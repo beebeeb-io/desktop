@@ -677,6 +677,25 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
             .map_err(|_| actions::ActionError::Failed("could not start a thread".into()))
     }
 
+    /// dc-RC-b: the previous account's leftover files move beside the folder the refused start asked for, and the
+    /// start follows, on the start worker (the engine copies files). A refused move changed nothing in the sync
+    /// folder; a plain start then follows, so the refusal modal opens again with the truth.
+    fn keep_aside_and_switch(&self) -> Result<(), actions::ActionError> {
+        use setup::SetupEngine as _;
+        let folder = self.engine.settings_folder().ok().flatten().unwrap_or_else(|| self.engine.suggested_folder());
+        let (engine, name, first_run) = (self.engine.clone(), self.starts.folder(), self.first_run.clone());
+        self.starts
+            .ask(move || match engine.keep_aside_and_switch(folder) {
+                Ok(done) => tracing::info!(kept = done.kept, "keep aside: done"),
+                Err(why) => {
+                    tracing::warn!(?why, "keep aside: nothing was moved");
+                    sync::start_sync_now(&engine, &name, &first_run);
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| actions::ActionError::Failed("could not start a thread".into()))
+    }
+
     fn stop_for_quit(&self) {
         let _ = self.engine.stop();
     }

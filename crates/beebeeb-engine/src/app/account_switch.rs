@@ -29,6 +29,13 @@
 //! folder only once its copy holds the same bytes; then starts as any start does, so the clear above runs in 014's
 //! order.
 //!
+//! dc-RC-b, "Keep them aside": the removal also refuses at a file a person left in the folder that is no synced copy
+//! (an ordinary file, a synced file changed since) and at a folder no row names. That start is refused as
+//! [`super::SyncStartRefused::LeftoverFilesOfAnotherAccount`], and the person chooses: the discard above (it takes
+//! these files too), or [`Engine::keep_aside_and_switch`], which copies each into a new, dated folder beside the sync
+//! folder ("Beebeeb files from <that account's address>"), at its own path inside it, takes an original out only once
+//! every copy holds the same bytes, and starts. Nothing is deleted without one of the two answers.
+//!
 //! dc-167, the account switcher (Guus 2026-11-21: a switch keeps the key, a sign-out forgets): every account signed
 //! in on this PC keeps its session (token, owner, email, lock entries) in a parked slot of its own
 //! ([`parked_slot_name`]) while another account is the current one, and its vault key in its R4 slot. A switch parks
@@ -52,36 +59,50 @@ use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 
 /// The reason a file that may hold unsent bytes keeps the switch out.
 const GUARDED_FILE: &str = "guarded file";
+/// The reason the OS removed nothing from the folder.
+const ITEMS_STAY: &str = "the folder's items stay";
 
 impl<C: CredentialStores> Engine<C> {
     /// Step 7's part: see the module. A no-op unless `data` is recorded as another account's by user id. Best effort in
-    /// the sense that a failure changes nothing the binding reads: the start then refuses as before. `true` when it
-    /// stopped at a file that may hold bytes a person never sent (w29: the refusal then says what to do).
+    /// the sense that a failure changes nothing the binding reads: the start then refuses as before. `Some` when it
+    /// stopped at files of the previous account that a person can answer for: one that may hold bytes never sent
+    /// (w29), or files it left that are no synced copies (dc-RC-b). The refusal then says what to do.
     pub(super) fn clear_the_previous_account(
         &self,
         data: &LocalState,
         session: &Identity,
         sync_root: &Path,
         port: &dyn SyncRootPort,
-    ) -> bool {
+    ) -> Option<super::SyncStartRefused> {
         let owner = data.db.owner().ok().flatten();
         let other_account = match (owner.as_ref().and_then(|o| o.user_id.as_deref()), session.user_id.as_deref()) {
             (Some(recorded), Some(now)) => recorded != now,
             _ => false,
         };
         if !other_account {
-            return false;
+            return None;
         }
-        let Some(previous) = owner.as_ref() else { return false };
+        let previous = owner.as_ref()?;
         match self.remove_the_previous_account(data, previous, sync_root, port) {
             Ok(()) => {
                 tracing::info!("account switch: the previous account's local data was removed");
                 self.wipe_thumb_cache_at_session_end(); // A's thumbnails (079); the cache is keyed by this install's slot.
-                false
+                None
             }
             Err(why) => {
                 tracing::warn!(why, "account switch: the previous account's local data stays");
-                why == GUARDED_FILE
+                match why {
+                    GUARDED_FILE => Some(super::SyncStartRefused::UnsentFileOfAnotherAccount),
+                    // Only where the person's answer can finish the switch, and only when something of theirs is
+                    // there to answer for: any other refusal of the removal stays the plain one.
+                    ITEMS_STAY
+                        if discard_offered_on_this_os()
+                            && left_by_a_person(&data.db, sync_root, port, true).is_ok_and(|left| !left.is_empty()) =>
+                    {
+                        Some(super::SyncStartRefused::LeftoverFilesOfAnotherAccount)
+                    }
+                    _ => None,
+                }
             }
         }
     }
@@ -119,7 +140,7 @@ impl<C: CredentialStores> Engine<C> {
             }
         }
         if db.has_account_data().map_err(|_| "unreadable")? {
-            port.remove_synced_items(db, sync_root, &unasked).map_err(|_| "the folder's items stay")?;
+            port.remove_synced_items(db, sync_root, &unasked).map_err(|_| ITEMS_STAY)?;
         }
         let purge = db.purge_all_local_state().map_err(|_| "the rows stay")?;
         for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {
@@ -258,7 +279,7 @@ impl<C: CredentialStores> Engine<C> {
 
     fn discard_ask_on(&self, sync_root: &Path, port: &dyn SyncRootPort) -> Result<DiscardAsk, DiscardRefused> {
         let (db, _previous) = self.previous_accounts_data()?;
-        let paths = unsent_paths(&db, sync_root, port)?;
+        let paths = in_the_way(&db, sync_root, port)?.files;
         if paths.is_empty() {
             return Err(DiscardRefused::NothingToDiscard);
         }
@@ -278,7 +299,8 @@ impl<C: CredentialStores> Engine<C> {
                 return Err(DiscardRefused::SyncRunning);
             }
             let (db, previous) = self.previous_accounts_data()?;
-            if unsent_paths(&db, &sync_root, port)? != ask.paths {
+            let left = in_the_way(&db, &sync_root, port)?;
+            if left.files != ask.paths {
                 return Err(DiscardRefused::Changed);
             }
             self.keep_its_key_in_its_slot(&previous)?;
@@ -290,22 +312,66 @@ impl<C: CredentialStores> Engine<C> {
             })?;
             self.record_kept_folder(&kept_in)?;
             // Every copy is proven before the first original goes: a file that changed since keeps everything here.
-            for (source, copy) in sources.iter().zip(&copies) {
-                if !same_bytes(source, copy).unwrap_or(false) {
-                    return Err(DiscardRefused::Changed);
-                }
+            if !every_copy_holds_the_same(&sources, &copies) {
+                return Err(DiscardRefused::Changed);
             }
-            for source in &sources {
-                match std::fs::remove_file(source) {
-                    Ok(()) => (),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(_) => return Err(DiscardRefused::KeepFailed),
-                }
-            }
+            take_out(&sync_root, &sources, &left.folders)?;
             Ok((kept_in, copies.len()))
         })?;
         tracing::info!(kept, "discard and switch: the unsent files were kept; the switch goes on");
         // The plain start, after the locks: step 7 now finds nothing unsent and clears in 014's order.
+        let start = self.start_on(sync_root, port);
+        Ok(DiscardDone { kept_in, kept, start })
+    }
+
+    /// dc-RC-b, "Keep them aside": see the module. Every file of the previous account that keeps the switch out moves
+    /// into a new folder beside the sync folder, then the start runs. `Err`: nothing left the sync folder, except
+    /// after `KeepFailed` from a removal the OS refused midway (every file is then in the new folder, some in both).
+    pub fn keep_aside_and_switch(&self, sync_root: PathBuf) -> Result<DiscardDone, DiscardRefused> {
+        if !discard_offered_on_this_os() {
+            return Err(DiscardRefused::Unsupported);
+        }
+        self.keep_aside_on(sync_root, &OsSyncRoots::new(self.identity))
+    }
+
+    /// [`Engine::keep_aside_and_switch`] with the OS's answers from `port`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn keep_aside_and_switch_with(
+        &self,
+        sync_root: PathBuf,
+        port: &dyn SyncRootPort,
+    ) -> Result<DiscardDone, DiscardRefused> {
+        self.keep_aside_on(sync_root, port)
+    }
+
+    fn keep_aside_on(&self, sync_root: PathBuf, port: &dyn SyncRootPort) -> Result<DiscardDone, DiscardRefused> {
+        let (kept_in, kept) = self.runtime.block_on(async {
+            let _step = self.transition.lock().await;
+            let slot = self.acct.engine.lock().await;
+            if slot.as_ref().is_some_and(|runner| runner.is_running()) {
+                return Err(DiscardRefused::SyncRunning);
+            }
+            let (db, previous) = self.previous_accounts_data()?;
+            let left = in_the_way(&db, &sync_root, port)?;
+            if left.is_empty() {
+                return Err(DiscardRefused::NothingToDiscard);
+            }
+            self.keep_its_key_in_its_slot(&previous)?;
+            let name = aside_folder_name(&previous, chrono::Local::now().date_naive());
+            let (aside, copies) = copy_aside(&sync_root, &name, &left).map_err(|why| {
+                tracing::warn!(why, "keep aside: nothing was removed");
+                DiscardRefused::KeepFailed
+            })?;
+            let sources: Vec<PathBuf> = left.files.iter().map(|path| item_at(&sync_root, path)).collect();
+            if !every_copy_holds_the_same(&sources, &copies) {
+                // The new folder holds copies only, made by this call: every original is still in the sync folder.
+                let _ = std::fs::remove_dir_all(&aside);
+                return Err(DiscardRefused::Changed);
+            }
+            take_out(&sync_root, &sources, &left.folders)?;
+            Ok((aside, copies.len()))
+        })?;
+        tracing::info!(kept, "keep aside: the previous account's files are beside the sync folder; the switch goes on");
         let start = self.start_on(sync_root, port);
         Ok(DiscardDone { kept_in, kept, start })
     }
@@ -385,20 +451,194 @@ fn discard_offered_on_this_os() -> bool {
     cfg!(any(target_os = "windows", test, feature = "test-support"))
 }
 
-/// The previous account's files that may hold bytes it never sent, in the database's order: what keeps B out
-/// (`remove_the_previous_account`'s guarded check). Other work of its refuses: that needs its account.
-fn unsent_paths(db: &StateDb, sync_root: &Path, port: &dyn SyncRootPort) -> Result<Vec<String>, DiscardRefused> {
+/// dc-RC-b: what a person left in the folder that the removal never deletes, by path under the folder (`/` between
+/// names): the files the OS says so of ([`SyncRootPort::left_by_a_person`]), and the folders no row names (made
+/// beside the synced ones: the removal refuses at one even when it is empty), a folder always before what is in it.
+#[derive(Debug, Default)]
+struct Left {
+    files: Vec<String>,
+    folders: Vec<String>,
+}
+
+impl Left {
+    fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.folders.is_empty()
+    }
+}
+
+/// See [`Left`]. Only reads, in name order. A link is never followed, and a folder that cannot be listed holds nothing
+/// this could copy: both are left for the removal to refuse. `first_only` stops at the first thing found (the
+/// refusal only needs to know there is one).
+fn left_by_a_person(
+    db: &StateDb,
+    sync_root: &Path,
+    port: &dyn SyncRootPort,
+    first_only: bool,
+) -> Result<Left, DiscardRefused> {
+    let mut left = Left::default();
+    let mut folders = vec![String::new()];
+    while let Some(folder) = folders.pop() {
+        let entries = match std::fs::read_dir(item_at(sync_root, &folder)) {
+            Ok(entries) => entries,
+            Err(_) if folder.is_empty() => return Err(DiscardRefused::Unreadable),
+            Err(_) => continue,
+        };
+        let mut items: Vec<(String, std::fs::FileType)> = entries
+            .flatten()
+            .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.file_type().ok()?)))
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, kind) in items {
+            let path = if folder.is_empty() { name } else { format!("{folder}/{name}") };
+            if kind.is_dir() {
+                if db.get_file_by_path(&path).map_err(|_| DiscardRefused::Unreadable)?.is_none() {
+                    left.folders.push(path.clone());
+                }
+                folders.push(path);
+            } else if kind.is_file() && port.left_by_a_person(sync_root, &path) {
+                left.files.push(path);
+            }
+            if first_only && !left.is_empty() {
+                return Ok(left);
+            }
+        }
+    }
+    Ok(left)
+}
+
+/// The previous account's files that keep B out, and the folders no row names: first the files of unknown content
+/// that may hold bytes it never sent, in the database's order (`remove_the_previous_account`'s guarded check), then
+/// what a person left ([`left_by_a_person`]). Other work of its refuses: that needs its account.
+fn in_the_way(db: &StateDb, sync_root: &Path, port: &dyn SyncRootPort) -> Result<Left, DiscardRefused> {
     if db.work_waiting_for_a_person().map_err(|_| DiscardRefused::Unreadable)?.is_some() {
         return Err(DiscardRefused::OtherWork);
     }
     let guarded = db.guarded_paths().map_err(|_| DiscardRefused::Unreadable)?;
-    Ok(guarded
+    let mut files: Vec<String> = guarded
         .into_iter()
         .filter(|path| {
             let there = item_at(sync_root, path).symlink_metadata();
             there.is_ok_and(|item| item.is_file()) && port.may_hold_bytes(sync_root, path)
         })
-        .collect())
+        .collect();
+    let mut left = left_by_a_person(db, sync_root, port, false)?;
+    left.files.retain(|path| !files.iter().any(|unsent| unsent.trim_start_matches('/') == path));
+    files.append(&mut left.files);
+    Ok(Left { files, folders: left.folders })
+}
+
+/// Whether every source and its copy hold the same bytes now.
+fn every_copy_holds_the_same(sources: &[PathBuf], copies: &[PathBuf]) -> bool {
+    sources.len() == copies.len()
+        && sources.iter().zip(copies).all(|(source, copy)| same_bytes(source, copy).unwrap_or(false))
+}
+
+/// Each original out of the sync folder (its copy was proven first), then each folder no row names that this
+/// emptied, the deepest first: `remove_dir` takes only an empty one, so a folder still holding anything stays.
+fn take_out(sync_root: &Path, sources: &[PathBuf], folders: &[String]) -> Result<(), DiscardRefused> {
+    for source in sources {
+        match std::fs::remove_file(source) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return Err(DiscardRefused::KeepFailed),
+        }
+    }
+    for folder in folders.iter().rev() {
+        let _ = std::fs::remove_dir(item_at(sync_root, folder));
+    }
+    Ok(())
+}
+
+/// dc-RC-b: the name of the folder the previous account's files move to: whose they are (its address, without the
+/// characters a file name cannot hold; "the previous account" when none is recorded, never an id) and the day.
+fn aside_folder_name(previous: &Identity, on: chrono::NaiveDate) -> String {
+    let address: String = previous
+        .email
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control() && !"<>:\"/\\|?*".contains(*c))
+        .take(100)
+        .collect();
+    let address = address.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    let whose = if address.is_empty() { "the previous account" } else { address };
+    format!("Beebeeb files from {whose} ({})", on.format("%Y-%m-%d"))
+}
+
+/// dc-RC-b: a new folder `name` beside the sync folder (`name (2)` when taken: never into a folder that is there),
+/// holding a copy of each file of `left` at its own path, and each folder no row names. The folder and the copies,
+/// in `left.files`' order. A failure removes the half-made folder; the sync folder is only read.
+fn copy_aside(sync_root: &Path, name: &str, left: &Left) -> Result<(PathBuf, Vec<PathBuf>), &'static str> {
+    use std::path::Component;
+    let inside = |path: &str| {
+        let parts = &mut Path::new(path.trim_start_matches('/')).components();
+        parts.all(|part| matches!(part, Component::Normal(_)))
+    };
+    if !left.files.iter().chain(&left.folders).all(|path| inside(path)) {
+        return Err("a path leaves the sync folder");
+    }
+    let beside = sync_root.parent().ok_or("the sync folder has no folder beside it")?;
+    let mut n = 1;
+    let aside = loop {
+        let candidate = beside.join(if n == 1 { name.to_string() } else { format!("{name} ({n})") });
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(_) => return Err("the folder beside the sync folder could not be made"),
+        }
+    };
+    let copy_all = || -> std::io::Result<Vec<PathBuf>> {
+        for folder in &left.folders {
+            std::fs::create_dir_all(item_at(&aside, folder))?;
+        }
+        let mut copies = Vec::with_capacity(left.files.len());
+        for path in &left.files {
+            let to = item_at(&aside, path);
+            let (Some(directory), Some(file)) = (to.parent(), to.file_name().and_then(|file| file.to_str())) else {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            };
+            std::fs::create_dir_all(directory)?;
+            copies.push(copy_new(&item_at(sync_root, path), directory, file)?);
+        }
+        Ok(copies)
+    };
+    match copy_all() {
+        Ok(copies) => Ok((aside, copies)),
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&aside);
+            Err("a copy could not be made")
+        }
+    }
+}
+
+/// `source` copied into a file made new in `directory` (`create_new`; `name (2)` when `file` is taken), flushed,
+/// with the source's modified time when the OS takes it. A copy that fails leaves no file.
+fn copy_new(source: &Path, directory: &Path, file: &str) -> std::io::Result<PathBuf> {
+    use crate::sign_out::kept_names::with_suffix;
+    let mut n = 1;
+    loop {
+        let name = if n == 1 { file.to_string() } else { with_suffix(file, &format!(" ({n})")) };
+        let destination = directory.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&destination) {
+            Ok(mut to) => {
+                let copied = std::fs::File::open(source).and_then(|mut from| {
+                    std::io::copy(&mut from, &mut to)?;
+                    if let Ok(modified) = from.metadata().and_then(|item| item.modified()) {
+                        let _ = to.set_modified(modified);
+                    }
+                    to.sync_all()
+                });
+                if let Err(error) = copied {
+                    drop(to);
+                    let _ = std::fs::remove_file(&destination);
+                    return Err(error);
+                }
+                return Ok(destination);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 fn item_at(sync_root: &Path, path: &str) -> PathBuf {
@@ -452,7 +692,7 @@ fn keep_copies(root: &Path, paths: &[String], sources: &[PathBuf]) -> Result<(Pa
 /// (`create_new`, `name (2)` when taken), flushed. Untested on Windows.
 #[cfg(not(target_os = "macos"))]
 fn keep_copies(root: &Path, paths: &[String], sources: &[PathBuf]) -> Result<(PathBuf, Vec<PathBuf>), &'static str> {
-    use crate::sign_out::kept_names::{KeptRole, event_folder_name, kept_relative_path, with_suffix};
+    use crate::sign_out::kept_names::{KeptRole, event_folder_name, kept_relative_path};
     use std::io::ErrorKind;
     std::fs::create_dir_all(root).map_err(|_| "the kept folder could not be made")?;
     let name = event_folder_name(chrono::Local::now());
@@ -470,26 +710,7 @@ fn keep_copies(root: &Path, paths: &[String], sources: &[PathBuf]) -> Result<(Pa
         let (file, dirs) = components.split_last().expect("never empty");
         let directory = dirs.iter().fold(event.clone(), |at, part| at.join(part));
         std::fs::create_dir_all(&directory)?;
-        let mut n = 1;
-        loop {
-            let name = if n == 1 { file.clone() } else { with_suffix(file, &format!(" ({n})")) };
-            let destination = directory.join(name);
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&destination) {
-                Ok(mut to) => {
-                    let copied = std::fs::File::open(source)
-                        .and_then(|mut from| std::io::copy(&mut from, &mut to))
-                        .and_then(|_| to.sync_all());
-                    if let Err(error) = copied {
-                        drop(to);
-                        let _ = std::fs::remove_file(&destination);
-                        return Err(error);
-                    }
-                    return Ok(destination);
-                }
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => n += 1,
-                Err(e) => return Err(e),
-            }
-        }
+        copy_new(source, &directory, file)
     };
     let mut copies = Vec::with_capacity(paths.len());
     for (path, source) in paths.iter().zip(sources) {
@@ -826,6 +1047,22 @@ fn clear_parked<P: AuthSecretStore>(parked: &P) -> crate::keychain::AuthResult<(
 #[cfg(test)]
 #[path = "account_switch_switcher_tests.rs"]
 mod switcher_tests;
+
+#[cfg(test)]
+mod keep_aside_name_tests {
+    use super::*;
+
+    #[test]
+    fn the_folder_is_named_for_the_account_and_the_day_and_never_for_an_id() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+        let a = Identity::new(Some("user-rc-b"), Some("a.person@example.eu"));
+        assert_eq!(aside_folder_name(&a, day), "Beebeeb files from a.person@example.eu (2026-11-22)");
+        let odd = Identity::new(Some("user-rc-b"), Some("a/b\\c:d*e?\"f<g>h|@example.eu. "));
+        assert_eq!(aside_folder_name(&odd, day), "Beebeeb files from abcdefgh@example.eu (2026-11-22)");
+        let unnamed = Identity::new(Some("user-rc-b"), None);
+        assert_eq!(aside_folder_name(&unnamed, day), "Beebeeb files from the previous account (2026-11-22)");
+    }
+}
 
 #[cfg(test)]
 mod discard_ask_tests {

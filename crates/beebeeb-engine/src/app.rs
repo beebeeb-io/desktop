@@ -159,6 +159,10 @@ pub enum SyncStartRefused {
     /// w29: the previous account left a file here that may hold changes it never sent: it is never removed unasked.
     /// The only way on is that account's (it sends them) or the person's (the file moves out of the folder).
     UnsentFileOfAnotherAccount,
+    /// dc-RC-b: the previous account left files of its own making in the folder (ordinary files, or files changed
+    /// since they synced), which a switch never removes unasked. The person keeps them aside or discards them
+    /// (`app::account_switch`); until then every sign-in of another account is refused here.
+    LeftoverFilesOfAnotherAccount,
     /// Whose this PC's local data is, or whose the session is, could not be confirmed.
     IdentityUnknown,
     /// An earlier engine did not confirm it stopped: only a restart of the app helps.
@@ -181,6 +185,7 @@ impl SyncStartRefused {
             Self::RegistrationFailed { .. } => "registration_failed",
             Self::OtherAccountsData => "other_accounts_data",
             Self::UnsentFileOfAnotherAccount => "unsent_file_of_another_account",
+            Self::LeftoverFilesOfAnotherAccount => "leftover_files_of_another_account",
             Self::IdentityUnknown => "identity_unknown",
             Self::StopUnconfirmed => "stop_unconfirmed",
             Self::StopFinishing => "stop_finishing",
@@ -223,6 +228,9 @@ impl std::fmt::Display for SyncStartRefused {
             Self::OtherAccountsData => f.write_str(account_binding::OTHER_ACCOUNT_ON_WINDOWS),
             Self::UnsentFileOfAnotherAccount => f.write_str(
                 "A file left in the sync folder by the account that was signed in before may hold changes that were never sent. Nothing was uploaded or deleted.",
+            ),
+            Self::LeftoverFilesOfAnotherAccount => f.write_str(
+                "The account that was signed in before left files in the sync folder. Nothing was uploaded or deleted.",
             ),
             Self::IdentityUnknown => f.write_str(account_binding::IDENTITY_UNKNOWN),
             Self::StopUnconfirmed => f.write_str(account_binding::ENGINE_STOP_UNCONFIRMED),
@@ -904,10 +912,11 @@ impl<C: CredentialStores> Engine<C> {
             }
             // (7) The local data is bound to the session's account (another account's data refuses, nothing reset).
             let data = self.local_data_for_start(&sync_root, &identity)?;
-            let unsent_file = self.clear_the_previous_account(&data, &identity, &sync_root, port); // another account's data goes first.
+            // Another account's data goes first.
+            let kept_out_by = self.clear_the_previous_account(&data, &identity, &sync_root, port);
             account_binding::bind_before_engine_start(&data, &identity, false).map_err(|error| {
-                let refused = match (unsent_file, SyncStartRefused::of_binding(&error)) {
-                    (true, SyncStartRefused::OtherAccountsData) => SyncStartRefused::UnsentFileOfAnotherAccount,
+                let refused = match (kept_out_by, SyncStartRefused::of_binding(&error)) {
+                    (Some(its_files), SyncStartRefused::OtherAccountsData) => its_files,
                     (_, other) => other,
                 };
                 self.proof_owed_on(refused, &sync_root)

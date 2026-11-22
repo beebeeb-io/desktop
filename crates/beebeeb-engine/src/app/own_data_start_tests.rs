@@ -40,6 +40,10 @@ mod switch;
 #[path = "account_switch_discard_tests.rs"]
 mod account_switch_discard;
 
+/// dc-RC-b: "Keep them aside" over files the previous account left.
+#[path = "account_switch_keep_aside_tests.rs"]
+mod account_switch_keep_aside;
+
 type TestEngine = Engine<MemoryCredentials>;
 type Answer = std::pin::Pin<Box<dyn std::future::Future<Output = Listing> + Send>>;
 
