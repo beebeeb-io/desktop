@@ -20,7 +20,8 @@
 //! and nothing is kept. A lock of the same account leaves a place to come back to: when that account
 //! is unlocked and its mark still says "not done", the guide resumes on the step it was on, with the
 //! window put on that step's place and its card shown (review L335: it restarted at the first step
-//! and did not move the window, so on Shared or Photos no card showed). Finished ("Done") or skipped
+//! and did not move the window, so on Shared or Photos no card showed). A file that is open at the unlock
+//! stays open: the tip waits behind it. Finished ("Done") or skipped
 //! (Skip, Esc), it is done for that ACCOUNT on this PC and does not start by itself again
 //! (`guide_marks`; owner ruling 2026-11-13, a deviation from the board's "Shown once per PC",
 //! recorded in `FRAMES.md`).
@@ -344,7 +345,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
                     account,
                     ..Guide::default()
                 };
-                if open {
+                // A file that is open stays open (the unlock shows it again, `engine_host::viewer`): the step is
+                // set and the window is not moved; its tip waits behind the file, as it does behind any viewer.
+                let on_file = matches!(s.shell.app.screen(), Screen::Drive(route) if route.item.is_some());
+                if open && !on_file {
                     show(s, step);
                 } else {
                     s.guide.step = Some(step);
