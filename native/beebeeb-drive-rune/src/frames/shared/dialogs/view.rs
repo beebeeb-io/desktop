@@ -2,7 +2,7 @@
 //! Mac sheet (`WinDialog`, the main action first) and of each Mac alert (`WinAlert`).
 
 use super::kit::{self, Field, Foot};
-use super::request_menus::{Pick, Setting};
+use super::request_menus::Setting;
 use super::{Dialog, EMAIL_INPUT, NOTE_INPUT, PASSWORD_INPUT, SafetyNumber, TITLE_INPUT, ask, close, dismiss};
 use crate::State;
 use crate::frames::Intent;
@@ -238,9 +238,9 @@ fn person(s: &State, share: &PeopleShare, member: &Member, t: &Theme) -> El {
             .role("button")
             .label("Back to People")
             .size(28.0, 28.0)
-            .px(6.0)
+            .px(crate::theme::scale::space::S6)
             .center()
-            .radius(7.0)
+            .radius(crate::theme::tokens::radius::CONTROL)
             .hover(t.hover)
             .press(t.press)
             .focusable(true)
@@ -252,7 +252,7 @@ fn person(s: &State, share: &PeopleShare, member: &Member, t: &Theme) -> El {
     let head = row()
         .key("dlg-head-row")
         .center_y()
-        .gap(8.0)
+        .gap(crate::theme::scale::space::S8)
         .child(back)
         .child(kit::title(&member.name, t));
     let email = settings_list::item(
@@ -292,7 +292,7 @@ fn person(s: &State, share: &PeopleShare, member: &Member, t: &Theme) -> El {
             n + 1,
             "Access",
             Some("Access"),
-            el().key("access-box").w_full().px(12.0).py(8.0).child(switch),
+            el().key("access-box").w_full().px(crate::theme::scale::space::S12).py(crate::theme::scale::space::S8).child(switch),
             None,
             t,
         ),
@@ -488,7 +488,7 @@ fn stopped(s: &State, share: &PeopleShare, member: &Member, number: &SafetyNumbe
         .key("dlg-alert-head")
         .w_full()
         .pt(8.0)
-        .gap(12.0)
+        .gap(crate::theme::scale::space::S12)
         .items_start()
         .child(tile_sized(0, Tone::Red, &ic::SHIELD, 40.0, t))
         .child(
@@ -588,7 +588,7 @@ fn invite(s: &State, share: &str, name: &str, t: &Theme) -> El {
         col()
             .key("access-wrap")
             .w_full()
-            .gap(6.0)
+            .gap(crate::theme::scale::space::S6)
             .child(kit::outer_label("access-label", "Access", t))
             .child(switch),
         kit::note(

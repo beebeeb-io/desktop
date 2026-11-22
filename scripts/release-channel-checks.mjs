@@ -22,13 +22,16 @@
 // Usage:
 //   node scripts/release-channel-checks.mjs notes <version> <channel> [RELEASE_NOTES.md]
 //   node scripts/release-channel-checks.mjs delivery
+//     (DESKTOP_STABLE_MANIFEST_URL / DESKTOP_LATEST_RELEASE_API override the two endpoints; the tests use them)
 
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 export const CHANNELS = ['alpha', 'beta', 'stable']
-export const STABLE_MANIFEST_URL = 'https://releases.beebeeb.io/desktop/latest.json'
-export const LATEST_RELEASE_API = 'https://api.github.com/repos/beebeeb-io/desktop/releases/latest'
+export const STABLE_MANIFEST_URL =
+  process.env.DESKTOP_STABLE_MANIFEST_URL || 'https://releases.beebeeb.io/desktop/latest.json'
+export const LATEST_RELEASE_API =
+  process.env.DESKTOP_LATEST_RELEASE_API || 'https://api.github.com/repos/beebeeb-io/desktop/releases/latest'
 
 // An unconditional promise of automatic delivery to existing installs. Only the
 // stable manifest reaches every existing install, so only a release whose first
@@ -140,8 +143,16 @@ export function validateReleaseNotes(notes, version, channel, options = {}) {
         `RELEASE_NOTES.md's Install / Update section must contain the macOS line, word for word: "${MAC_INSTALL_LINE}" On macOS the in-app update cannot install (task 2176).`,
       )
     }
-    for (const sentence of sentences(section)) {
-      if (macLine.includes(sentence) || !DELIVERY_WORDS.test(sentence)) continue
+  }
+
+  // LD-0077: in both modes a sentence about how existing installs get the release must name Windows
+  // only; the macOS lines themselves are exempt.
+  if (section !== null) {
+    const exempt = [collapse(MAC_INSTALL_LINE), collapse(MACOS_NOT_IN_RELEASE_LINE)]
+    // The not-in-this-release line may share a sentence with its neighbour ("... updater. macOS: not ...").
+    const notInReleaseRe = new RegExp(escapeRegExp(MACOS_NOT_IN_RELEASE_LINE).replace(/\s+/g, '\\s+'), 'g')
+    for (const sentence of sentences(section.replace(notInReleaseRe, '\n\n'))) {
+      if (exempt.some((line) => line.includes(sentence)) || !DELIVERY_WORDS.test(sentence)) continue
       if (!/\bwindows\b/i.test(sentence) || /\bmac(?:os)?\b/i.test(sentence)) {
         errors.push(
           `RELEASE_NOTES.md's Install / Update section says how existing installs get the release without scoping it to Windows ("${sentence}"). On macOS the in-app update cannot install (task 2176): name Windows only, and say what a Mac does with the macOS line from docs/RELEASING.md.`,

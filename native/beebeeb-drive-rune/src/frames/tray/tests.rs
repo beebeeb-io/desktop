@@ -12,6 +12,7 @@ use crate::{State, init};
 
 /// Every flyout frame of the board: its title, its line, its button and whether that button
 /// is the amber one (`None`: the state has no button).
+#[allow(clippy::type_complexity)]
 const BUILT: [(&str, &str, &str, Option<(&str, bool)>); 19] = [
     (
         "DW-1202",

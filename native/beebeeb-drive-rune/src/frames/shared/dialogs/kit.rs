@@ -32,13 +32,13 @@ use rune::tok::Family;
 use rune::{Color, El, Icon, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 
 /// `.kit-field-outer`: a field's label above it.
-pub const FIELD_LABEL: TextStyle = TextStyle::new(11.0, 500.0).lh(15.0);
+pub const FIELD_LABEL: TextStyle = crate::theme::scale::text::CAPTION_LOOSE;
 /// `.kit-field-value`, `.kit-field-ph`: what is typed, and the placeholder.
-pub const FIELD_VALUE: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+pub const FIELD_VALUE: TextStyle = crate::theme::scale::text::READ;
 /// `.t-body`: a dialog's sentence that says what will happen.
-pub const BODY: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+pub const BODY: TextStyle = crate::theme::scale::text::READ;
 /// `.kit-seg-md span`: a tab of the wide switch.
-pub const SEG_MD: TextStyle = TextStyle::new(12.5, 550.0).lh(17.0);
+pub const SEG_MD: TextStyle = crate::theme::scale::text::FIELD_STRONG;
 /// `.kit-banner-text`.
 pub const NOTE: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
 
@@ -250,8 +250,8 @@ pub fn field(
         .key(key.to_string())
         .w_full()
         .h(28.0)
-        .px(8.0)
-        .gap(6.0)
+        .px(crate::theme::scale::space::S8)
+        .gap(crate::theme::scale::space::S6)
         .center_y()
         .radius(radius::MD)
         .border_layout()
@@ -272,7 +272,7 @@ pub fn field(
     col()
         .key(format!("{key}-wrap"))
         .w_full()
-        .gap(6.0)
+        .gap(crate::theme::scale::space::S6)
         .child(outer_label(&format!("{key}-label"), spec.label, t))
         .child(well)
 }
@@ -299,8 +299,8 @@ pub fn seg(n: usize, name: &str, tabs: &[(&'static str, bool)], t: &Theme, each:
         .role("tablist")
         .label(name)
         .w_full()
-        .padding(2.0)
-        .radius(10.0)
+        .padding(crate::theme::scale::space::S2)
+        .radius(crate::theme::tokens::radius::LG)
         .fill(t.field)
         .box_shadow(kit::ring_inset(t.separator));
     for (i, (words, on)) in tabs.iter().enumerate() {
@@ -312,7 +312,7 @@ pub fn seg(n: usize, name: &str, tabs: &[(&'static str, bool)], t: &Theme, each:
             .checked(*on)
             .grow(1.0)
             .h(28.0)
-            .px(12.0)
+            .px(crate::theme::scale::space::S12)
             .center()
             .radius(8.0)
             .focusable(true)
@@ -345,13 +345,13 @@ pub fn list(n: usize, name: &str, title: Option<&str>, body: El, foot: Option<&s
         .role("group")
         .label(name)
         .w_full()
-        .gap(6.0);
+        .gap(crate::theme::scale::space::S6);
     if let Some(title) = title {
         l = l.child(
             kit::label(format!("list-{n}-title"), title, LIST_TITLE, t.text_tertiary)
                 .a11y_hidden()
                 .w_full()
-                .px(14.0),
+                .px(crate::theme::scale::space::S14),
         );
     }
     l = l.child(
@@ -367,7 +367,7 @@ pub fn list(n: usize, name: &str, title: Option<&str>, body: El, foot: Option<&s
         l = l.child(
             kit::label(format!("list-{n}-foot"), foot, FOOT, t.text_tertiary)
                 .w_full()
-                .px(16.0)
+                .px(crate::theme::scale::space::S16)
                 .wrap(),
         );
     }
@@ -423,8 +423,8 @@ pub fn person(n: usize, m: usize, member: &Member, link: bool, t: &Theme) -> El 
         .label(format!("{}, {line}", member.name))
         .w_full()
         .h(40.0)
-        .px(10.0)
-        .gap(8.0)
+        .px(crate::theme::scale::space::S10)
+        .gap(crate::theme::scale::space::S8)
         .center_y()
         .child(avatar(&format!("{k}-person"), &member.initials, member.hue, t))
         .child(words);
@@ -482,7 +482,7 @@ pub fn groups(g: &Groups, numbers: &[String], t: &Theme) -> El {
         .radius(12.0)
         .fill(t.field);
     for (l, line) in numbers.chunks(4).enumerate() {
-        let mut r = row().key(format!("safety-line-{l}")).a11y_hidden().gap(16.0);
+        let mut r = row().key(format!("safety-line-{l}")).a11y_hidden().gap(crate::theme::scale::space::S16);
         for (c, group) in line.iter().enumerate() {
             let i = l * 4 + c;
             r = r.child(
@@ -507,7 +507,7 @@ pub fn note(key: &str, icon: &'static Icon, words: &str, t: &Theme) -> El {
         .w_full()
         .py(11.0)
         .px(13.0)
-        .gap(10.0)
+        .gap(crate::theme::scale::space::S10)
         .items_start()
         .radius(13.0)
         .fill(t.tile)

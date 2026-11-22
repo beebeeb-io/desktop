@@ -14,6 +14,7 @@ use super::source::{Action, ActionError};
 use crate::State;
 use crate::source::{DriveItem, format_size};
 use crate::theme::file_icons::icon_for;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, icons_files};
 use crate::ui::settings_dialog::DIALOG_TITLE;
@@ -171,7 +172,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 
 /// The card's head: close, the file's name and where the preview is, Share, Open in its app (Files' panel only).
 fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
-    let mut title = col().key("pv-title").grow(1.0).min_w(0.0).px(4.0).child(
+    let mut title = col().key("pv-title").grow(1.0).min_w(0.0).px(scale::space::S4).child(
         kit::label("pv-name", item.name.clone(), type_::TITLE, t.text)
             .role("heading")
             .level(2)
@@ -194,8 +195,8 @@ fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
         .key("pv-head")
         .w_full()
         .h(44.0)
-        .px(12.0)
-        .gap(8.0)
+        .px(scale::space::S12)
+        .gap(scale::space::S8)
         .center_y()
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
@@ -212,7 +213,8 @@ fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
         return head;
     }
     let mut head = head.child(
-        crate::ui::toolbar::tool("pv-share", "Share\u{2026}", &icons::SHARE, t).on_press(|s: &mut State| s.share_from_preview()),
+        crate::ui::toolbar::tool("pv-share", "Share\u{2026}", &icons::SHARE, t)
+            .on_press(|s: &mut State| s.share_from_preview()),
     );
     if matches!(state, Previewed::Shown(_)) {
         head = head.child(
@@ -240,7 +242,7 @@ fn page(p: &Page) -> El {
         .w(440.0)
         .h_full()
         .padding(40.0)
-        .gap(10.0)
+        .gap(scale::space::S10)
         .radius(3.0)
         .fill(Color::WHITE)
         .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)))
@@ -325,7 +327,7 @@ fn blank(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
         .grow(1.0)
         .w_full()
         .center()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .px(40.0)
         .child(
             el().key("pv-blank-tile")
@@ -363,7 +365,7 @@ fn blank(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
     blank.child(
         row()
             .key("pv-blank-actions")
-            .gap(8.0)
+            .gap(scale::space::S8)
             .mt(12.0)
             .child(
                 button::outline_button("pv-open-with", "Open in another app\u{2026}", None, t)
@@ -382,7 +384,7 @@ pub(crate) fn card(item: &DriveItem, state: &Previewed, mode: &Mode, size: (f32,
             .grow(1.0)
             .min_h(0.0)
             .w_full()
-            .padding(24.0)
+            .padding(scale::space::S24)
             .justify_center()
             .fill(t.text.alpha(0.05))
             .clip_rounded(0.0)
@@ -394,7 +396,7 @@ pub(crate) fn card(item: &DriveItem, state: &Previewed, mode: &Mode, size: (f32,
         .role("dialog")
         .label(format!("Preview of {}", item.name))
         .size(w, h)
-        .radius(12.0)
+        .radius(crate::theme::scale::radius::DIALOG)
         .fill(t.card)
         .box_shadow(kit::drop(30.0, 80.0, Color::BLACK.alpha(0.34)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))

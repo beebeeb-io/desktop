@@ -9,7 +9,8 @@ use rune::{Align, Color, Cursor, El, Icon, LiveRegion, ScrollFade, ScrollPos, Sc
 
 use super::source::{Change, Changes, MAX_ROWS, Origin, Snapshot, Status, Tile, Tone, What};
 use super::{Host, Ui, icons};
-use crate::theme::tokens::{self, Theme, type_};
+use crate::theme::scale::space;
+use crate::theme::tokens::{self, Theme};
 use crate::theme::file_icons::icon_for;
 use crate::ui::file_row::{self, RowLook};
 use crate::ui::view_state::{ViewState, try_again, view_state};
@@ -25,23 +26,21 @@ mod type_fly {
     /// 13.5px/650, tracked -0.006em: the state (`.mk-pst-tx b`).
     pub const TITLE: TextStyle = TextStyle::new(13.5, 650.0).lh(17.0).tracking(-0.081);
     /// 12px/400: the line under it (`.mk-pst-tx span`).
-    pub const LINE: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
+    pub const LINE: TextStyle = crate::theme::tokens::type_::BODY;
     /// 10.5px/400 mono: the reason, for support (DW-1216).
     pub const CODE: TextStyle = TextStyle::new(10.5, 400.0).family(Family::Mono).lh(16.0);
     /// 11px/400 mono: the upload speed.
-    pub const SPEED: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(17.0);
+    pub const SPEED: TextStyle = crate::theme::scale::text::MONO_SM;
     /// 11px/600: "Recent changes" (`.mk-plabel`).
-    pub const LABEL: TextStyle = TextStyle::new(11.0, 600.0).lh(17.0);
+    pub const LABEL: TextStyle = crate::theme::scale::text::CAPTION_SEMI;
     /// 11px/500: "last 50" (`.mk-plabel span`).
     pub const LABEL_COUNT: TextStyle = TextStyle::new(11.0, 500.0).lh(17.0);
-    /// 12.5px/500: a file's name (`.mk-pr-tx b`).
-    pub const NAME: TextStyle = TextStyle::new(12.5, 500.0).lh(15.0);
     /// 11.5px/400: what happened to it (`.mk-pr-tx span`).
     pub const WHAT: TextStyle = TextStyle::new(11.5, 400.0).lh(14.0);
     /// 11px/400 mono: when (`.mk-pr-t`).
     pub const WHEN: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(14.5);
     /// 11.5px/400: "That's the last 50 changes." (`.mk-pend small`).
-    pub const END: TextStyle = TextStyle::new(11.5, 400.0).lh(17.0);
+    pub const END: TextStyle = crate::theme::tokens::type_::STATUS;
     /// 11.5px/500 on a 13px line: the three buttons (`.wn-fly .mk-pbtn`).
     pub const FOOT: TextStyle = TextStyle::new(11.5, 500.0).lh(13.0);
 }
@@ -162,7 +161,7 @@ fn status_block<S: 'static>(snapshot: &Snapshot, name: &str, host: Host<S>, t: &
     let tile = el()
         .key("st-tile")
         .size(34.0, 34.0)
-        .radius(10.0)
+        .radius(crate::theme::scale::radius::PANEL)
         .fill(wash)
         .center()
         .child(if checking {
@@ -175,7 +174,7 @@ fn status_block<S: 'static>(snapshot: &Snapshot, name: &str, host: Host<S>, t: &
     if checking {
         // No words until the state is known (DW-1212): two bars where they will be.
         words = words
-            .gap(6.0)
+            .gap(space::S6)
             .child(el().key("st-skel-1").w_frac(0.62).h(11.0).radius(5.0).fill(skeleton))
             .child(el().key("st-skel-2").w_frac(0.84).h(9.0).radius(5.0).fill(skeleton));
     } else {
@@ -232,9 +231,9 @@ fn status_block<S: 'static>(snapshot: &Snapshot, name: &str, host: Host<S>, t: &
         })
         .w_full()
         .pt(14.0)
-        .px(14.0)
+        .px(space::S14)
         .pb(12.0)
-        .gap(9.0)
+        .gap(space::S9)
         .child(top);
     if let Some(under) = under {
         block = block.child(under);
@@ -242,7 +241,7 @@ fn status_block<S: 'static>(snapshot: &Snapshot, name: &str, host: Host<S>, t: &
     match status {
         // The bar and the speed, each only when it is known: never a guessed one.
         Status::Syncing { fraction, speed, .. } if fraction.is_some() || speed.is_some() => {
-            let mut progress = row().key("st-progress").w_full().h(17.0).gap(8.0).center_y();
+            let mut progress = row().key("st-progress").w_full().h(17.0).gap(space::S8).center_y();
             if let Some(fraction) = fraction {
                 progress = progress.child(
                     bar("st-bar", 0.0, *fraction, t.accent, t)
@@ -255,7 +254,7 @@ fn status_block<S: 'static>(snapshot: &Snapshot, name: &str, host: Host<S>, t: &
                     row()
                         .key("st-speed-row")
                         .label(format!("Upload speed {speed}"))
-                        .gap(2.0)
+                        .gap(space::S2)
                         .center_y()
                         .child(kit::glyph("st-speed-icon", &icons::ARROW_UP, 11.0, t.text_tertiary))
                         .child(kit::label("st-speed", speed.clone(), type_fly::SPEED, t.text_tertiary)),
@@ -288,7 +287,7 @@ fn changes_label(snapshot: &Snapshot, t: &Theme) -> El {
         .h(28.5)
         .pt(6.0)
         .pb(5.0)
-        .px(16.0)
+        .px(space::S16)
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
         .border_layout()
         .justify_between()
@@ -346,7 +345,7 @@ fn change_row<S: 'static>(
         What::Moving { text, .. } => (text.clone(), t.text_tertiary, None),
         What::Failed { text } => (text.clone(), red_text(t), None),
     };
-    let mut what = row().key(format!("{key}-what")).w(WHAT_W).gap(4.0).center_y();
+    let mut what = row().key(format!("{key}-what")).w(WHAT_W).gap(space::S4).center_y();
     if let Some(origin) = origin {
         what = what.child(kit::glyph(format!("{key}-sub-icon"), origin_icon(origin), 12.0, t.text_tertiary));
     }
@@ -427,7 +426,7 @@ fn changes_list<S: 'static>(ui: &Ui, name: &str, host: Host<S>, t: &Theme) -> El
         ))
         .w_full()
         .h_full()
-        .px(6.0)
+        .px(space::S6)
         .focusable(true)
         .focus_ring(2.0, -2.0, t.accent_deep)
         .scroll(ScrollSpec {
@@ -450,7 +449,7 @@ fn changes_list<S: 'static>(ui: &Ui, name: &str, host: Host<S>, t: &Theme) -> El
         content = content.child(change_row(i, shown, change, ui.selected() == Some(i), host, t));
     }
     // The end of the list: where the rest is (DW-1220).
-    let mut end = col().key("end").w_full().pt(12.0).pb(14.0).gap(8.0).center();
+    let mut end = col().key("end").w_full().pt(12.0).pb(14.0).gap(space::S8).center();
     if complete {
         end = end.child(kit::label(
             "end-text",
@@ -512,7 +511,7 @@ fn footer<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El {
             .w(0.0)
             .h(52.0)
             .pt(8.0)
-            .px(6.0)
+            .px(space::S6)
             .gap(3.0)
             .items_center()
             .radius(8.0);
@@ -563,8 +562,8 @@ fn footer<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El {
         .label("Flyout actions")
         .w_full()
         .h(64.5)
-        .padding(6.0)
-        .gap(4.0)
+        .padding(space::S6)
+        .gap(space::S4)
         .fill(surface)
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
         .border_layout()

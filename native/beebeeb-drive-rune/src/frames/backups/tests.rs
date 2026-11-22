@@ -72,7 +72,7 @@ fn press(rt: &mut Runtime<State>, key: Key) {
 
 fn type_text(rt: &mut Runtime<State>, typed: &str) {
     for c in typed.chars() {
-        press(rt, Key::Text(c.to_string().into()));
+        press(rt, Key::Text(c.to_string()));
     }
 }
 

@@ -12,6 +12,7 @@ use super::share::{big_tile, file_head};
 use super::source::{Action, ActionError, Read};
 use crate::State;
 use crate::source::DriveItem;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Trailing};
@@ -171,8 +172,8 @@ fn version_row(index: usize, button: usize, item: &DriveItem, v: &Version, t: &T
         .label(name)
         .w_full()
         .min_h(40.0)
-        .px(10.0)
-        .gap(8.0)
+        .px(scale::space::S10)
+        .gap(scale::space::S8)
         .center_y()
         .on_double_press(|s: &mut State| s.preview_version());
     if let Some(device) = &v.changed_on {
@@ -197,7 +198,13 @@ fn version_row(index: usize, button: usize, item: &DriveItem, v: &Version, t: &T
             .child(kit::label(format!("{key}-sub"), sub, SUB, t.text_tertiary).truncate()),
     );
     if v.current {
-        r.child(crate::ui::pill::pill(&format!("{key}-pill"), "Current", crate::ui::pill::Tone::Neutral, false, t))
+        r.child(crate::ui::pill::pill(
+            &format!("{key}-pill"),
+            "Current",
+            crate::ui::pill::Tone::Neutral,
+            false,
+            t,
+        ))
     } else {
         let id = v.id.clone();
         r.child(

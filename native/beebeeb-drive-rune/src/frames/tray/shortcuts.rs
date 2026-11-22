@@ -10,13 +10,14 @@
 //!
 //! Every measurement is the board's computed CSS (`.wn-dlg`, `.wn-cmds`, `.wn-cmd`).
 
-use rune::{Align, Color, Cx, El, Key, KeyEvent, ScrollSpec, TextStyle, Tx, col, el, row};
+use rune::{Align, Cx, El, Key, KeyEvent, ScrollSpec, TextStyle, Tx, col, el, row};
 
 use super::commands::{APP, EDITOR, WINDOW};
 use crate::State;
 use crate::frames::shared::parts::controls::{ButtonKind, ButtonSize, button_keyed};
 use crate::shell::app::{Dialog as AppDialog, Event};
 use crate::shell::registry::{self, DialogFrame, FeedbackPolicy, FrameGroup};
+use crate::theme::scale::space;
 use crate::theme::tokens::{self, Theme};
 use crate::ui::dialog::{Dialog, Foot, Head, dialog};
 use crate::ui::kit;
@@ -54,9 +55,9 @@ pub const BODY_KEY: &str = "sc-body";
 mod type_sc {
     use super::TextStyle;
     /// `.t-title` in a dialog's head.
-    pub const TITLE: TextStyle = TextStyle::new(17.0, 600.0).lh(22.0).tracking(-0.204);
+    pub const TITLE: TextStyle = crate::theme::scale::text::HEADING;
     /// `.t-sub` in a dialog's head.
-    pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+    pub const SUB: TextStyle = crate::theme::scale::text::SUB;
     /// `.wn-cmdhead`: a menu's name, in capitals.
     pub const HEAD: TextStyle = TextStyle::new(11.0, 600.0).lh(17.0).tracking(0.66);
     /// `.wn-cmd`: a command.
@@ -169,7 +170,7 @@ fn head(t: &Theme) -> El {
         .key("sc-head")
         .w_full()
         .pt(20.0)
-        .px(24.0)
+        .px(space::S24)
         .pb(4.0)
         .gap(3.0)
         .child(kit::label("sc-title", TITLE, type_sc::TITLE, t.text).role("heading"))
@@ -188,7 +189,7 @@ fn body(lists: &'static [List], t: &Theme) -> El {
         .shrink()
         .min_h(0.0)
         .pt(10.0)
-        .px(24.0)
+        .px(space::S24)
         .pb(18.0)
         .scroll(ScrollSpec { stick_bottom: false })
         .child(grid)
@@ -240,7 +241,7 @@ fn command(c: usize, r: usize, name: &str, home: &str, t: &Theme) -> El {
                 .key(format!("{key}-words"))
                 .w_full()
                 .py(3.0)
-                .gap(12.0)
+                .gap(space::S12)
                 .justify_between()
                 .items_start()
                 .child(

@@ -10,11 +10,13 @@ use super::parts::table::Row;
 use crate::State;
 use crate::frames::Intent;
 
+type Cached = (u64, SectionSort, std::sync::Arc<Vec<Row>>);
+
 /// One sorted, filtered copy of a source's rows, held per answer: the view and the keys ask for it many times a
 /// frame, and it is worked out again only when the source's answer (`rev`) or the sort changed. A source that
 /// gives no revision (`None`) is never cached.
 #[derive(Default)]
-pub struct Arranged(std::sync::Mutex<Option<(u64, SectionSort, std::sync::Arc<Vec<Row>>)>>);
+pub struct Arranged(std::sync::Mutex<Option<Cached>>);
 
 impl Arranged {
     /// The rows as `sort` lists them. `rev`: the source's revision; `rows` reads the source's rows (called only on a

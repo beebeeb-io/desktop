@@ -149,14 +149,47 @@ fn tab_stops(rt: &mut Runtime<State>) -> Vec<String> {
     stops
 }
 
-/// Tab to a control and press it with Space.
+/// A tool of the ribbon's row (`rt-N`, `rp-N`).
+fn ribbon_tool(key: &str) -> bool {
+    key.starts_with("rt-") || key.starts_with("rp-")
+}
+
+/// Tab to a control and press it with Space. A live ribbon's tools are one Tab stop (a roving group): Tab into
+/// the row, then the Right arrow to the tool.
 fn operate(rt: &mut Runtime<State>, key: &str) {
+    let mut stops: Vec<String> = Vec::new();
     for _ in 0..80 {
-        if focused(rt).as_deref() == Some(key) {
+        let at = focused(rt);
+        if at.as_deref() == Some(key) {
             press(rt, Key::Text(" ".into()));
             return;
         }
+        // Tab came round without stopping on it: it is inside the ribbon's group.
+        if let Some(at) = at {
+            if stops.contains(&at) {
+                break;
+            }
+            stops.push(at);
+        }
         press(rt, Key::Tab);
+    }
+    if ribbon_tool(key) {
+        for _ in 0..80 {
+            if focused(rt).as_deref().is_some_and(ribbon_tool) {
+                break;
+            }
+            press(rt, Key::Tab);
+        }
+        for _ in 0..80 {
+            if focused(rt).as_deref() == Some(key) {
+                press(rt, Key::Text(" ".into()));
+                return;
+            }
+            if !focused(rt).as_deref().is_some_and(ribbon_tool) {
+                break;
+            }
+            press(rt, Key::Right);
+        }
     }
     panic!("Tab never reached {key}; focus is on {:?}", focused(rt));
 }
@@ -656,6 +689,62 @@ mod live_ribbon {
                 EditOp::Align(TextAlign::Right),
                 EditOp::Indent(1),
             ]
+        );
+    }
+
+    #[test]
+    fn the_arrows_rove_inside_the_ribbons_tools_and_tab_stops_on_one() {
+        let (mut rt, ops, answers) = editing(true);
+        // A revision to go back to: Undo is a tool that takes the keyboard.
+        answer(&mut rt, &answers, edited(1, marks(), Vec::new()));
+        // Tab stops on one tool of the row, and each tab above it is a stop of its own.
+        let stops = tab_stops(&mut rt);
+        let tools: Vec<&String> = stops.iter().filter(|key| ribbon_tool(key)).collect();
+        assert_eq!(tools.len(), 1, "one Tab stop for the row of tools: {stops:?}");
+        assert!(stops.contains(&"rib-tab-0-cell".to_string()), "{stops:?}");
+        assert!(stops.contains(&"rib-tab-1-cell".to_string()), "{stops:?}");
+        assert!(stops.contains(&"rib-find".to_string()), "{stops:?}");
+        // Into the row, to its first tool.
+        for _ in 0..80 {
+            if focused(&rt).as_deref().is_some_and(ribbon_tool) {
+                break;
+            }
+            press(&mut rt, Key::Tab);
+        }
+        press(&mut rt, Key::Home);
+        let first = focused(&rt).expect("a tool has the keyboard");
+        assert!(ribbon_tool(&first), "{first}");
+        // Right moves tool by tool, and Left comes back.
+        press(&mut rt, Key::Right);
+        let second = focused(&rt).expect("a tool has the keyboard");
+        assert!(ribbon_tool(&second) && second != first, "Right moved from {first} to {second}");
+        press(&mut rt, Key::Right);
+        let third = focused(&rt).expect("a tool has the keyboard");
+        assert!(ribbon_tool(&third) && third != second && third != first, "{third}");
+        press(&mut rt, Key::Left);
+        assert_eq!(focused(&rt).as_deref(), Some(second.as_str()));
+        // End is the last tool, and Right from it wraps to the first: never out to a tab.
+        press(&mut rt, Key::End);
+        let last = focused(&rt).expect("a tool has the keyboard");
+        assert!(ribbon_tool(&last) && last != first, "{last}");
+        press(&mut rt, Key::Right);
+        assert_eq!(focused(&rt).as_deref(), Some(first.as_str()));
+        press(&mut rt, Key::Left);
+        assert_eq!(focused(&rt).as_deref(), Some(last.as_str()));
+        // Moving pressed nothing and left the open tab alone.
+        assert!(ops.borrow().is_empty(), "the arrows sent {:?}", ops.borrow());
+        assert_eq!(ui(&rt).office.tab, Tab::Home);
+        // Tab leaves the row in one press, and Space presses the tool the arrows chose.
+        press(&mut rt, Key::Home);
+        press(&mut rt, Key::Tab);
+        assert!(!focused(&rt).as_deref().is_some_and(ribbon_tool), "Tab left the row");
+        operate(&mut rt, "rt-2");
+        assert_eq!(
+            *ops.borrow(),
+            [EditOp::Mark {
+                mark: Mark::Bold,
+                on: true
+            }]
         );
     }
 

@@ -4,6 +4,7 @@
 
 use crate::State;
 use crate::theme::icons;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::toolbar::{self as tb, Bar, Details, New, Sort, View, press};
@@ -29,7 +30,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
     };
     // While the list is still arriving in the root, the title says how far it is (DW-1107).
     let count = super::browse_states::title_words(s).unwrap_or(count);
-    let mut title = col().key("folder-info").px(4.0).min_w(0.0);
+    let mut title = col().key("folder-info").px(scale::space::S4).min_w(0.0);
     title = if s.listing.path.len() > 1 {
         // Inside a folder the title is the path (`.mk-crumbs`): each folder above is a way up.
         let mut crumbs = row()
@@ -37,7 +38,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
             .role("navigation")
             .label("Path")
             .center_y()
-            .gap(4.0)
+            .gap(scale::space::S4)
             .min_w(0.0);
         let last = s.listing.path.len() - 1;
         for (i, crumb) in s.listing.path.iter().enumerate() {

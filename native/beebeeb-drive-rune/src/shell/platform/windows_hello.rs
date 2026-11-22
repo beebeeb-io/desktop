@@ -949,7 +949,9 @@ mod tests {
         assert!(take_away_for_quit(Duration::from_secs(10)));
         assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(HelloResult::Cancelled));
         thread.join().unwrap();
-        assert!(lock(&UP.up).is_none());
+        // Other tests (the engine's, the frames') start prompts on this slot without this mutex: the slot may hold
+        // theirs by now, but never this test's.
+        assert!(lock(&UP.up).as_ref().is_none_or(|other| !Arc::ptr_eq(other, &control)));
         QUIT_ON_GLOBAL.with(|on| on.set(false));
     }
 

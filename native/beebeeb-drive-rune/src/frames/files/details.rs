@@ -7,6 +7,7 @@ use super::source::Details;
 use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview};
 use crate::ui::{file_list, kit};
@@ -19,8 +20,8 @@ fn offline_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
         .key(format!("{key}-card"))
         .w_full()
         .min_h(40.0)
-        .px(10.0)
-        .gap(8.0)
+        .px(scale::space::S10)
+        .gap(scale::space::S8)
         .center_y()
         .radius(radius::LG)
         .fill(t.card)
@@ -35,7 +36,8 @@ fn offline_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
                 .child(kit::label(format!("{key}-detail"), sub, type_::BODY.lh(15.0), t.text_tertiary).truncate()),
         )
         .child(
-            crate::ui::switch::switch_sized(&format!("{key}-switch"), "", on, true, crate::ui::button::Size::Md, t).label(title)
+            crate::ui::switch::switch_sized(&format!("{key}-switch"), "", on, true, crate::ui::button::Size::Md, t)
+                .label(title)
                 .description(sub)
                 .on_press_tx(|s: &mut State, tx: &mut Tx| {
                     s.toggle_keep_offline(tx);
@@ -73,13 +75,11 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
         preview(page_preview(t), t)
     };
 
-    let mut facts = col().key("detail-meta").role("list").gap(6.0).child(meta_row(
-        "detail-changed",
-        "Changed",
-        &d.changed,
-        true,
-        t,
-    ));
+    let mut facts = col()
+        .key("detail-meta")
+        .role("list")
+        .gap(scale::space::S6)
+        .child(meta_row("detail-changed", "Changed", &d.changed, true, t));
     if let Some(v) = &d.changed_on {
         facts = facts.child(meta_row("detail-changed-on", "Changed on", v, false, t));
     }
@@ -103,7 +103,7 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
             .description("Removes the copy on this PC. It stays in Beebeeb and downloads again when you open it.")
             .w_full()
             .h(22.0)
-            .gap(7.0)
+            .gap(scale::space::S7)
             .center()
             .radius(radius::MD)
             .hover(t.hover)
@@ -140,7 +140,7 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
         .child(
             row()
                 .key("detail-actions")
-                .gap(8.0)
+                .gap(scale::space::S8)
                 .child(
                     action_button("share", "Share\u{2026}", &icons::SHARE, t)
                         .on_press_tx(|s: &mut State, tx: &mut rune::Tx| s.ask_share(tx)),

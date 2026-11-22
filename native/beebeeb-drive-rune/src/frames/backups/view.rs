@@ -3,12 +3,12 @@
 
 use rune::{Cx, El, col, row};
 
-use super::source::{Backed, BackupsSource, Device, DeviceKind, FileKind, Folder, NotBackedUp, Part, Status};
+use super::source::{Backed, BackupsSource, Device, DeviceKind, Folder, NotBackedUp, Part, Status};
 use super::{BackupsUi, Dialog, Page, mail_view};
 use crate::State;
 use crate::frames::settings;
-use crate::frames::this_pc::icons as pc_icons;
 use crate::shell::{placeholder, registry};
+use crate::theme::scale::space;
 use crate::theme::icons as drive_icons;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{self, Theme};
@@ -28,7 +28,7 @@ pub(super) fn thousands(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -121,7 +121,7 @@ fn status_card(status: &Status, t: &Theme) -> (El, usize) {
                         .key("card-0-words")
                         .grow(1.0)
                         .min_w(0.0)
-                        .gap(6.0)
+                        .gap(space::S6)
                         .child(cards::head(0, &format!("Backing up {folder}"), t))
                         .child(bk::sub_rich(0, &words, &[0..count.len()], t))
                         .child(bk::bar(

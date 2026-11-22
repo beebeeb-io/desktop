@@ -27,7 +27,7 @@ use parts::controls::{ButtonKind, ButtonSize, Tone, button, button_keyed, pill, 
 use parts::menu::{Entry, Open, Took, Trail};
 use parts::table::{Columns, Row, header, rows, table_row, tile};
 use parts::toolbar::{Bar, slot_sep, toolbar};
-use parts::{chrome, empty, list, style};
+use parts::{chrome, list, style};
 use crate::ui::file_row::ROW_H;
 use crate::ui::view_state::{ViewState, try_again};
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el, row};
@@ -197,7 +197,7 @@ fn notice_words(notice: Notice) -> &'static str {
 /// The notice over the lists (Trash's). Keys: `notice`, `notice-words`.
 fn notice_note(notice: Notice, t: &Theme) -> El {
     const WORDS: rune::TextStyle = rune::TextStyle::new(12.5, 400.0).lh(17.0);
-    el().key("notice-wrap").w_full().px(14.0).pt(10.0).child(
+    el().key("notice-wrap").w_full().px(crate::theme::scale::space::S14).pt(10.0).child(
         col()
             .key("notice")
             .role("status")
@@ -208,7 +208,7 @@ fn notice_note(notice: Notice, t: &Theme) -> El {
             .pb(9.0)
             .pl(12.0)
             .pr(10.0)
-            .radius(10.0)
+            .radius(crate::theme::tokens::radius::LG)
             .fill(t.text.alpha(0.06))
             .child(
                 rune::rich(notice_words(notice), Vec::new())
@@ -669,16 +669,16 @@ fn invitation_card(n: usize, inv: &source::Invitation, t: &Theme) -> El {
                 .truncate(),
         )
         .child(kit::label(format!("{k}-sub"), inv.from_line.clone(), style::SUB, t.text_tertiary).truncate());
-    el().key(format!("{k}-wrap")).w_full().px(16.0).pt(12.0).child(
+    el().key(format!("{k}-wrap")).w_full().px(crate::theme::scale::space::S16).pt(12.0).child(
         row()
             .key(k.clone())
             .role("group")
             .label(format!("Waiting for you: {}", inv.name))
             .w_full()
-            .padding(12.0)
-            .gap(12.0)
+            .padding(crate::theme::scale::space::S12)
+            .gap(crate::theme::scale::space::S12)
             .center_y()
-            .radius(10.0)
+            .radius(crate::theme::tokens::radius::LG)
             .fill(t.card)
             .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)))
             .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -753,7 +753,7 @@ fn with_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
     );
     let t = &t;
     body =
-        body.child(el().key("label-wrap").px(20.0).pt(16.0).child(list::label(
+        body.child(el().key("label-wrap").px(crate::theme::scale::space::S20).pt(16.0).child(list::label(
             "shared-with-you",
             "Shared with you",
             t,
@@ -838,7 +838,7 @@ fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
                 row()
                     .key("link")
                     .center_y()
-                    .gap(4.0)
+                    .gap(crate::theme::scale::space::S4)
                     .child(kit::glyph(
                         format!("{k}-link-icon"),
                         &icons::LINK,
@@ -877,16 +877,16 @@ fn by_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
     let body = col()
         .key("list-body")
         .pt(12.0)
-        .gap(8.0)
+        .gap(crate::theme::scale::space::S8)
         .child(
             el().key("label-wrap-0")
-                .px(20.0)
+                .px(crate::theme::scale::space::S20)
                 .child(list::label("with-people", "With people", t)),
         )
         .child(list::list(0, "With people", people_items, t))
         .child(
             el().key("label-wrap-1")
-                .px(20.0)
+                .px(crate::theme::scale::space::S20)
                 .pt(12.0)
                 .child(list::label("links", "Links", t)),
         )
@@ -959,7 +959,7 @@ fn requests(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
     let body = col()
         .key("list-body")
         .pt(12.0)
-        .gap(8.0)
+        .gap(crate::theme::scale::space::S8)
         .child(list::list(0, "File requests", items, t));
     (body, status, requests.len())
 }

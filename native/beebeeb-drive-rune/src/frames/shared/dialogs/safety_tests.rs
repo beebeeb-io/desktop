@@ -4,7 +4,7 @@
 use super::Dialog;
 use crate::frames::Intent;
 use crate::frames::shared::scenes;
-use crate::frames::shared::source::{BoardShared, SafetyAsk, SafetyState, SharedSource};
+use crate::frames::shared::source::{BoardShared, SafetyAsk, SafetyState};
 use crate::frames::shared::tests::{click, info, runtime};
 use crate::{State, init};
 

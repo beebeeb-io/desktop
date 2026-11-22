@@ -14,8 +14,10 @@ app (`native/beebeeb-drive-rune` on the engine `crates/beebeeb-engine`), Windows
 2. Refuses while `RELEASE_BLOCKERS.md` lists an item that binds Windows.
 3. Checks the authored release notes (job `validate-release-notes`): `RELEASE_NOTES.md` must name the version and
    carry the "macOS: not in this release" line (`scripts/release-channel-checks.mjs … --no-macos`). Authored notes
-   are mandatory; an auto-generated changelog is never enough.
-4. Verifies the release branch point (the reviewed head of `main` or a `release/*` branch).
+   are mandatory; an auto-generated changelog is never enough. The notes also end with the hidden
+   `<!-- changelog ... -->` block the website changelog is built from (`docs/RELEASING.md` → "Changelog step").
+4. Verifies the release branch point (the reviewed head of `main` or a `release/*` branch; a `release/*` branch
+   must also still list every `RELEASE_BLOCKERS.md` item that `main` lists).
 5. Builds the installer with [`packaging/windows/build-installer.ps1`](packaging/windows/build-installer.ps1)
    (plain `makensis`) and runs the Authenticode gate on the artefacts (a self-test, then the artefacts).
 6. Publishes the v2 channel manifest (job `publish-manifest`): it writes `desktop/v2/<channel>.json`, signs it with

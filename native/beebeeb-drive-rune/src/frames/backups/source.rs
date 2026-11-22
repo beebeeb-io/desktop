@@ -170,6 +170,7 @@ pub struct Pumped {
 /// What became of a "Stop and move the backup to Trash" a source answered late. Each refusal is a fixed sentence that
 /// says whether anything changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum Stopped {
     /// The folder is no longer backed up and its backup is in Trash.
     Done,

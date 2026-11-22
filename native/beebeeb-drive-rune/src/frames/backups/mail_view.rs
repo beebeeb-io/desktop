@@ -5,7 +5,6 @@
 //! settings pane has; this file adds `mail-title`, `mail-sub`, `mail-note`, `mail-count`,
 //! `mail-left` and the fields `field-<N>` (`-label`, `-value`, `-caret`, `-msg`).
 
-use rune::tok::Family;
 use rune::{Color, El, Icon, Span, TextEdit, TextStyle, col, el, rich, row, text_input};
 
 use super::mail::{Connection, Field, Mail, MailFolder, MailState};
@@ -13,6 +12,7 @@ use super::source::BackupsSource;
 use super::view::thousands;
 use super::{BackupsUi, Dialog, Page};
 use crate::State;
+use crate::theme::scale::space;
 use crate::theme::icons as drive_icons;
 use crate::theme::icons_files as file_icons;
 use crate::theme::icons_settings as ic;
@@ -22,9 +22,9 @@ use crate::ui::settings_card as cards;
 use crate::ui::settings_controls::{self as controls, BANNER_TEXT, BANNER_TITLE, Emphasis};
 use crate::ui::settings_dialog::{self as dialogs, DIALOG_TITLE, Weight};
 use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
-use crate::ui::settings_notice::{self as notice, PILL, Tone};
+use crate::ui::settings_notice::{self as notice, Tone};
 use crate::ui::settings_shell::{self as shell, SUB};
-use crate::ui::{au, kit, pill, settings_meter};
+use crate::ui::{au, kit, pill};
 
 /// A folder that is not ticked: a point where the tick would be (`M12 11.9v.2`).
 static NOT_TICKED: Icon = Icon {
@@ -34,15 +34,15 @@ static NOT_TICKED: Icon = Icon {
 };
 
 /// 11px/500 on 15px: a field's label (`.kit-field-outer`).
-const FIELD_LABEL: TextStyle = TextStyle::new(11.0, 500.0).lh(15.0);
+const FIELD_LABEL: TextStyle = crate::theme::scale::text::CAPTION_LOOSE;
 /// 13px/400 on 17px: what a field holds.
-const FIELD_VALUE: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+const FIELD_VALUE: TextStyle = crate::theme::scale::text::READ;
 /// The same, hidden: bullets 1.56px apart (`.is-secure`).
 const FIELD_SECURE: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0).tracking(1.56);
 /// 11.5px mono on 17px: a server's name, a port.
-const FIELD_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0);
+const FIELD_MONO: TextStyle = crate::theme::scale::text::META_MONO_LOOSE;
 /// 12px/400 on 16px: the words under a field.
-const FIELD_MSG: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
+const FIELD_MSG: TextStyle = crate::theme::tokens::type_::BODY;
 
 /// Words with a machine's value inside them (`mono`: byte ranges), noted for the gate as one text.
 fn words_rich(key: &str, words: &str, mono: &[std::ops::Range<usize>], style: TextStyle, ink: Color) -> El {
@@ -56,7 +56,7 @@ fn head(title: &str, sub: &str, trailing: Option<El>, t: &Theme) -> El {
     let mut h = row()
         .key("mail-head")
         .w_full()
-        .gap(12.0)
+        .gap(space::S12)
         .center_y()
         .child(notice::tile_sized(0, Tone::Neutral, &ic::MAIL, 40.0, t))
         .child(
@@ -96,7 +96,7 @@ fn banner_red(
         .label(format!("{title}. {words}"))
         .w_full()
         .items_start()
-        .gap(10.0)
+        .gap(space::S10)
         .py(11.0)
         .px(13.0)
         .radius(13.0)
@@ -112,7 +112,7 @@ fn banner_red(
                 .key(format!("{key}-words"))
                 .grow(1.0)
                 .min_w(0.0)
-                .gap(2.0)
+                .gap(space::S2)
                 .child(kit::label(format!("{key}-title"), title, BANNER_TITLE, t.text).w_full())
                 .child(words_rich(&format!("{key}-text"), words, mono, BANNER_TEXT, t.text_secondary).wrap()),
         );
@@ -421,10 +421,10 @@ fn field(
         .key(key.clone())
         .w_full()
         .h(28.0)
-        .px(8.0)
-        .gap(6.0)
+        .px(space::S8)
+        .gap(space::S6)
         .center_y()
-        .radius(6.0)
+        .radius(crate::theme::tokens::radius::MD)
         .border_layout();
     well = if error {
         well.fill(t.field)
@@ -479,7 +479,7 @@ fn field(
     let mut wrap = col()
         .key(format!("{key}-wrap"))
         .w_full()
-        .gap(6.0)
+        .gap(space::S6)
         .child(
             kit::label(format!("{key}-label"), label, FIELD_LABEL, t.text_secondary)
                 .a11y_hidden()
@@ -574,7 +574,7 @@ fn account(ui: &BackupsUi, connection: &Connection, banners: usize, first_button
         row()
             .key("mail-server-row")
             .w_full()
-            .gap(12.0)
+            .gap(space::S12)
             .child(el().key("mail-server-cell").grow(1.0).min_w(0.0).child(field(
                 1,
                 "IMAP server",

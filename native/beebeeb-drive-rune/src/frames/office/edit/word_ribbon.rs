@@ -372,6 +372,28 @@ fn word_count(s: &mut State) {
     }
 }
 
+/// The open tab's tools as one arrow-roving group: Tab stops on one tool, the arrows, Home and End move among
+/// them. The ribbon's tabs and its search stay Tab stops of their own, outside the group: an arrow that lands on
+/// a tab presses it (Rune's rule for role `tab`), and that would swap the row of tools under the keyboard.
+pub fn tool_group(tools: Vec<El>) -> Vec<El> {
+    if tools.is_empty() {
+        return tools;
+    }
+    // The row it sits in (`rib-tools`), again: same gap, same centring, all of its room.
+    vec![
+        row()
+            .key("rib-group")
+            .role("group")
+            .label("Tools")
+            .focus_group()
+            .w_full()
+            .h_full()
+            .gap(2.0)
+            .center_y()
+            .children(tools),
+    ]
+}
+
 /// The ribbon of a live text document: the tabs, the open tab's tools and, over everything, the open pop-up and
 /// the selection's tools.
 pub fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
@@ -395,7 +417,7 @@ pub fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
         // A workbook's tabs: never on a text document's row.
         Tab::Data | Tab::Formulas => Vec::new(),
     };
-    let mut rib = vo::ribbon_of(ui, unsaved, tools, t).focus_group();
+    let mut rib = vo::ribbon_of(ui, unsaved, tool_group(tools), t);
     let pops = &ui.office.ribbon;
     if let Some(pop) = pops.open {
         // Opened from the selection's tools while another tab shows: the Home row's places still say where.

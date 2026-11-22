@@ -31,6 +31,7 @@ use crate::ui::keys::SEARCH_KEY;
 use crate::ui::file_row::{self, Column, RowLook, Width};
 use crate::ui::file_tile::{self, TilePicture, TileSize};
 use crate::ui::toolbar::{Bar, Details as PaneBtn, New, Sort, View, bar, press, search_box, title_block};
+use crate::theme::scale::space;
 use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::{caption, kit, status_line};
 
@@ -249,7 +250,7 @@ fn unavailable(reason: Option<(&'static str, &'static str)>, t: &Theme) -> El {
         col()
             .key("search-why")
             .items_center()
-            .gap(4.0)
+            .gap(space::S4)
             .child(
                 kit::label("search-why-title", title, style::SUB, t.text_secondary)
                     .w(227.11)
@@ -299,8 +300,8 @@ fn recent_searches(recent: &[String], t: &Theme) -> El {
         .grow(1.0)
         .max_w(560.0)
         .h_full()
-        .padding(24.0)
-        .gap(12.0);
+        .padding(space::S24)
+        .gap(space::S12);
     if !recent.is_empty() {
         let head = row()
             .key("recent-head")
@@ -385,8 +386,8 @@ fn recent_item(m: usize, query: &str, t: &Theme) -> El {
         .description("Recent search")
         .h(28.0)
         .w_full()
-        .px(10.0)
-        .gap(8.0)
+        .px(space::S10)
+        .gap(space::S8)
         .center_y()
         .hover(t.hover)
         .press(t.press)
@@ -421,9 +422,9 @@ fn narrow_row(narrow: Narrow, scope: bool, t: &Theme) -> El {
     let mut r = row()
         .key("narrow-row")
         .w_full()
-        .px(20.0)
+        .px(space::S20)
         .pt(12.0)
-        .gap(12.0)
+        .gap(space::S12)
         .center_y()
         .child(pills);
     if scope {
@@ -442,7 +443,7 @@ fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -487,8 +488,8 @@ fn grid_rows(tiles: Vec<El>) -> Vec<El> {
             row()
                 .key(format!("grid-row-{n}"))
                 .w_full()
-                .gap(8.0)
-                .py(4.0)
+                .gap(space::S8)
+                .py(space::S4)
                 .children(tiles.by_ref().take(TILES_PER_ROW)),
         );
     }
@@ -596,8 +597,8 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .py(4.0)
-                .px(6.0)
+                .py(space::S4)
+                .px(space::S6)
                 .scroll(rune::ScrollSpec { stick_bottom: false })
                 .children(if ui.grid { grid_rows(rows) } else { rows }),
         );
@@ -664,7 +665,7 @@ fn details_pane(hit: &Hit, d: &Details, t: &Theme) -> El {
     } else {
         preview(page_preview(t), t)
     };
-    let mut facts = col().key("detail-meta").role("list").gap(6.0).child(meta_row(
+    let mut facts = col().key("detail-meta").role("list").gap(space::S6).child(meta_row(
         "detail-changed",
         "Changed",
         &d.changed,
@@ -702,7 +703,7 @@ fn details_pane(hit: &Hit, d: &Details, t: &Theme) -> El {
         .child(
             row()
                 .key("detail-actions")
-                .gap(8.0)
+                .gap(space::S8)
                 .child(twice(
                     "btn-share",
                     action_button("share", "Share\u{2026}", &icons::SHARE, t)
@@ -761,8 +762,8 @@ fn offline_card(id: &str, d: &Details, t: &Theme) -> El {
         .key("item-0-0")
         .w_full()
         .min_h(40.0)
-        .px(10.0)
-        .gap(8.0)
+        .px(space::S10)
+        .gap(space::S8)
         .center_y()
         .child(
             col()

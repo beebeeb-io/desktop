@@ -106,6 +106,7 @@ pub fn parked_remove(s: &mut State) {
 
 /// Render-only scenes (`--scene this-pc-parked`): no board frame draws them, so they are not board frames and the
 /// gate does not count them; they are the renders a person looks at (FRAMES.md, "NOT ON THE BOARD").
+#[allow(clippy::type_complexity)]
 pub const RENDER_SCENES: &[(&str, fn(&mut State))] = &[
     ("this-pc-parked", parked),
     ("this-pc-parked-choose", parked_choose),

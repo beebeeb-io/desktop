@@ -16,7 +16,6 @@ use crate::frames::global::source::Loading;
 use crate::source::DriveItem;
 use crate::ui::view_state::{ViewState, view_state};
 use crate::theme::tokens::Theme;
-use crate::ui::kit;
 use crate::ui::status_bar::{Dot, bar};
 use rune::El;
 

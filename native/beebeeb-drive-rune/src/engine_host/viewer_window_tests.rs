@@ -315,6 +315,18 @@ fn sign_in(engine: &Engine<MemoryCredentials>, account: &FakeAccount, phrase: &s
 
 impl Window {
     /// Lets leaving elements finish leaving, and the poll see what changed.
+    /// Settles until `done` holds, at most 30 s (a loaded rig answers late, never wrongly).
+    fn settle_until(&mut self, done: impl Fn(&Window) -> bool) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            self.settle();
+            if done(self) || std::time::Instant::now() >= until {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     fn settle(&mut self) {
         for _ in 0..2 {
             self.rt.frame(0.016);
@@ -930,13 +942,13 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
             s.viewer.ui = None;
             host::dispatch(s, Event::Escape);
         });
-        w.settle();
+        w.settle_until(|w| w.route_item().is_none());
         assert_eq!(w.route_item(), None);
     };
     let mut in_app = 0;
     for (name, id) in kinds {
         w.open_row(name);
-        w.settle();
+        w.settle_until(|w| w.route_item().as_deref() == Some(id) && w.rt.state.viewer.ui.is_some());
         assert!(
             w.route_item().as_deref() == Some(id) && w.rt.state.viewer.ui.is_some(),
             "Files: {name} did not open in the app; the window draws:\n{}",
@@ -946,7 +958,7 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
         leave(&mut w);
         let mut opened = Opened::Failed(crate::frames::files::source::ActionError::Failed);
         w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(id, name))));
-        w.settle();
+        w.settle_until(|w| w.route_item().as_deref() == Some(id));
         assert_eq!((opened, w.route_item().as_deref()), (Opened::InApp, Some(id)), "Search: {name}");
         in_app += 1;
         leave(&mut w);

@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use beebeeb_office_protocol::office::{
     Dirty, EditKind, EditOp, Edited, HitMode, ListKind, Marks, PageRect, ParaStyle, RectPt, TextAlign,
@@ -27,6 +27,35 @@ const GATE: Duration = Duration::from_millis(16);
 /// A debug build runs several times slower than the shipped one.
 const DEBUG_BOUND: Duration = Duration::from_millis(250);
 
+/// The calling thread's CPU time (not wall time: a loaded rig stretches the wall clock, not the work). Where the
+/// OS clock is not bound here, the wall clock stands in.
+#[cfg(all(unix, target_pointer_width = "64", any(target_os = "linux", target_os = "macos")))]
+fn cpu_now() -> Duration {
+    #[repr(C)]
+    struct Timespec {
+        sec: i64,
+        nsec: i64,
+    }
+    unsafe extern "C" {
+        fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+    }
+    #[cfg(target_os = "linux")]
+    const THREAD_CPU: i32 = 3;
+    #[cfg(target_os = "macos")]
+    const THREAD_CPU: i32 = 16;
+    let mut ts = Timespec { sec: 0, nsec: 0 };
+    // SAFETY: `ts` is a valid out-pointer of the C `timespec` layout on 64-bit Linux and macOS.
+    let rc = unsafe { clock_gettime(THREAD_CPU, &mut ts) };
+    assert_eq!(rc, 0, "the thread CPU clock");
+    Duration::new(ts.sec as u64, ts.nsec as u32)
+}
+
+#[cfg(not(all(unix, target_pointer_width = "64", any(target_os = "linux", target_os = "macos"))))]
+fn cpu_now() -> Duration {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed()
+}
+
 fn bound() -> Duration {
     if cfg!(debug_assertions) { DEBUG_BOUND } else { GATE }
 }
@@ -34,9 +63,9 @@ fn bound() -> Duration {
 fn best(runs: usize, mut f: impl FnMut()) -> Duration {
     (0..runs)
         .map(|_| {
-            let t = Instant::now();
+            let t = cpu_now();
             f();
-            t.elapsed()
+            cpu_now() - t
         })
         .min()
         .expect("a run")
@@ -184,10 +213,10 @@ fn office_sheets_budget_a_commit_at_the_cell_cap_fits_a_frame() {
     for _ in 0..5 {
         rt.key(KeyEvent { key: Key::Text("4".into()), mods: Mods::default() });
         rt.frame(1.0 / 60.0);
-        let t = Instant::now();
+        let t = cpu_now();
         rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
         rt.frame(1.0 / 60.0);
-        runs.push(t.elapsed());
+        runs.push(cpu_now() - t);
     }
     let commit = runs.into_iter().min().expect("a run");
     eprintln!("sheet budget: commit + frame at the cell cap {commit:?}");

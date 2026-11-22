@@ -9,6 +9,7 @@ use super::source::{Change, Exit, Kind, Origin};
 use super::{Filter, Section, Ui, icons};
 use crate::State;
 use crate::ui::button;
+use crate::theme::scale::space;
 use crate::theme::icons as base;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::theme::file_icons::icon_for;
@@ -86,8 +87,8 @@ fn filter(ui: &Ui, t: &Theme) -> El {
         .role("tablist")
         .label("Show")
         .focus_group()
-        .padding(2.0)
-        .radius(10.0)
+        .padding(space::S2)
+        .radius(crate::theme::scale::radius::PANEL)
         .fill(t.field)
         .box_shadow(kit::ring_inset(t.separator));
     for f in Filter::ALL {
@@ -99,7 +100,7 @@ fn filter(ui: &Ui, t: &Theme) -> El {
             .label(words.clone())
             .checked(on)
             .h(24.0)
-            .px(10.0)
+            .px(space::S10)
             .center()
             .radius(8.0)
             .focusable(true)
@@ -127,15 +128,15 @@ fn filter(ui: &Ui, t: &Theme) -> El {
 /// The bar under the toolbar on the Problems filter (`.mk-bulk`).
 fn problems_bar(try_all: bool, t: &Theme) -> El {
     const WORDS: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
-    const TITLE: TextStyle = TextStyle::new(12.5, 600.0).lh(17.0);
+    const TITLE: TextStyle = crate::theme::scale::text::FIELD_SEMI;
     let mut bar = row()
         .key("problems-bar")
         .role("group")
         .label("Can't sync")
         .w_full()
-        .py(6.0)
-        .px(14.0)
-        .gap(8.0)
+        .py(space::S6)
+        .px(space::S14)
+        .gap(space::S8)
         .center_y()
         .fill(icons::bar_bg(t))
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
@@ -217,8 +218,8 @@ fn list(ui: &Ui, t: &Theme) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .py(8.0)
-        .px(16.0)
+        .py(space::S8)
+        .px(space::S16)
         .scroll(rune::ScrollSpec { stick_bottom: false })
         .child(
             col()
@@ -250,7 +251,7 @@ fn day_heading(words: &str, t: &Theme) -> El {
         .label(words)
         .w_full()
         .h(ROW_H)
-        .px(14.0)
+        .px(space::S14)
         .items_end()
         .pb(4.0)
         .child(kit::label(
@@ -331,7 +332,7 @@ fn change_row(i: usize, change: &Change, retry_no: usize, count: usize, t: &Them
             .key("device-cell")
             .w(150.0)
             .min_w(0.0)
-            .gap(6.0)
+            .gap(space::S6)
             .center_y()
             .child(kit::glyph(
                 format!("{k}-device-icon"),

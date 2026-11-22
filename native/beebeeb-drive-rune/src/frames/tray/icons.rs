@@ -103,42 +103,8 @@ pub static FROM_TABLET: Icon = icon24!(
 /// A change by someone it is shared with (`row-7-sub-icon of DW-1202-dark`).
 pub use crate::theme::icons::SHARED as FROM_PEOPLE;
 
-/// A document (`row-0-icon of DW-1202-dark`).
-pub use crate::theme::icons::DOC_GENERIC as FILE_DOC;
-
-/// A spreadsheet (`row-1-icon of DW-1202-dark`).
-pub use crate::theme::icons::DOC_SPREADSHEET as FILE_SHEET;
-
-/// A presentation (`row-1-icon of DW-1203-dark`).
-pub use crate::theme::icons::DOC_MINIMAL as FILE_DECK;
-
-/// A video (`row-0-icon of DW-1207-dark`).
-pub static FILE_VIDEO: Icon = icon24!(
-    "file-video",
-    r#"<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M10 15l5-3-5-3v6z"></path>"#
-);
-
-/// A sound recording (`row-4-icon of DW-1220-dark`).
-pub static FILE_AUDIO: Icon = icon24!(
-    "file-audio",
-    r#"<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M11 15a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM11 15v-4l4-1"></path>"#
-);
-
-/// An archive (`row-1-icon of DW-1221-dark`).
-pub static FILE_ARCHIVE: Icon = icon24!(
-    "file-archive",
-    r#"<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M10 2v2M12 4v2M10 6v2M12 8v2M10 10v2M12 12v4h-2v-4"></path>"#
-);
-
-/// A file moved to Trash (`row-6-icon of DW-1202-dark`).
+   /// A file moved to Trash (`row-6-icon of DW-1202-dark`).
 pub use crate::theme::icons::TRASH as FILE_TRASHED;
-
-/// A photo or another image of the account, until the flyout has its thumbnail (the running
-/// app's rows, `source::Tile::Image`): the design system's image glyph. No board frame draws it.
-pub use crate::theme::icons::PHOTOS as FILE_IMAGE;
-
-/// A folder (`row-7-icon of DW-1202-dark`).
-pub use crate::theme::icons::FILES as FOLDER;
 
 // The b as a template image (`#mk-b`): the rounded square with the b cut out of it by a mask
 // (`#mk-bmask`). Rune's glyph atlas has no masks, so `view::b_glyph` stacks two one-colour

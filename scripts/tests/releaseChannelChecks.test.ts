@@ -243,6 +243,23 @@ describe('validateReleaseNotes --no-macos (Windows+Linux-only release)', () => {
     expect(validateReleaseNotes(withoutMacLine, '0.8.21', 'alpha')).toHaveLength(1)
   })
 
+  test('LD-0077: --no-macos still refuses a delivery sentence that does not name Windows', () => {
+    const unscoped = baseNotes(
+      `Existing installs receive this release through the in-app updater automatically. ${MACOS_NOT_IN_RELEASE_LINE}`,
+    )
+    const scoped = baseNotes(
+      `Existing Windows installs receive this release through the in-app updater automatically. ${MACOS_NOT_IN_RELEASE_LINE}`,
+    )
+    const macMention = baseNotes(
+      `Windows and Mac installs receive this release through the in-app updater. ${MACOS_NOT_IN_RELEASE_LINE}`,
+    )
+    expect(validateReleaseNotes(unscoped, '0.8.21', 'stable', { noMacos: true })).toHaveLength(1)
+    expect(validateReleaseNotes(macMention, '0.8.21', 'stable', { noMacos: true })).toHaveLength(1)
+    expect(validateReleaseNotes(scoped, '0.8.21', 'stable', { noMacos: true })).toEqual([])
+    // the not-in-this-release line itself ("follows in a later version") is not a delivery claim
+    expect(validateReleaseNotes(baseNotes(MACOS_NOT_IN_RELEASE_LINE), '0.8.21', 'stable', { noMacos: true })).toEqual([])
+  })
+
   test('CLI --no-macos flag: exits 0 with MACOS_NOT_IN_RELEASE_LINE, 1 without', () => {
     function runCli(section: string, flags: string[]) {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rcc-test-'))
@@ -262,5 +279,59 @@ describe('validateReleaseNotes --no-macos (Windows+Linux-only release)', () => {
     }
     expect(runCli(`Windows: in-app updater. ${MACOS_NOT_IN_RELEASE_LINE}`, ['--no-macos'])).toBe(0)
     expect(runCli('Windows: in-app updater.', ['--no-macos'])).toBe(1)
+  })
+})
+
+describe('delivery drift check (2300): runnable as a script against any endpoints', () => {
+  async function runDelivery(manifestVersion: string | null, latestTag: string) {
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url)
+        if (url.pathname === '/manifest') {
+          return manifestVersion === null
+            ? new Response('nope', { status: 500 })
+            : Response.json({ version: manifestVersion })
+        }
+        return Response.json({ tag_name: latestTag })
+      },
+    })
+    try {
+      const proc = Bun.spawn(['node', 'scripts/release-channel-checks.mjs', 'delivery'], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          DESKTOP_STABLE_MANIFEST_URL: `http://127.0.0.1:${server.port}/manifest`,
+          DESKTOP_LATEST_RELEASE_API: `http://127.0.0.1:${server.port}/latest`,
+        },
+      })
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ])
+      return { code, stdout, stderr }
+    } finally {
+      server.stop(true)
+    }
+  }
+
+  test('exits 0 when the stable manifest matches GitHub Latest', async () => {
+    const r = await runDelivery('0.9.1', 'desktop-v0.9.1')
+    expect(r.code).toBe(0)
+    expect(r.stdout).toContain('delivery OK')
+  })
+
+  test('exits 1 on drift and names both versions', async () => {
+    const r = await runDelivery('0.9.0', 'desktop-v0.9.1')
+    expect(r.code).toBe(1)
+    expect(r.stderr).toContain('0.9.0')
+    expect(r.stderr).toContain('desktop-v0.9.1')
+  })
+
+  test('exits 1 when the manifest cannot be read (fail closed)', async () => {
+    expect((await runDelivery(null, 'desktop-v0.9.1')).code).toBe(1)
   })
 })

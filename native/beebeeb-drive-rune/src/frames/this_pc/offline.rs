@@ -11,6 +11,7 @@ use super::source::{Kept, Kind, Standing};
 use super::{MENU_ITEMS, RowMenu, Section, icons};
 use crate::State;
 use crate::source::{DriveItem, format_size};
+use crate::theme::scale::space;
 use crate::theme::file_icons::icon_for;
 use crate::theme::icons as base;
 use crate::theme::tokens::{self, Theme, radius, type_};
@@ -263,10 +264,10 @@ fn note(t: &Theme) -> El {
         .role("note")
         .mt(10.0)
         .mx(14.0)
-        .py(9.0)
+        .py(space::S9)
         .pl(12.0)
         .pr(10.0)
-        .gap(10.0)
+        .gap(space::S10)
         .center_y()
         .radius(radius::LG)
         .fill(icons::note_bg(t))
@@ -303,8 +304,8 @@ fn rows(count: usize, t: &Theme) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .py(4.0)
-        .px(6.0)
+        .py(space::S4)
+        .px(space::S6)
         .scroll(rune::ScrollSpec { stick_bottom: false })
         .child(
             col()
@@ -340,7 +341,7 @@ fn rows(count: usize, t: &Theme) -> El {
 /// One kept item: the shared row with this section's cells. Keys: `row-<i>` and
 /// `row-<i>-tile|icon|name|date|size|dash|pc` (`date` is the Status cell, `dash` the Contains cell).
 fn kept_row(i: usize, item: &Kept, selected: bool, count: usize, t: &Theme) -> El {
-    const CONTAINS: TextStyle = TextStyle::new(12.0, 400.0).lh(14.5);
+    const CONTAINS: TextStyle = crate::theme::scale::text::NOTE;
     let k = format!("row-{i}");
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
     let icon = icon_for(&item.name, item.kind == Kind::Folder, mime_of(&item.kind));
