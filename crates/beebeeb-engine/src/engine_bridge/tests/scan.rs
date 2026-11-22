@@ -143,7 +143,7 @@ async fn regression_2229_a_settled_file_is_classified_again_only_when_it_or_its_
         "settled again"
     );
 
-    memo.age_by(std::time::Duration::from_secs(11 * 60));
+    memo.age_by(std::time::Duration::from_secs(61 * 60));
     assert_eq!(
         regression_2229_pass(&bridge, &sync_root, &mut memo),
         (1, 0),
@@ -423,7 +423,7 @@ async fn regression_2229_an_equal_length_edit_that_restores_the_mtime_is_sent() 
 
     std::fs::write(&local, b"balance: 999").unwrap();
     regression_2229_set_modified(&local, hour_ago);
-    memo.age_by(std::time::Duration::from_secs(11 * 60));
+    memo.age_by(std::time::Duration::from_secs(61 * 60));
     assert_eq!(
         regression_2229_pass(&bridge, &sync_root, &mut memo),
         (1, 0),
