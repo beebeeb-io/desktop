@@ -346,6 +346,7 @@ fn ctrl_f_opens_search_and_esc_takes_the_window_back_to_files() {
     assert!(!rt.state.frames.find.open && rt.state.search.text.is_empty());
     assert!(has(&rt, "pane-list"), "Files' list is back");
     assert_ne!(text(&rt, "folder-title"), "Search");
+
 }
 
 /// The board: "Type: shows results". A word typed in the Files toolbar's field opens search, and
@@ -869,10 +870,7 @@ mod acting {
         drain(&mut rt);
         assert_eq!(
             *spy.kept.lock().unwrap(),
-            vec![
-                ("board-search-1".to_string(), true),
-                ("board-search-1".to_string(), false)
-            ]
+            vec![("board-search-1".to_string(), true), ("board-search-1".to_string(), false)]
         );
     }
 
@@ -886,15 +884,9 @@ mod acting {
         assert!(has(&rt, "menu"), "Files' Sort entries are drawn");
         // Name, folders first: Sort by (1 name), Order (7 reversed).
         click(&mut rt, "menu-item-1");
-        assert_eq!(
-            names(&rt.state),
-            ["Contractors", "Contract draft.pdf", "Contract signed 2025.pdf"]
-        );
+        assert_eq!(names(&rt.state), ["Contractors", "Contract draft.pdf", "Contract signed 2025.pdf"]);
         click(&mut rt, "menu-item-7");
-        assert_eq!(
-            names(&rt.state),
-            ["Contractors", "Contract signed 2025.pdf", "Contract draft.pdf"]
-        );
+        assert_eq!(names(&rt.state), ["Contractors", "Contract signed 2025.pdf", "Contract draft.pdf"]);
         assert_eq!(rt.state.actions.sort, files_sort, "Files' own sort is not touched");
         assert_ne!(source_order, names(&rt.state));
         // The drawn rows follow: the first row is the folder.
@@ -921,10 +913,7 @@ mod acting {
         click(&mut rt, "new-btn");
         drain(&mut rt);
         assert_eq!(rt.state.actions.menu.map(|m| m.kind), Some(MenuKind::New));
-        assert!(
-            !super::super::shows_over_files(&rt.state),
-            "Files shows while its menu is open"
-        );
+        assert!(!super::super::shows_over_files(&rt.state), "Files shows while its menu is open");
     }
 
     #[test]

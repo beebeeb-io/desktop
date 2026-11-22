@@ -24,10 +24,9 @@ fn blocks_of(source: &str) -> Rc<Vec<Block>> {
     let hash = h.finish();
     PARSED.with(|c| {
         if let Some((k, b)) = &*c.borrow()
-            && *k == hash
-        {
-            return b.clone();
-        }
+            && *k == hash {
+                return b.clone();
+            }
         #[cfg(test)]
         PARSES.with(|n| n.set(n.get() + 1));
         let b = Rc::new(markdown::parse(source));

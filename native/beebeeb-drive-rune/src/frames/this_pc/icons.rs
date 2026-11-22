@@ -41,7 +41,7 @@ pub static RETRY: Icon = icon24!(
     r#"<path d="M20 12a8 8 0 1 1-2.3-5.6L20 8.5"></path><path d="M20 4v4.5h-4.5"></path>"#
 );
 
-/// `--color-red` as a count's fill (`.mk-badge.is-red`), the same in both themes.
+   /// `--color-red` as a count's fill (`.mk-badge.is-red`), the same in both themes.
 pub fn red_badge() -> Color {
     oklch(0.55, 0.20, 25.0)
 }
@@ -68,3 +68,4 @@ pub fn bar_bg(t: &Theme) -> Color {
 pub fn note_bg(t: &Theme) -> Color {
     t.text.alpha(0.06)
 }
+

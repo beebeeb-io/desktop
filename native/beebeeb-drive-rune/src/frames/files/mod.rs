@@ -32,8 +32,8 @@ pub mod protected_fixture;
 pub mod rename;
 pub mod reread;
 pub mod reset;
-pub mod retry;
 pub mod reveal;
+pub mod retry;
 mod row_facts;
 pub mod scenes_waveb;
 pub mod select_bar;
@@ -1145,12 +1145,7 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
         s.show_detail_pane = false;
         let names: Vec<&str> = s.listing.items.iter().map(|i| i.name.as_str()).collect();
         let original = s.listing.items[6].clone();
-        if s.actions
-            .source
-            .duplicate(std::slice::from_ref(&original), &names)
-            .is_ok()
-            && s.take_changes().0
-        {
+        if s.actions.source.duplicate(std::slice::from_ref(&original), &names).is_ok() && s.take_changes().0 {
             s.open_rename(7);
             let mut edit = rune::TextEdit::new(original.name.clone());
             edit.set_caret(names::stem_len(&original.name, false));

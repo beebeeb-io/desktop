@@ -58,13 +58,7 @@ pub struct Column {
 impl Column {
     /// A start-aligned column whose title is what is read.
     pub const fn new(key: &'static str, title: &'static str, width: Width) -> Column {
-        Column {
-            key,
-            title,
-            width,
-            align: Align::Start,
-            spoken: None,
-        }
+        Column { key, title, width, align: Align::Start, spoken: None }
     }
 
     pub const fn align(mut self, align: Align) -> Column {
@@ -103,7 +97,8 @@ pub fn icon_tile(key: &str, icon: FileIcon, t: &Theme) -> El {
 
 /// The tile's empty frame (22 pt, rounded), keyed `<key>-tile`: for a thumbnail.
 pub fn tile_frame(key: &str) -> El {
-    el().key(format!("{key}-tile"))
+    el()
+        .key(format!("{key}-tile"))
         .size(22.0, 22.0)
         .radius(6.0)
         .clip_rounded(6.0)
@@ -192,7 +187,12 @@ pub fn header(columns: &[Column], sorted: Option<(usize, bool)>, t: &Theme) -> E
 }
 
 /// [`header`], with `each(column index, cell)` to make a cell sort on press.
-pub fn header_with(columns: &[Column], sorted: Option<(usize, bool)>, each: impl Fn(usize, El) -> El, t: &Theme) -> El {
+pub fn header_with(
+    columns: &[Column],
+    sorted: Option<(usize, bool)>,
+    each: impl Fn(usize, El) -> El,
+    t: &Theme,
+) -> El {
     let mut out = hrow()
         .key("column-headers")
         .role("row")
@@ -231,11 +231,7 @@ pub fn header_with(columns: &[Column], sorted: Option<(usize, bool)>, each: impl
         {
             let arrow = kit::glyph("sort-arrow", &icons::CHEVRON_DOWN, 11.0, t.text_tertiary);
             // The board has one arrow glyph; descending turns it over.
-            let arrow = if ascending {
-                arrow
-            } else {
-                arrow.rotate(std::f32::consts::PI)
-            };
+            let arrow = if ascending { arrow } else { arrow.rotate(std::f32::consts::PI) };
             cell = cell.sorted(Some(ascending)).child(arrow);
         }
         out = out.child(each(i, cell));

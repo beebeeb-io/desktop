@@ -194,21 +194,11 @@ mod tests {
     #[test]
     fn the_key_after_a_dead_key_types_what_windows_composed() {
         // ' then e: é.
-        let (taken, passed) = run(&[
-            KeyMessage::Down(QUOTE),
-            KeyMessage::Dead,
-            KeyMessage::Down(0x45),
-            KeyMessage::Char(0xE9),
-        ]);
+        let (taken, passed) = run(&[KeyMessage::Down(QUOTE), KeyMessage::Dead, KeyMessage::Down(0x45), KeyMessage::Char(0xE9)]);
         assert_eq!(taken, ["é"]);
         assert!(!passed.contains(&KeyMessage::Char(0xE9)));
         // ' then Space: the apostrophe, not a space.
-        let (taken, _) = run(&[
-            KeyMessage::Down(QUOTE),
-            KeyMessage::Dead,
-            KeyMessage::Down(0x20),
-            KeyMessage::Char(0x27),
-        ]);
+        let (taken, _) = run(&[KeyMessage::Down(QUOTE), KeyMessage::Dead, KeyMessage::Down(0x20), KeyMessage::Char(0x27)]);
         assert_eq!(taken, ["'"]);
         // ' then t: both characters.
         let (taken, _) = run(&[
@@ -243,12 +233,7 @@ mod tests {
         assert_eq!(taken, ["é"]);
         assert_eq!(passed.last(), Some(&KeyMessage::Char(u16::from(b'a'))));
         // ' then Backspace: the Backspace key, its character left to winit.
-        let (taken, passed) = run(&[
-            KeyMessage::Down(QUOTE),
-            KeyMessage::Dead,
-            KeyMessage::Down(0x08),
-            KeyMessage::Char(0x08),
-        ]);
+        let (taken, passed) = run(&[KeyMessage::Down(QUOTE), KeyMessage::Dead, KeyMessage::Down(0x08), KeyMessage::Char(0x08)]);
         assert!(taken.is_empty(), "taken: {taken:?}");
         assert_eq!(passed.last(), Some(&KeyMessage::Char(0x08)));
     }

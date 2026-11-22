@@ -55,9 +55,7 @@ pub fn share_file(window: Option<&rune::WindowHandle>, path: &Path) -> Result<()
                 .ok()
                 .flatten()
         })
-        .ok_or(PlatformError::Os(
-            "the share sheet: the window has no handle yet".into(),
-        ))?;
+        .ok_or(PlatformError::Os("the share sheet: the window has no handle yet".into()))?;
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -68,16 +66,15 @@ pub fn share_file(window: Option<&rune::WindowHandle>, path: &Path) -> Result<()
         .ok_or(PlatformError::Os("the share sheet: the file has no folder".into()))?;
     // Windows file names cannot hold a quote, so the name is safe inside the query's quotes.
     if name.contains('"') {
-        return Err(PlatformError::Os(
-            "the share sheet: the file's name cannot be shared".into(),
-        ));
+        return Err(PlatformError::Os("the share sheet: the file's name cannot be shared".into()));
     }
     // SAFETY: plain WinRT/COM calls on the window's thread; every interface is owned by its wrapper.
     unsafe {
         let storage_folder = StorageFolder::GetFolderFromPathAsync(&HSTRING::from(folder.as_os_str()))
             .and_then(|op| op.get())
             .map_err(|e| os("the folder could not be opened", &e))?;
-        let options = QueryOptions::new().map_err(|e| os("the query could not be made", &e))?;
+        let options = QueryOptions::new()
+            .map_err(|e| os("the query could not be made", &e))?;
         options
             .SetApplicationSearchFilter(&HSTRING::from(format!("System.FileName:=\"{name}\"")))
             .map_err(|e| os("the query could not be set", &e))?;
@@ -93,8 +90,8 @@ pub fn share_file(window: Option<&rune::WindowHandle>, path: &Path) -> Result<()
         }
         let items = Items(items);
         let title = HSTRING::from(name);
-        let interop =
-            factory::<DataTransferManager, IDataTransferManagerInterop>().map_err(|e| os("is not available", &e))?;
+        let interop = factory::<DataTransferManager, IDataTransferManagerInterop>()
+            .map_err(|e| os("is not available", &e))?;
         let manager: DataTransferManager = interop
             .GetForWindow(HWND(hwnd as *mut _))
             .map_err(|e| os("could not be made for the window", &e))?;
@@ -103,16 +100,14 @@ pub fn share_file(window: Option<&rune::WindowHandle>, path: &Path) -> Result<()
                 let _ = old.RemoveDataRequested(token);
             }
         });
-        let handler = TypedEventHandler::new(
-            move |_: &Option<DataTransferManager>, args: &Option<DataRequestedEventArgs>| {
-                if let Some(args) = args {
-                    let data = args.Request()?.Data()?;
-                    data.Properties()?.SetTitle(&title)?;
-                    data.SetStorageItems(items.get(), true)?;
-                }
-                Ok(())
-            },
-        );
+        let handler = TypedEventHandler::new(move |_: &Option<DataTransferManager>, args: &Option<DataRequestedEventArgs>| {
+            if let Some(args) = args {
+                let data = args.Request()?.Data()?;
+                data.Properties()?.SetTitle(&title)?;
+                data.SetStorageItems(items.get(), true)?;
+            }
+            Ok(())
+        });
         let token = manager
             .DataRequested(&handler)
             .map_err(|e| os("could not listen", &e))?;

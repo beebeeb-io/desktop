@@ -59,12 +59,12 @@ pub use beebeeb_office_protocol::office::{
 };
 pub use worker::edit::EditEvent;
 // Re-exported for the window; the window proof (`beebeeb-office-page`) compiles this file alone and names neither.
-pub(crate) use worker::edit::Mode;
 #[allow(unused_imports)]
 pub use worker::edit::{EditFailure, EditRefused};
-pub(crate) use worker::restart::Cadence;
 #[allow(unused_imports)]
 pub use worker::restart::{READ_ONLY_WORDS, RESTORED_WORDS};
+pub(crate) use worker::edit::Mode;
+pub(crate) use worker::restart::Cadence;
 
 // Windows Error Reporting keeps no copy of the helper's memory (the lead's answer 4, 2026-11-15 19:03).
 #[path = "office_host/crash_reports.rs"]
@@ -196,11 +196,7 @@ pub(crate) fn screen_lock_begin_in(registry: &'static Registry, budget: Duration
     // Counted before the first ask, so a close the shell asks for from now on waits.
     lock(&registry.screen).running += 1;
     let open_at_lock: Vec<Arc<Shared>> = lock(&registry.hosts).iter().filter_map(Weak::upgrade).collect();
-    let asked = open_at_lock
-        .iter()
-        .filter(|shared| shared.flush_begin())
-        .cloned()
-        .collect();
+    let asked = open_at_lock.iter().filter(|shared| shared.flush_begin()).cloned().collect();
     ScreenLockFlush {
         registry,
         open_at_lock,
@@ -630,10 +626,7 @@ impl Registry {
     pub(crate) const fn new() -> Registry {
         Registry {
             hosts: Mutex::new(Vec::new()),
-            screen: Mutex::new(ScreenFlushState {
-                running: 0,
-                deferred: None,
-            }),
+            screen: Mutex::new(ScreenFlushState { running: 0, deferred: None }),
         }
     }
 
@@ -910,10 +903,7 @@ enum Command {
     Cancel(RequestId),
     Outline,
     Stats,
-    Cells {
-        sheet: u32,
-        range: CellRange,
-    },
+    Cells { sheet: u32, range: CellRange },
     Retry,
     /// A request of an editing session.
     Edit(worker::edit::EditCommand),
@@ -1249,16 +1239,7 @@ pub(crate) fn open_mode<S: Starter>(
     bytes: Option<Zeroizing<Vec<u8>>>,
     wake: Wake,
 ) -> OfficeHost {
-    open_mode_cadence(
-        starter,
-        registry,
-        timeouts,
-        Cadence::PRODUCTION,
-        mode,
-        kind,
-        bytes,
-        wake,
-    )
+    open_mode_cadence(starter, registry, timeouts, Cadence::PRODUCTION, mode, kind, bytes, wake)
 }
 
 /// [`open_mode`] with the snapshot and crash timing named (the tests shorten it).
@@ -1328,17 +1309,7 @@ pub(crate) fn open_mode_held<S: Starter>(
         return host;
     }
     registry.add(&shared);
-    if !worker::spawn(
-        starter,
-        mode,
-        kind,
-        shared.clone(),
-        inputs,
-        timeouts,
-        cadence,
-        bytes,
-        scratch,
-    ) {
+    if !worker::spawn(starter, mode, kind, shared.clone(), inputs, timeouts, cadence, bytes, scratch) {
         // The worker (and the bytes in it) was dropped: wiped.
         lock(&shared.inner).state = OfficeState::Stopped {
             why: Stop::Failed,

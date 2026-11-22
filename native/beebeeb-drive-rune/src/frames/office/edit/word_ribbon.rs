@@ -4,10 +4,10 @@
 use beebeeb_office_protocol::office::{EditOp, ListKind, Mark, Marks, ParaStyle, Rgb, TextAlign};
 use rune::{Color, El, Key, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text_input};
 
+use crate::theme::scale::{self as sc, space};
 use crate::State;
 use crate::frames::viewers::office::{self as vo, Face, Tab, Tool, ico};
 use crate::frames::viewers::{self, Intent, Ui};
-use crate::theme::scale::{self as sc, space};
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::menu::{self, Entry};

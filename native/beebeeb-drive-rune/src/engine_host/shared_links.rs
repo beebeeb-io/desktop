@@ -58,33 +58,27 @@ impl<C: CredentialStores> EngineSharedSource<C> {
         if self.changing.contains(id) {
             return false;
         }
-        let (engine, answers, made) = (
-            self.engine.clone(),
-            self.answers.clone(),
-            self.shared_links.made.clone(),
-        );
+        let (engine, answers, made) = (self.engine.clone(), self.answers.clone(), self.shared_links.made.clone());
         let sent_for = id.to_string();
-        let started = std::thread::Builder::new()
-            .name("shared-copy-link".into())
-            .spawn(move || {
-                let copied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let link = match &item {
-                        Some(item) => engine.share_link_for(session, item, None).map_err(|_| ()),
-                        None => engine.file_request_copy_for(session, &sent_for).map_err(|_| ()),
-                    };
-                    link.map(|link| LinkText::new(link.expose()))
-                }))
-                .unwrap_or(Err(()));
-                let done = match copied {
-                    Ok(link) => {
-                        let _ = made.send((session, link));
-                        Ok(())
-                    }
-                    Err(()) => Err(ShareChangeError::Refused),
+        let started = std::thread::Builder::new().name("shared-copy-link".into()).spawn(move || {
+            let copied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let link = match &item {
+                    Some(item) => engine.share_link_for(session, item, None).map_err(|_| ()),
+                    None => engine.file_request_copy_for(session, &sent_for).map_err(|_| ()),
                 };
-                let _ = answers.send(Answer::Changed(sent_for, session, done));
-                engine.wake_host();
-            });
+                link.map(|link| LinkText::new(link.expose()))
+            }))
+            .unwrap_or(Err(()));
+            let done = match copied {
+                Ok(link) => {
+                    let _ = made.send((session, link));
+                    Ok(())
+                }
+                Err(()) => Err(ShareChangeError::Refused),
+            };
+            let _ = answers.send(Answer::Changed(sent_for, session, done));
+            engine.wake_host();
+        });
         self.started(started, id)
     }
 
@@ -111,24 +105,22 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             },
         };
         let (engine, answers, sent_for) = (self.engine.clone(), self.answers.clone(), share_id.to_string());
-        let started = std::thread::Builder::new()
-            .name("shared-link-change".into())
-            .spawn(move || {
-                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    engine.share_link_change_for(session, &sent_for, &change)
-                }))
-                .unwrap_or(Err(ShareLinkError::Refused));
-                drop(change);
-                let done = done.map_err(|why| match why {
-                    ShareLinkError::NotSignedIn => ShareChangeError::NotSignedIn,
-                    ShareLinkError::Offline => ShareChangeError::Offline,
-                    ShareLinkError::SessionEnded => ShareChangeError::SessionEnded,
-                    ShareLinkError::NotFound => ShareChangeError::NotFound,
-                    _ => ShareChangeError::Refused,
-                });
-                let _ = answers.send(Answer::Changed(sent_for, session, done));
-                engine.wake_host();
+        let started = std::thread::Builder::new().name("shared-link-change".into()).spawn(move || {
+            let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                engine.share_link_change_for(session, &sent_for, &change)
+            }))
+            .unwrap_or(Err(ShareLinkError::Refused));
+            drop(change);
+            let done = done.map_err(|why| match why {
+                ShareLinkError::NotSignedIn => ShareChangeError::NotSignedIn,
+                ShareLinkError::Offline => ShareChangeError::Offline,
+                ShareLinkError::SessionEnded => ShareChangeError::SessionEnded,
+                ShareLinkError::NotFound => ShareChangeError::NotFound,
+                _ => ShareChangeError::Refused,
             });
+            let _ = answers.send(Answer::Changed(sent_for, session, done));
+            engine.wake_host();
+        });
         self.started(started, share_id)
     }
 

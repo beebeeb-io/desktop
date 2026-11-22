@@ -6,11 +6,7 @@ use super::*;
 
 /// What a remote desktop typed since the last poll, as the platform hands it over.
 fn packets(platform: &FakePlatform, text: &[&str]) {
-    platform
-        .packet_text
-        .lock()
-        .unwrap()
-        .extend(text.iter().map(|t| t.to_string()));
+    platform.packet_text.lock().unwrap().extend(text.iter().map(|t| t.to_string()));
 }
 
 #[test]
@@ -20,10 +16,7 @@ fn text_typed_as_unicode_packets_reaches_the_focused_field() {
     assert_eq!(rt.state.search.text, "");
     packets(&platform, &["h", "é", "😀"]);
     settle(&mut rt);
-    assert_eq!(
-        rt.state.search.text, "hé😀",
-        "the packets' text is typed into Search names, in order, once"
-    );
+    assert_eq!(rt.state.search.text, "hé😀", "the packets' text is typed into Search names, in order, once");
     // Nothing is typed again by the polls that follow.
     settle(&mut rt);
     assert_eq!(rt.state.search.text, "hé😀");
@@ -44,11 +37,7 @@ fn text_typed_as_unicode_packets_reaches_the_text_editor() {
     use crate::frames::viewers::source::{FixtureViewerSource, board};
     let (_, platform, mut rt) = fixture();
     rt.update(|s, _| {
-        assert!(crate::frames::viewers::open_from(
-            s,
-            Box::new(FixtureViewerSource::new()),
-            board::NOTES
-        ));
+        assert!(crate::frames::viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::NOTES));
     });
     settle(&mut rt);
     press(&mut rt, Key::Command('e'), ctrl());
@@ -59,11 +48,7 @@ fn text_typed_as_unicode_packets_reaches_the_text_editor() {
     let before = text(&rt);
     packets(&platform, &["h", "o", "i", " ", "'", "é"]);
     settle(&mut rt);
-    assert_eq!(
-        text(&rt),
-        format!("{before}hoi 'é"),
-        "typed at the caret, at the end of the note"
-    );
+    assert_eq!(text(&rt), format!("{before}hoi 'é"), "typed at the caret, at the end of the note");
     assert!(rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.dirty()));
 }
 
@@ -72,11 +57,7 @@ fn editing() -> (std::sync::Arc<FakePlatform>, Runtime<State>) {
     use crate::frames::viewers::source::{FixtureViewerSource, board};
     let (_, platform, mut rt) = fixture();
     rt.update(|s, _| {
-        assert!(crate::frames::viewers::open_from(
-            s,
-            Box::new(FixtureViewerSource::new()),
-            board::NOTES
-        ));
+        assert!(crate::frames::viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::NOTES));
     });
     settle(&mut rt);
     press(&mut rt, Key::Command('e'), ctrl());

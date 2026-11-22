@@ -64,13 +64,13 @@ use beebeeb_engine::file_ops;
 use zeroize::Zeroize;
 
 use super::log;
+use beebeeb_office_protocol::office::{EditKind, EditOp, HitMode, Template};
 use crate::frames::viewers::kinds::{self, PdfDoc, PhotoDoc, Picture, Viewer};
 #[allow(unused_imports)] // the text readers moved to `viewer_text.rs`; tests reach them through `super::*`.
 use crate::frames::viewers::source::{
-    Body, Cut, Details, EditAnswer, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState,
-    SaveOutcome, Settled, Stopped, TextDoc, Truncated, ViewerSource, plain_lines,
+    Body, Cut, Details, EditAnswer, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, SaveOutcome,
+    Settled, Stopped, TextDoc, Truncated, ViewerSource, plain_lines,
 };
-use beebeeb_office_protocol::office::{EditKind, EditOp, HitMode, Template};
 
 #[path = "viewer_pages.rs"]
 mod pages;
@@ -231,7 +231,10 @@ pub trait ViewerEngine: Send + Sync + 'static {
     }
     /// [`Engine::scratch_for`]: the session's sealed scratch for the editor's large working copies. `None`: copies
     /// stay in memory.
-    fn office_scratch(&self, _session: SessionGeneration) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
+    fn office_scratch(
+        &self,
+        _session: SessionGeneration,
+    ) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
         None
     }
     /// [`Engine::set_office_session_end_hook`]: a lock seals the open editors' unsaved work, a sign-out ends them,
@@ -461,7 +464,10 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         self.engine.create_office_for(session, folder, name, bytes)
     }
 
-    fn office_scratch(&self, session: SessionGeneration) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
+    fn office_scratch(
+        &self,
+        session: SessionGeneration,
+    ) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
         self.engine.scratch_for(session)
     }
 
@@ -791,11 +797,7 @@ fn content_of(shows: Shows, bytes: &[u8], cancel: &AtomicBool) -> Content {
 
 /// Open the PDF in `bytes` in the confined helper (a copy stays with the session, for find; both are wiped when
 /// they are let go). The view's body, and the session for its pages when it opened.
-fn open_pdf(
-    bytes: zeroize::Zeroizing<Vec<u8>>,
-    size: &str,
-    cancel: &AtomicBool,
-) -> (Body, Option<viewer_pdf::Session>) {
+fn open_pdf(bytes: zeroize::Zeroizing<Vec<u8>>, size: &str, cancel: &AtomicBool) -> (Body, Option<viewer_pdf::Session>) {
     match viewer_pdf::Session::open(viewer_pdf::start(bytes.clone()), bytes, cancel) {
         Ok(session) => (
             Body::Pdf(PdfDoc {
@@ -1272,8 +1274,7 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     fn previews(&self, name: &str) -> bool {
         shows(name) != Shows::Nothing
             || heic_or_no_viewer(name) == NoPreview::Heic
-            || self.media_previews(name)
-            || self.office_route(name).is_some()
+            || self.media_previews(name) || self.office_route(name).is_some()
     }
 
     /// An audio or a video file kept on this PC still opens in the player when playback is available (D-MED-13); an

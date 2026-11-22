@@ -989,23 +989,12 @@ fn the_original_reports_its_progress_then_swaps_the_picture_in_and_stop_keeps_no
     }));
     assert!(source.download_original(harbour));
     let answered = originals_until(&mut source, |answered| {
-        answered.iter().any(|a| {
-            matches!(
-                a,
-                OriginalAnswer::Progress {
-                    done: 1_000,
-                    total: 4_000,
-                    ..
-                }
-            )
-        })
+        answered.iter().any(|a| matches!(a, OriginalAnswer::Progress { done: 1_000, total: 4_000, .. }))
     });
     assert!(answered.iter().all(|a| !matches!(a, OriginalAnswer::Done(_))));
     assert!(source.original(harbour).is_none(), "nothing before the end");
     go_on_tx.send(()).unwrap();
-    let answered = originals_until(&mut source, |answered| {
-        answered.contains(&OriginalAnswer::Done(harbour))
-    });
+    let answered = originals_until(&mut source, |answered| answered.contains(&OriginalAnswer::Done(harbour)));
     assert!(answered.contains(&OriginalAnswer::Done(harbour)));
     assert!(source.original(harbour).is_some());
 

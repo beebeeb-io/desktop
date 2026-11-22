@@ -21,6 +21,7 @@ use crate::frames::office::edit::palette::{self, Run};
 use crate::frames::office::edit::save::{self, Seen, Sent};
 use crate::frames::office::edit::word_insert::{self, Insert, LinkForm, Picking, TableForm};
 
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::dialogs::{self, Look};
 use super::office::{self, WordDoc};
 use super::office_icons as oi;
@@ -30,10 +31,9 @@ use super::{Intent, Ui, icons, style};
 use crate::State;
 use crate::theme::scale;
 use crate::theme::tokens::{self, Theme, type_};
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
-use crate::ui::dialog::{self, Sub};
 use crate::ui::field::{self, Bare, caret_mark};
 use crate::ui::kit;
+use crate::ui::dialog::{self, Sub};
 use crate::ui::settings_dialog::{DIALOG_TITLE, Weight};
 
 /// 13px on 17px (`.t-body`): a command's name, and what is typed.
@@ -221,9 +221,7 @@ impl Ui {
     /// What a save that left the window's thread became, read from the window's file and toast (`viewers::settle`
     /// applied it). `true`: something changed, the view must run again.
     pub fn office_settle_save(&mut self) -> bool {
-        let Some(sent) = self.office.save.clone() else {
-            return false;
-        };
+        let Some(sent) = self.office.save.clone() else { return false };
         // A newer version in the way: `settle` asked the text editor's question; the office editor's is this one.
         if let Some(super::Dialog::Conflict(other)) = &self.dialog {
             let other = other.clone();
@@ -299,9 +297,7 @@ impl Ui {
     /// Leaving the document was asked for (Back, Esc): `true` while changes no version holds are there, so the
     /// question is up (DW-1525) and the document stays. For `viewers::hold_for_changes`.
     pub fn office_hold_for_changes(&mut self) -> bool {
-        let Some(edit) = self.office.edit.as_ref() else {
-            return false;
-        };
+        let Some(edit) = self.office.edit.as_ref() else { return false };
         // A lock or sign-out closed the document (its pane says so, and its text was sealed as a recovery snapshot
         // or left with the key): nothing is on screen to keep, and a question about it would be drawn nowhere, so
         // Files and the gear would answer nothing.
@@ -332,10 +328,7 @@ impl Ui {
     /// The slide on the stage and the deck's count, for the palette's slide commands (`None`: not a deck).
     fn stage(&self) -> Option<palette::Stage> {
         match &self.file.body {
-            Body::Deck(deck) => Some(palette::Stage {
-                current: deck.view.current,
-                count: deck.view.count,
-            }),
+            Body::Deck(deck) => Some(palette::Stage { current: deck.view.current, count: deck.view.count }),
             _ => None,
         }
     }
@@ -387,13 +380,7 @@ impl Ui {
         let edit = self.office.edit.as_ref().filter(|e| !e.stopped);
         let live = edit.is_some();
         let stage = self.stage();
-        let run = palette::resolve_at(
-            edit.map(|e| e.kind),
-            stage,
-            &group.title,
-            &command.name,
-            edit.and_then(|e| e.marks.as_ref()),
-        );
+        let run = palette::resolve_at(edit.map(|e| e.kind), stage, &group.title, &command.name, edit.and_then(|e| e.marks.as_ref()));
         self.office.over = None;
         match run {
             Run::File(name) => self.intent(Intent::OpenInDrive(name)),
@@ -497,9 +484,7 @@ impl Ui {
 
     /// The table dialog's Insert (Enter): what is typed is checked first, in words.
     pub fn office_table_ok(&mut self) {
-        let Some(Over::Table(form)) = &mut self.office.over else {
-            return;
-        };
+        let Some(Over::Table(form)) = &mut self.office.over else { return };
         match word_insert::table_op(&form.rows.text, &form.cols.text) {
             Ok(op) => {
                 self.office.over = None;
@@ -514,9 +499,7 @@ impl Ui {
 
     /// The link dialog's Insert (Enter).
     pub fn office_link_ok(&mut self) {
-        let Some(Over::Link(form)) = &mut self.office.over else {
-            return;
-        };
+        let Some(Over::Link(form)) = &mut self.office.over else { return };
         match word_insert::link_op(&form.text.text, &form.url.text) {
             Ok(op) => {
                 self.office.over = None;
@@ -626,40 +609,32 @@ fn conflict(opened: u32, other: &Conflict, t: &Theme) -> El {
         }
     };
     let wide = |key: &str, label: String, look: Look| {
-        button(
-            keys(key),
-            &label,
-            None,
-            look.variant(),
-            Size::Md,
-            ButtonState::Enabled,
-            t,
-        )
-        .pixel_snap(false)
-        .w_full()
+        button(keys(key), &label, None, look.variant(), Size::Md, ButtonState::Enabled, t)
+            .pixel_snap(false)
+            .w_full()
     };
     let foot = col()
-        .key("dlg-stack")
-        .w_full()
-        .gap(scale::space::S8)
-        .child(wide("btn-0", "Save as a new version anyway".into(), Look::Primary).on_press(keep(Keep::Mine)))
-        .child(
-            wide(
-                "btn-1",
-                "Keep both \u{2014} save mine as a separate file".into(),
-                Look::Outline,
+            .key("dlg-stack")
+            .w_full()
+            .gap(scale::space::S8)
+            .child(wide("btn-0", "Save as a new version anyway".into(), Look::Primary).on_press(keep(Keep::Mine)))
+            .child(
+                wide(
+                    "btn-1",
+                    "Keep both \u{2014} save mine as a separate file".into(),
+                    Look::Outline,
+                )
+                .on_press(keep(Keep::Both)),
             )
-            .on_press(keep(Keep::Both)),
-        )
-        .child(
-            wide(
-                "btn-2",
-                format!("Discard my changes and reopen version {}", other.version),
-                Look::Danger,
+            .child(
+                wide(
+                    "btn-2",
+                    format!("Discard my changes and reopen version {}", other.version),
+                    Look::Danger,
+                )
+                .on_press(keep(Keep::Theirs)),
             )
-            .on_press(keep(Keep::Theirs)),
-        )
-        .child(wide("btn-3", "Cancel".into(), Look::Quiet).on_press(close));
+            .child(wide("btn-3", "Cancel".into(), Look::Quiet).on_press(close));
     dialogs::shell_closing(SAVED_FIRST, "alertdialog", 420.0, head, Vec::new(), foot, close, t)
 }
 
@@ -789,12 +764,7 @@ fn palette(ui: &Ui, palette: &Palette, back: &str, t: &Theme) -> El {
         .child(kit::glyph("pal-find-icon", &oi::FIND, 15.0, t.text))
         .child(field)
         .child(kbd("pal-esc", "esc", t));
-    let mut list = col()
-        .key("pal-list")
-        .role("listbox")
-        .label("Results")
-        .w_full()
-        .py(scale::space::S8);
+    let mut list = col().key("pal-list").role("listbox").label("Results").w_full().py(scale::space::S8);
     let found = ui.office_found();
     // Fewer results than before: the mark stays on the list.
     let last = found.iter().map(|g| g.commands.len()).sum::<usize>().saturating_sub(1);
@@ -956,31 +926,14 @@ pub fn no_editor(t: &Theme) -> El {
                 .gap(scale::space::S8)
                 .mt(8.0)
                 .child(
-                    button(
-                        keys("empty-add"),
-                        "Try again",
-                        None,
-                        Variant::Secondary,
-                        Size::Md,
-                        ButtonState::Enabled,
-                        t,
-                    )
-                    .on_press(|s: &mut State| {
+                    button(keys("empty-add"), "Try again", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
                         if let Some(ui) = super::ui(s) {
                             ui.retry();
                         }
                     }),
                 )
                 .child(
-                    button(
-                        keys("empty-btn-1"),
-                        "Open in another app\u{2026}",
-                        None,
-                        Variant::Ghost,
-                        Size::Md,
-                        ButtonState::Enabled,
-                        t,
-                    )
+                    button(keys("empty-btn-1"), "Open in another app\u{2026}", None, Variant::Ghost, Size::Md, ButtonState::Enabled, t)
                     .on_press(|s: &mut State| {
                         if let Some(ui) = super::ui(s) {
                             ui.intent(Intent::OpenInAnotherApp);
@@ -1033,13 +986,7 @@ pub fn insert_tools(t: &Theme) -> Vec<El> {
         worded("rt-1", "Image\u{2026}", &oi::IMAGE, Insert::Image, t),
         worded("rt-2", "Link\u{2026}", &oi::LINK, Insert::Link, t),
         office::hairline("rsep-0".into(), t),
-        worded(
-            "rt-3",
-            "Page break",
-            &super::media_icons::FILE_TEXT,
-            Insert::PageBreak,
-            t,
-        ),
+        worded("rt-3", "Page break", &super::media_icons::FILE_TEXT, Insert::PageBreak, t),
     ]
 }
 
@@ -1146,10 +1093,7 @@ fn labelled(
 }
 
 fn error_of(error: &Option<word_insert::Why>, field: usize) -> Option<&str> {
-    error
-        .as_ref()
-        .filter(|(at, _)| *at == field)
-        .map(|(_, words)| words.as_str())
+    error.as_ref().filter(|(at, _)| *at == field).map(|(_, words)| words.as_str())
 }
 
 /// The scrim and the card of one of the editor's dialogs: Esc and a press outside close it, Tab stays inside. As it
@@ -1160,10 +1104,7 @@ fn insert_card(card: El, opener: &str, back: &str, t: &Theme) -> El {
 
 /// What takes the keyboard in the open document once a dialog over it closes: the page, the slide or the grid.
 pub fn doc_key(name: &str) -> &'static str {
-    let ext = name
-        .rsplit_once('.')
-        .map(|(_, e)| e.to_ascii_lowercase())
-        .unwrap_or_default();
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
         "pptx" | "ppt" | "odp" | "key" => crate::frames::office::edit::slide::FOCUS_KEY,
         "xlsx" | "xls" | "ods" | "csv" => crate::frames::office::edit::sheet::GRID_KEY,
@@ -1189,14 +1130,7 @@ fn table_dialog(form: &TableForm, back: &str, t: &Theme) -> El {
         .key("ins-fields")
         .w_full()
         .gap(scale::space::S12)
-        .child(labelled(
-            ROWS,
-            "Rows",
-            &form.rows,
-            rows_edit,
-            error_of(&form.error, 0),
-            t,
-        ))
+        .child(labelled(ROWS, "Rows", &form.rows, rows_edit, error_of(&form.error, 0), t))
         .child(labelled(
             COLS,
             "Columns",
@@ -1205,15 +1139,11 @@ fn table_dialog(form: &TableForm, back: &str, t: &Theme) -> El {
             error_of(&form.error, 1),
             t,
         ));
-    let foot = insert_foot(
-        "Insert",
-        |s| {
-            if let Some(ui) = super::ui(s) {
-                ui.office_table_ok();
-            }
-        },
-        t,
-    );
+    let foot = insert_foot("Insert", |s| {
+        if let Some(ui) = super::ui(s) {
+            ui.office_table_ok();
+        }
+    }, t);
     insert_card(
         dialog::card(
             "Insert table",
@@ -1252,23 +1182,17 @@ fn link_dialog(form: &LinkForm, back: &str, t: &Theme) -> El {
             error_of(&form.error, 1),
             t,
         ));
-    let foot = insert_foot(
-        "Insert",
-        |s| {
-            if let Some(ui) = super::ui(s) {
-                ui.office_link_ok();
-            }
-        },
-        t,
-    );
+    let foot = insert_foot("Insert", |s| {
+        if let Some(ui) = super::ui(s) {
+            ui.office_link_ok();
+        }
+    }, t);
     insert_card(
         dialog::card(
             "Insert link",
             460.0,
             "Insert link",
-            Some(Sub::Wrap(
-                "The address is kept as text in the document. It is never opened from here.",
-            )),
+            Some(Sub::Wrap("The address is kept as text in the document. It is never opened from here.")),
             vec![fields],
             foot,
             t,

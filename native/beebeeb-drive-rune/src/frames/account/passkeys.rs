@@ -245,12 +245,7 @@ fn start_rename(s: &mut State, id: String) -> bool {
     let Some(source) = s.account.source.as_deref().filter(|x| x.can_rename_passkey()) else {
         return false;
     };
-    let name = source
-        .passkeys()
-        .into_iter()
-        .find(|p| p.id == id)
-        .map(|p| p.name)
-        .unwrap_or_default();
+    let name = source.passkeys().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_default();
     s.account.dialog = None;
     let f = &mut s.account.form;
     form::type_in(&mut f.rename, &name);

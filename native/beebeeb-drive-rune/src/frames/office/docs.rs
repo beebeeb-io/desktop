@@ -17,15 +17,15 @@
 //! `viewers::doc_mut(&mut State) -> Option<&mut DocBody>` and `viewers::open_doc(&mut State, OpenFile) -> bool` calls,
 //! the window arm calling [`window`], and the key route calling [`DocBody::on_key`].
 
-use beebeeb_office_protocol::office::EditKind;
 use rune::{Color, Cx, El, Icon, Key, Mods, Pixels, SurfaceFit, TextStyle, col, el, row};
+use beebeeb_office_protocol::office::EditKind;
 use zeroize::Zeroize;
 
-use super::edit::{EditUi, ime, word};
+use crate::theme::scale::{self as sc, space};
 use crate::State;
+use super::edit::{EditUi, ime, word};
 use crate::frames::viewers::{self, Ui};
 use crate::theme::icons;
-use crate::theme::scale::{self as sc, space};
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::{caption, kit, sidebar};
 
@@ -563,13 +563,7 @@ pub enum Pictures<'a> {
 /// The pages on grey in the stage's viewport (`docs_scroll`). Every page keeps its box, so the scroll height is right;
 /// live, only the pages near the screen ask the renderer for a picture, and the rest are blank paper of their size; the
 /// fixture draws its pages as it always did.
-fn stage(
-    doc: &DocBody,
-    pics: &Pictures,
-    stage_rect: Option<[f32; 4]>,
-    ed: Option<(&EditUi, Option<El>)>,
-    t: &Theme,
-) -> El {
+fn stage(doc: &DocBody, pics: &Pictures, stage_rect: Option<[f32; 4]>, ed: Option<(&EditUi, Option<El>)>, t: &Theme) -> El {
     let count = doc.view.pages.max(1);
     let mut pages = col()
         .key("pages")

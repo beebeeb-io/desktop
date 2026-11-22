@@ -381,26 +381,16 @@ fn w31_before_the_first_file_list_the_status_says_loading_or_failed_never_nothin
     // The list is here: a later snapshot's ingest is no first load.
     let here = global_status_with(&running, FirstList::Here, Some((1, 2)), now);
     assert_eq!((here.loading, here.list_failed), (None, false));
-    assert_eq!(
-        global_status(&running, now),
-        global_status_with(&running, FirstList::Here, None, now)
-    );
+    assert_eq!(global_status(&running, now), global_status_with(&running, FirstList::Here, None, now));
 
     // Nothing is on its way while sync is paused, and never without a running engine.
-    let paused = SyncView {
-        paused: true,
-        ..running
-    };
+    let paused = SyncView { paused: true, ..running };
     for first in [FirstList::Awaited, FirstList::Failed] {
         let status = global_status_with(&paused, first, None, now);
         assert_eq!((status.loading, status.list_failed), (None, false), "paused, {first:?}");
         for view in without_an_engine() {
             let status = global_status_with(&view, first, None, now);
-            assert_eq!(
-                (status.loading, status.list_failed),
-                (None, false),
-                "{view:?}, {first:?}"
-            );
+            assert_eq!((status.loading, status.list_failed), (None, false), "{view:?}, {first:?}");
         }
     }
 }

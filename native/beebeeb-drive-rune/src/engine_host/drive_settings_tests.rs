@@ -592,11 +592,7 @@ fn storage_is_wired_and_draws_what_was_read() {
     assert_eq!(st.trash, "3 items");
     assert!(!st.kinds.is_empty(), "the rows by type come from the insights' read");
     assert_eq!(st.kinds[0].1, "Photos and media", "largest first");
-    assert!(
-        st.kinds
-            .iter()
-            .all(|(_, _, size)| !size.is_empty() && !size.contains('\u{b7}'))
-    );
+    assert!(st.kinds.iter().all(|(_, _, size)| !size.is_empty() && !size.contains('\u{b7}')));
 
     *fake.trash.lock().unwrap() = Err("down".into());
     let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));

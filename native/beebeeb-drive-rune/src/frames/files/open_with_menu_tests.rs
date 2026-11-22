@@ -9,11 +9,11 @@ use super::source::{AppChoice, Call, FilesFixture};
 use super::tests::{Calls, NONE, asked, click, find, focused, info, press, right_click, runtime_of, settle};
 use super::{MenuKind, Toast};
 use crate::State;
+use crate::shell::app::Screen;
 use crate::frames::office::open_with::{
     AGREEMENT_ID, AGREEMENT_ROW, BOARD_STATUS, WORD_ON, agreement, scene_open_with,
 };
 use crate::frames::viewers::kinds::OfficeShips;
-use crate::shell::app::Screen;
 use crate::ui::menu::Entry;
 use rune::{Key, Runtime};
 
@@ -219,11 +219,7 @@ fn an_app_press_on_a_file_not_kept_hands_it_over_and_says_the_download_size() {
         assert!(rt.state.actions.menu.is_none(), "{line} closes the menu");
         assert_eq!(asked(&calls), [call], "{line}: handed over");
         assert_eq!(rt.state.live_toast(), Some(DOWNLOADING), "{line}");
-        assert_eq!(
-            info(&rt, "toast").label.as_deref(),
-            Some("Downloading 38 KB…"),
-            "{line}"
-        );
+        assert_eq!(info(&rt, "toast").label.as_deref(), Some("Downloading 38 KB…"), "{line}");
         assert_eq!(DOWNLOADING.stays(), std::time::Duration::from_secs(3), "the usual 3 s");
     }
 }
@@ -256,11 +252,7 @@ fn an_app_press_the_source_refuses_says_why_not_the_size() {
     let mut s = with_agreement(false);
     let mut fixture = FilesFixture::default();
     fixture.apps = Some(vec![app(1)]);
-    fixture
-        .fail
-        .lock()
-        .unwrap()
-        .push((super::Action::OpenWith, super::source::ActionError::Unavailable));
+    fixture.fail.lock().unwrap().push((super::Action::OpenWith, super::source::ActionError::Unavailable));
     s.actions.source = Box::new(fixture);
     let mut rt = runtime_of(s);
     click(&mut rt, &format!("row-{AGREEMENT_ROW}-date"));
@@ -285,11 +277,7 @@ fn open_on_a_file_not_kept_hands_it_to_the_default_app_and_says_the_download_siz
         click(&mut rt, &format!("row-{AGREEMENT_ROW}-date"));
         press(&mut rt, Key::Enter, NONE);
         settle(&mut rt);
-        assert_eq!(
-            *calls.lock().unwrap(),
-            [Call::OpenDefault(AGREEMENT_ID.into())],
-            "kept: {kept}"
-        );
+        assert_eq!(*calls.lock().unwrap(), [Call::OpenDefault(AGREEMENT_ID.into())], "kept: {kept}");
         assert_eq!(rt.state.live_toast(), toast, "kept: {kept}");
     }
 }
@@ -318,7 +306,9 @@ fn beebeeb_in_the_submenu_makes_the_same_open_call_as_open_beebeeb() {
     click(&mut rt, "menu-item-0");
     let opened = asked(&by_open);
     assert!(opened.is_empty(), "the viewer opens it, not another app: {opened:?}");
-    let on_viewer = |rt: &Runtime<State>| matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(AGREEMENT_ID));
+    let on_viewer = |rt: &Runtime<State>| {
+        matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(AGREEMENT_ID))
+    };
     assert!(on_viewer(&rt));
     // …is what Beebeeb in the submenu does, and no other app is asked.
     let (mut rt, by_line) = spied_with(true, Some(vec![app(1)]));

@@ -250,9 +250,7 @@ fn viewer_bar_has_one_show_in_file_explorer_and_no_open_explorer() {
     assert_eq!(button.role, "button");
     assert!(button.focusable);
     assert!(
-        !rt.elements()
-            .into_iter()
-            .any(|e| e.key.as_deref() == Some("open-explorer") && !e.exiting),
+        !rt.elements().into_iter().any(|e| e.key.as_deref() == Some("open-explorer") && !e.exiting),
         "no duplicate open-explorer button in the viewer bar"
     );
 }
@@ -280,11 +278,7 @@ mod roving_bar {
     }
 
     fn view(_: &(), _: &mut Cx<()>) -> El {
-        let bar = row()
-            .key("bar")
-            .child(stop("zoom-out"))
-            .child(stop("zoom-in"))
-            .child(stop("rotate"));
+        let bar = row().key("bar").child(stop("zoom-out")).child(stop("zoom-in")).child(stop("rotate"));
         col()
             .w_full()
             .h_full()
@@ -294,13 +288,7 @@ mod roving_bar {
     }
 
     fn key(rt: &mut Runtime<()>, key: Key, shift: bool) {
-        rt.key(KeyEvent {
-            key,
-            mods: Mods {
-                shift,
-                ..Mods::default()
-            },
-        });
+        rt.key(KeyEvent { key, mods: Mods { shift, ..Mods::default() } });
         rt.frame(0.0);
         rt.settle_all();
         rt.frame(0.0);
@@ -312,27 +300,16 @@ mod roving_bar {
 
     #[test]
     fn tab_enters_the_toolbar_once_arrows_move_inside_and_tab_leaves() {
-        let env = Env {
-            system_dark: false,
-            scale: 2.0,
-        };
+        let env = Env { system_dark: false, scale: 2.0 };
         let mut rt = Runtime::new((), view, (400.0, 300.0), env);
         rt.frame(0.0);
-        let bar = rt
-            .elements()
-            .into_iter()
-            .find(|e| e.key.as_deref() == Some("bar"))
-            .expect("bar");
+        let bar = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("bar")).expect("bar");
         assert_eq!(bar.role, "toolbar");
         assert_eq!(bar.label.as_deref(), Some("Viewer controls"));
         key(&mut rt, Key::Tab, false);
         assert_eq!(focused(&rt).as_deref(), Some("before"));
         key(&mut rt, Key::Tab, false);
-        assert_eq!(
-            focused(&rt).as_deref(),
-            Some("zoom-out"),
-            "Tab enters at the first item"
-        );
+        assert_eq!(focused(&rt).as_deref(), Some("zoom-out"), "Tab enters at the first item");
         key(&mut rt, Key::Right, false);
         assert_eq!(focused(&rt).as_deref(), Some("zoom-in"));
         key(&mut rt, Key::End, false);
@@ -344,11 +321,7 @@ mod roving_bar {
         key(&mut rt, Key::Tab, false);
         assert_eq!(focused(&rt).as_deref(), Some("after"), "one Tab leaves the toolbar");
         key(&mut rt, Key::Tab, true);
-        assert_eq!(
-            focused(&rt).as_deref(),
-            Some("zoom-out"),
-            "Shift+Tab comes back to one item"
-        );
+        assert_eq!(focused(&rt).as_deref(), Some("zoom-out"), "Shift+Tab comes back to one item");
         key(&mut rt, Key::Tab, true);
         assert_eq!(focused(&rt).as_deref(), Some("before"));
     }

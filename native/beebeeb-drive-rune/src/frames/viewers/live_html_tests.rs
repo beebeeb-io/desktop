@@ -37,19 +37,7 @@ fn img_alt() {
 #[test]
 fn unclosed_and_odd_input_do_not_panic() {
     assert_eq!(to_blocks("<p>hi").len(), 1);
-    for s in [
-        "<",
-        "<p",
-        "<a href=\"x",
-        "&",
-        "&#xZZ;",
-        "<!--",
-        "<script>",
-        "a < b",
-        "<pre>x",
-        "</p></ul></li>",
-        "é<é>",
-    ] {
+    for s in ["<", "<p", "<a href=\"x", "&", "&#xZZ;", "<!--", "<script>", "a < b", "<pre>x", "</p></ul></li>", "é<é>"] {
         let _ = to_blocks(s);
     }
 }

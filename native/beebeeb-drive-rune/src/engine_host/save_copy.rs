@@ -188,7 +188,12 @@ fn stopped(still: &dyn Fn() -> bool, cancel: &AtomicBool) -> Result<(), SaveRefu
     Ok(())
 }
 
-fn write_all(out: &mut File, bytes: &[u8], still: &dyn Fn() -> bool, cancel: &AtomicBool) -> Result<(), SaveRefused> {
+fn write_all(
+    out: &mut File,
+    bytes: &[u8],
+    still: &dyn Fn() -> bool,
+    cancel: &AtomicBool,
+) -> Result<(), SaveRefused> {
     for chunk in bytes.chunks(CHUNK) {
         stopped(still, cancel)?;
         out.write_all(chunk).map_err(|_| SaveRefused::Failed)?;
@@ -299,13 +304,7 @@ mod tests {
         assert!(names(dir.path()).is_empty());
         // A source that is not there fails the same way.
         let end = place(&dest, &|| true, &AtomicBool::new(false), |out| {
-            copy_stream(
-                &dir.path().join("gone"),
-                out,
-                &|| true,
-                &AtomicBool::new(false),
-                &|_, _| {},
-            )
+            copy_stream(&dir.path().join("gone"), out, &|| true, &AtomicBool::new(false), &|_, _| {})
         });
         assert_eq!(end, Err(SaveRefused::Failed));
         assert!(names(dir.path()).is_empty());
@@ -349,9 +348,7 @@ mod tests {
             asked.get() <= 3
         };
         let cancel = AtomicBool::new(false);
-        let end = place(&dest, &still, &cancel, |out| {
-            copy_stream(&src, out, &still, &cancel, &|_, _| {})
-        });
+        let end = place(&dest, &still, &cancel, |out| copy_stream(&src, out, &still, &cancel, &|_, _| {}));
         assert_eq!(end, Err(SaveRefused::NotSignedIn));
         assert_eq!(names(dir.path()), ["a.bin"]);
     }
@@ -364,9 +361,7 @@ mod tests {
         let dest = dir.path().join("copy.bin");
         let cancel = AtomicBool::new(false);
         let progress = |_, _| cancel.store(true, Ordering::SeqCst);
-        let end = place(&dest, &|| true, &cancel, |out| {
-            copy_stream(&src, out, &|| true, &cancel, &progress)
-        });
+        let end = place(&dest, &|| true, &cancel, |out| copy_stream(&src, out, &|| true, &cancel, &progress));
         assert_eq!(end, Err(SaveRefused::Cancelled));
         assert_eq!(names(dir.path()), ["a.bin"]);
     }

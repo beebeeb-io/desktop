@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
-use beebeeb_engine::app::office_recovery::{RecoveryEntry, RecoveryRefused};
 use beebeeb_engine::app::viewer_api::{LocalCopy, OpenFileError, OpenFileFacts, OpenedFile};
+use beebeeb_engine::app::office_recovery::{RecoveryEntry, RecoveryRefused};
 use beebeeb_engine::app::viewer_edit_api::{EditFacts, EditRefused, NewCopy, SaveEnd};
 use beebeeb_office_protocol::check;
 use beebeeb_office_protocol::office::{
@@ -573,28 +573,16 @@ impl ViewerEngine for TestEngine {
             .s()
             .blobs
             .iter()
-            .map(|(id, (at, base, _))| RecoveryEntry {
-                file_id: id.clone(),
-                saved_at: *at,
-                base: *base,
-            })
+            .map(|(id, (at, base, _))| RecoveryEntry { file_id: id.clone(), saved_at: *at, base: *base })
             .collect())
     }
 
     fn recovery_take(&self, _session: SessionGeneration, file_id: &str) -> Result<Zeroizing<Vec<u8>>, RecoveryRefused> {
-        self.s()
-            .blobs
-            .get(file_id)
-            .map(|b| Zeroizing::new(b.2.clone()))
-            .ok_or(RecoveryRefused::NotFound)
+        self.s().blobs.get(file_id).map(|b| Zeroizing::new(b.2.clone())).ok_or(RecoveryRefused::NotFound)
     }
 
     fn recovery_discard(&self, _session: SessionGeneration, file_id: &str) -> Result<(), RecoveryRefused> {
-        self.s()
-            .blobs
-            .remove(file_id)
-            .map(|_| ())
-            .ok_or(RecoveryRefused::NotFound)
+        self.s().blobs.remove(file_id).map(|_| ()).ok_or(RecoveryRefused::NotFound)
     }
 
     fn create_office(
@@ -810,10 +798,7 @@ fn a_landed_save_says_its_revision_first_and_a_copy_too_large_is_said() {
         std::thread::sleep(Duration::from_millis(2));
     };
     assert!(matches!(first, Settled::SavedRevision(4)), "the revision comes first");
-    assert!(
-        matches!(e.source.settled("f1"), Some(Settled::Saved { version: 4, .. })),
-        "then the save"
-    );
+    assert!(matches!(e.source.settled("f1"), Some(Settled::Saved { version: 4, .. })), "then the save");
     assert!(e.source.settled("f1").is_none());
 
     // Copy: the helper says the selection is too large.
@@ -839,11 +824,7 @@ fn a_writable_file_opens_in_the_editor_and_the_rest_in_the_viewer() {
         ("Invented.pptx", EditKind::Pptx),
     ] {
         let e = editor(name, false);
-        assert_eq!(
-            e.edits.lock().unwrap().iter().map(|(k, _)| *k).collect::<Vec<_>>(),
-            [kind],
-            "{name}"
-        );
+        assert_eq!(e.edits.lock().unwrap().iter().map(|(k, _)| *k).collect::<Vec<_>>(), [kind], "{name}");
         assert!(e.viewer_opened.lock().unwrap().is_empty(), "{name}: not the viewer");
         assert!(e.source.can_edit("f1"), "{name}");
     }
@@ -862,10 +843,7 @@ fn a_writable_file_opens_in_the_editor_and_the_rest_in_the_viewer() {
         assert!(!e.source.hit("f1", 0, 1.0, 1.0, HitMode::Place), "{name}");
         assert!(!e.source.copy_selection("f1"), "{name}");
         assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Failed), "{name}");
-        assert!(
-            matches!(e.source.resolve_document("f1", Keep::Mine), SaveOutcome::Failed),
-            "{name}"
-        );
+        assert!(matches!(e.source.resolve_document("f1", Keep::Mine), SaveOutcome::Failed), "{name}");
         assert!(!e.source.saving(), "{name}");
         assert_eq!(e.engine.s().writes, 0, "{name}");
         assert!(e.engine.s().stored.is_empty(), "{name}: nothing was written");
@@ -878,10 +856,7 @@ fn a_writable_file_opens_in_the_editor_and_the_rest_in_the_viewer() {
     source.office.edit_on = false;
     source.open("f1").unwrap();
     first_body(&mut source, "f1");
-    assert!(
-        edits.lock().unwrap().is_empty() && opened.lock().unwrap().len() == 1,
-        "off: the viewer"
-    );
+    assert!(edits.lock().unwrap().is_empty() && opened.lock().unwrap().len() == 1, "off: the viewer");
     let fake = Fake::default();
     let engine = TestEngine::new(&[("f1", "Invented.pptx", 64)]);
     let (opened, edits) = (Opened::default(), Edits::default());
@@ -889,10 +864,7 @@ fn a_writable_file_opens_in_the_editor_and_the_rest_in_the_viewer() {
     source.office.edits.pptx = false;
     source.open("f1").unwrap();
     first_body(&mut source, "f1");
-    assert!(
-        edits.lock().unwrap().is_empty() && opened.lock().unwrap().len() == 1,
-        "pptx off: the viewer"
-    );
+    assert!(edits.lock().unwrap().is_empty() && opened.lock().unwrap().len() == 1, "pptx off: the viewer");
     // The shipped switches: the editor on where the sandbox is, slides too (MPL-2.0 accepted 2026-11-18).
     const {
         assert!(EditShips::SHIPPED.docx && EditShips::SHIPPED.xlsx && EditShips::SHIPPED.pptx);
@@ -910,8 +882,7 @@ fn the_editors_calls_reach_the_session_and_its_answers_come_back_in_order() {
     for what in ["edit", "hit", "copy", "layouts", "image"] {
         assert_eq!(e.fake.asked_count(what), 1, "{what}");
     }
-    e.fake
-        .answer(HostEdit::Edited(Box::new(edited(1, Dirty::Rects(vec![page_rect(0)])))));
+    e.fake.answer(HostEdit::Edited(Box::new(edited(1, Dirty::Rects(vec![page_rect(0)])))));
     e.fake.answer(HostEdit::Clip {
         text: "invented".into(),
         html: None,
@@ -958,10 +929,7 @@ fn an_edited_docx_saves_as_the_next_version() {
         panic!("saved")
     };
     assert_eq!((id.as_str(), version), ("f1", 4));
-    assert!(
-        matches!(body, Body::Doc(_)),
-        "the document on screen, not a placeholder"
-    );
+    assert!(matches!(body, Body::Doc(_)), "the document on screen, not a placeholder");
     let stored = e.engine.s().stored.clone();
     assert_eq!(stored, vec![("f1".to_string(), helper_saved.to_vec(), 3)]);
     assert!(!e.source.saving());
@@ -988,10 +956,7 @@ fn a_save_from_a_stale_base_answers_conflict_and_the_three_answers_work() {
     assert!(e.source.can_edit("f1"), "the edit stays open");
 
     // Keep mine: from the version the file is at now (5), not the stale base.
-    assert!(matches!(
-        e.source.resolve_document("f1", Keep::Mine),
-        SaveOutcome::Working
-    ));
+    assert!(matches!(e.source.resolve_document("f1", Keep::Mine), SaveOutcome::Working));
     e.fake.saved(b"mine v2", 2);
     let settled = until_settled(&mut e.source, "f1", || {});
     let crate::frames::viewers::source::Settled::Saved { version, .. } = settled else {
@@ -1001,10 +966,7 @@ fn a_save_from_a_stale_base_answers_conflict_and_the_three_answers_work() {
     assert_eq!(e.engine.s().stored, vec![("f1".to_string(), b"mine v2".to_vec(), 5)]);
 
     // Keep both: a copy next to the file, under its own id; the file as it was.
-    assert!(matches!(
-        e.source.resolve_document("f1", Keep::Both),
-        SaveOutcome::Working
-    ));
+    assert!(matches!(e.source.resolve_document("f1", Keep::Both), SaveOutcome::Working));
     e.fake.saved(b"mine v3", 3);
     let settled = until_settled(&mut e.source, "f1", || {});
     let crate::frames::viewers::source::Settled::Saved { id, version, .. } = settled else {
@@ -1078,10 +1040,7 @@ fn new_document_creates_the_file_and_opens_it() {
     let mut source = editor_with(engine.clone(), &fake, opened.clone(), edits.clone(), &template);
     assert!(source.create_document(Some("folder1"), "Invented.docx", EditKind::Docx, Template::Blank));
     assert!(source.saving());
-    assert!(
-        !source.create_document(None, "Another.docx", EditKind::Docx, Template::Blank),
-        "one at a time"
-    );
+    assert!(!source.create_document(None, "Another.docx", EditKind::Docx, Template::Blank), "one at a time");
     template.set(pages(1));
     let mut delivered = false;
     let settled = until_settled(&mut source, "", || {
@@ -1096,11 +1055,7 @@ fn new_document_creates_the_file_and_opens_it() {
     assert_eq!((id.as_str(), name.as_str(), version), ("new1", "Invented.docx", 3));
     assert_eq!(
         engine.s().created,
-        vec![(
-            Some("folder1".to_string()),
-            "Invented.docx".to_string(),
-            b"PK blank letter".to_vec()
-        )]
+        vec![(Some("folder1".to_string()), "Invented.docx".to_string(), b"PK blank letter".to_vec())]
     );
     assert!(!source.saving());
     assert!(template.log().closes.len() == 1, "the template's session is closed");
@@ -1146,10 +1101,7 @@ fn new_document_opens_on_its_own_bytes_when_the_local_copy_is_not_readable_yet()
         assert!(Instant::now() < end, "the editor never opened");
         std::thread::sleep(Duration::from_millis(2));
     }
-    assert_eq!(
-        edits.lock().unwrap().as_slice(),
-        &[(EditKind::Docx, b"PK blank letter".len())]
-    );
+    assert_eq!(edits.lock().unwrap().as_slice(), &[(EditKind::Docx, b"PK blank letter".len())]);
 }
 
 /// w23 (the w20 fix held only on the fake platform): the window opens the made file with `Ui::open`, that is a SECOND
@@ -1192,23 +1144,14 @@ fn new_document_opened_by_the_window_after_saved_uses_its_own_bytes() {
         assert!(Instant::now() < end, "the editor never opened");
         std::thread::sleep(Duration::from_millis(2));
     }
-    assert_eq!(
-        edits.lock().unwrap().as_slice(),
-        &[(EditKind::Docx, b"PK blank letter".len())]
-    );
+    assert_eq!(edits.lock().unwrap().as_slice(), &[(EditKind::Docx, b"PK blank letter".len())]);
 }
 
 #[test]
 fn new_document_ends_as_failed_when_the_template_never_opens() {
     let template = Fake::default();
     let engine = TestEngine::new(&[]);
-    let mut source = editor_with(
-        engine.clone(),
-        &Fake::default(),
-        Opened::default(),
-        Edits::default(),
-        &template,
-    );
+    let mut source = editor_with(engine.clone(), &Fake::default(), Opened::default(), Edits::default(), &template);
     assert!(source.create_document(None, "Invented.docx", EditKind::Docx, Template::Blank));
     template.set(HostState::Stopped {
         why: Stop::TimedOut,
@@ -1269,10 +1212,7 @@ fn an_edited_drops_the_pictures_it_names_and_nothing_older_is_drawn() {
     hold(&fake, &mut view, other_scale);
     fake.answer(HostEdit::Edited(Box::new(edited(7, Dirty::Rects(vec![page_rect(0)])))));
     view.poll();
-    assert!(
-        !view.holds(page_key(0)) && !view.holds(other_scale),
-        "the named page's pictures are gone"
-    );
+    assert!(!view.holds(page_key(0)) && !view.holds(other_scale), "the named page's pictures are gone");
     assert!(view.holds(page_key(1)) && view.holds(page_key(2)));
     // The picture is not found for the old revision either: the old scale is not drawn in its place.
     assert!(view.picture(page_key(0)).is_none(), "no stale picture stands in");
@@ -1377,11 +1317,7 @@ fn an_edited_drops_the_cell_blocks_it_changed_and_a_re_asked_block_replaces_the_
     fake.cells(
         0,
         range(0, 0, 64, 10),
-        vec![
-            cell(0, 0, "a", None, None),
-            cell(1, 1, "b", None, None),
-            cell(70, 1, "far", None, None),
-        ],
+        vec![cell(0, 0, "a", None, None), cell(1, 1, "b", None, None), cell(70, 1, "far", None, None)],
         Vec::new(),
     );
     view.poll();
@@ -1391,11 +1327,7 @@ fn an_edited_drops_the_cell_blocks_it_changed_and_a_re_asked_block_replaces_the_
     change.cells = vec![(0, range(1, 1, 1, 1))];
     fake.answer(HostEdit::Edited(Box::new(change)));
     view.poll();
-    assert_eq!(
-        cells_of(&mut view),
-        vec![(70, 1, "far".to_string())],
-        "the block it touched is dropped"
-    );
+    assert_eq!(cells_of(&mut view), vec![(70, 1, "far".to_string())], "the block it touched is dropped");
     // The next draw asks the block again; the answer replaces it whole (A1 is empty now).
     view.wants_cells(0, 0, 0, 10, 4);
     assert_eq!(fake.log().cells.len(), 2, "asked again");
@@ -1860,10 +1792,7 @@ fn a_poll_without_a_build_cancels_nothing_the_last_build_wanted() {
     for _ in 0..3 {
         assert!(view.poll().is_none(), "nothing changed: no build");
     }
-    assert!(
-        fake.log().cancels.is_empty(),
-        "no ask the last build wanted is cancelled"
-    );
+    assert!(fake.log().cancels.is_empty(), "no ask the last build wanted is cancelled");
 
     // The answers come: each is drawn.
     for id in &asked {
@@ -2234,16 +2163,9 @@ fn a_snapshot_is_kept_survives_a_restart_and_restores() {
     let mut e = editor("Invented.docx", false);
     snapshot(&e.fake, b"SNAP-ONE", 2);
     snapshot(&e.fake, b"SNAP-TWO", 3);
-    assert!(
-        e.source.poll_edit("f1").is_none(),
-        "a snapshot is no answer to the window"
-    );
+    assert!(e.source.poll_edit("f1").is_none(), "a snapshot is no answer to the window");
     let kept = e.engine.s().blobs.get("f1").cloned().expect("kept under the file's id");
-    assert_eq!(
-        (kept.1, kept.2),
-        (3, b"SNAP-TWO".to_vec()),
-        "one blob per file: the newest, from the file's version"
-    );
+    assert_eq!((kept.1, kept.2), (3, b"SNAP-TWO".to_vec()), "one blob per file: the newest, from the file's version");
 
     // The app restarts: a new source over the same engine (this PC's blobs stayed).
     let engine = e.engine.clone();
@@ -2252,21 +2174,12 @@ fn a_snapshot_is_kept_survives_a_restart_and_restores() {
     let offer = again.source.office_recovery("f1").expect("offered after the restart");
     let pending = again.source.office_recovery_pending();
     assert_eq!(pending.len(), 1);
-    assert_eq!(
-        (pending[0].file_id.as_str(), pending[0].at.as_str()),
-        ("f1", offer.at.as_str())
-    );
+    assert_eq!((pending[0].file_id.as_str(), pending[0].at.as_str()), ("f1", offer.at.as_str()));
     assert!(again.source.office_restore("f1"));
     // A new editing session opened on the blob's bytes, and the editor was told.
     assert_eq!(again.edits.lock().unwrap().last().map(|(_, len)| *len), Some(8));
-    assert!(matches!(
-        again.source.poll_edit("f1"),
-        Some(EditAnswer::Restored { .. })
-    ));
-    assert!(
-        again.engine.s().blobs.contains_key("f1"),
-        "the blob stays until a save or a discard"
-    );
+    assert!(matches!(again.source.poll_edit("f1"), Some(EditAnswer::Restored { .. })));
+    assert!(again.engine.s().blobs.contains_key("f1"), "the blob stays until a save or a discard");
     // Not for another file, and not twice without a blob.
     assert!(!again.source.office_restore("f2"));
     again.source.office_discard_recovery("f1");
@@ -2310,10 +2223,7 @@ fn a_queued_save_keeps_the_blob_until_it_landed() {
     e.fake.saved(b"PK saved package", 4);
     let settled = until_settled(&mut e.source, "f1", || {});
     assert!(matches!(settled, Settled::Queued { .. }));
-    assert!(
-        e.engine.s().blobs.contains_key("f1"),
-        "not in Beebeeb yet: the blob stays"
-    );
+    assert!(e.engine.s().blobs.contains_key("f1"), "not in Beebeeb yet: the blob stays");
     // Not landed: still there after the poll's looks.
     let end = Instant::now() + Duration::from_millis(2500);
     while Instant::now() < end {
@@ -2342,23 +2252,14 @@ fn a_save_confirmed_later_keeps_a_blob_made_after_the_press() {
     e.source.poll("f1");
     e.fake.saved(b"PK saved package", 4);
     let settled = until_settled(&mut e.source, "f1", || {});
-    assert!(matches!(
-        settled,
-        crate::frames::viewers::source::Settled::Queued { .. }
-    ));
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Queued { .. }));
     // A blob from the far future of this clock is "newer than the press"; then the upload lands.
-    e.engine
-        .s()
-        .blobs
-        .insert("f1".into(), (i64::MAX / 2, 3, b"TYPED-AFTER".to_vec()));
+    e.engine.s().blobs.insert("f1".into(), (i64::MAX / 2, 3, b"TYPED-AFTER".to_vec()));
     e.engine.s().own = true;
     let end = Instant::now() + Duration::from_millis(3500);
     while Instant::now() < end {
         e.source.poll("f1");
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        e.engine.s().blobs.contains_key("f1"),
-        "what was typed after the press is not in the saved version"
-    );
+    assert!(e.engine.s().blobs.contains_key("f1"), "what was typed after the press is not in the saved version");
 }

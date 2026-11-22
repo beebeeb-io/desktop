@@ -24,8 +24,8 @@ use beebeeb_office_protocol::office::{Dirty, EditKind, Purpose};
 use rune::{AppSpec, Env, Ime, Key, KeyEvent, Mods, Runtime};
 use zeroize::Zeroizing;
 
-use super::super::super::EngineViewerSource;
 use super::super::super::office_tests::{Fake, edited, pages};
+use super::super::super::EngineViewerSource;
 use super::super::{EditShips, HostEdit};
 use crate::State;
 use crate::engine_host::LiveEngine;
@@ -276,13 +276,8 @@ fn window(tag: &str) -> Window {
     let viewed = Arc::new(AtomicUsize::new(0));
     let makers;
     {
-        let (engine, helper, template, edits, viewed) = (
-            engine.clone(),
-            helper.clone(),
-            template.clone(),
-            edits.clone(),
-            viewed.clone(),
-        );
+        let (engine, helper, template, edits, viewed) =
+            (engine.clone(), helper.clone(), template.clone(), edits.clone(), viewed.clone());
         let make = move || source_of(&engine, &helper, &template, &edits, &viewed);
         makers = Some(Box::new(make.clone()) as Box<dyn Fn() -> Box<dyn viewers::source::ViewerSource>>);
         viewers::wire(&mut s, Box::new(make));
@@ -492,11 +487,7 @@ fn an_office_file_opens_in_the_editor_and_a_save_is_a_new_version_on_the_server(
     w.rt.ime(Ime::Commit("\u{4F60}".into()));
     w.settle();
     assert_eq!(preedit(&w), None);
-    assert_eq!(
-        w.helper.asked_count("edit"),
-        1,
-        "the committed text reached the open editor"
-    );
+    assert_eq!(w.helper.asked_count("edit"), 1, "the committed text reached the open editor");
 
     // The helper's answer: the document is at revision 1, which no version holds.
     w.helper.answer(HostEdit::Edited(Box::new(edited(1, Dirty::All))));
@@ -528,11 +519,7 @@ fn an_office_file_opens_in_the_editor_and_a_save_is_a_new_version_on_the_server(
     assert!(w.has("edit-chrome"), "the editor stays open on the saved document");
 
     // The engine queued the new version; the uploader's pass sends it. The server holds version 2 now.
-    assert_eq!(
-        w.account.item_state(DOC).map(|state| state.0),
-        Some(1),
-        "not sent yet: sync is off here"
-    );
+    assert_eq!(w.account.item_state(DOC).map(|state| state.0), Some(1), "not sent yet: sync is off here");
     assert_eq!(w.upload(), 1, "one upload was queued by the save");
     assert_eq!(
         w.account.item_state(DOC).map(|state| state.0),
@@ -557,11 +544,7 @@ fn new_document_from_the_files_menu_makes_a_new_file_on_the_server() {
     let source = (w.make)();
     w.rt.update(|s, _| {
         let doc = new_document::Doc::new(Some(source));
-        s.viewer.new_file = Some(viewers::new_file::NewFile::document(
-            None,
-            viewers::new_file::Kind::Word,
-            doc,
-        ));
+        s.viewer.new_file = Some(viewers::new_file::NewFile::document(None, viewers::new_file::Kind::Word, doc));
     });
     w.settle();
     let step = w.rt.state.viewer.new_file.as_ref().map(|dialog| dialog.step);
@@ -577,9 +560,7 @@ fn new_document_from_the_files_menu_makes_a_new_file_on_the_server() {
     };
     assert_eq!(creating(&w), Some((true, None)), "Create was taken by the source");
     w.template.set(pages(1));
-    w.until("the template's bytes are asked", |w| {
-        w.template.asked_count("save") == 1
-    });
+    w.until("the template's bytes are asked", |w| w.template.asked_count("save") == 1);
     w.template.saved(&first_version(), 0);
     w.until("the creation answered", |w| creating(w).is_none_or(|doc| !doc.0));
     // What the window did with the answer (the new file opened here, or the dialog says why not) is not this
@@ -593,11 +574,7 @@ fn new_document_from_the_files_menu_makes_a_new_file_on_the_server() {
 
     assert_eq!(w.upload(), 1, "one upload was queued by Create");
     let files = w.account.live_file_ids();
-    assert_eq!(
-        files.len(),
-        2,
-        "the fake server holds the new document beside the first: {files:?}"
-    );
+    assert_eq!(files.len(), 2, "the fake server holds the new document beside the first: {files:?}");
 }
 
 /// w24: the file a New document made is only queued when Create answers (its upload has not landed, so the local state
@@ -610,19 +587,13 @@ fn a_new_document_opens_in_the_editor_before_its_upload_lands_and_ctrl_s_saves_i
     let source = (w.make)();
     w.rt.update(|s, _| {
         let doc = new_document::Doc::new(Some(source));
-        s.viewer.new_file = Some(viewers::new_file::NewFile::document(
-            None,
-            viewers::new_file::Kind::Word,
-            doc,
-        ));
+        s.viewer.new_file = Some(viewers::new_file::NewFile::document(None, viewers::new_file::Kind::Word, doc));
     });
     w.settle();
     w.rt.update(|s, _| new_document::create(s));
     w.settle();
     w.template.set(pages(1));
-    w.until("the template's bytes are asked", |w| {
-        w.template.asked_count("save") == 1
-    });
+    w.until("the template's bytes are asked", |w| w.template.asked_count("save") == 1);
     w.template.saved(&first_version(), 0);
     // The new file is queued only until the uploader's pass sends it (a running sync does that between two looks):
     // the window must not open it before, or it comes up as the viewer.
@@ -636,9 +607,7 @@ fn a_new_document_opens_in_the_editor_before_its_upload_lands_and_ctrl_s_saves_i
     w.helper.answer(HostEdit::Edited(Box::new(edited(1, Dirty::All))));
     w.until("the edit is unsaved", |w| w.edit().is_some_and(|edit| edit.0));
     w.ctrl('s');
-    w.until("the helper is asked for the document's bytes", |w| {
-        w.helper.asked_count("save") == 1
-    });
+    w.until("the helper is asked for the document's bytes", |w| w.helper.asked_count("save") == 1);
     w.helper.saved(&edited_version(), 1);
     w.until("the save answered", |w| w.edit() == Some((false, false, None)));
     let said = w.toast().unwrap_or_default();
@@ -655,33 +624,23 @@ fn a_new_document_whose_upload_never_ran_opens_in_the_editor_and_saves_once_it_l
     let source = (w.make)();
     w.rt.update(|s, _| {
         let doc = new_document::Doc::new(Some(source));
-        s.viewer.new_file = Some(viewers::new_file::NewFile::document(
-            None,
-            viewers::new_file::Kind::Word,
-            doc,
-        ));
+        s.viewer.new_file = Some(viewers::new_file::NewFile::document(None, viewers::new_file::Kind::Word, doc));
     });
     w.settle();
     w.rt.update(|s, _| new_document::create(s));
     w.settle();
     w.template.set(pages(1));
-    w.until("the template's bytes are asked", |w| {
-        w.template.asked_count("save") == 1
-    });
+    w.until("the template's bytes are asked", |w| w.template.asked_count("save") == 1);
     w.template.saved(&first_version(), 0);
     // No uploader's pass: the new file stays queued, the local state holds no version for it.
     w.helper.set(pages(1));
-    w.until("the new document is open in the editor, not sent", |w| {
-        w.edit().is_some()
-    });
+    w.until("the new document is open in the editor, not sent", |w| w.edit().is_some());
     assert!(w.has("edit-chrome"), "the editor's frame is drawn: {}", w.drawn());
 
     w.helper.answer(HostEdit::Edited(Box::new(edited(1, Dirty::All))));
     w.until("the edit is unsaved", |w| w.edit().is_some_and(|edit| edit.0));
     w.ctrl('s');
-    w.until("the helper is asked for the document's bytes", |w| {
-        w.helper.asked_count("save") == 1
-    });
+    w.until("the helper is asked for the document's bytes", |w| w.helper.asked_count("save") == 1);
     w.helper.saved(&edited_version(), 1);
     // The document's own upload lands while the save waits for it.
     assert_eq!(w.upload(), 1, "the new document was sent");
@@ -700,16 +659,9 @@ fn text_typed_before_the_snapshot_timer_is_offered_after_a_lock_and_an_unlock() 
     w.sign_in();
     w.open_in_the_editor();
     // (The window's editor holds nothing unsaved, so the lock closes the document, as in the test below.)
-    assert_eq!(
-        viewers::office_over::recovery_pending(&w.rt.state).len(),
-        0,
-        "no snapshot was ever handed over: nothing kept yet"
-    );
+    assert_eq!(viewers::office_over::recovery_pending(&w.rt.state).len(), 0, "no snapshot was ever handed over: nothing kept yet");
 
-    let sink = w
-        .helper
-        .flush_sink()
-        .expect("the editor registered the door a lock seals through");
+    let sink = w.helper.flush_sink().expect("the editor registered the door a lock seals through");
     let last_text = Zeroizing::new(edited_version());
     w.engine.set_office_session_end_hook(Arc::new(move |ending| {
         if ending == SessionEnding::Lock {
@@ -722,16 +674,10 @@ fn text_typed_before_the_snapshot_timer_is_offered_after_a_lock_and_an_unlock() 
     w.engine
         .unlock_with_phrase(Zeroizing::new(TEST_PHRASE.to_string()))
         .expect("the phrase unlocks");
-    w.until("the notice after unlock", |w| {
-        w.rt.state.actions.toast == Some(Toast::KeptEdits(1))
-    });
+    w.until("the notice after unlock", |w| w.rt.state.actions.toast == Some(Toast::KeptEdits(1)));
     w.open_in_the_editor();
     assert!(
-        w.rt.state
-            .viewer
-            .ui
-            .as_ref()
-            .is_some_and(|ui| ui.office.recovery.is_some()),
+        w.rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.office.recovery.is_some()),
         "the reopened document offers the text typed before the lock"
     );
 }
@@ -745,16 +691,9 @@ fn text_typed_before_the_snapshot_timer_is_offered_after_a_screen_lock_and_an_un
     let mut w = window("screenlockflush");
     w.sign_in();
     w.open_in_the_editor();
-    assert_eq!(
-        viewers::office_over::recovery_pending(&w.rt.state).len(),
-        0,
-        "nothing kept yet"
-    );
+    assert_eq!(viewers::office_over::recovery_pending(&w.rt.state).len(), 0, "nothing kept yet");
 
-    let sink = w
-        .helper
-        .flush_sink()
-        .expect("the editor registered the door a lock seals through");
+    let sink = w.helper.flush_sink().expect("the editor registered the door a lock seals through");
     let last_text = Zeroizing::new(edited_version());
     let sealed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (done, when_called) = (sealed.clone(), Arc::new(std::sync::Mutex::new(None)));
@@ -779,23 +718,14 @@ fn text_typed_before_the_snapshot_timer_is_offered_after_a_screen_lock_and_an_un
         Some(EngineGate::ScreenLocked),
         "the lock frame is first: the screen was locked when the flush began"
     );
-    assert!(
-        !sealed.load(std::sync::atomic::Ordering::SeqCst),
-        "the flush has not ended when the lock call returned"
-    );
-    w.until("the seal landed in the background", |_| {
-        sealed.load(std::sync::atomic::Ordering::SeqCst)
-    });
+    assert!(!sealed.load(std::sync::atomic::Ordering::SeqCst), "the flush has not ended when the lock call returned");
+    w.until("the seal landed in the background", |_| sealed.load(std::sync::atomic::Ordering::SeqCst));
     w.engine
         .unlock_screen_platform_verified(w.engine.session_turn())
         .expect("the platform's yes unlocks the screen");
     w.settle();
     let offered = |w: &Window| {
-        w.rt.state
-            .viewer
-            .ui
-            .as_ref()
-            .is_some_and(|ui| ui.office.recovery.is_some())
+        w.rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.office.recovery.is_some())
             || !viewers::office_over::recovery_pending(&w.rt.state).is_empty()
     };
     w.until("the last text is offered", |w| offered(w));
@@ -811,10 +741,7 @@ fn after_a_screen_lock_with_unsaved_edits_files_and_the_settings_gear_answer_at_
     w.helper.answer(HostEdit::Edited(Box::new(edited(1, Dirty::All))));
     w.until("the edit is unsaved", |w| w.edit().is_some_and(|edit| edit.0));
     use beebeeb_engine::app::office_session_end::SessionEnding;
-    let sink = w
-        .helper
-        .flush_sink()
-        .expect("the editor registered the door a lock seals through");
+    let sink = w.helper.flush_sink().expect("the editor registered the door a lock seals through");
     let last_text = Zeroizing::new(edited_version());
     let sealed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let done = sealed.clone();
@@ -835,9 +762,7 @@ fn after_a_screen_lock_with_unsaved_edits_files_and_the_settings_gear_answer_at_
     w.engine
         .unlock_screen_platform_verified(w.engine.session_turn())
         .expect("the platform's yes unlocks the screen");
-    w.until("the notice after unlock", |w| {
-        w.rt.state.actions.toast == Some(Toast::KeptEdits(1))
-    });
+    w.until("the notice after unlock", |w| w.rt.state.actions.toast == Some(Toast::KeptEdits(1)));
     let began = Instant::now();
     w.settle();
     w.click("Photos-row");
@@ -910,16 +835,9 @@ fn an_editing_this_pc_kept_is_said_after_unlock_and_restored_from_the_offer() {
     );
     let (unsaved, _, restored) = w.edit().expect("the editor");
     assert!(unsaved, "no version holds the restored document yet");
+    assert!(w.drawn().contains(&recovery::brought_words(&restored.expect("when it is from"))));
     assert!(
-        w.drawn()
-            .contains(&recovery::brought_words(&restored.expect("when it is from")))
-    );
-    assert!(
-        w.rt.state
-            .viewer
-            .ui
-            .as_ref()
-            .is_some_and(|ui| ui.office.recovery.is_none()),
+        w.rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.office.recovery.is_none()),
         "the offer is answered"
     );
 
@@ -953,8 +871,6 @@ fn windows_on_the_shared_state_folder_are_one_at_a_time() {
         "a second window was made while the first was alive: its lock would end the first's grant"
     );
     drop(first);
-    made_at
-        .recv_timeout(Duration::from_secs(60))
-        .expect("the second window is made once the first is gone");
+    made_at.recv_timeout(Duration::from_secs(60)).expect("the second window is made once the first is gone");
     second.join().unwrap();
 }

@@ -1,7 +1,7 @@
 //! Theme: design tokens and SVG icons extracted from the design board.
 
-pub mod contrast;
 pub mod file_icon_art;
+pub mod contrast;
 pub mod file_icon_colors;
 pub mod file_icons;
 pub mod icons;

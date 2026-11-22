@@ -93,12 +93,7 @@ impl DocBody {
     pub fn page_rect(&self, r: &PageRect) -> [f32; 4] {
         let n = r.page.saturating_add(1).clamp(1, self.view.pages.max(1));
         let k = self.page_scale(n);
-        [
-            r.rect.x * k,
-            self.page_top(n) + r.rect.y * k,
-            r.rect.w * k,
-            r.rect.h * k,
-        ]
+        [r.rect.x * k, self.page_top(n) + r.rect.y * k, r.rect.w * k, r.rect.h * k]
     }
 
     /// The offset the asks band reads: where the stage was last seen scrolled to, or, when that is not where the page in

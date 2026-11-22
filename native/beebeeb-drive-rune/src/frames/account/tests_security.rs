@@ -2,7 +2,7 @@
 //! everything, part, or nothing; and that nothing unbound can be pressed. Input is scripted, as in `tests.rs`.
 
 use super::source::{BOARD_SIGN_OUT_REFUSED, BoardAccount, SecurityFacts, SignOutMode};
-use super::tests::{asked, click, find, info, key, name, row_to, runtime, says, section, settle, tab_to, window};
+use super::tests::{asked, click, find, info, key, name, runtime, says, row_to, section, settle, tab_to, window};
 use super::{Dialog, Pane, SettingsPane};
 use crate::frames::settings::Intent;
 use crate::{State, init};
@@ -191,7 +191,8 @@ fn nothing_that_is_not_bound_is_drawn() {
     let mut rt = page_knowing(nothing_known, true);
     // Every function this source has not bound is a row that is not there: no text that says so, no web detour.
     for row in [
-        "item-0-0", "item-0-1", "item-0-2", "item-1-0", "item-1-2", "item-2-0", "item-3-0", "item-3-1", "item-4-0",
+        "item-0-0", "item-0-1", "item-0-2", "item-1-0", "item-1-2", "item-2-0", "item-3-0", "item-3-1",
+        "item-4-0",
     ] {
         assert!(find(&rt, row).is_none(), "{row} is not drawn");
     }
@@ -238,10 +239,7 @@ fn a_row_for_a_page_nothing_answers_for_is_not_drawn() {
     for row in ["item-0-0", "item-0-1", "item-0-2", "item-1-2", "item-2-3"] {
         assert!(find(&rt, row).is_none(), "{row} is not drawn");
     }
-    assert!(
-        !every_text(&rt).contains("Not available"),
-        "no row says it is not available"
-    );
+    assert!(!every_text(&rt).contains("Not available"), "no row says it is not available");
     // The board's source has App lock on; this page has no row for it, so its menu does not open either.
     rt.update(|s, _| super::go(s, "DW-0716"));
     settle(&mut rt);
@@ -521,10 +519,7 @@ fn a_pane_without_an_answer_is_loading_empty_or_failed_with_a_retry() {
     assert!(loading.contains("loading-words"), "Loading says it is loading");
     let signed_out = drawn(PaneState::SignedOut);
     assert!(signed_out.contains("account-state-title") && signed_out.contains("Sign in and unlock"));
-    assert!(
-        !signed_out.contains("account-state-retry"),
-        "nothing to retry: the person signs in"
-    );
+    assert!(!signed_out.contains("account-state-retry"), "nothing to retry: the person signs in");
     let failed = drawn(PaneState::Failed);
     assert!(failed.contains("account-state-retry"), "Try again is drawn");
     assert!(failed.contains("Beebeeb didn't answer."), "the reason is said");

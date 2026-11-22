@@ -6,8 +6,8 @@ use std::cell::Cell;
 
 use rune::{El, Key, KeyEvent, Span, row, text_input};
 
-use super::super::{Ui, style};
 use super::EditorView;
+use super::super::{Ui, style};
 use crate::State;
 use crate::text_kit::find::{self, FindQuery};
 use crate::theme::scale;
@@ -128,11 +128,7 @@ pub fn match_spans(view: &EditorView, text: &str, t: &Theme) -> Vec<Span> {
     ms.iter()
         .enumerate()
         .map(|(i, m)| {
-            let c = if view.find.current == Some(i) {
-                t.selection
-            } else {
-                t.highlight
-            };
+            let c = if view.find.current == Some(i) { t.selection } else { t.highlight };
             Span::new(m.start, m.end).bg(c, 0.0)
         })
         .collect()
@@ -287,16 +283,7 @@ pub fn bar(view: &EditorView, t: &Theme) -> Option<El> {
             })
         }))
         .child(chip("find-close", "\u{00d7}", false, t).on_press_tx(close_to_field));
-    let mut b = rune::col()
-        .key("find-bar-box")
-        .mx(14.0)
-        .mt(10.0)
-        .px(scale::space::S12)
-        .py(scale::space::S8)
-        .gap(scale::space::S6)
-        .radius(tokens::radius::LG)
-        .fill(style::banner(t))
-        .child(line1);
+    let mut b = rune::col().key("find-bar-box").mx(14.0).mt(10.0).px(scale::space::S12).py(scale::space::S8).gap(scale::space::S6).radius(tokens::radius::LG).fill(style::banner(t)).child(line1);
     if view.find.replace_open {
         b = b.child(
             row()
@@ -310,10 +297,9 @@ pub fn bar(view: &EditorView, t: &Theme) -> Option<El> {
                         None
                     })
                 }))
-                .child(
-                    chip("find-replace-all", "Replace all", false, t)
-                        .on_press(|s: &mut State| with(s, |ui, e| Some(replace_all(&mut ui.editor_view, e)))),
-                ),
+                .child(chip("find-replace-all", "Replace all", false, t).on_press(|s: &mut State| {
+                    with(s, |ui, e| Some(replace_all(&mut ui.editor_view, e)))
+                })),
         );
     }
     Some(super::stop(b, super::FIND_PANE).w_full())

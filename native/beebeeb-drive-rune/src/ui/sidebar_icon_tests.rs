@@ -29,11 +29,7 @@ fn sidebar_places_draw_in_their_tints() {
                     }
                     SidebarSection::Photos => tint_color(Tint::Image, dark),
                     SidebarSection::Trash => {
-                        if on {
-                            t.text
-                        } else {
-                            t.text_tertiary
-                        }
+                        if on { t.text } else { t.text_tertiary }
                     }
                 };
                 assert!(c == want, "{} (dark {dark}, on {on})", s.label());

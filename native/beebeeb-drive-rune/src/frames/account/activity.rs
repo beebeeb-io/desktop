@@ -42,16 +42,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     // A source that cannot stop the recording from here shows it as a value, not as a switch that would not turn.
     let fixed_on = on && !source.can_stop_activity();
     // Turning it off asks first; turning it on starts a new log at once.
-    let switch = crate::ui::switch::switch_sized(
-        &format!("{}-switch", "item-0-0"),
-        "",
-        on,
-        true,
-        crate::ui::button::Size::Md,
-        t,
-    )
-    .label("Record sign-in activity")
-    .on_press(move |s: &mut State| {
+    let switch = crate::ui::switch::switch_sized(&format!("{}-switch", "item-0-0"), "", on, true, crate::ui::button::Size::Md, t).label("Record sign-in activity").on_press(move |s: &mut State| {
         if on {
             super::ask(s, Dialog::Code(CodeFor::StopActivity));
             form::focus(&mut s.account.form, Some(form::CURRENT_KEY));
@@ -62,11 +53,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     let mut children = vec![
         set::heading("Sign-in activity", sub, None, t),
         // The row that opens the web page is the list's one control; the row with the switch is text around it.
-        (if fixed_on {
-            crate::ui::settings_list::roving_list
-        } else {
-            crate::ui::settings_list::list
-        })(
+        (if fixed_on { crate::ui::settings_list::roving_list } else { crate::ui::settings_list::list })(
             0,
             None,
             vec![if fixed_on {

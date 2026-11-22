@@ -17,12 +17,8 @@ impl LocalFile {
         if !meta.is_file() || meta.len() > MAX_BYTES {
             return Err(OpenError::NotNow);
         }
-        let text =
-            String::from_utf8(std::fs::read(path).map_err(|_| OpenError::NotNow)?).map_err(|_| OpenError::NotNow)?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let text = String::from_utf8(std::fs::read(path).map_err(|_| OpenError::NotNow)?).map_err(|_| OpenError::NotNow)?;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let markdown = path
             .extension()
             .and_then(|e| e.to_str())
@@ -87,15 +83,9 @@ mod tests {
         let notice = include_str!("../../../../../packaging/licences/THIRD-PARTY-LICENSES.md");
         let blocks = parse(notice);
         let count = |f: fn(&Block) -> bool| blocks.iter().filter(|b| f(b)).count();
-        assert!(
-            matches!(blocks.first(), Some(Block::Heading(1, _))),
-            "starts with its title"
-        );
+        assert!(matches!(blocks.first(), Some(Block::Heading(1, _))), "starts with its title");
         assert!(count(|b| matches!(b, Block::Heading(2, _))) >= 6, "its six sections");
         assert!(count(|b| matches!(b, Block::List(_))) > 100, "lists of crates");
-        assert!(
-            count(|b| matches!(b, Block::Code(_))) > 200,
-            "licence texts as code blocks"
-        );
+        assert!(count(|b| matches!(b, Block::Code(_))) > 200, "licence texts as code blocks");
     }
 }

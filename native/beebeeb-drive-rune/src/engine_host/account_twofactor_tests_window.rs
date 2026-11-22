@@ -97,13 +97,7 @@ fn ask_for_new_codes(fake: &Fake, rt: &mut Runtime<State>) {
     rt.update(|s, _| crate::frames::account::go(s, "DW-A71"));
     rt.frame(0.016);
     wait_for(rt, "the Two-factor page is read", |rt| {
-        read(rt)
-            && rt
-                .state
-                .account
-                .source
-                .as_deref()
-                .is_some_and(|s| s.pane_state(Pane::TwoFactor) == PaneState::Ready)
+        read(rt) && rt.state.account.source.as_deref().is_some_and(|s| s.pane_state(Pane::TwoFactor) == PaneState::Ready)
     });
     rt.update(|s, _| {
         s.account.dialog = Some(Dialog::Code(CodeFor::NewBackupCodes));

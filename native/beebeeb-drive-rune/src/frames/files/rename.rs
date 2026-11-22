@@ -10,8 +10,8 @@
 use super::names::{self, NameError};
 use super::source::{Action, ActionError};
 use crate::State;
-use crate::theme::icons_files;
 use crate::theme::scale;
+use crate::theme::icons_files;
 use crate::theme::tokens::Theme;
 use crate::ui::{field, kit};
 use rune::{Align, El, Key, KeyEvent, Side, TextEdit, Tx, el, row, text_input};

@@ -33,12 +33,7 @@ impl PhotosSource for Held {
     }
     fn file_items(&self, ids: &[PhotoId]) -> Option<Vec<DriveItem>> {
         ids.iter()
-            .map(|id| {
-                self.files
-                    .iter()
-                    .find(|(photo, _)| photo == id)
-                    .map(|(_, item)| item.clone())
-            })
+            .map(|id| self.files.iter().find(|(photo, _)| photo == id).map(|(_, item)| item.clone()))
             .collect()
     }
     fn devices(&self) -> Vec<Device> {
@@ -88,6 +83,7 @@ impl PhotosSource for Held {
     }
 }
 
+
 fn file(id: &str, name: &str) -> DriveItem {
     DriveItem {
         id: id.into(),
@@ -108,15 +104,7 @@ fn file(id: &str, name: &str) -> DriveItem {
 
 /// The library of the board, with files behind photos 0 and 1.
 fn window() -> (Runtime<State>, Arc<Mutex<Vec<Call>>>) {
-    let mut rt = Runtime::new(
-        init(),
-        view,
-        (1278.0, 798.0),
-        Env {
-            system_dark: false,
-            scale: 2.0,
-        },
-    );
+    let mut rt = Runtime::new(init(), view, (1278.0, 798.0), Env { system_dark: false, scale: 2.0 });
     rt.on_key = Some(crate::shell::host::on_key);
     rt.poll = Some(crate::shell::host::poll);
     rt.frame(0.0);
@@ -184,19 +172,12 @@ fn copy_link_with_week_and_a_password_asks_once_with_those_choices_for_that_phot
         links(&calls),
         [(
             vec!["f-a".to_string()],
-            ShareOptions {
-                expires: LinkExpiry::Week,
-                password: Some("hunter2".into()),
-                ..Default::default()
-            }
+            ShareOptions { expires: LinkExpiry::Week, password: Some("hunter2".into()), ..Default::default() }
         )]
     );
     assert!(rt.state.photos.dialog.is_none());
     assert_eq!(rt.state.photos.toast, Some(Toast::Words("Link copied")));
-    assert!(
-        rt.state.photos.share_password.text.is_empty(),
-        "the password is wiped once used"
-    );
+    assert!(rt.state.photos.share_password.text.is_empty(), "the password is wiped once used");
 }
 
 #[test]
@@ -249,9 +230,5 @@ fn link_copied_from_the_real_source_is_said_over_photos() {
     settle(&mut rt);
     rt.settle_all();
     rt.frame(0.0);
-    assert!(
-        !rt.elements()
-            .iter()
-            .any(|e| e.key.as_deref() == Some("ph-toast") && !e.exiting)
-    );
+    assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("ph-toast") && !e.exiting));
 }

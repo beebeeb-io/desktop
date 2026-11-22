@@ -59,13 +59,7 @@ fn page(_: &State, _: &mut Cx<State>) -> El {
         None,
         vec![
             account_set::item(2, 0, &Row::new(Lead::None, "Laptop").link(true), vec![], &t),
-            account_set::item(
-                2,
-                1,
-                &Row::new(Lead::None, "Phone").link(false).selected(true),
-                vec![],
-                &t,
-            ),
+            account_set::item(2, 1, &Row::new(Lead::None, "Phone").link(false).selected(true), vec![], &t),
         ],
         None,
         &t,
@@ -105,10 +99,7 @@ fn settle(rt: &mut Runtime<State>) {
 fn press(rt: &mut Runtime<State>, key: Key, shift: bool) {
     rt.key(KeyEvent {
         key,
-        mods: Mods {
-            shift,
-            ..Mods::default()
-        },
+        mods: Mods { shift, ..Mods::default() },
     });
     settle(rt);
 }

@@ -59,11 +59,7 @@ fn editing(tab: Tab, layouts: bool) -> (Runtime<State>, Rc<RefCell<Log>>) {
     let log = Rc::new(RefCell::new(Log::default()));
     let mut state = init();
     let id = file.id.clone();
-    assert!(viewers::open_from(
-        &mut state,
-        Box::new(Source { file, log: log.clone() }),
-        &id
-    ));
+    assert!(viewers::open_from(&mut state, Box::new(Source { file, log: log.clone() }), &id));
     let ui = viewers::ui(&mut state).expect("a file");
     let mut edit = EditUi::new(EditKind::Pptx);
     if layouts {
@@ -83,9 +79,9 @@ fn editing(tab: Tab, layouts: bool) -> (Runtime<State>, Rc<RefCell<Log>>) {
 }
 
 fn by_label(rt: &Runtime<State>, label: &str) -> Option<rune::ElementInfo> {
-    rt.elements().into_iter().find(|e| {
-        e.label.as_deref() == Some(label) && !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("r"))
-    })
+    rt.elements()
+        .into_iter()
+        .find(|e| e.label.as_deref() == Some(label) && !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("r")))
 }
 
 fn press(rt: &mut Runtime<State>, label: &str) {
@@ -101,9 +97,7 @@ fn press(rt: &mut Runtime<State>, label: &str) {
 }
 
 fn has(rt: &Runtime<State>, key: &str) -> bool {
-    rt.elements()
-        .iter()
-        .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+    rt.elements().iter().any(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
 fn deck(rt: &mut Runtime<State>) -> (u32, u32) {
@@ -155,10 +149,7 @@ fn office_slides_ribbon_design_lists_layouts_and_applies_one() {
     // A new deck's first slide shows Title slide.
     assert!(has(&rt, "rl-0-on"));
     press(&mut rt, "Title only");
-    assert_eq!(
-        log.borrow().edits.last(),
-        Some(&EditOp::SetLayout { slide: 0, layout: 3 })
-    );
+    assert_eq!(log.borrow().edits.last(), Some(&EditOp::SetLayout { slide: 0, layout: 3 }));
     assert!(has(&rt, "rl-3-on") && !has(&rt, "rl-0-on"));
 }
 
@@ -186,10 +177,7 @@ fn office_slides_ribbon_an_open_deck_asks_for_its_layouts_once() {
 
 #[test]
 fn office_slides_ribbon_tab_words_are_design_and_transitions() {
-    let words: Vec<&str> = Tab::ALL
-        .iter()
-        .map(|t| crate::frames::office::edit::slide::tab_label(*t))
-        .collect();
+    let words: Vec<&str> = Tab::ALL.iter().map(|t| crate::frames::office::edit::slide::tab_label(*t)).collect();
     assert_eq!(words, ["Home", "Insert", "Design", "Transitions"]);
 }
 

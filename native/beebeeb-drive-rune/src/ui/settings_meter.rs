@@ -202,13 +202,7 @@ pub fn mixed(key: &str, words: &str, mono: &[std::ops::Range<usize>], style: Tex
 
 /// `mixed` for the common case: the value comes first, the words follow ("240 GB used").
 pub fn value_then(key: &str, value: &str, words: &str, style: TextStyle, ink: Color) -> El {
-    mixed(
-        key,
-        &format!("{value}{words}"),
-        std::slice::from_ref(&(0..value.len())),
-        style,
-        ink,
-    )
+    mixed(key, &format!("{value}{words}"), std::slice::from_ref(&(0..value.len())), style, ink)
 }
 
 /// `mixed` with the value last ("of 1 TB").

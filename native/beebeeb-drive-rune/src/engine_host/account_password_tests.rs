@@ -135,11 +135,7 @@ fn a_kept_password_is_dropped_when_the_session_moves_on() {
             .err(),
         Some(Refused::NotConfirmed)
     );
-    assert_eq!(
-        asked_by_the_change(&fake),
-        asked,
-        "a session that moved on sends nothing"
-    );
+    assert_eq!(asked_by_the_change(&fake), asked, "a session that moved on sends nothing");
     assert_eq!(calls.pane_state(false), PaneState::SignedOut);
 }
 

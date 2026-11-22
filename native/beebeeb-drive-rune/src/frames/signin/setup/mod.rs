@@ -268,12 +268,9 @@ fn decode(png_bytes: &[u8]) -> Pixels {
     let bytes = &buf[..info.buffer_size()];
     let rgba: Vec<u8> = match (info.color_type, info.bit_depth) {
         (png::ColorType::Rgba, png::BitDepth::Eight) => bytes.to_vec(),
-        (png::ColorType::Rgb, png::BitDepth::Eight) => bytes
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|p| [p[0], p[1], p[2], 255])
-            .collect(),
+        (png::ColorType::Rgb, png::BitDepth::Eight) => {
+            bytes.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect()
+        }
         _ => return pixels,
     };
     pixels.set(info.width, info.height, rgba);

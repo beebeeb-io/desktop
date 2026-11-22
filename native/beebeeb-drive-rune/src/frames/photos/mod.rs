@@ -9,8 +9,6 @@
 mod chrome;
 mod grid;
 mod icons;
-#[cfg(test)]
-mod original_tests;
 mod overlay;
 mod route;
 mod route_chrome;
@@ -25,6 +23,8 @@ mod route_share;
 mod route_share_tests;
 mod session;
 pub mod source;
+#[cfg(test)]
+mod original_tests;
 #[cfg(test)]
 mod tests;
 mod viewer;
@@ -300,9 +300,7 @@ impl Ui {
             return;
         }
         let at = self.cursor.and_then(|(day, index)| {
-            self.lines
-                .iter()
-                .position(|l| l.day == day && l.start <= index && index < l.start + l.len)
+            self.lines.iter().position(|l| l.day == day && l.start <= index && index < l.start + l.len)
         });
         let page = 5isize;
         let line = match key {
@@ -803,12 +801,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     // "Link copied" from the engine's source is said by Files' poll, in Files' toast: over Photos it is drawn here.
     if let Some(toast) = session::link_toast(s) {
         let viewing = ui.viewing().is_some();
-        front.push(overlay::toast_layer(
-            &toast,
-            if viewing { 118.0 } else { 24.0 },
-            !viewing,
-            &t,
-        ));
+        front.push(overlay::toast_layer(&toast, if viewing { 118.0 } else { 24.0 }, !viewing, &t));
     }
     match ui.viewing() {
         Some(viewing) => chrome::window(
@@ -958,17 +951,13 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 ui.move_cursor(0, 0);
             }
             if let Some((day, index)) = ui.cursor
-                && !ui
-                    .selected
-                    .contains_key(&ui.photo_at(day, index).map_or(PhotoId(u64::MAX), |p| p.id))
+                && !ui.selected.contains_key(&ui.photo_at(day, index).map_or(PhotoId(u64::MAX), |p| p.id))
             {
                 ui.check_tile(day, index);
             }
             ui.move_cursor(dx, dy);
             if let Some((day, index)) = ui.cursor
-                && !ui
-                    .selected
-                    .contains_key(&ui.photo_at(day, index).map_or(PhotoId(u64::MAX), |p| p.id))
+                && !ui.selected.contains_key(&ui.photo_at(day, index).map_or(PhotoId(u64::MAX), |p| p.id))
             {
                 ui.check_tile(day, index);
             }

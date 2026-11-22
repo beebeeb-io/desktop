@@ -42,12 +42,7 @@ fn build(key: &str, label: &str, on: bool, enabled: bool, size: Option<Size>, t:
         None => (None, TRACK_W, TRACK_H, KNOB),
     };
     let track_fill = if on { t.selection } else { t.paper3 };
-    let knob = el()
-        .key(format!("{key}-knob"))
-        .w(knob_d)
-        .h(knob_d)
-        .radius(knob_d / 2.0)
-        .fill(t.white);
+    let knob = el().key(format!("{key}-knob")).w(knob_d).h(knob_d).radius(knob_d / 2.0).fill(t.white);
     let mut track = row()
         .key(format!("{key}-track"))
         .w(track_w)

@@ -257,20 +257,8 @@ mod tests {
     fn the_tray_tip_is_fixed_frameless_topmost_starts_hidden_and_sits_on_the_primary_display() {
         let o = tray_tip_options();
         assert!(o.borderless && o.always_on_top && !o.visible && !o.resizable);
-        let m = |x, primary| Monitor {
-            x,
-            y: 0,
-            w: 1920,
-            h: 1080,
-            scale: 1.0,
-            primary,
-        };
-        let whole = flyout::Rect {
-            x: 1920,
-            y: 0,
-            w: 1920,
-            h: 1080,
-        };
+        let m = |x, primary| Monitor { x, y: 0, w: 1920, h: 1080, scale: 1.0, primary };
+        let whole = flyout::Rect { x: 1920, y: 0, w: 1920, h: 1080 };
         let work = flyout::Rect { h: 1040, ..whole };
         let a = primary_anchor(&[m(0, false), m(1920, true)], &[(whole, work)]).expect("a display");
         assert_eq!((a.monitor, a.work), (whole, work));

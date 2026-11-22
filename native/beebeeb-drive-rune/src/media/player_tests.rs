@@ -1123,11 +1123,7 @@ fn system_answer_restarts_once_in_the_system_profile() {
         .iter()
         .rposition(|msg| matches!(msg, ToHelper::Open { .. }))
         .expect("the second open");
-    assert_eq!(
-        last,
-        [second_open - 1],
-        "one `LastHelper`, right before the second `Open`"
-    );
+    assert_eq!(last, [second_open - 1], "one `LastHelper`, right before the second `Open`");
     r.handle.stop(StopReason::Closed);
     // The system profile's helper answers the same: that is the PC's answer. Never a third start.
     let pc = rig(1_000, no_system_aac);

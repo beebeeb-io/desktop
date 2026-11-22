@@ -838,11 +838,7 @@ fn an_archives_list_jumps_by_typed_names_and_keeps_its_keys() {
     let (mut rt, _) = recording(board::ZIP);
     typed(&mut rt, "s");
     typed(&mut rt, "e");
-    assert_eq!(
-        viewer(&rt).media.entry,
-        Some(3),
-        "\"se\": selects-list.csv, by its name"
-    );
+    assert_eq!(viewer(&rt).media.entry, Some(3), "\"se\": selects-list.csv, by its name");
     typed(&mut rt, "C");
     assert_eq!(viewer(&rt).media.entry, Some(3), "\"sec\" matches none: focus stays");
 }

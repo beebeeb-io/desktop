@@ -42,8 +42,8 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::photos_api::{ThumbCut, ThumbPixels, ThumbRefused};
-use beebeeb_engine::app::{CredentialStores, Engine};
 use beebeeb_media_protocol::image::MAX_IMAGE_FILE;
+use beebeeb_engine::app::{CredentialStores, Engine};
 use rune::Pixels;
 
 use super::log;

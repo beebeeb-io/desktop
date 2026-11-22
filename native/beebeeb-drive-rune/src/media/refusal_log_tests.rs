@@ -66,29 +66,15 @@ fn every_codec_word_and_helper_code_passes_the_filter() {
     let mut words = std::collections::BTreeSet::new();
     for codec in codecs {
         let text = logged(|| helper_error(ErrorCode::Unsupported(codec)));
-        let word = text
-            .trim_end()
-            .rsplit("answer=unsupported codec=")
-            .next()
-            .unwrap()
-            .to_owned();
+        let word = text.trim_end().rsplit("answer=unsupported codec=").next().unwrap().to_owned();
         assert!(text.contains("answer=unsupported codec="), "{codec:?}: {text}");
-        assert!(
-            !word.contains('<') && !word.contains(' '),
-            "{codec:?} is one readable word: {text}"
-        );
+        assert!(!word.contains('<') && !word.contains(' '), "{codec:?} is one readable word: {text}");
         words.insert(word);
     }
     assert_eq!(words.len(), codecs.len(), "each format has its own word: {words:?}");
     let codes = [
-        (
-            ErrorCode::NoSystemDecoder(Codec::Hevc),
-            "answer=no system decoder codec=hevc",
-        ),
-        (
-            ErrorCode::NoSystemMedia(Codec::Hevc),
-            "answer=no system media codec=hevc",
-        ),
+        (ErrorCode::NoSystemDecoder(Codec::Hevc), "answer=no system decoder codec=hevc"),
+        (ErrorCode::NoSystemMedia(Codec::Hevc), "answer=no system media codec=hevc"),
         (ErrorCode::NoDecoder, "answer=no decoder codec=none"),
         (ErrorCode::Corrupt, "answer=corrupt"),
         (ErrorCode::TooLarge, "answer=too large"),
@@ -130,10 +116,7 @@ fn a_broken_rule_says_what_and_where() {
 fn every_sandbox_error_has_a_step_but_the_windows_floor() {
     // `sandbox_failed` writes to the process's own list: a step no other test uses.
     let text = logged(|| {
-        sandbox_failed(&SandboxError::Os {
-            step: "resume",
-            code: 1450,
-        });
+        sandbox_failed(&SandboxError::Os { step: "resume", code: 1450 });
         sandbox_failed(&SandboxError::NeedsNewerWindows);
     });
     assert!(text.contains("step=resume os_error=1450"), "{text}");

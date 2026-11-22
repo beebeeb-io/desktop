@@ -46,38 +46,35 @@ pub fn line(text: &str) -> Vec<Run> {
     };
     while !rest.is_empty() {
         if let Some(inner) = rest.strip_prefix("**")
-            && let Some(end) = inner.find("**").filter(|end| *end > 0)
-        {
-            flush(&mut plain, &mut out);
-            out.push(mark("**"));
-            out.push(run(&inner[..end], Ink::Strong, true, false));
-            out.push(mark("**"));
-            rest = &inner[end + 2..];
-            continue;
-        }
+            && let Some(end) = inner.find("**").filter(|end| *end > 0) {
+                flush(&mut plain, &mut out);
+                out.push(mark("**"));
+                out.push(run(&inner[..end], Ink::Strong, true, false));
+                out.push(mark("**"));
+                rest = &inner[end + 2..];
+                continue;
+            }
         if let Some(inner) = rest.strip_prefix('`')
-            && let Some(end) = inner.find('`').filter(|end| *end > 0)
-        {
-            flush(&mut plain, &mut out);
-            out.push(mark("`"));
-            out.push(run(&inner[..end], Ink::Green, false, false));
-            out.push(mark("`"));
-            rest = &inner[end + 1..];
-            continue;
-        }
+            && let Some(end) = inner.find('`').filter(|end| *end > 0) {
+                flush(&mut plain, &mut out);
+                out.push(mark("`"));
+                out.push(run(&inner[..end], Ink::Green, false, false));
+                out.push(mark("`"));
+                rest = &inner[end + 1..];
+                continue;
+            }
         if let Some(inner) = rest.strip_prefix('[')
             && let Some((words, target)) = inner.split_once("](")
-            && let Some(end) = target.find(')').filter(|_| !words.contains('['))
-        {
-            flush(&mut plain, &mut out);
-            out.push(mark("["));
-            out.push(run(words, Ink::Plain, false, false));
-            out.push(mark("]("));
-            out.push(run(&target[..end], Ink::Green, false, false));
-            out.push(mark(")"));
-            rest = &target[end + 1..];
-            continue;
-        }
+                && let Some(end) = target.find(')').filter(|_| !words.contains('[')) {
+                    flush(&mut plain, &mut out);
+                    out.push(mark("["));
+                    out.push(run(words, Ink::Plain, false, false));
+                    out.push(mark("]("));
+                    out.push(run(&target[..end], Ink::Green, false, false));
+                    out.push(mark(")"));
+                    rest = &target[end + 1..];
+                    continue;
+                }
         let ch = rest.chars().next().unwrap_or(' ');
         plain.push(ch);
         rest = &rest[ch.len_utf8()..];

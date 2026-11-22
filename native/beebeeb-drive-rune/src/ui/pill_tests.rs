@@ -13,17 +13,11 @@ struct Page {
 }
 
 fn view(p: &Page, _: &mut Cx<Page>) -> El {
-    rune::row()
-        .px(20.0)
-        .pt(20.0)
-        .child(pill("p", "Synced", p.tone, p.dot, &theme(false)))
+    rune::row().px(20.0).pt(20.0).child(pill("p", "Synced", p.tone, p.dot, &theme(false)))
 }
 
 fn render(tone: Tone, dot: bool) -> Runtime<Page> {
-    let env = Env {
-        system_dark: false,
-        scale: 2.0,
-    };
+    let env = Env { system_dark: false, scale: 2.0 };
     let mut rt = Runtime::new(Page { tone, dot }, view, (300.0, 100.0), env);
     rt.frame(0.0);
     rt.settle_all();
@@ -32,9 +26,7 @@ fn render(tone: Tone, dot: bool) -> Runtime<Page> {
 }
 
 fn find(rt: &Runtime<Page>, key: &str) -> Option<ElementInfo> {
-    rt.elements()
-        .into_iter()
-        .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+    rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
 fn close(a: Color, b: Color) -> bool {

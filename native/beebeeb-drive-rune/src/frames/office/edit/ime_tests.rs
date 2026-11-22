@@ -51,9 +51,7 @@ impl ViewerSource for Recording {
     }
     fn copy_selection(&mut self, _: &str) -> bool {
         self.log.borrow_mut().push(Asked::Copy);
-        let Some((text, html)) = self.copy.clone() else {
-            return false;
-        };
+        let Some((text, html)) = self.copy.clone() else { return false };
         self.inner.edit_answers.push(EditAnswer::Clip { text, html });
         true
     }
@@ -65,24 +63,13 @@ impl ViewerSource for Recording {
 /// The editor's page: a focusable surface that takes the clipboard keys first, with the caret element and the
 /// pre-edit where a real surface would put them.
 fn view(s: &State, _: &mut Cx<State>) -> El {
-    let mut page = el()
-        .key("edit-page")
-        .size(300.0, 200.0)
-        .focusable(true)
-        .on_key(|s: &mut State, ev: &KeyEvent, tx: &mut Tx| clipboard::on_clip_key(s, tx, ev));
+    let mut page = el().key("edit-page").size(300.0, 200.0).focusable(true).on_key(
+        |s: &mut State, ev: &KeyEvent, tx: &mut Tx| clipboard::on_clip_key(s, tx, ev),
+    );
     if let Some(caret) = ime::caret_el(s) {
         page = page.child(caret.absolute(40.0, 50.0));
     }
-    if let Some(pre) = ime::preedit_el(
-        s,
-        14.0,
-        Color {
-            r: 0.1,
-            g: 0.1,
-            b: 0.12,
-            a: 1.0,
-        },
-    ) {
+    if let Some(pre) = ime::preedit_el(s, 14.0, Color { r: 0.1, g: 0.1, b: 0.12, a: 1.0 }) {
         page = page.child(pre.absolute(40.0, 70.0));
     }
     page
@@ -110,9 +97,7 @@ fn harness(kind: EditKind, copy: Option<(&str, Option<&str>)>) -> Harness {
         poll: Some(poll),
         ..AppSpec::new("ime", (400.0, 300.0), init, view)
     };
-    let mut rt = App::new(spec)
-        .on_ime(on_ime)
-        .headless_runtime((400.0, 300.0), Env::new(false, 1.0));
+    let mut rt = App::new(spec).on_ime(on_ime).headless_runtime((400.0, 300.0), Env::new(false, 1.0));
     let clipboard = memory();
     rt.use_clipboard(&clipboard);
     let source = Recording {
@@ -123,15 +108,7 @@ fn harness(kind: EditKind, copy: Option<(&str, Option<&str>)>) -> Harness {
     rt.update(|s, _| {
         assert!(open_from(s, Box::new(source), board::DOCX));
         let mut edit = EditUi::new(kind);
-        edit.caret = Some(PageRect {
-            page: 0,
-            rect: RectPt {
-                x: 72.0,
-                y: 96.0,
-                w: 1.0,
-                h: 14.0,
-            },
-        });
+        edit.caret = Some(PageRect { page: 0, rect: RectPt { x: 72.0, y: 96.0, w: 1.0, h: 14.0 } });
         viewers::ui(s).expect("a file").office.edit = Some(edit);
     });
     rt.frame(0.0);
@@ -159,14 +136,7 @@ impl Harness {
     }
 
     fn ctrl(&mut self, c: char) {
-        self.rt.key(KeyEvent {
-            key: Key::Command(c),
-            mods: Mods {
-                cmd: true,
-                ctrl: true,
-                ..Mods::default()
-            },
-        });
+        self.rt.key(KeyEvent { key: Key::Command(c), mods: Mods { cmd: true, ctrl: true, ..Mods::default() } });
         self.settle();
     }
 
@@ -175,16 +145,11 @@ impl Harness {
     }
 
     fn edit(&mut self) -> EditUi {
-        viewers::ui(&mut self.rt.state)
-            .and_then(|ui| ui.office.edit.clone())
-            .expect("an editor")
+        viewers::ui(&mut self.rt.state).and_then(|ui| ui.office.edit.clone()).expect("an editor")
     }
 
     fn has(&self, key: &str) -> bool {
-        self.rt
-            .elements()
-            .into_iter()
-            .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+        self.rt.elements().into_iter().any(|e| e.key.as_deref() == Some(key) && !e.exiting)
     }
 }
 
@@ -196,10 +161,7 @@ fn paste(text: &str) -> Asked {
     Asked::Edit(EditOp::Paste { text: text.to_string() })
 }
 
-const DELETE: Asked = Asked::Edit(EditOp::Delete {
-    back: false,
-    word: false,
-});
+const DELETE: Asked = Asked::Edit(EditOp::Delete { back: false, word: false });
 
 // The input method.
 
@@ -289,19 +251,12 @@ fn only_a_caret_the_editor_has_the_keyboard_for_asks_for_the_input_method() {
     assert_eq!(h.rt.ime_area, None, "the page has not the keyboard yet");
     h.focus();
     let area = h.rt.ime_area.expect("the caret's rectangle");
-    assert_eq!(
-        (area[0], area[1], area[3]),
-        (40.0, 50.0, 14.0),
-        "the surface placed it, the helper sized it"
-    );
+    assert_eq!((area[0], area[1], area[3]), (40.0, 50.0, 14.0), "the surface placed it, the helper sized it");
     assert!(h.edit().has_keyboard);
     h.rt.update(|_, tx| tx.blur());
     h.settle();
     assert!(!h.edit().has_keyboard);
-    assert_eq!(
-        h.rt.ime_area, None,
-        "the keyboard went elsewhere: the input method is off"
-    );
+    assert_eq!(h.rt.ime_area, None, "the keyboard went elsewhere: the input method is off");
 }
 
 #[test]
@@ -335,10 +290,7 @@ fn copy_asks_the_editor_and_writes_text_and_html_when_the_answer_comes() {
     assert_eq!(h.asked(), [Asked::Copy]);
     assert_eq!(h.clipboard.text().as_deref().map(String::as_str), Some("Total due"));
     assert_eq!(
-        h.clipboard
-            .content()
-            .and_then(|c| c.html().map(str::to_owned))
-            .as_deref(),
+        h.clipboard.content().and_then(|c| c.html().map(str::to_owned)).as_deref(),
         Some("<b>Total due</b>")
     );
     assert_eq!(h.edit().clip, None, "the clip was taken");
@@ -363,15 +315,7 @@ fn copy_without_html_writes_the_text_alone_and_an_empty_answer_leaves_the_clipbo
 fn cut_copies_first_and_then_deletes() {
     let mut h = harness(EditKind::Docx, Some(("gone", None)));
     h.rt.update(|s, _| {
-        let rect = PageRect {
-            page: 0,
-            rect: RectPt {
-                x: 72.0,
-                y: 96.0,
-                w: 30.0,
-                h: 14.0,
-            },
-        };
+        let rect = PageRect { page: 0, rect: RectPt { x: 72.0, y: 96.0, w: 30.0, h: 14.0 } };
         viewers::ui(s).unwrap().office.edit.as_mut().unwrap().selection = vec![rect];
     });
     h.focus();
@@ -385,11 +329,7 @@ fn a_cut_with_nothing_selected_in_a_document_deletes_nothing() {
     let mut h = harness(EditKind::Docx, Some(("", None)));
     h.focus();
     h.ctrl('x');
-    assert_eq!(
-        h.asked(),
-        [Asked::Copy],
-        "a caret is not a selection: Delete would take the next character"
-    );
+    assert_eq!(h.asked(), [Asked::Copy], "a caret is not a selection: Delete would take the next character");
 }
 
 #[test]
@@ -413,8 +353,7 @@ fn a_cut_in_a_sheet_clears_the_cells_it_copied() {
 fn paste_sends_the_clipboards_plain_text_even_when_html_is_there() {
     let mut h = harness(EditKind::Docx, None);
     h.focus();
-    h.clipboard
-        .set_content(ClipboardContent::new("one\r\ntwo\rthree").with_html("<b>one</b>"));
+    h.clipboard.set_content(ClipboardContent::new("one\r\ntwo\rthree").with_html("<b>one</b>"));
     h.ctrl('v');
     assert_eq!(h.asked(), [paste("one\ntwo\nthree")]);
 }
@@ -447,29 +386,13 @@ fn a_paste_over_what_an_edit_carries_is_refused_with_words() {
 fn other_keys_are_not_taken_and_neither_is_a_chord_with_alt_or_a_stopped_editor() {
     let mut h = harness(EditKind::Docx, None);
     let key = |key, mods| KeyEvent { key, mods };
-    let cmd = Mods {
-        cmd: true,
-        ctrl: true,
-        ..Mods::default()
-    };
+    let cmd = Mods { cmd: true, ctrl: true, ..Mods::default() };
     let mut taken = Vec::new();
     h.rt.update(|s, tx| {
-        taken.push(clipboard::on_clip_key(
-            s,
-            tx,
-            &key(Key::Text("c".into()), Mods::default()),
-        ));
+        taken.push(clipboard::on_clip_key(s, tx, &key(Key::Text("c".into()), Mods::default())));
         taken.push(clipboard::on_clip_key(s, tx, &key(Key::Command('z'), cmd)));
-        taken.push(clipboard::on_clip_key(
-            s,
-            tx,
-            &key(Key::Command('c'), Mods { alt: true, ..cmd }),
-        ));
-        taken.push(clipboard::on_clip_key(
-            s,
-            tx,
-            &key(Key::Command('c'), Mods { shift: true, ..cmd }),
-        ));
+        taken.push(clipboard::on_clip_key(s, tx, &key(Key::Command('c'), Mods { alt: true, ..cmd })));
+        taken.push(clipboard::on_clip_key(s, tx, &key(Key::Command('c'), Mods { shift: true, ..cmd })));
         taken.push(clipboard::on_clip_key(s, tx, &key(Key::Command('c'), cmd)));
         viewers::ui(s).unwrap().office.edit.as_mut().unwrap().stopped = true;
         taken.push(clipboard::on_clip_key(s, tx, &key(Key::Command('c'), cmd)));

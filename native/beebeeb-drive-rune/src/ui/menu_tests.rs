@@ -41,28 +41,14 @@ fn place_at_stays_in_window() {
 #[test]
 fn place_under_flips_up_when_no_room() {
     let w = (800.0, 600.0);
-    assert_eq!(
-        place_under((10.0, 10.0, 80.0, 30.0), (100.0, 100.0), w, 4.0),
-        (10.0, 44.0)
-    );
-    assert_eq!(
-        place_under((780.0, 560.0, 20.0, 30.0), (100.0, 100.0), w, 4.0),
-        (700.0, 456.0)
-    );
+    assert_eq!(place_under((10.0, 10.0, 80.0, 30.0), (100.0, 100.0), w, 4.0), (10.0, 44.0));
+    assert_eq!(place_under((780.0, 560.0, 20.0, 30.0), (100.0, 100.0), w, 4.0), (700.0, 456.0));
 }
 
 #[test]
 fn sized_height_uses_the_size_row_and_default_is_unchanged() {
-    let e = [
-        Entry::item("a", "A"),
-        Entry::Head("H"),
-        Entry::Sep,
-        Entry::item("b", "B"),
-    ];
+    let e = [Entry::item("a", "A"), Entry::Head("H"), Entry::Sep, Entry::item("b", "B")];
     assert_eq!(height(&e), 2.0 * PAD + 30.0 + HEAD_H + 2.0 * PAD + kit::HAIR + 30.0);
-    assert_eq!(
-        height_sized(&e, Size::Sm),
-        2.0 * PAD + 22.0 + HEAD_H + 2.0 * PAD + kit::HAIR + 22.0
-    );
+    assert_eq!(height_sized(&e, Size::Sm), 2.0 * PAD + 22.0 + HEAD_H + 2.0 * PAD + kit::HAIR + 22.0);
     assert_eq!(item_h(Size::Md), 28.0);
 }

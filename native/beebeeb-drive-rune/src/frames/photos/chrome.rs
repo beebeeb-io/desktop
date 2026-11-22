@@ -158,9 +158,9 @@ pub fn window(
     if let Some(under) = under_bar {
         main = main.child(under);
     }
-    let main =
-        main.child(body.grow(1.0).min_h(0.0).w_full())
-            .child(status_line(&crate::frames::sync_words(s), status, t));
+    let main = main
+        .child(body.grow(1.0).min_h(0.0).w_full())
+        .child(status_line(&crate::frames::sync_words(s), status, t));
     col()
         .key("window")
         .role("window")
@@ -211,23 +211,7 @@ pub fn button_width(label: &str, icon: bool, tone: Tone, h: f32, _font: TextStyl
     button::natural_width(label, icon, variant, size)
 }
 
-pub fn button(
-    key: &str,
-    label: &str,
-    ic: Option<&'static Icon>,
-    tone: Tone,
-    h: f32,
-    _font: TextStyle,
-    t: &Theme,
-) -> El {
+pub fn button(key: &str, label: &str, ic: Option<&'static Icon>, tone: Tone, h: f32, _font: TextStyle, t: &Theme) -> El {
     let (variant, size) = mapped(tone, h);
-    button::button(
-        button::keys(key),
-        label,
-        ic,
-        variant,
-        size,
-        button::ButtonState::Enabled,
-        t,
-    )
+    button::button(button::keys(key), label, ic, variant, size, button::ButtonState::Enabled, t)
 }

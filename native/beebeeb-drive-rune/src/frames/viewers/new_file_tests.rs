@@ -272,10 +272,7 @@ fn a_name_the_folder_already_has_says_why_and_typing_takes_the_message_away() {
 #[test]
 #[allow(clippy::assertions_on_constants)]
 fn new_file_offers_the_office_types() {
-    assert!(
-        super::new_file::OFFICE_EDITOR,
-        "the editor ships: the office types are offered"
-    );
+    assert!(super::new_file::OFFICE_EDITOR, "the editor ships: the office types are offered");
     assert_eq!(Kind::offered().len(), Kind::ALL.len());
     let (mut rt, _calls) = runtime();
     open_dialog(&mut rt);

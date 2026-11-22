@@ -89,13 +89,7 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
                 },
             ),
             title,
-            slot: Some(
-                row()
-                    .key("toolbar-slot")
-                    .center_y()
-                    .gap(crate::theme::scale::space::S8)
-                    .children(bar.slot),
-            ),
+            slot: Some(row().key("toolbar-slot").center_y().gap(crate::theme::scale::space::S8).children(bar.slot)),
             slot_sep: bar.slot_sep,
             // List or grid does not apply to these sections: the board draws the switch dimmed, neither side chosen.
             view: View::NotHere,

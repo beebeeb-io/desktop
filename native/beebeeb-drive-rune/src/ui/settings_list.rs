@@ -311,17 +311,15 @@ fn build(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>, r
         // Rune roves a `list` on the arrows, Home and End and type-selects in it; a settings
         // list is never longer than its pane, so a page is the whole list: Page Up and Page
         // Down go to its ends.
-        body = body
-            .focus_group()
-            .on_key(|_: &mut crate::State, ev: &KeyEvent, tx: &mut Tx| {
-                let to = match ev.key {
-                    Key::PageUp => Key::Home,
-                    Key::PageDown => Key::End,
-                    _ => return false,
-                };
-                tx.send_key(KeyEvent { key: to, mods: ev.mods });
-                true
-            });
+        body = body.focus_group().on_key(|_: &mut crate::State, ev: &KeyEvent, tx: &mut Tx| {
+            let to = match ev.key {
+                Key::PageUp => Key::Home,
+                Key::PageDown => Key::End,
+                _ => return false,
+            };
+            tx.send_key(KeyEvent { key: to, mods: ev.mods });
+            true
+        });
     }
     l = l.child(body.child(rows_box));
     if let Some(foot) = foot {

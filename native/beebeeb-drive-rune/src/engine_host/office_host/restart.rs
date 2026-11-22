@@ -15,17 +15,15 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
-use super::super::{OfficeState, Out, Purpose, RequestId, Starter, lock};
 use super::edit::{EditAsked, EditCommand, EditEvent, EditFailure, Mode};
+use super::super::{OfficeState, Out, Purpose, RequestId, Starter, lock};
 use super::held::Held;
 use super::{Asked, Command, Doc, Phase, Worker};
 
 /// What the window says after a restart.
-pub const RESTORED_WORDS: &str =
-    "The editor stopped and was restarted from your last saved copy. Undo history was lost.";
+pub const RESTORED_WORDS: &str = "The editor stopped and was restarted from your last saved copy. Undo history was lost.";
 /// What the window says after a second crash.
-pub const READ_ONLY_WORDS: &str =
-    "The editor stopped again. This document is open to read only; your last saved copy is offered as a copy.";
+pub const READ_ONLY_WORDS: &str = "The editor stopped again. This document is open to read only; your last saved copy is offered as a copy.";
 
 /// The snapshot and crash timing. Production: 2 s idle, 10 s at most between snapshots, 60 s crash window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,10 +152,7 @@ impl<S: Starter> Worker<S> {
             });
             return;
         }
-        if let (Some(sink), Some(copy)) = (
-            self.shared.flush_sink(),
-            self.held.as_ref().and_then(Held::snapshot_copy),
-        ) {
+        if let (Some(sink), Some(copy)) = (self.shared.flush_sink(), self.held.as_ref().and_then(Held::snapshot_copy)) {
             sink(&copy);
         }
         self.flush_complete();
@@ -225,9 +220,8 @@ impl<S: Starter> Worker<S> {
             }
         }
         for command in &run.deferred {
-            if let Command::Edit(
-                EditCommand::Send { id, .. } | EditCommand::Image { id, .. } | EditCommand::Save { id, .. },
-            ) = command
+            if let Command::Edit(EditCommand::Send { id, .. } | EditCommand::Image { id, .. } | EditCommand::Save { id, .. }) =
+                command
             {
                 ids.push(*id);
             }

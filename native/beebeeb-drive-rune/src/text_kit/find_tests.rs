@@ -3,11 +3,7 @@
 use super::*;
 
 fn q(n: &str, mc: bool, ww: bool) -> FindQuery {
-    FindQuery {
-        needle: n.into(),
-        match_case: mc,
-        whole_word: ww,
-    }
+    FindQuery { needle: n.into(), match_case: mc, whole_word: ww }
 }
 
 #[test]

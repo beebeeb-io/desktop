@@ -16,8 +16,8 @@ use super::super::source::{
 use super::super::{Toast, Ui};
 use super::*;
 use crate::engine_host::save_copy::{Progress, SaveRefused};
-use crate::shell::platform::SaveAnswer;
 use crate::shell::platform::fake::FakePlatform;
+use crate::shell::platform::SaveAnswer;
 use crate::source::DriveItem;
 use crate::{State, init, view};
 
@@ -55,12 +55,7 @@ impl PhotosSource for Held {
     }
     fn file_items(&self, ids: &[PhotoId]) -> Option<Vec<DriveItem>> {
         ids.iter()
-            .map(|id| {
-                self.files
-                    .iter()
-                    .find(|(photo, _)| photo == id)
-                    .map(|(_, item)| item.clone())
-            })
+            .map(|id| self.files.iter().find(|(photo, _)| photo == id).map(|(_, item)| item.clone()))
             .collect()
     }
     fn devices(&self) -> Vec<Device> {
@@ -110,18 +105,11 @@ impl PhotosSource for Held {
     }
 }
 
+
 const A: PhotoId = PhotoId(0);
 
 fn window(kept: Option<PathBuf>) -> Runtime<State> {
-    let mut rt = Runtime::new(
-        init(),
-        view,
-        (1278.0, 798.0),
-        Env {
-            system_dark: false,
-            scale: 2.0,
-        },
-    );
+    let mut rt = Runtime::new(init(), view, (1278.0, 798.0), Env { system_dark: false, scale: 2.0 });
     rt.frame(0.0);
     rt.state.photos = Ui::new(Box::new(Held {
         library: FixturePhotos::new(),
@@ -132,10 +120,8 @@ fn window(kept: Option<PathBuf>) -> Runtime<State> {
 }
 
 fn listing(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into())
-        .collect();
+    let mut names: Vec<String> =
+        std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
     names.sort();
     names
 }
@@ -195,10 +181,7 @@ impl CopySaver for Saver {
         _progress: &Progress,
         _cancel: &AtomicBool,
     ) -> Result<(), SaveRefused> {
-        self.saved
-            .lock()
-            .unwrap()
-            .push((file_id.to_string(), dest.to_path_buf()));
+        self.saved.lock().unwrap().push((file_id.to_string(), dest.to_path_buf()));
         std::fs::write(dest, b"copy").map_err(|_| SaveRefused::Failed)
     }
 }
@@ -209,14 +192,8 @@ fn save_to_pc_asks_the_panel_with_the_photos_name_and_saves_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("harbour.jpg");
     let platform = Arc::new(FakePlatform::default());
-    platform
-        .saves
-        .lock()
-        .unwrap()
-        .push_back(SaveAnswer::Chosen(dest.clone()));
-    let saver = Arc::new(Saver {
-        saved: Mutex::default(),
-    });
+    platform.saves.lock().unwrap().push_back(SaveAnswer::Chosen(dest.clone()));
+    let saver = Arc::new(Saver { saved: Mutex::default() });
     let mut rt = window(None);
     rt.update(|s, tx| save_to_pc(s, tx, platform.clone(), saver.clone(), A));
     for _ in 0..200 {

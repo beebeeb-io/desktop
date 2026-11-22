@@ -40,8 +40,8 @@
 //! Must not: log a name, an id or a path.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, mpsc};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
@@ -55,12 +55,12 @@ use super::log;
 use super::media::HelperPicture;
 use super::stamp::{Stamp, stamp};
 use super::thumbs::EngineThumbStore;
-use crate::engine_host::viewer::viewer_picture;
 use crate::frames::files::source::{Action, ActionError, Change};
 use crate::frames::photos::source::{
-    Answered, BackupStatus, Day, Detail, Device, DeviceKind, Folder, Kind, Left, Loaded, OriginalAnswer, Photo,
-    PhotoId, PhotosSource, Pumped, Shape, SourceRef, StripItem, Totals, Viewing,
+    Answered, BackupStatus, Day, Detail, Device, DeviceKind, Folder, Kind, Left, Loaded, Photo, PhotoId, PhotosSource,
+    OriginalAnswer, Pumped, Shape, SourceRef, StripItem, Totals, Viewing,
 };
+use crate::engine_host::viewer::viewer_picture;
 use crate::media::StopReason;
 use crate::media::player::{MediaItem, PlayerHandle, Press, Refusal};
 use crate::source::DriveItem;
@@ -155,15 +155,10 @@ pub(crate) fn original_refused_for(name: &str) -> Option<&'static str> {
     if HelperPicture::of_name(name).is_some_and(|kind| !kind.decoder_missing()) {
         return None;
     }
-    let ext = name
-        .rsplit_once('.')
-        .map(|(_, ext)| ext.to_ascii_lowercase())
-        .unwrap_or_default();
+    let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()).unwrap_or_default();
     Some(match ext.as_str() {
         "heic" | "heif" => crate::frames::viewers::refusal_text::HEIC_WORDS,
-        "dng" | "cr2" | "cr3" | "arw" | "nef" | "raf" | "orf" | "rw2" => {
-            crate::frames::viewers::refusal_text::RAW_WORDS
-        }
+        "dng" | "cr2" | "cr3" | "arw" | "nef" | "raf" | "orf" | "rw2" => crate::frames::viewers::refusal_text::RAW_WORDS,
         _ => "This format can\u{2019}t be shown at full size on this PC yet. This is the preview.",
     })
 }
@@ -173,8 +168,7 @@ const ORIGINAL_MAX: u64 = 256 * 1024 * 1024;
 
 /// What a test's download answers in the engine's place: calls `progress` as it goes, then hands back the bytes.
 #[cfg(test)]
-type FakeFetch =
-    Box<dyn FnOnce(&(dyn Fn(u64, u64) + Send + Sync), &std::sync::atomic::AtomicBool) -> Result<Vec<u8>, ()> + Send>;
+type FakeFetch = Box<dyn FnOnce(&(dyn Fn(u64, u64) + Send + Sync), &std::sync::atomic::AtomicBool) -> Result<Vec<u8>, ()> + Send>;
 
 /// The picture decoders of this source, started with the first original.
 fn decoders() -> &'static rune::ImageCache {
@@ -863,11 +857,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         while let Ok(answer) = self.inbox.try_recv() {
             match answer {
                 Answer::OriginalProgress(number, done, total) => {
-                    if self
-                        .original
-                        .as_ref()
-                        .is_some_and(|job| job.number == number && job.pixels.is_none())
-                    {
+                    if self.original.as_ref().is_some_and(|job| job.number == number && job.pixels.is_none()) {
                         progress = Some((number, done, total));
                     }
                 }
@@ -1308,55 +1298,42 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         #[cfg(test)]
         let fake = self.fetch_says.take();
-        let (engine, answers, flag, wanted) = (
-            self.engine.clone(),
-            self.answers.clone(),
-            cancel.clone(),
-            file_id.clone(),
-        );
-        let started = std::thread::Builder::new()
-            .name("photos-original".into())
-            .spawn(move || {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let reply = answers.clone();
-                    let progress = move |done: u64, total: u64| {
-                        let _ = reply.send(Answer::OriginalProgress(number, done, total));
-                        // Not the window's wake on every chunk: the poll takes the latest.
-                    };
-                    #[cfg(test)]
-                    if let Some(fake) = fake {
-                        return fake(&progress, &flag).ok().and_then(|bytes| decode(&bytes)).ok_or(());
-                    }
-                    // A HEIC or a RAW whose copy is on this PC is read from there: nothing is downloaded for it.
-                    if HelperPicture::of_name(&name).is_some()
-                        && let Ok(Some(copy)) = engine.local_picture_copy_for(session, &wanted, ORIGINAL_MAX)
-                        && let Some(bytes) = copy.read()
-                    {
-                        return decode(&bytes).ok_or(());
-                    }
-                    let opened = engine
-                        .open_file_in_memory(&wanted, ORIGINAL_MAX, &progress, &flag)
-                        .map_err(|_| ())?;
-                    if flag.load(Ordering::SeqCst) {
-                        return Err(());
-                    }
-                    decode(&opened.bytes).ok_or(())
-                }))
-                .unwrap_or(Err(()));
-                let _ = answers.send(Answer::OriginalDone(number, outcome));
-                engine.wake_host();
-            });
+        let (engine, answers, flag, wanted) = (self.engine.clone(), self.answers.clone(), cancel.clone(), file_id.clone());
+        let started = std::thread::Builder::new().name("photos-original".into()).spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let reply = answers.clone();
+                let progress = move |done: u64, total: u64| {
+                    let _ = reply.send(Answer::OriginalProgress(number, done, total));
+                    // Not the window's wake on every chunk: the poll takes the latest.
+                };
+                #[cfg(test)]
+                if let Some(fake) = fake {
+                    return fake(&progress, &flag).ok().and_then(|bytes| decode(&bytes)).ok_or(());
+                }
+                // A HEIC or a RAW whose copy is on this PC is read from there: nothing is downloaded for it.
+                if HelperPicture::of_name(&name).is_some()
+                    && let Ok(Some(copy)) = engine.local_picture_copy_for(session, &wanted, ORIGINAL_MAX)
+                    && let Some(bytes) = copy.read()
+                {
+                    return decode(&bytes).ok_or(());
+                }
+                let opened = engine
+                    .open_file_in_memory(&wanted, ORIGINAL_MAX, &progress, &flag)
+                    .map_err(|_| ())?;
+                if flag.load(Ordering::SeqCst) {
+                    return Err(());
+                }
+                decode(&opened.bytes).ok_or(())
+            }))
+            .unwrap_or(Err(()));
+            let _ = answers.send(Answer::OriginalDone(number, outcome));
+            engine.wake_host();
+        });
         if started.is_err() {
             log("photos: could not start the worker");
             return false;
         }
-        self.original = Some(OriginalJob {
-            number,
-            file_id,
-            pressed,
-            cancel,
-            pixels: None,
-        });
+        self.original = Some(OriginalJob { number, file_id, pressed, cancel, pixels: None });
         true
     }
 
@@ -1367,10 +1344,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
 
     fn holds_unshowable(&self) -> bool {
         self.current().is_some_and(|library| {
-            library
-                .photos
-                .iter()
-                .any(|photo| !photo.video && original_refused_for(&photo.name).is_some())
+            library.photos.iter().any(|photo| !photo.video && original_refused_for(&photo.name).is_some())
         })
     }
 

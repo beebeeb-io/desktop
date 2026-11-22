@@ -13,8 +13,7 @@ type Read = Result<(SessionGeneration, Zeroizing<Vec<u8>>), OpenFileError>;
 pub(crate) type Opener = Box<dyn Fn(&Path, OfficeKind, Zeroizing<Vec<u8>>, Wake) -> OfficeView + Send>;
 
 /// Starts an editing session on the bytes (the app's: [`OfficeView::open_edit`]; a test's fake).
-pub(crate) type EditOpener =
-    Box<dyn Fn(&Path, EditKind, Zeroizing<Vec<u8>>, Wake, Option<ScratchStore>) -> OfficeView + Send>;
+pub(crate) type EditOpener = Box<dyn Fn(&Path, EditKind, Zeroizing<Vec<u8>>, Wake, Option<ScratchStore>) -> OfficeView + Send>;
 
 /// Starts a new document from a template (the app's: [`OfficeView::new_doc`]; a test's fake).
 pub(crate) type NewOpener = Box<dyn Fn(&Path, EditKind, Template, Wake, Option<ScratchStore>) -> OfficeView + Send>;
@@ -154,9 +153,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         // A document made here has no version until its upload lands, and is this PC's own until then: the editor too.
         .filter(|_| {
             let made_here = self.office_made_here(&opening.file_id, opening.session);
-            opening
-                .edit
-                .is_some_and(|facts| facts.can_write && (facts.version > 0 || made_here))
+            opening.edit.is_some_and(|facts| facts.can_write && (facts.version > 0 || made_here))
         });
         // The file a New document just made opens on the bytes it was made from, never on its copy on this PC.
         let made = self
@@ -215,9 +212,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             cancel,
             edit,
             // A document made here is edited from the version its upload becomes: a new file's first.
-            base: opening
-                .edit
-                .map_or(0, |facts| facts.version.max(i64::from(edit.is_some()))),
+            base: opening.edit.map_or(0, |facts| facts.version.max(i64::from(edit.is_some()))),
             inbox: Some(inbox),
             view: None,
             ended: false,
@@ -368,13 +363,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// The bytes of a document just made are for that file's own open, no other.
     pub(in crate::engine_host::viewer) fn office_forget_made_but(&mut self, file_id: &str) {
-        if self
-            .office
-            .work
-            .made_on
-            .as_ref()
-            .is_some_and(|made| made.file_id != file_id)
-        {
+        if self.office.work.made_on.as_ref().is_some_and(|made| made.file_id != file_id) {
             self.office.work.made_on = None;
         }
     }

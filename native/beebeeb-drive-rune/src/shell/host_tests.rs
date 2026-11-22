@@ -729,18 +729,11 @@ fn by_default_no_window_is_excluded_from_capture() {
     let platform = Arc::new(FakePlatform::default());
     let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
     assert!(!rt.state.shell.hide_from_capture());
-    for (at, gate) in [
-        (1.0, GateState::SignedOut),
-        (2.0, GateState::Locked),
-        (3.0, GateState::Ready),
-    ] {
+    for (at, gate) in [(1.0, GateState::SignedOut), (2.0, GateState::Locked), (3.0, GateState::Ready)] {
         engine.set_gate(gate);
         rt.frame(at);
     }
-    assert!(
-        platform.capture_exclusions.lock().unwrap().is_empty(),
-        "nothing asked for exclusion"
-    );
+    assert!(platform.capture_exclusions.lock().unwrap().is_empty(), "nothing asked for exclusion");
     assert!(!rt.state.shell.capture_excluded);
 }
 
@@ -757,11 +750,7 @@ fn the_switch_excludes_every_window_on_every_screen_and_off_clears_it() {
     engine.set_gate(GateState::Ready);
     rt.frame(2.0);
     rt.frame(3.0);
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true],
-        "Files too, no extra call"
-    );
+    assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true], "Files too, no extra call");
     hide_from_capture(&mut rt, false);
     rt.frame(4.0);
     assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true, false]);
@@ -775,10 +764,7 @@ fn the_switch_is_stored_and_read_at_start() {
     let file = dir.join(crate::shell::capture_setting::FILE_NAME);
     let engine = Arc::new(FixtureEngine::ready());
     let platform = Arc::new(FakePlatform::default());
-    let wiring = Wiring {
-        capture_file: Some(file.clone()),
-        ..Wiring::default()
-    };
+    let wiring = Wiring { capture_file: Some(file.clone()), ..Wiring::default() };
     let mut shell = Shell::new(
         Arc::new(HostActions::new(engine.clone(), platform.clone())),
         platform.clone(),
@@ -786,10 +772,7 @@ fn the_switch_is_stored_and_read_at_start() {
     );
     shell.set_hide_from_capture(true);
     assert!(crate::shell::capture_setting::load(&file));
-    let wiring = Wiring {
-        hide_from_capture: crate::shell::capture_setting::load(&file),
-        ..Wiring::default()
-    };
+    let wiring = Wiring { hide_from_capture: crate::shell::capture_setting::load(&file), ..Wiring::default() };
     let again = Shell::new(Arc::new(HostActions::new(engine, platform.clone())), platform, wiring);
     assert!(again.hide_from_capture());
     let _ = std::fs::remove_dir_all(&dir);
@@ -807,10 +790,7 @@ fn a_failed_platform_call_keeps_the_flag_false_and_content_draws() {
     hide_from_capture(&mut rt, true);
     rt.frame(1.0);
     assert!(!rt.state.shell.capture_excluded, "flag stays false on failure");
-    assert!(
-        rt.state.shell.capture_exclusion_retries > 0,
-        "retry counter incremented"
-    );
+    assert!(rt.state.shell.capture_exclusion_retries > 0, "retry counter incremented");
     assert!(platform.capture_exclusions.lock().unwrap().is_empty());
 }
 

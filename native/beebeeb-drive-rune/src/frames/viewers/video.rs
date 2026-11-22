@@ -15,8 +15,8 @@ use super::kinds::clock;
 use super::source::{Body, NoPreview};
 use super::{Intent, Ui, media_icons, refusal_text, states, style};
 use crate::State;
-use crate::media::player::{NoSound, PlayState, PlayerHandle, Refusal};
 use crate::theme::scale;
+use crate::media::player::{NoSound, PlayState, PlayerHandle, Refusal};
 use crate::theme::tokens::Theme;
 use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::kit;
@@ -107,20 +107,13 @@ pub fn refused_for(why: &Refusal, t: &Theme) -> El {
 fn refused_with(words: &str, action: &'static str, store: Option<&'static str>, t: &Theme) -> El {
     // A refusal is final for this file here: it offers the other app, never "Try again".
     let mut buttons = row().key("refused-actions").gap(scale::space::S8).child(
-        button(
-            keys("refused-open"),
-            action,
-            None,
-            Variant::Secondary,
-            Size::Md,
-            ButtonState::Enabled,
-            t,
-        )
-        .on_press(|s: &mut State| {
-            if let Some(ui) = super::ui(s) {
-                ui.intent(Intent::OpenInAnotherApp);
-            }
-        }),
+        button(keys("refused-open"), action, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(
+            |s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.intent(Intent::OpenInAnotherApp);
+                }
+            },
+        ),
     );
     if let Some(url) = store {
         buttons = buttons.child(

@@ -23,11 +23,11 @@ use beebeeb_office_protocol::check::MAX_OP_TEXT_BYTES;
 use beebeeb_office_protocol::office::{CellRange, EditOp};
 use rune::{Drag, Key, KeyEvent, Phase, TextEdit, Tx, el, text_input};
 
+use crate::theme::scale::space;
 use crate::State;
 use crate::frames::office::sheets::{self, Cell, Geometry, SheetView, sheets_scroll};
 use crate::frames::viewers;
 use crate::frames::viewers::source::Body;
-use crate::theme::scale::space;
 use crate::theme::tokens::Theme;
 
 /// The surface over the grid: the keys that start with `edit-` are the editor's (`edit::FOCUS_PREFIX`).
@@ -121,14 +121,7 @@ pub fn cell_edit(s: &mut State) -> &mut TextEdit {
 
 fn grid_mut(s: &mut State) -> &mut Grid {
     // The field is only built (and so only edits) in a window that has a file open.
-    s.viewer
-        .ui
-        .as_mut()
-        .expect("the sheet's cell editor belongs to an open file")
-        .office
-        .grid
-        .0
-        .get_mut()
+    s.viewer.ui.as_mut().expect("the sheet's cell editor belongs to an open file").office.grid.0.get_mut()
 }
 
 /// The cell being edited and where, if one is.
@@ -738,9 +731,7 @@ pub fn layer(grid: &SheetGrid, view: &SheetView, geometry: Geometry, room: (f32,
     if editing_in(grid).is_some_and(|e| e.sheet != view.sheet) {
         on(grid, reset_grid);
     }
-    let cell_at = editing_in(grid)
-        .filter(|e| !e.in_bar)
-        .and_then(|e| geometry.rect_of(e.cell));
+    let cell_at = editing_in(grid).filter(|e| !e.in_bar).and_then(|e| geometry.rect_of(e.cell));
     on(grid, |g| {
         g.geometry = geometry;
         g.room = room;

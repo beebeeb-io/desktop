@@ -410,10 +410,7 @@ fn a_preview_without_a_connection_opens_the_panel() {
 fn a_grid_tile_wears_its_kinds_icon_colour() {
     use crate::theme::file_icon_colors::tint_color;
     use crate::theme::file_icons::Tint;
-    use crate::ui::{
-        grid_tiles::{Tile, tile},
-        kit,
-    };
+    use crate::ui::{grid_tiles::{Tile, tile}, kit};
     let rt = scene("DW-0119");
     let proto = rt.state.listing.items[2].clone();
     let item = |name: &str, folder: bool, mime: Option<&str>| {
@@ -439,18 +436,7 @@ fn a_grid_tile_wears_its_kinds_icon_colour() {
             Thumb::Type(_, size) => assert_eq!(size, sizes[i]),
             _ => panic!("tile {i} is not a type icon"),
         }
-        let _ = tile(
-            i,
-            &Tile {
-                name: &it.name,
-                sub: "",
-                thumb: th,
-                pixels: None,
-                length: None,
-                selected: false,
-            },
-            &t,
-        );
+        let _ = tile(i, &Tile { name: &it.name, sub: "", thumb: th, pixels: None, length: None, selected: false }, &t);
     }
     let notes = kit::take();
     for (i, tint) in want.iter().enumerate() {

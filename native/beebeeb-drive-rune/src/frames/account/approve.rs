@@ -23,8 +23,8 @@ use crate::theme::tokens::Theme;
 use crate::ui::account_form::{self as fm, Field};
 use crate::ui::account_set::{self as set, Lead, Look, Row, Size, Tail};
 use crate::ui::au::{self, Keys, Tone};
-use crate::ui::au_entry::{self, FocusedSpec};
 use crate::ui::dialog::{self, Dialog as Card, Foot, Head};
+use crate::ui::au_entry::{self, FocusedSpec};
 use crate::ui::kit;
 use crate::ui::settings_dialog::DIALOG_TITLE;
 use crate::ui::settings_list as lists;
@@ -549,11 +549,12 @@ fn password_field(a: &Approve, t: &Theme) -> El {
 /// DW-A12: type the code the other device shows.
 pub fn code_pane(a: &Approve, t: &Theme) -> El {
     let error = problem_words(a.problem);
-    let mut field = col()
-        .key("approve-field")
-        .w_full()
-        .gap(crate::theme::scale::space::S6)
-        .child(code_field(a, "Code on the other device", error, t));
+    let mut field =
+        col()
+            .key("approve-field")
+            .w_full()
+            .gap(crate::theme::scale::space::S6)
+            .child(code_field(a, "Code on the other device", error, t));
     if error.is_none() {
         field = field.child(
             kit::label(

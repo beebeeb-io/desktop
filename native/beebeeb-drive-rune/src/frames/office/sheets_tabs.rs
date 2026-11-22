@@ -14,9 +14,9 @@ use rune::{Color, El, Key, KeyEvent, TextEdit, Tx, col, el, row, text_input};
 
 use super::sheets_scroll::follow;
 use super::{Cell, SheetView, TAB, TAB_ON, TABS_H, fitted};
+use crate::theme::scale::space;
 use crate::State;
 use crate::frames::viewers::{self, source::Body};
-use crate::theme::scale::space;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 
@@ -142,10 +142,7 @@ pub fn name_problem(name: &str, others: &[&str]) -> Option<&'static str> {
     if name.contains(NAME_BAD) {
         return Some("A sheet name can't have : \\ / ? * [ ]");
     }
-    if others
-        .iter()
-        .any(|o| o.eq_ignore_ascii_case(name) || o.to_lowercase() == name.to_lowercase())
-    {
+    if others.iter().any(|o| o.eq_ignore_ascii_case(name) || o.to_lowercase() == name.to_lowercase()) {
         return Some("Another sheet has that name");
     }
     None
@@ -198,13 +195,7 @@ fn commit_rename(s: &mut State, tx: &mut Tx) {
         Some(ui) => {
             let (source, id) = ui.edit_source();
             let id = id.to_string();
-            source.edit(
-                &id,
-                EditOp::RenameSheet {
-                    sheet,
-                    name: name.clone(),
-                },
-            )
+            source.edit(&id, EditOp::RenameSheet { sheet, name: name.clone() })
         }
         None => false,
     };

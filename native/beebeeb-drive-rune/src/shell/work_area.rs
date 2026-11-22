@@ -85,17 +85,10 @@ pub fn fit_on_change(
 ) -> Option<((f32, f32), (i32, i32))> {
     let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
     let inside = |r: &Rect, p: (i32, i32)| p.0 >= r.x && p.0 < r.x + r.w && p.1 >= r.y && p.1 < r.y + r.h;
-    let (_, area) = work
-        .iter()
-        .find(|(whole, _)| inside(whole, at))
-        .or_else(|| work.first())?;
+    let (_, area) = work.iter().find(|(whole, _)| inside(whole, at)).or_else(|| work.first())?;
     let (fw, fh) = ((FRAME_PX.0 * scale).ceil() as i32, (FRAME_PX.1 * scale).ceil() as i32);
-    let w = ((f64::from(want_points.0) * scale).round() as i32)
-        .min(area.w - fw)
-        .max(1);
-    let h = ((f64::from(want_points.1) * scale).round() as i32)
-        .min(area.h - fh)
-        .max(1);
+    let w = ((f64::from(want_points.0) * scale).round() as i32).min(area.w - fw).max(1);
+    let h = ((f64::from(want_points.1) * scale).round() as i32).min(area.h - fh).max(1);
     let x = at.0.clamp(area.x, (area.x + area.w - w - fw).max(area.x));
     let y = at.1.clamp(area.y, (area.y + area.h - h - fh).max(area.y));
     Some((((f64::from(w) / scale) as f32, (f64::from(h) / scale) as f32), (x, y)))

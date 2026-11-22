@@ -449,14 +449,7 @@ fn archive_key(ui: &mut Ui, ev: &KeyEvent, now: u64) -> bool {
     let names: Vec<String> = ui
         .entries()
         .iter()
-        .map(|e| {
-            e.path
-                .trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .unwrap_or_default()
-                .to_string()
-        })
+        .map(|e| e.path.trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string())
         .collect();
     let keys = ListKeys {
         len: names.len(),

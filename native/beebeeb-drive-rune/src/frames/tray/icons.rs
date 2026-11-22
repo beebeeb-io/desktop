@@ -103,7 +103,7 @@ pub static FROM_TABLET: Icon = icon24!(
 /// A change by someone it is shared with (`row-7-sub-icon of DW-1202-dark`).
 pub use crate::theme::icons::SHARED as FROM_PEOPLE;
 
-/// A file moved to Trash (`row-6-icon of DW-1202-dark`).
+   /// A file moved to Trash (`row-6-icon of DW-1202-dark`).
 pub use crate::theme::icons::TRASH as FILE_TRASHED;
 
 // The b as a template image (`#mk-b`): the rounded square with the b cut out of it by a mask

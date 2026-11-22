@@ -67,7 +67,9 @@ fn main() {
     // drive-complete-138: a panic leaves one redacted record in the log folder (`log_file::crash`).
     log_file::crash::install_hook();
     // Test builds only: a crash on demand, for the installed-build check of the record.
-    if !shell::identity::engine_identity().is_real() && std::env::var_os("BEEBEEB_TEST_CRASH").is_some() {
+    if !shell::identity::engine_identity().is_real()
+        && std::env::var_os("BEEBEEB_TEST_CRASH").is_some()
+    {
         std::thread::spawn(|| {
             while log_file::dir().is_none() {
                 std::thread::sleep(std::time::Duration::from_millis(200));

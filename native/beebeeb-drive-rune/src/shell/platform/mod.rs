@@ -16,17 +16,17 @@ use super::tray_icon::TaskbarTheme;
 
 #[cfg(test)]
 pub mod fake;
+pub mod packet_text;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-pub mod packet_text;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-mod windows_contrast;
-#[cfg(windows)]
 mod windows_control;
+#[cfg(windows)]
+mod windows_contrast;
 /// The Windows contrast theme's colours, when one is on.
 #[cfg(windows)]
 pub(crate) fn contrast_colors() -> Option<crate::theme::contrast::SystemColors> {
@@ -254,10 +254,7 @@ mod save_share_tests {
     #[test]
     fn a_save_path_that_lands_after_a_sign_out_is_dropped() {
         let chosen = SaveAnswer::Chosen(PathBuf::from("C:/Users/x/a.jpg"));
-        assert_eq!(
-            chosen.clone().for_session("acct-1", Some("acct-1")),
-            Some(chosen.clone())
-        );
+        assert_eq!(chosen.clone().for_session("acct-1", Some("acct-1")), Some(chosen.clone()));
         assert_eq!(chosen.clone().for_session("acct-1", None), None);
         assert_eq!(chosen.for_session("acct-1", Some("acct-2")), None);
         assert_eq!(SaveAnswer::Cancelled.for_session("acct-1", None), None);
@@ -266,14 +263,8 @@ mod save_share_tests {
     #[test]
     fn a_cancelled_panel_answers_cancelled_and_remembers_the_ask() {
         let fake = FakePlatform::default();
-        assert_eq!(
-            fake.pick_save_path("a.jpg", PathBuf::from("C:/x")),
-            SaveAnswer::Cancelled
-        );
-        fake.saves
-            .lock()
-            .unwrap()
-            .push_back(SaveAnswer::Chosen(PathBuf::from("C:/x/b.jpg")));
+        assert_eq!(fake.pick_save_path("a.jpg", PathBuf::from("C:/x")), SaveAnswer::Cancelled);
+        fake.saves.lock().unwrap().push_back(SaveAnswer::Chosen(PathBuf::from("C:/x/b.jpg")));
         fake.saves.lock().unwrap().push_back(SaveAnswer::Failed);
         assert_eq!(
             fake.pick_save_path("b.jpg", PathBuf::from("C:/x")),
@@ -291,10 +282,7 @@ mod save_share_tests {
         assert_eq!(fake.share_file(None, Path::new("C:/x/a.jpg")), Ok(()));
         assert_eq!(fake.shared.lock().unwrap().as_slice(), [PathBuf::from("C:/x/a.jpg")]);
         let unbuilt = FakePlatform::unbuilt();
-        assert!(matches!(
-            unbuilt.share_file(None, Path::new("a")),
-            Err(PlatformError::NotBuilt(_))
-        ));
+        assert!(matches!(unbuilt.share_file(None, Path::new("a")), Err(PlatformError::NotBuilt(_))));
         assert_eq!(unbuilt.pick_save_path("a", PathBuf::new()), SaveAnswer::Failed);
     }
 }

@@ -45,11 +45,7 @@ pub fn with_main(main: AppHandle<State>) -> TipState {
 
 /// The tip's top-left, next to the b: the flyout's rule with the tip's size.
 pub fn position(a: &Anchor) -> (i32, i32) {
-    let scale = if a.scale.is_finite() && a.scale > 0.0 {
-        a.scale
-    } else {
-        1.0
-    };
+    let scale = if a.scale.is_finite() && a.scale > 0.0 { a.scale } else { 1.0 };
     let (w, h) = (
         (f64::from(SIZE.0) * scale).round() as i32,
         (f64::from(SIZE.1) * scale).round() as i32,
@@ -131,27 +127,14 @@ mod tray_tip_tests {
     use flyout::{Anchor, Rect};
 
     fn key(key: Key) -> KeyEvent {
-        KeyEvent {
-            key,
-            mods: rune::Mods::default(),
-        }
+        KeyEvent { key, mods: rune::Mods::default() }
     }
 
     fn anchor(work: (i32, i32, i32, i32)) -> Anchor {
-        let monitor = Rect {
-            x: 0,
-            y: 0,
-            w: 1920,
-            h: 1080,
-        };
+        let monitor = Rect { x: 0, y: 0, w: 1920, h: 1080 };
         Anchor {
             monitor,
-            work: Rect {
-                x: work.0,
-                y: work.1,
-                w: work.2,
-                h: work.3,
-            },
+            work: Rect { x: work.0, y: work.1, w: work.2, h: work.3 },
             scale: 1.0,
         }
     }

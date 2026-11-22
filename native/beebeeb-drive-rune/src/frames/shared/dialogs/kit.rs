@@ -24,9 +24,9 @@ use crate::frames::shared::parts::{self, style};
 use crate::frames::shared::source::Member;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, radius, type_};
-use crate::ui::dialog::{Dialog, Foot as DFoot, Head, dialog};
 use crate::ui::settings_dialog::{DIALOG_TITLE, scrim_color};
 use crate::ui::settings_list::{FOOT, LIST_TITLE};
+use crate::ui::dialog::{Dialog, Foot as DFoot, Head, dialog};
 use crate::ui::{field as ui_field, kit};
 use rune::tok::Family;
 use rune::{Color, El, Icon, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
@@ -482,10 +482,7 @@ pub fn groups(g: &Groups, numbers: &[String], t: &Theme) -> El {
         .radius(12.0)
         .fill(t.field);
     for (l, line) in numbers.chunks(4).enumerate() {
-        let mut r = row()
-            .key(format!("safety-line-{l}"))
-            .a11y_hidden()
-            .gap(crate::theme::scale::space::S16);
+        let mut r = row().key(format!("safety-line-{l}")).a11y_hidden().gap(crate::theme::scale::space::S16);
         for (c, group) in line.iter().enumerate() {
             let i = l * 4 + c;
             r = r.child(

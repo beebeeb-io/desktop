@@ -47,14 +47,7 @@ pub(super) fn watch(wake: PacketWake) -> bool {
     // SAFETY: a thread hook of the calling thread with a `extern "system"` procedure that lives as long as the
     // process; no module handle is needed for a hook of the caller's own thread. It is never removed: the thread
     // is the window's and ends with the process.
-    let hook = unsafe {
-        SetWindowsHookExW(
-            WH_GETMESSAGE,
-            Some(on_message),
-            std::ptr::null_mut(),
-            GetCurrentThreadId(),
-        )
-    };
+    let hook = unsafe { SetWindowsHookExW(WH_GETMESSAGE, Some(on_message), std::ptr::null_mut(), GetCurrentThreadId()) };
     if hook.is_null() {
         return false;
     }

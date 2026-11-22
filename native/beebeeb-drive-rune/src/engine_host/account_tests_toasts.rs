@@ -308,7 +308,11 @@ fn everywhere_else_one_by_one_stops_at_a_call_that_gets_no_answer() {
     let already_sent = sent.len();
     // The engine sends a dropped call again (bounded transport retries): the same session, never the next one.
     sent.dedup();
-    assert_eq!(sent, ["s-phone"], "nothing is sent after a call that got no answer");
+    assert_eq!(
+        sent,
+        ["s-phone"],
+        "nothing is sent after a call that got no answer"
+    );
     // Not known for the one, not sent for the other: the list says both stand, and both can be sent again.
     assert_eq!(source.notice(), Some(NOT_SIGNED_OUT_ELSEWHERE));
     assert_eq!(source.notice_action(), Some(TRY_AGAIN));

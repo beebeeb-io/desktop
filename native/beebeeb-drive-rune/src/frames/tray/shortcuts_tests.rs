@@ -89,10 +89,7 @@ fn the_three_contents_hold_the_boards_lists_and_counts() {
         WINDOW.iter().map(|l| l.commands.len()).collect::<Vec<_>>(),
         [8, 10, 4, 6]
     );
-    assert_eq!(
-        EDITOR.iter().map(|l| l.commands.len()).collect::<Vec<_>>(),
-        [5, 6, 16, 6]
-    );
+    assert_eq!(EDITOR.iter().map(|l| l.commands.len()).collect::<Vec<_>>(), [5, 6, 16, 6]);
     assert_eq!((count(APP), count(WINDOW), count(EDITOR)), (37, 28, 33));
     // No command without its key or its home, and no Ctrl+Alt key (AltGr types characters).
     for (name, home) in [APP, WINDOW, EDITOR]
@@ -292,10 +289,7 @@ fn the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document() {
             list.name
         );
     }
-    assert!(
-        has(&rt, "sc-3") && !has(&rt, "sc-4"),
-        "four lists: Format and Insert are back"
-    );
+    assert!(has(&rt, "sc-3") && !has(&rt, "sc-4"), "four lists: Format and Insert are back");
     let dialog = info(&rt, "sc-dlg");
     assert_eq!(dialog.role, "dialog");
     assert_eq!(

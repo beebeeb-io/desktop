@@ -238,10 +238,7 @@ fn leftover_files_offer_keep_aside_and_discard_and_keep_aside_asks_the_engine_on
         .filter_map(|e| e.label)
         .collect();
     for label in ["Keep them aside", "Discard and switch", "Close"] {
-        assert!(
-            labels.iter().any(|l| l == label),
-            "{label} is not on the card: {labels:?}"
-        );
+        assert!(labels.iter().any(|l| l == label), "{label} is not on the card: {labels:?}");
     }
     press(&mut rt, "Close");
     assert_eq!(asked(&engine), 0, "Close moves nothing");

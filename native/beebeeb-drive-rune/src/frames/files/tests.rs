@@ -653,10 +653,7 @@ fn new_opens_its_menu_and_every_entry_and_shortcut_goes_to_its_frame() {
             "Upload a folder\u{2026}"
         ]
     );
-    for (n, expected) in ["DW-0417", "DW-1521", "DW-1558", "DW-0415", "DW-0480"]
-        .into_iter()
-        .enumerate()
-    {
+    for (n, expected) in ["DW-0417", "DW-1521", "DW-1558", "DW-0415", "DW-0480"].into_iter().enumerate() {
         if rt.state.actions.menu.is_none() {
             click(&mut rt, "new-btn");
         }

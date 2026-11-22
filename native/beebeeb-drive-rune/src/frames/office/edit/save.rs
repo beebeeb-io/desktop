@@ -5,8 +5,8 @@
 //! The revision a save was asked at is kept here ([`Sent`], in `OfficeUi.save`): what the person types while it is
 //! on its way stays unsaved after it lands. The presses and the answers' wiring are `viewers/office_over.rs`'s.
 
-use super::EditUi;
 use crate::frames::viewers::{Ui, office::Keeping};
+use super::EditUi;
 
 /// The toast while a save is on its way.
 pub const SAVING: &str = "Saving\u{2026}";
@@ -104,39 +104,14 @@ mod tests {
     use crate::frames::office::edit::EditKind;
 
     fn sent() -> Sent {
-        Sent {
-            revision: 3,
-            id: "f1".into(),
-            version: 7,
-            answer: None,
-        }
+        Sent { revision: 3, id: "f1".into(), version: 7, answer: None }
     }
 
     #[test]
     fn only_the_engines_answer_settles_a_save_never_a_toast() {
         assert_eq!(seen(&sent(), "f1", 7), Seen::Waiting);
-        assert_eq!(
-            seen(
-                &Sent {
-                    answer: Some(Seen::Queued),
-                    ..sent()
-                },
-                "f1",
-                7
-            ),
-            Seen::Queued
-        );
-        assert_eq!(
-            seen(
-                &Sent {
-                    answer: Some(Seen::Failed),
-                    ..sent()
-                },
-                "f1",
-                7
-            ),
-            Seen::Failed
-        );
+        assert_eq!(seen(&Sent { answer: Some(Seen::Queued), ..sent() }, "f1", 7), Seen::Queued);
+        assert_eq!(seen(&Sent { answer: Some(Seen::Failed), ..sent() }, "f1", 7), Seen::Failed);
         assert_eq!(seen(&sent(), "f1", 8), Seen::Landed);
     }
 

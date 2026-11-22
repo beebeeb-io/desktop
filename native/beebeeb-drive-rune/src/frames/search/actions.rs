@@ -82,9 +82,9 @@ pub fn sorted(s: &State, hits: Arc<[Hit]>) -> Arc<[Hit]> {
     };
     let facts = |hit: &Hit| {
         let known = s.actions.source.item_of(&hit.id);
-        let item = known
-            .clone()
-            .unwrap_or_else(|| crate::frames::item::display_item(&hit.id, &hit.name, hit.kind == Kind::Folder, hit.pc));
+        let item = known.clone().unwrap_or_else(|| {
+            crate::frames::item::display_item(&hit.id, &hit.name, hit.kind == Kind::Folder, hit.pc)
+        });
         let changed = known
             .map(|k| k.modified_at)
             .filter(|m| !m.is_empty())
@@ -178,11 +178,7 @@ fn keep_offline(s: &mut State, tx: &mut Tx, id: &str) -> bool {
             s.frames.find.kept.insert(id.to_string(), keep);
         }
         Err(why) => {
-            let action = if keep {
-                Action::KeepOffline
-            } else {
-                Action::RemoveOffline
-            };
+            let action = if keep { Action::KeepOffline } else { Action::RemoveOffline };
             say(s, tx, Toast::failure(action, why));
         }
     }
@@ -286,31 +282,13 @@ fn show_in_files(s: &mut State, tx: &mut Tx, id: &str) {
 fn pick_sort(s: &mut State, id: &str) {
     let sort = s.frames.find.sort.unwrap_or_default();
     let next = match id {
-        "sort-name" => Sort {
-            by: SortBy::Name,
-            ..sort
-        },
-        "sort-date" => Sort {
-            by: SortBy::DateChanged,
-            ..sort
-        },
-        "sort-size" => Sort {
-            by: SortBy::Size,
-            ..sort
-        },
-        "sort-type" => Sort {
-            by: SortBy::Type,
-            ..sort
-        },
-        "order-forward" => Sort {
-            reversed: false,
-            ..sort
-        },
+        "sort-name" => Sort { by: SortBy::Name, ..sort },
+        "sort-date" => Sort { by: SortBy::DateChanged, ..sort },
+        "sort-size" => Sort { by: SortBy::Size, ..sort },
+        "sort-type" => Sort { by: SortBy::Type, ..sort },
+        "order-forward" => Sort { reversed: false, ..sort },
         "order-reversed" => Sort { reversed: true, ..sort },
-        "folders-first" => Sort {
-            folders_first: !sort.folders_first,
-            ..sort
-        },
+        "folders-first" => Sort { folders_first: !sort.folders_first, ..sort },
         _ => return,
     };
     s.frames.find.sort = Some(next);
@@ -332,9 +310,7 @@ fn close_menu(s: &mut State, tx: &mut Tx) {
 
 /// The arrows, Home, End, Enter and Esc of the open menu (heard on the menu itself: it is modal).
 fn menu_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    let Some(open) = s.frames.find.menu.clone() else {
-        return false;
-    };
+    let Some(open) = s.frames.find.menu.clone() else { return false };
     let list = entries(s, &open.of);
     let to = |s: &mut State, hot: Option<usize>| {
         if let Some(m) = s.frames.find.menu.as_mut() {

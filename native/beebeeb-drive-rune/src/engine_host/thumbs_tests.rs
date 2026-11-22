@@ -411,22 +411,13 @@ mod local_decode {
         };
         let square = cut_made_here(whole(), ThumbCut::Square);
         assert_eq!((square.width, square.height), (2, 2));
-        assert_eq!(
-            square.rgba.to_vec(),
-            [1u8, 2, 1, 2].iter().flat_map(|c| [*c; 4]).collect::<Vec<u8>>()
-        );
+        assert_eq!(square.rgba.to_vec(), [1u8, 2, 1, 2].iter().flat_map(|c| [*c; 4]).collect::<Vec<u8>>());
         let strip = cut_made_here(whole(), ThumbCut::Strip);
         assert_eq!((strip.width, strip.height), (1, 2));
         let same = cut_made_here(whole(), ThumbCut::Whole);
         assert_eq!((same.width, same.height, same.rgba.len()), (4, 2, 32));
         // A length that does not match its size is never indexed.
-        let short = cut_made_here(
-            ThumbPixels {
-                rgba: zeroize::Zeroizing::new(vec![0; 5]),
-                ..whole()
-            },
-            ThumbCut::Square,
-        );
+        let short = cut_made_here(ThumbPixels { rgba: zeroize::Zeroizing::new(vec![0; 5]), ..whole() }, ThumbCut::Square);
         assert_eq!(short.rgba.len(), 5);
     }
 

@@ -188,10 +188,7 @@ mod tests {
     }
 
     fn render(p: Page) -> Runtime<Page> {
-        let env = Env {
-            system_dark: false,
-            scale: 2.0,
-        };
+        let env = Env { system_dark: false, scale: 2.0 };
         let mut rt = Runtime::new(p, view, (400.0, 200.0), env);
         rt.frame(0.0);
         rt.settle_all();
@@ -224,12 +221,7 @@ mod tests {
     #[test]
     fn sits_inset_above_the_lower_edge() {
         let rt = render(Page(Lead::Check, false));
-        let r = rt
-            .elements()
-            .into_iter()
-            .find(|e| e.key.as_deref() == Some("toast"))
-            .unwrap()
-            .rect;
+        let r = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("toast")).unwrap().rect;
         assert!((200.0 - (r[1] + r[3]) - INSET).abs() < 1.0, "{r:?}");
     }
 }

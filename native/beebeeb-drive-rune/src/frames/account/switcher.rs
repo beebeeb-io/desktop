@@ -12,8 +12,8 @@
 //! call runs on a thread of its own, never the window's; the engine wakes the window when it is done. Nothing of an
 //! account (email, id) is logged.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::State;
 use crate::theme::tokens::{self, Theme, radius, type_};
@@ -141,11 +141,7 @@ fn sign_out(id: String) {
 }
 
 fn initials(email: &str) -> String {
-    email
-        .chars()
-        .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default()
+    email.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_default()
 }
 
 /// The list, drawn above the account row while it is open (`None` while closed, or with no switcher installed).
@@ -166,11 +162,7 @@ pub fn panel(t: &Theme) -> Option<El> {
         .radius(radius::CONTROL)
         .fill(t.card)
         .border(kit::HAIR, t.separator)
-        .child(
-            kit::label("switcher-head", "Accounts on this PC", type_::CAPTION, t.text_tertiary)
-                .px(crate::theme::scale::space::S6)
-                .py(crate::theme::scale::space::S2),
-        );
+        .child(kit::label("switcher-head", "Accounts on this PC", type_::CAPTION, t.text_tertiary).px(crate::theme::scale::space::S6).py(crate::theme::scale::space::S2));
     for (i, account) in listed().into_iter().enumerate() {
         let key = format!("switcher-account-{i}");
         let mut line = row()
@@ -201,12 +193,7 @@ pub fn panel(t: &Theme) -> Option<El> {
                     .min_w(0.0),
             );
         if account.current {
-            line = line.child(kit::label(
-                format!("{key}-current"),
-                "Current",
-                type_::CAPTION,
-                t.text_tertiary,
-            ));
+            line = line.child(kit::label(format!("{key}-current"), "Current", type_::CAPTION, t.text_tertiary));
         } else {
             let id = account.id.clone();
             line = line
@@ -246,19 +233,10 @@ pub fn panel(t: &Theme) -> Option<El> {
             .focusable(!busy)
             .disabled(busy)
             .on_press(|_s: &mut State| add_another())
-            .child(kit::label(
-                "switcher-add-label",
-                "Add another account",
-                type_::BODY_SM,
-                t.text,
-            )),
+            .child(kit::label("switcher-add-label", "Add another account", type_::BODY_SM, t.text)),
     );
     if let Some(words) = said() {
-        list = list.child(
-            kit::label("switcher-said", words, type_::CAPTION, t.text_secondary)
-                .px(crate::theme::scale::space::S6)
-                .wrap(),
-        );
+        list = list.child(kit::label("switcher-said", words, type_::CAPTION, t.text_secondary).px(crate::theme::scale::space::S6).wrap());
     }
     Some(list)
 }

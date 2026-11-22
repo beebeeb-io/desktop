@@ -123,7 +123,8 @@ fn new_request(s: &State, t: &Theme) -> El {
         if m > 0 {
             item = item.ruled();
         }
-        settings_list::item(n, m, &item, t).on_press(move |s: &mut State| s.frames.shared.fields.request.toggle(which))
+        settings_list::item(n, m, &item, t)
+            .on_press(move |s: &mut State| s.frames.shared.fields.request.toggle(which))
     };
     let settings = kit::rows(
         n,
@@ -131,12 +132,7 @@ fn new_request(s: &State, t: &Theme) -> El {
         vec![
             setting(0, &ic::FOLDER, "Files go to", Setting::Folder),
             setting(1, &ic::CLOCK, "Expires", Setting::Expires),
-            setting(
-                2,
-                &crate::frames::shared::parts::icons::FILE,
-                "Most files",
-                Setting::Files,
-            ),
+            setting(2, &crate::frames::shared::parts::icons::FILE, "Most files", Setting::Files),
             setting(3, &ic::DATABASE, "Total size", Setting::Size),
         ],
     );
@@ -192,12 +188,7 @@ fn new_request_menu(s: &State, t: &Theme) -> Option<El> {
         .collect();
     Some(
         crate::ui::settings_controls::menu(0, name, 150.0, items, t)
-            .anchored(
-                format!("item-{}-{m}-menu-at", ui.lists_behind()),
-                rune::Side::Bottom,
-                rune::Align::Start,
-                0.0,
-            )
+            .anchored(format!("item-{}-{m}-menu-at", ui.lists_behind()), rune::Side::Bottom, rune::Align::Start, 0.0)
             .modal(true, |s: &mut State| s.frames.shared.fields.request.open = None),
     )
 }
@@ -301,11 +292,7 @@ fn person(s: &State, share: &PeopleShare, member: &Member, t: &Theme) -> El {
             n + 1,
             "Access",
             Some("Access"),
-            el().key("access-box")
-                .w_full()
-                .px(crate::theme::scale::space::S12)
-                .py(crate::theme::scale::space::S8)
-                .child(switch),
+            el().key("access-box").w_full().px(crate::theme::scale::space::S12).py(crate::theme::scale::space::S8).child(switch),
             None,
             t,
         ),
@@ -464,8 +451,7 @@ fn safety_number(s: &State, share: &str, member: &Member, number: &SafetyNumber,
         // Not ready, or already answered: the only way on is back.
         let (share, person) = (share.clone(), person.clone());
         trailing(vec![
-            button_md("Done", ButtonKind::Amber, None, t)
-                .on_press(move |s: &mut State| back_to_person(s, &share, &person)),
+            button_md("Done", ButtonKind::Amber, None, t).on_press(move |s: &mut State| back_to_person(s, &share, &person)),
         ])
     } else {
         let (differ, matched) = ((share.clone(), person.clone()), (share, person));
@@ -474,10 +460,7 @@ fn safety_number(s: &State, share: &str, member: &Member, number: &SafetyNumber,
             .child(
                 button_md("They don't match", ButtonKind::Outline, None, t).on_press(move |s: &mut State| {
                     if wired {
-                        s.frames
-                            .shared
-                            .source
-                            .safety_start(&differ.0, &differ.1, SafetyAsk::Differs);
+                        s.frames.shared.source.safety_start(&differ.0, &differ.1, SafetyAsk::Differs);
                     } else {
                         ask(s, Intent::Do("safety-number-differs", differ.1.clone()));
                     }
@@ -487,10 +470,7 @@ fn safety_number(s: &State, share: &str, member: &Member, number: &SafetyNumber,
             .child(
                 button_md("They match", ButtonKind::Amber, None, t).on_press(move |s: &mut State| {
                     if wired {
-                        s.frames
-                            .shared
-                            .source
-                            .safety_start(&matched.0, &matched.1, SafetyAsk::Matches);
+                        s.frames.shared.source.safety_start(&matched.0, &matched.1, SafetyAsk::Matches);
                     } else {
                         ask(s, Intent::Do("safety-number-matches", matched.1.clone()));
                     }
@@ -707,10 +687,7 @@ fn key_changed(s: &State, share: &str, member: &Member, t: &Theme) -> El {
         button_md("Share anyway", ButtonKind::Outline, None, t).on_press(move |s: &mut State| {
             if s.frames.shared.source.safety_wired() {
                 s.frames.shared.source.safety_clear(&anyway_share, &anyway);
-                s.frames
-                    .shared
-                    .source
-                    .safety_start(&anyway_share, &anyway, SafetyAsk::Anyway);
+                s.frames.shared.source.safety_start(&anyway_share, &anyway, SafetyAsk::Anyway);
             } else {
                 ask(s, Intent::Do("share-anyway", anyway.clone()));
             }
@@ -871,15 +848,12 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
                 return Vec::new();
             };
             // A share that went through "Share anyway" has nothing left to warn about.
-            let changed = key_changed
-                .as_deref()
-                .and_then(|p| ui.member(&share.id, p))
-                .filter(|m| {
-                    !matches!(
-                        ui.source.safety_state(&share.id, &m.id),
-                        SafetyState::Shared | SafetyState::Withdrawn
-                    )
-                });
+            let changed = key_changed.as_deref().and_then(|p| ui.member(&share.id, p)).filter(|m| {
+                !matches!(
+                    ui.source.safety_state(&share.id, &m.id),
+                    SafetyState::Shared | SafetyState::Withdrawn
+                )
+            });
             let people = kit::layer(
                 "people",
                 people(s, &share, t),

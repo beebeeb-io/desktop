@@ -175,16 +175,10 @@ fn unix_now() -> i64 {
 
 /// Drop `file_id`'s recovery blob, but only one kept before `pressed_at`: a blob kept after the person pressed Save may
 /// hold what was typed since, and that is not in the version the server confirmed. `true`: it went.
-fn discard_blob_before<E: ViewerEngine>(
-    engine: &E,
-    session: SessionGeneration,
-    file_id: &str,
-    pressed_at: i64,
-) -> bool {
-    let older = engine.recovery_list(session).is_ok_and(|all| {
-        all.iter()
-            .any(|entry| entry.file_id == file_id && entry.saved_at < pressed_at)
-    });
+fn discard_blob_before<E: ViewerEngine>(engine: &E, session: SessionGeneration, file_id: &str, pressed_at: i64) -> bool {
+    let older = engine
+        .recovery_list(session)
+        .is_ok_and(|all| all.iter().any(|entry| entry.file_id == file_id && entry.saved_at < pressed_at));
     older && engine.recovery_discard(session, file_id).is_ok()
 }
 
@@ -238,10 +232,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         self.office_view(file_id).is_some_and(OfficeView::can_edit)
     }
 
-    pub(in crate::engine_host::viewer) fn office_guarded(
-        &self,
-        file_id: &str,
-    ) -> Vec<beebeeb_office_protocol::office::DroppedPart> {
+    pub(in crate::engine_host::viewer) fn office_guarded(&self, file_id: &str) -> Vec<beebeeb_office_protocol::office::DroppedPart> {
         self.office_view(file_id).map(OfficeView::guarded).unwrap_or_default()
     }
 
@@ -323,8 +314,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     fn office_ask_save(&mut self, file_id: &str, base: i64, how: How) -> SaveOutcome {
         // A document made here is saved although it had no version when it was opened: its save waits for its upload.
         let facts = self.change_facts().map(|(opening, facts)| (opening.session, facts));
-        let unlanded =
-            facts.is_some_and(|(session, facts)| facts.version == 0 && self.office_made_here(file_id, session));
+        let unlanded = facts.is_some_and(|(session, facts)| facts.version == 0 && self.office_made_here(file_id, session));
         let writable = facts.is_some_and(|(_, facts)| facts.can_write && (facts.version > 0 || unlanded));
         let Some(stamp) = self.stamp_of(file_id).filter(|_| writable) else {
             return SaveOutcome::Failed;
@@ -333,7 +323,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         if self.changes.busy || work.saving.is_some() || work.creating.is_some() {
             return SaveOutcome::Failed;
         }
-        let Some(request) = self.office_view_mut(file_id).and_then(|view| view.save(Purpose::Save)) else {
+        let Some(request) = self
+            .office_view_mut(file_id)
+            .and_then(|view| view.save(Purpose::Save))
+        else {
             return SaveOutcome::Failed;
         };
         self.office.work.saving = Some(Pending {
@@ -368,11 +361,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             *slot = None;
             return;
         }
-        if self
-            .engine
-            .edit_facts(session, file_id, epoch)
-            .is_some_and(|facts| facts.own)
-        {
+        if self.engine.edit_facts(session, file_id, epoch).is_some_and(|facts| facts.own) {
             discard_blob_before(&*self.engine, session, file_id, pressed_at);
             *slot = None;
         }
@@ -382,13 +371,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     /// they never will be.
     pub(in crate::engine_host::viewer) fn office_pump_save(&mut self, file_id: &str) {
         self.office_discard_when_landed(file_id);
-        let Some(pending) = self
-            .office
-            .work
-            .saving
-            .as_ref()
-            .filter(|pending| pending.file_id == file_id)
-        else {
+        let Some(pending) = self.office.work.saving.as_ref().filter(|pending| pending.file_id == file_id) else {
             return;
         };
         let request = pending.request;
@@ -439,42 +422,42 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let (session, epoch, name, id) = (stamp.session, stamp.epoch, stamp.name.clone(), file_id.clone());
         let started = self.spawn(&file_id, stamp, move |engine| {
             let end = match how {
-                // A document made here, opened before its upload landed: saved from the version that upload became (a
-                // new file's first, 1; a file already past it answers Conflict). Not landed in time: said, nothing stored.
-                How::Save if unlanded => {
-                    wait_until_landed(engine, session, &id, SAVE_LAND_WAIT);
-                    match engine.edit_facts(session, &id, epoch) {
-                        Some(now) if now.version > 0 => {
-                            settle(engine.save_office(session, &id, &bytes, base.max(1), epoch), &id, &name)
-                        }
-                        Some(_) => (Settled::Refused(NEW_NOT_SENT.to_string()), None),
-                        None => (Settled::Failed, None),
+            // A document made here, opened before its upload landed: saved from the version that upload became (a
+            // new file's first, 1; a file already past it answers Conflict). Not landed in time: said, nothing stored.
+            How::Save if unlanded => {
+                wait_until_landed(engine, session, &id, SAVE_LAND_WAIT);
+                match engine.edit_facts(session, &id, epoch) {
+                    Some(now) if now.version > 0 => {
+                        settle(engine.save_office(session, &id, &bytes, base.max(1), epoch), &id, &name)
                     }
-                }
-                How::Save => settle(engine.save_office(session, &id, &bytes, base, epoch), &id, &name),
-                // Mine becomes the newest version: saved from the version the file is at now.
-                How::Mine => match engine.edit_facts(session, &id, epoch) {
-                    Some(now) => settle(engine.save_office(session, &id, &bytes, now.version, epoch), &id, &name),
+                    Some(_) => (Settled::Refused(NEW_NOT_SENT.to_string()), None),
                     None => (Settled::Failed, None),
-                },
-                // Mine next to theirs, under this PC's name. The copy is another file: what the view holds of this one
-                // does not move.
-                How::Both => {
-                    let at = hhmm();
-                    match engine.save_office_copy(session, &id, &bytes, &this_pc(), &at) {
-                        Ok(copy) => (
-                            Settled::Saved {
-                                id: copy.id,
-                                name: copy.name,
-                                body: placeholder(),
-                                version: 1,
-                                at,
-                            },
-                            None,
-                        ),
-                        Err(_) => (Settled::Failed, None),
-                    }
                 }
+            }
+            How::Save => settle(engine.save_office(session, &id, &bytes, base, epoch), &id, &name),
+            // Mine becomes the newest version: saved from the version the file is at now.
+            How::Mine => match engine.edit_facts(session, &id, epoch) {
+                Some(now) => settle(engine.save_office(session, &id, &bytes, now.version, epoch), &id, &name),
+                None => (Settled::Failed, None),
+            },
+            // Mine next to theirs, under this PC's name. The copy is another file: what the view holds of this one
+            // does not move.
+            How::Both => {
+                let at = hhmm();
+                match engine.save_office_copy(session, &id, &bytes, &this_pc(), &at) {
+                    Ok(copy) => (
+                        Settled::Saved {
+                            id: copy.id,
+                            name: copy.name,
+                            body: placeholder(),
+                            version: 1,
+                            at,
+                        },
+                        None,
+                    ),
+                    Err(_) => (Settled::Failed, None),
+                }
+            }
             };
             match end.0 {
                 // The server confirmed it: the file's recovery blob is not needed any more.
@@ -589,28 +572,26 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 // The template's session is over: its bytes are here.
                 let creating = self.office.work.creating.take()?;
                 let (engine, tx) = (self.engine.clone(), self.office.work.made_tx.clone());
-                let started = std::thread::Builder::new()
-                    .name("viewer-office-create".into())
-                    .spawn(move || {
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let id = engine.create_office(
-                                creating.session,
-                                creating.folder.as_deref(),
-                                &creating.name,
-                                &bytes,
-                            )?;
-                            wait_until_landed(&*engine, creating.session, &id, CREATE_LAND_WAIT);
-                            Ok(id)
-                        }))
-                        .unwrap_or(Err(EditRefused::Failed));
-                        let _ = tx.send(Made {
-                            session: creating.session,
-                            account: creating.account,
-                            result,
-                            bytes,
-                        });
-                        engine.wake();
+                let started = std::thread::Builder::new().name("viewer-office-create".into()).spawn(move || {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let id = engine.create_office(
+                            creating.session,
+                            creating.folder.as_deref(),
+                            &creating.name,
+                            &bytes,
+                        )?;
+                        wait_until_landed(&*engine, creating.session, &id, CREATE_LAND_WAIT);
+                        Ok(id)
+                    }))
+                    .unwrap_or(Err(EditRefused::Failed));
+                    let _ = tx.send(Made {
+                        session: creating.session,
+                        account: creating.account,
+                        result,
+                        bytes,
                     });
+                    engine.wake();
+                });
                 if started.is_err() {
                     log("viewer: could not start the worker for a new document");
                     self.changes.busy = false;

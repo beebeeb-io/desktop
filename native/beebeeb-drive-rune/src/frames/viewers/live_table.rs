@@ -6,11 +6,7 @@ use std::hash::{Hash, Hasher};
 
 use rune::El;
 
-use super::super::{
-    Ui,
-    kinds::{Column, TableDoc},
-    table,
-};
+use super::super::{Ui, kinds::{Column, TableDoc}, table};
 use crate::theme::tokens::Theme;
 
 const MAX_ROWS: usize = 1_000;
@@ -46,11 +42,7 @@ fn detect(source: &str) -> (char, &'static str) {
     }
     let commas = first.matches(',').count();
     let semis = first.matches(';').count();
-    if semis > commas {
-        (';', "Semicolon-separated")
-    } else {
-        (',', "Comma-separated")
-    }
+    if semis > commas { (';', "Semicolon-separated") } else { (',', "Comma-separated") }
 }
 
 /// RFC 4180 records. An unterminated quote runs to the end of the text.
@@ -127,12 +119,7 @@ pub(crate) fn parse(source: &str) -> TableDoc {
             r
         })
         .collect();
-    TableDoc {
-        separator: label.to_string(),
-        columns,
-        rows,
-        total_rows,
-    }
+    TableDoc { separator: label.to_string(), columns, rows, total_rows }
 }
 
 #[cfg(test)]
