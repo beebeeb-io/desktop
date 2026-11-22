@@ -40,8 +40,14 @@ mod tests {
     fn the_rule_wants_recall_and_no_pin() {
         assert!(scanners_skip_contents(RECALL_ON_DATA_ACCESS | 0x80));
         assert!(scanners_skip_contents(RECALL_ON_DATA_ACCESS | OFFLINE));
-        assert!(!scanners_skip_contents(0x80), "a file with its bytes is scanned, and needs no fetch");
-        assert!(!scanners_skip_contents(RECALL_ON_DATA_ACCESS | PINNED), "a pinned file is hydrated anyway");
+        assert!(
+            !scanners_skip_contents(0x80),
+            "a file with its bytes is scanned, and needs no fetch"
+        );
+        assert!(
+            !scanners_skip_contents(RECALL_ON_DATA_ACCESS | PINNED),
+            "a pinned file is hydrated anyway"
+        );
     }
 
     static FETCHES: AtomicUsize = AtomicUsize::new(0);
@@ -127,7 +133,10 @@ mod tests {
         for i in 0..FILES {
             let parent = if i % 2 == 0 { &root } else { &sub };
             let name = format!("file-{i}.txt");
-            assert!(placeholders::create_placeholder(parent, &format!("id-{i}"), &name, 64 * 1024, 1_700_000_000, false).unwrap());
+            assert!(
+                placeholders::create_placeholder(parent, &format!("id-{i}"), &name, 64 * 1024, 1_700_000_000, false)
+                    .unwrap()
+            );
         }
 
         let mut files = Vec::new();
@@ -143,7 +152,11 @@ mod tests {
             offline += usize::from(attributes & OFFLINE != 0);
             // Properties, as the indexer reads them.
             let meta = std::fs::metadata(path).unwrap();
-            assert_eq!(meta.len(), 64 * 1024, "the size is the placeholder's, without its bytes");
+            assert_eq!(
+                meta.len(),
+                64 * 1024,
+                "the size is the placeholder's, without its bytes"
+            );
             // A scanner's read: OPEN_NO_RECALL never asks the provider for data.
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .read(true)
@@ -155,15 +168,25 @@ mod tests {
             }
         }
         println!("task_1658 files={} offline={offline}", files.len());
-        assert_eq!(FETCHES.load(Ordering::SeqCst), 0, "a scanner-style crawl asked for bytes");
+        assert_eq!(
+            FETCHES.load(Ordering::SeqCst),
+            0,
+            "a scanner-style crawl asked for bytes"
+        );
         for path in &files {
             let attributes = placeholders::read_os_placeholder_state(path).unwrap();
-            assert!(scanners_skip_contents(attributes), "still cloud-only after the crawl: {attributes:#x}");
+            assert!(
+                scanners_skip_contents(attributes),
+                "still cloud-only after the crawl: {attributes:#x}"
+            );
         }
 
         // The control: a plain read asks the provider (which refuses), so the counter sees hydration.
         let control = std::fs::File::open(&files[0]).and_then(|mut f| std::io::Read::read(&mut f, &mut [0u8; 1]));
-        assert!(control.is_err(), "the refusing provider fails the plain read: {control:?}");
+        assert!(
+            control.is_err(),
+            "the refusing provider fails the plain read: {control:?}"
+        );
         assert!(FETCHES.load(Ordering::SeqCst) >= 1, "a plain read asks for bytes");
     }
 }
