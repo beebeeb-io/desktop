@@ -511,9 +511,28 @@ fn dehydrate_these(
         if let Err(error) = crate::windows_cf::placeholders::set_pin_state(&canonical, false, false) {
             tracing::warn!(file_id = %file_id, error = %error, "free_up_space: OS unpin before dehydrate failed; attempting dehydrate anyway");
         }
+        // Task 2199 (dc-103b): read before the dehydrate, so a fetch recorded after it keeps its candidate.
+        let seq_before = crate::engine_bridge::content_seq_for_wipe(db, &file_id);
         match crate::windows_cf::placeholders::dehydrate_placeholder(&canonical) {
             Ok(freed) => {
                 bytes_freed = bytes_freed.saturating_add(freed);
+                // Task 2199 (dc-103b; design 1640 "Not done" (a)): the dehydrate removed every byte (it reported
+                // bytes freed and the platform now shows nothing on disk), so the record of what was fetched is
+                // wiped to empty, unless a fetch was recorded since `seq_before`. The next range fetch then names
+                // one version instead of mixing in versions whose bytes are gone.
+                let nothing_left = freed > 0
+                    && matches!(
+                        crate::windows_cf::placeholders::platform_view(&canonical),
+                        crate::unknown_check::PlatformView::Placeholder {
+                            on_disk: crate::unknown_check::OnDisk::Nothing,
+                            ..
+                        }
+                    );
+                if let Some(seq_before) = seq_before.filter(|_| nothing_left) {
+                    if let Err(error) = db.wipe_fetched_content_if_unchanged(&file_id, seq_before) {
+                        tracing::warn!(file_id = %file_id, error = %error, "free_up_space: could not wipe the fetch record");
+                    }
+                }
                 // Only NOW is this file genuinely cloud-only on disk — record
                 // it so the DB flip below applies ONLY to files we actually
                 // dehydrated. (`freed == 0` still means "successfully cloud-only

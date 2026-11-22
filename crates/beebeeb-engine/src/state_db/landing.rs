@@ -45,6 +45,21 @@ impl StateDb {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         match version {
             Some(version) => {
+                // Task 2199 N7 (dc-103b): the restore moves the base to a version whose bytes are not on disk.
+                // The agreed content joins the candidate at its own version first (T6's fold), so the old hash
+                // is never paired with the new base: an edit of those bytes is sent on the old version (and
+                // parks), never on the restored one.
+                let base_moves: bool = tx
+                    .query_row(
+                        "SELECT local_base_version != ?2 FROM files WHERE file_id = ?1",
+                        params![file_id, version],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+                if base_moves {
+                    super::sql::fold_agreed_into_candidate_conn(&tx, file_id)?;
+                }
                 tx.execute(
                     "UPDATE files SET current_version = ?2, local_base_version = ?2,
                                       current_object_version_id = COALESCE(?3, current_object_version_id),
