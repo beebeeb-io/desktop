@@ -43,6 +43,7 @@ mod source_engine;
 mod text_kit;
 mod theme;
 mod ui;
+mod uninstall_hook;
 mod windows_floor;
 
 // `ui/**` names these at the crate root.
@@ -58,6 +59,10 @@ fn main() {
     if let Some(refusal) = shell::identity::AppIdentity::CURRENT.start_refusal(std::env::consts::OS) {
         eprintln!("{refusal}");
         std::process::exit(2);
+    }
+    // drive-complete-006b: the uninstaller's sync-folder teardown, before any state, window or control channel.
+    if let Some(code) = uninstall_hook::run(std::env::args().skip(1)) {
+        std::process::exit(code);
     }
     shell::run();
 }

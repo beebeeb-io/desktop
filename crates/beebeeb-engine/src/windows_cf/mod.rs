@@ -63,6 +63,8 @@ pub mod fetch_progress;
 // LD-0105 S7: providers, the hydration policy and its read-back, the Explorer registration's Id.
 mod registration;
 pub use registration::*;
+// drive-complete-006b: the uninstaller's teardown of this identity's sync folders (keep downloaded files, or remove).
+pub mod registration_teardown;
 #[cfg(test)]
 mod reconcile_tests;
 // w36: an idle tick keeps no handle and does no per-row work.

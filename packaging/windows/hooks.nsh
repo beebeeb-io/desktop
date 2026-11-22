@@ -30,6 +30,23 @@
 !macro NSIS_HOOK_PREUNINSTALL
 !macroend
 
+; Beebeeb (drive-complete-006b): run by the uninstall section once the app has stopped and while its exe is still
+; here. The app unregisters THIS identity's sync folder from Cloud Files and Explorer (navigation-pane entry, status
+; flyout and thumbnail handlers), then keeps downloaded files as plain files ("Keep downloaded files" ticked, the
+; default, and always in a silent uninstall) or removes the folder (unticked). Engine:
+; windows_cf::registration_teardown. An update (/UPDATE) changes nothing here. A failure leaves the uninstall going.
+!macro BB_UNINSTALL_SYNC_FOLDER exe
+  ${If} $UpdateMode <> 1
+  ${AndIf} ${FileExists} "${exe}"
+    ${If} $KeepFilesCheckboxState = ${BST_CHECKED}
+      ExecWait '"${exe}" --uninstall-sync-folder keep' $0
+    ${Else}
+      ExecWait '"${exe}" --uninstall-sync-folder remove' $0
+    ${EndIf}
+    DetailPrint "Beebeeb folder teardown: exit $0"
+  ${EndIf}
+!macroend
+
 ; Beebeeb: an uninstall (not an update) also removes downloaded update installers. They are a cache.
 ; The identity's own names (engine identity.rs): the folder name under the config, data, cache and temp dirs, and the
 ; credential service. Only THIS identity's: the test build never touches the real app's, nor the other way round.
