@@ -112,7 +112,7 @@ pub struct Shell {
     /// What the flyout was last told of the away lock's cover (`registry::covered`): `Some(sync runs)` while covered.
     pub(crate) flyout_covered: Option<bool>,
     /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle, or it reported a new
-    /// `TrayInputs::last_check`): Photos reads its library again, and the Files window the folder it shows
+    /// `TrayInputs::changes`: a check that changed something): Photos reads its library again, and the Files window the folder it shows
     /// ([`read_again_after_a_check`]).
     check_finished: bool,
     /// w31: the last [`poll`] saw the account's first file list still on its way (or failed). When it is no longer,
@@ -268,9 +268,10 @@ impl Shell {
         let changed = self.app.apply(Event::Session(self.actions.session())) == Outcome::Changed;
         let inputs = self.actions.tray_inputs();
         if inputs != self.tray_inputs {
-            // A finished check: the engine's state turned Idle, or it reported another finished check (one that moved
-            // no file stays Idle throughout; what another device changed comes in that way).
-            let another_check = inputs.last_check.is_some() && inputs.last_check != self.tray_inputs.last_check;
+            // A finished check: the engine's state turned Idle, or it reported a check that changed something (one
+            // that moved no file stays Idle throughout; what another device changed comes in that way). RC2-6b: not
+            // every check: on a large idle account the lists read after each one were 16 MB of state.db every 30 s.
+            let another_check = inputs.changes.is_some() && inputs.changes != self.tray_inputs.changes;
             let turned_idle = inputs.engine == EngineState::Idle && self.tray_inputs.engine != EngineState::Idle;
             self.check_finished |= another_check || turned_idle;
             // The flyout reads the inputs themselves (counts), not only what the b shows.

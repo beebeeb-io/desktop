@@ -13,7 +13,7 @@ fn a_running_payload_is_the_old_shape_with_empty_new_keys() {
         json!({
             "state": "running", "legacy_state": "running", "sync_root": ROOT, "error": null,
             "files_remaining": null, "bytes_total": null, "bytes_done": null,
-            "last_tick_ok_at": null, "reason": null
+            "last_tick_ok_at": null, "changes": 0, "reason": null
         })
     );
 }
@@ -29,7 +29,7 @@ fn an_idle_payload_after_a_good_tick_carries_the_check_time_and_no_reason() {
         json!({
             "state": "idle", "legacy_state": "idle", "sync_root": ROOT, "error": null,
             "files_remaining": 0, "bytes_total": 0, "bytes_done": 0,
-            "last_tick_ok_at": 1_760_000_000_i64, "reason": null
+            "last_tick_ok_at": 1_760_000_000_i64, "changes": 0, "reason": null
         })
     );
 }
@@ -47,8 +47,32 @@ fn a_syncing_payload_carries_files_and_bytes_and_still_says_idle_to_old_consumer
         json!({
             "state": "syncing", "legacy_state": "idle", "sync_root": ROOT, "error": null,
             "files_remaining": 14, "bytes_total": 1_288_490_189_u64, "bytes_done": 489_626_271_u64,
-            "last_tick_ok_at": 100, "reason": null
+            "last_tick_ok_at": 100, "changes": 0, "reason": null
         })
+    );
+}
+
+/// RC2-6b: `changes` moves only on a tick that changed something; every check moves `last_tick_ok_at`.
+#[test]
+fn changes_moves_only_on_a_tick_that_changed_something() {
+    let t = tracker();
+    let first = t.finish_tick(&Outcome::Synced, 100, Activity::default());
+    let quiet = t.finish_tick(&Outcome::Synced, 130, Activity::default());
+    assert_eq!((first.changes, quiet.changes), (Some(0), Some(0)));
+    assert_ne!(first.last_tick_ok_at, quiet.last_tick_ok_at);
+    t.note_change();
+    let changed = t.finish_tick(&Outcome::Synced, 160, Activity::default());
+    assert_eq!(changed.changes, Some(1));
+    assert_eq!(t.paused().changes, Some(1), "a pause keeps the count");
+
+    let mut view = EngineStatusView::default();
+    view.apply(&changed.to_json());
+    assert_eq!(view.changes, Some(1));
+    view.apply(&json!({ "state": "paused" }));
+    assert_eq!(
+        view.changes,
+        Some(1),
+        "the pause toggle's bare state says nothing about changes"
     );
 }
 

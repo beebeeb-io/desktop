@@ -124,7 +124,7 @@ mod scan;
 use scan::*;
 pub use scan::{DiskStamp, ScanMemo, scan_tick};
 
-mod change_feed;
+pub(crate) mod change_feed;
 pub use change_feed::{ChangeFeed, Changes, NoFeed};
 
 mod suppression;

@@ -54,6 +54,23 @@ pub struct PlacedMemo {
     placed: std::collections::HashMap<String, (String, std::ffi::OsString)>,
 }
 
+/// RC2-6b: the tick's two per-row passes, [`super::refresh_placeholders`] then [`super::reconcile_placeholder_state`], run only
+/// when the runner's gate (`runner::pass_gate`) says something can have changed. What they report back: whether a
+/// row was left for the next pass, and how many rows the reconcile changed (a native pin or "Free up space").
+pub fn placeholder_passes(sync_root: &std::path::Path) -> (crate::runner::PassOutcome, usize) {
+    let placed = super::refresh_placeholders(sync_root);
+    let reconciled = super::reconcile_placeholder_state(sync_root);
+    // Left for the next pass: a folder not made or not on disk yet, a create that failed, a name check that did not
+    // finish, a folder the reconcile could not list. Not `skipped` / `name_conflicts`: those wait for a change.
+    let retry = placed.ensure_dir_errors
+        + placed.create_errors
+        + placed.name_check_errors
+        + placed.deferred
+        + reconciled.counts.list_errors
+        > 0;
+    (crate::runner::PassOutcome { retry }, reconciled.deltas.len())
+}
+
 /// The names in `dir`, one listing (`FindFirstFile`/`FindNextFile`: no entry is opened). `None`: it could not be listed.
 fn names_in(dir: &std::path::Path) -> Option<std::collections::HashSet<std::ffi::OsString>> {
     Some(std::fs::read_dir(dir).ok()?.flatten().map(|e| e.file_name()).collect())

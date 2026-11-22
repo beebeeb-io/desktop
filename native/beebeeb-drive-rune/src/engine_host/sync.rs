@@ -133,6 +133,7 @@ pub fn tray_inputs_of(sync: &SyncView, status: &EngineStatusView) -> TrayInputs 
             .files_remaining
             .filter(|_| running && !sync.paused && status.is_syncing()),
         last_check: status.last_tick_ok_at.filter(|_| running),
+        changes: status.changes.filter(|_| running),
         ..TrayInputs::default()
     }
 }

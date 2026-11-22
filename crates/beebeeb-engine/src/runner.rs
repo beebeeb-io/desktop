@@ -592,6 +592,10 @@ async fn run(
     // S6: the kept files' step, for this engine run (one batch at a time, each failing file's backoff).
     #[cfg(not(target_os = "macos"))]
     let kept_refetch = Arc::new(crate::engine_bridge::KeptRefetch::default());
+    // RC2-6b: the placeholder passes' gate and its own change-journal feed (opened on the first tick, off the async
+    // workers; a second reader beside the scan's, with its own position).
+    #[cfg(target_os = "windows")]
+    let mut pass_gate = Some((PassGate::default(), None::<Box<dyn crate::watcher::ChangeFeed>>));
 
     // w31: the account's file list has never arrived on this PC (no cursor). Until it has, the pull goes first: the
     // backup passes wait (on a large backup they took minutes, and the windows showed no file all that time), and the
@@ -775,8 +779,10 @@ async fn run(
                 // writes), and these wait for one that is being sent.
                 let pull_and_passes = loop_state.pull.lock().await;
 
+                let mut shared_roots_changed = false;
                 match bridge.refresh_shared_roots().await {
                     Ok(outcome) if !outcome.removed_shared_file_ids.is_empty() => {
+                        shared_roots_changed = true;
                         tracing::info!(
                             removed = outcome.removed_shared_file_ids.len(),
                             "revoked shared content removed from local Finder state"
@@ -916,39 +922,64 @@ async fn run(
                             &send_phase,
                         )
                         .await;
+                        // RC2-6b: whether this tick changed what the windows list (they read their lists again only
+                        // then, not after every check): items applied, a queued operation finished, a conflict, a
+                        // shared root removed, or (below) a native pin or "Free up space" reconciled.
+                        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+                        let mut tick_changed = !tick.applied_item_ids.is_empty()
+                            || completed_sync_work > 0
+                            || !tick.conflicts.is_empty()
+                            || shared_roots_changed;
                         enforce_cache_budget(&app, &bridge, &mut quota_warning_notifications);
 
-                        // Windows Cloud Files: the one-shot `seed_placeholders`
-                        // at engine spawn ran against a (usually empty) DB, so
-                        // rows discovered by this and later ticks need a
-                        // placeholder minted now. Idempotent — existing
-                        // placeholders are a no-op (ERROR_ALREADY_EXISTS → Ok).
+                        // Windows Cloud Files: rows discovered by this and later ticks need a placeholder minted
+                        // (`refresh_placeholders`), and a native Explorer pin / "Free up space" (which never touches
+                        // our DB) is reconciled back into state_db (`reconcile_placeholder_state`, after the refresh
+                        // so new placeholders are there). RC2-6b: both list every folder of the sync root, so they
+                        // run only when something can have changed (`pass_gate`): an idle tick lists no folder.
+                        // dc-164 / RC2-6b: off the async workers (file system calls for every folder).
                         let placeholders_started = std::time::Instant::now();
-                        // dc-164: off the async workers (it makes file system calls for every new row).
                         #[cfg(target_os = "windows")]
                         {
-                            let placeholder_root = sync_root.clone();
-                            if let Err(e) = tokio::task::spawn_blocking(move || {
-                                crate::windows_cf::refresh_placeholders(&placeholder_root)
+                            let work = TickWork {
+                                applied_items: tick.applied_item_ids.len(),
+                                finished_ops: completed_sync_work as usize,
+                            };
+                            let (mut gate, feed) = pass_gate.take().unwrap_or_default();
+                            let pass_root = sync_root.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                let mut feed = feed.unwrap_or_else(|| crate::watcher::change_feed::open(&pass_root));
+                                let mut changed = 0usize;
+                                let ran = gate.step(
+                                    feed.as_mut(),
+                                    work,
+                                    std::time::Instant::now(),
+                                    SystemTime::now(),
+                                    || {
+                                        let (outcome, deltas) = crate::windows_cf::placeholder_passes(&pass_root);
+                                        changed = deltas;
+                                        outcome
+                                    },
+                                );
+                                (gate, feed, ran, changed)
                             })
                             .await
                             {
-                                tracing::warn!(error = %e, "placeholder pass panicked; next tick retries");
+                                Ok((gate, feed, ran, changed)) => {
+                                    pass_gate = Some((gate, Some(feed)));
+                                    tick_changed |= changed > 0;
+                                    if let Some((why, _)) = ran {
+                                        tracing::debug!(why = ?why, "placeholder passes ran");
+                                    }
+                                }
+                                // The gate and the feed are lost: the next tick's fresh gate runs the passes in full.
+                                Err(e) => tracing::warn!(error = %e, "placeholder pass panicked; next tick retries"),
                             }
                         }
                         if !first_tick_logged {
                             phase_timing("placeholders", placeholders_started, 0);
                             first_tick_logged = true;
                         }
-
-                        // Reconcile native Explorer pin / "Free up space" changes
-                        // (which never touch our DB) back into state_db so the app
-                        // view matches and `free_up_space` respects native pins.
-                        // Delta-only + idempotent — no-op when nothing changed
-                        // natively. Runs after refresh so newly minted placeholders
-                        // are present before we read their attributes.
-                        #[cfg(target_os = "windows")]
-                        crate::windows_cf::reconcile_placeholder_state(&sync_root);
 
                         // Stamp every DB-Local file's placeholder in-sync so
                         // Explorer shows the green ✓ overlay. Runs after
@@ -985,6 +1016,9 @@ async fn run(
                         // `Ok` is not the whole story: `sync_tick` swallows a failed
                         // `GET /sync/ops`, so the link monitor decides whether this
                         // was really a check that reached the server.
+                        if tick_changed {
+                            tracker.note_change();
+                        }
                         emit_payload(
                             &app,
                             finish_tick_payload(&tracker, Ok(()), &link, tick_started_at, &db, &transfers),
@@ -1360,6 +1394,11 @@ pub use lifecycle::{Wake, nudge_wait, phase_step_due};
 mod tick_loop;
 pub use tick_loop::RunMode;
 use tick_loop::*;
+
+// RC2-6b: the tick's placeholder passes run only when something can have changed.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod pass_gate;
+pub use pass_gate::{PassGate, PassOutcome, RunWhy, TickWork};
 
 mod working_set_signal;
 #[cfg(any(target_os = "macos", any(test, feature = "test-support")))]

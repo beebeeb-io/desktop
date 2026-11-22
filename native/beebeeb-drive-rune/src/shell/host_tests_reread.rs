@@ -215,21 +215,23 @@ fn a_finished_check_during_a_rename_waits_until_the_rename_closes() {
 }
 
 /// Files another device added come with a check that moves no file here: the engine reports Idle before and after it,
-/// with a new time of its last finished check. That is a finished check too; the same report again is not.
+/// with its count of checks that changed something moved on. That is a finished check too; the same report again is
+/// not.
 #[test]
 fn a_finished_check_that_stays_idle_still_shows_what_another_device_added() {
     let shelf = Elsewhere::with(&["m-1.txt", "m-2.txt"]);
     let (engine, mut rt) = window(&shelf);
-    let checked = |at: i64| TrayInputs {
+    let checked = |at: i64, changes: u64| TrayInputs {
         last_check: Some(at),
+        changes: Some(changes),
         ..inputs(EngineState::Idle)
     };
-    engine.set_inputs(checked(1_000));
+    engine.set_inputs(checked(1_000, 0));
     settle(&mut rt);
     assert_eq!(rt.state.listing.items.len(), 2);
 
     shelf.add(&SEVEN);
-    engine.set_inputs(checked(1_030));
+    engine.set_inputs(checked(1_030, 1));
     settle(&mut rt);
     assert_eq!(
         rt.state.listing.items.len(),
@@ -240,13 +242,46 @@ fn a_finished_check_that_stays_idle_still_shows_what_another_device_added() {
 
     let read = shelf.reads();
     settle(&mut rt);
-    engine.set_inputs(checked(1_030));
+    engine.set_inputs(checked(1_030, 1));
     settle(&mut rt);
     assert_eq!(
         shelf.reads(),
         read,
         "the same report again is no new check: nothing is read"
     );
+}
+
+/// RC2-6b: an idle engine finishes a check every 30 s. A check that changed nothing (its time moves, its count of
+/// changes does not) reads no list again; the next one that changed something does.
+#[test]
+fn a_check_that_changed_nothing_reads_no_list_again_and_one_that_changed_something_does() {
+    let shelf = Elsewhere::with(&["m-1.txt", "m-2.txt"]);
+    let (engine, mut rt) = window(&shelf);
+    let checked = |at: i64, changes: u64| TrayInputs {
+        last_check: Some(at),
+        changes: Some(changes),
+        ..inputs(EngineState::Idle)
+    };
+    engine.set_inputs(checked(1_000, 3));
+    settle(&mut rt);
+    assert_eq!(rt.state.listing.items.len(), 2);
+
+    let read = shelf.reads();
+    for i in 1..=5 {
+        engine.set_inputs(checked(1_000 + 30 * i, 3));
+        settle(&mut rt);
+    }
+    assert_eq!(shelf.reads(), read, "five idle checks read nothing again");
+    assert_eq!(rt.state.listing.items.len(), 2);
+
+    shelf.add(&SEVEN);
+    engine.set_inputs(checked(1_180, 4));
+    settle(&mut rt);
+    assert!(
+        shelf.reads() > read,
+        "a check that changed something reads the folder again"
+    );
+    assert_eq!(rt.state.listing.items.len(), 9, "{:?}", ids(&rt.state));
 }
 
 /// Scrolled down a long folder, files land that sort above the rows in view: the rows in view stay where they
