@@ -207,8 +207,21 @@ pub async fn sync_tick(
 }
 
 /// The real tick body — same behavior as [`sync_tick`], plus the applied item
-/// ids for the working-set signal.
+/// ids for the working-set signal. RC2-4: after a pull that reached the server, a rebuilt
+/// `state.db`'s check of the files on disk runs, bounded ([`EngineBridge::check_after_rebuild`]);
+/// it never fails the tick.
 pub async fn sync_tick_outcome(
+    bridge: &EngineBridge,
+    sync_root: &Path,
+) -> anyhow::Result<SyncTickOutcome> {
+    let outcome = sync_tick_pull(bridge, sync_root).await?;
+    if outcome.reached_server {
+        bridge.check_after_rebuild(sync_root).await;
+    }
+    Ok(outcome)
+}
+
+async fn sync_tick_pull(
     bridge: &EngineBridge,
     // The on-disk vault root. Needed on Windows so the deletion-reconcile paths
     // (`apply_sync_op` / `apply_snapshot`) can locate and remove the on-disk Cloud

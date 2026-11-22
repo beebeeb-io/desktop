@@ -77,8 +77,85 @@ pub fn move_corrupt_state_db_aside(state_dir: &std::path::Path) -> Result<StateD
         to.push(suffix);
         let _ = std::fs::rename(from, to);
     }
+    // RC2-4: the fresh `state.db` lists the files again with no content agreed with the server. The marker asks the
+    // engine to check the files on disk against the server's content once the first pull is in
+    // (`EngineBridge::check_after_rebuild`). A marker that cannot be written leaves them held, as before: never lost.
+    if let Err(error) = RebuiltCheck::owe(state_dir) {
+        tracing::warn!(%error, "state.db rebuilt: the check of the files on disk could not be asked for; they stay held");
+    }
     tracing::warn!("state.db was corrupt; moved aside, the next sign-in starts fresh");
     Ok(StateDbCheck::MovedAside(aside))
+}
+
+/// RC2-4: the file next to `state.db` that says a rebuilt `state.db` still owes the check of the files on disk.
+pub const REBUILT_CHECK_FILENAME: &str = "state.db.rebuilt-check";
+
+/// RC2-4: the check a rebuilt `state.db` owes. Its file lists the ids of files already checked whose bytes on disk
+/// differ from the server's content (held as real edits; never downloaded again by this check). Ids only, no names.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RebuiltCheck {
+    /// When the engine first saw the rebuild's first pull in (seconds since the epoch), if it has.
+    pub pulled_at: Option<i64>,
+    pub differing: std::collections::BTreeSet<String>,
+}
+
+/// RC2-4: the check ends only once no file is left to check this long after the first pull, so rows a platform
+/// marks synced a little after that pull (Windows' placeholders) are checked too.
+pub const REBUILT_CHECK_SETTLE_SECS: i64 = 600;
+
+impl RebuiltCheck {
+    fn path(state_dir: &std::path::Path) -> PathBuf {
+        state_dir.join(REBUILT_CHECK_FILENAME)
+    }
+
+    /// A rebuild owes the check: a fresh marker (a second rebuild starts it again, empty).
+    pub fn owe(state_dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::write(Self::path(state_dir), b"")
+    }
+
+    /// The check owed in `state_dir`, or `None` when none is.
+    pub fn read(state_dir: &std::path::Path) -> std::io::Result<Option<Self>> {
+        match std::fs::read_to_string(Self::path(state_dir)) {
+            Ok(text) => {
+                let mut owed = Self::default();
+                for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    match line.strip_prefix("pulled_at=") {
+                        Some(at) => owed.pulled_at = at.parse().ok(),
+                        None => {
+                            owed.differing.insert(line.to_string());
+                        }
+                    }
+                }
+                Ok(Some(owed))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Records the files found differing so far.
+    pub fn save(&self, state_dir: &std::path::Path) -> std::io::Result<()> {
+        let mut text = String::new();
+        if let Some(at) = self.pulled_at {
+            text.push_str(&format!("pulled_at={at}\n"));
+        }
+        for id in &self.differing {
+            text.push_str(id);
+            text.push('\n');
+        }
+        let path = Self::path(state_dir);
+        let tmp = state_dir.join(format!("{REBUILT_CHECK_FILENAME}.tmp"));
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(tmp, path)
+    }
+
+    /// Every file is checked: no check is owed any more.
+    pub fn finish(state_dir: &std::path::Path) -> std::io::Result<()> {
+        match std::fs::remove_file(Self::path(state_dir)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
 }
 
 fn unused_aside_path(state_dir: &std::path::Path) -> Result<PathBuf, String> {
