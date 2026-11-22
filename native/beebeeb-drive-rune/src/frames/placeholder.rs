@@ -4,7 +4,9 @@
 //! The progress counter keys on this function's name: a `FRAMES` row that names `placeholder::scene` is a
 //! frame that is NOT built. A lane that draws its frame replaces the row's scene with its own.
 
+#[cfg(test)]
 use crate::State;
+#[cfg(test)]
 use crate::shell::app::Section;
 
 /// The Files window, nothing selected, no pane open: a neutral state, never a frame's content.

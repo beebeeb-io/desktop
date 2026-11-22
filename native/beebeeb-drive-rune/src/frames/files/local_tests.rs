@@ -16,9 +16,9 @@ use std::time::Duration;
 type R = Result<(), ActionError>;
 
 /// What the test keeps of the source: what it was asked, what it will answer, when it was asked to wake.
-#[derive(Default, Clone)]
 type Asked = Arc<Mutex<Vec<(Action, Vec<String>)>>>;
 
+#[derive(Default, Clone)]
 struct Spy {
     later: Arc<Mutex<Vec<Change>>>,
     /// Each change of what this PC holds that was asked: the direction and the ids.

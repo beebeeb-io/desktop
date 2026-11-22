@@ -18,9 +18,9 @@ use std::time::Duration;
 type R = Result<(), ActionError>;
 
 /// What the test keeps of the source: what it was asked, and what it will answer.
-#[derive(Default, Clone)]
 type Asked = Arc<Mutex<Vec<(Action, Vec<String>)>>>;
 
+#[derive(Default, Clone)]
 struct Spy {
     later: Arc<Mutex<Vec<Change>>>,
     asked: Asked,
@@ -397,7 +397,7 @@ fn second_delete_after_failed_move_clears_old_failure() {
     // A second Delete, of another row, is accepted: the old failure and its Try again go.
     select(&mut rt, &other);
     rt.update(|s, tx| assert!(s.trash_selection(tx)));
-    assert_eq!(spy.asked(), [(Action::Trash, vec!std::slice::from_ref(&other))]);
+    assert_eq!(spy.asked(), [(Action::Trash, vec![other.clone()])]);
     assert_eq!(rt.state.actions.toast, None, "the old failure still stands");
     assert_eq!(rt.state.actions.trash.again, None, "and its Try again with it");
 
@@ -410,7 +410,7 @@ fn second_delete_after_failed_move_clears_old_failure() {
     );
     select(&mut rt, &ids[0]);
     rt.update(|s, tx| s.retry(tx));
-    assert_eq!(spy.asked(), [(Action::Trash, vec!std::slice::from_ref(&other))]);
+    assert_eq!(spy.asked(), [(Action::Trash, vec![other.clone()])]);
 }
 
 /// Review of 2468, L317: Undo is for every row moved since the last Undo, not only the last answer's. A partial move

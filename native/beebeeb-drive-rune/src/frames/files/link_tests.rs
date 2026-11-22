@@ -26,9 +26,9 @@ const LINK: &str = "https://app.beebeeb.io/s/an-invented-token#key=an-invented-k
 const BEFORE: &str = "what was on the clipboard before";
 
 /// What the test keeps of the source: what it was asked, and what it will answer.
-#[derive(Default, Clone)]
 type Asked = Arc<Mutex<Vec<(Action, Vec<String>)>>>;
 
+#[derive(Default, Clone)]
 struct Spy {
     later: Arc<Mutex<Vec<Change>>>,
     asked: Asked,
