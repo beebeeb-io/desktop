@@ -10,6 +10,7 @@ use super::Ui;
 use crate::State;
 use crate::shell::app::Event;
 use crate::shell::host;
+use crate::theme::scale::space;
 use crate::theme::tokens::{Theme, type_};
 
 /// Whether the search field has the keyboard (Rune reports a focused field's caret).
@@ -77,7 +78,7 @@ pub fn toolbar(
                 }),
             ),
             title: tb::title_block(name, (!sub.is_empty()).then_some(sub.as_str()), t),
-            slot: Some(row().key("toolbar-slot").center_y().gap(8.0).children(slot)),
+            slot: Some(row().key("toolbar-slot").center_y().gap(space::S8).children(slot)),
             slot_sep: false,
             // The board draws these and the section has nothing for them: there to be seen,
             // disabled to assistive technology, no focus (`Bar::inert`).

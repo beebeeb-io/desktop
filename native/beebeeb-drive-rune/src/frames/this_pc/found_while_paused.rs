@@ -13,6 +13,7 @@ use rune::{El, col, el, row};
 use super::icons;
 use crate::State;
 use crate::ui::button;
+use crate::theme::scale::space;
 use crate::theme::icons as base;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::{banner, kit};
@@ -181,7 +182,7 @@ pub fn view(card: &Card, press: fn(&mut State, Action), t: &Theme) -> Option<El>
         )
         .w_full()
     };
-    let mut words = col().key("fwp-words").grow(1.0).min_w(0.0).gap(4.0).child(kit::label(
+    let mut words = col().key("fwp-words").grow(1.0).min_w(0.0).gap(space::S4).child(kit::label(
         "fwp-title",
         TITLE,
         type_::HEAD,
@@ -201,7 +202,7 @@ pub fn view(card: &Card, press: fn(&mut State, Action), t: &Theme) -> Option<El>
         words = words.child(line("fwp-said", said.clone(), true));
     }
 
-    let mut buttons = row().key("fwp-buttons").gap(8.0).center_y();
+    let mut buttons = row().key("fwp-buttons").gap(space::S8).center_y();
     let busy = |a: Action, idle: &'static str, doing: &'static str| if card.busy == Some(a) { doing } else { idle };
     if card.held.as_ref().is_some_and(|h| !h.op_ids.is_empty()) {
         let on = card.can_decide();
@@ -219,12 +220,12 @@ pub fn view(card: &Card, press: fn(&mut State, Action), t: &Theme) -> Option<El>
             .role("group")
             .label(TITLE)
             .w_full()
-            .py(9.0)
+            .py(space::S9)
             .pl(12.0)
             .pr(10.0)
-            .gap(10.0)
+            .gap(space::S10)
             .items_center()
-            .radius(10.0)
+            .radius(crate::theme::scale::radius::PANEL)
             .fill(wash)
             .child(kit::glyph("fwp-icon", &base::SYNC_HISTORY, 16.0, mark))
             .child(words)

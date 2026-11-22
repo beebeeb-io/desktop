@@ -11,6 +11,7 @@ use rune::{El, el};
 use super::Asking;
 use super::source::Exit;
 use crate::State;
+use crate::theme::scale::space;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::settings_dialog::{self, Weight};
 use crate::ui::{banner, button, dialog, kit};
@@ -78,7 +79,7 @@ pub fn ask(asking: &Asking, t: &Theme) -> El {
             .collect();
         ("Two versions", KEEP_TITLE, lines)
     };
-    let mut foot = rune::col().key("settle-foot").w_full().gap(8.0);
+    let mut foot = rune::col().key("settle-foot").w_full().gap(space::S8);
     for (i, exit) in asking.exits.iter().enumerate() {
         let words = label(*exit);
         // The first answer is the default (Keep both when listed), as the two-versions question draws it; the others
