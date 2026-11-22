@@ -16,9 +16,10 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::State;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{self, Theme, radius, type_};
+use crate::ui::button::{self, ButtonState, Size, Variant};
 use crate::ui::kit;
-use rune::{El, col, el, row};
+use rune::{El, col, row};
 
 /// One account signed in on this PC, as the list shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,7 +182,7 @@ pub fn panel(t: &Theme) -> Option<El> {
                 format!("{key}-avatar"),
                 &initials(&account.email),
                 20.0,
-                rune::oklch(0.88, 0.05, 250.0),
+                tokens::account_avatar_tint(),
                 t.card,
                 t,
             ))
@@ -202,18 +203,19 @@ pub fn panel(t: &Theme) -> Option<El> {
                 .disabled(busy)
                 .on_press(move |_s: &mut State| switch_to(id.clone()));
             let id = account.id.clone();
+            let state = if busy { ButtonState::Busy } else { ButtonState::Enabled };
             line = line.child(
-                el().key(format!("{key}-sign-out"))
-                    .role("button")
-                    .label(format!("Sign out of {}", account.email))
-                    .px(6.0)
-                    .radius(radius::CONTROL)
-                    .hover(t.selection)
-                    .press(t.press)
-                    .focusable(!busy)
-                    .disabled(busy)
-                    .on_press(move |_s: &mut State| sign_out(id.clone()))
-                    .child(kit::label(format!("{key}-sign-out-label"), "Sign out", type_::CAPTION, t.text_secondary)),
+                button::button(
+                    button::keys(&format!("{key}-sign-out")),
+                    "Sign out",
+                    None,
+                    Variant::Ghost,
+                    Size::Sm,
+                    state,
+                    t,
+                )
+                .label(format!("Sign out of {}", account.email))
+                .on_press(move |_s: &mut State| sign_out(id.clone())),
             );
         }
         list = list.child(line);

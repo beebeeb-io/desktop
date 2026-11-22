@@ -42,6 +42,12 @@ pub fn red_text(dark: bool) -> Color {
     }
 }
 
+/// The hue of the signed-in person's own avatar (`.kit-avatar.hue-250`): only the hue is data, the theme
+/// picks its strength (`Theme::avatar_tint`).
+pub fn account_avatar_tint() -> Color {
+    oklch(0.88, 0.05, 250.0)
+}
+
 // ---------------------------------------------------------------------------
 // Spacing (from --spacing-*)
 // ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ accepted
 accepts
 access
 account
+accounts
 ack
 acknowledged
 acquire
@@ -95,6 +96,7 @@ base_unknown
 base_version
 based
 bases
+batch
 be
 beat
 because
@@ -184,6 +186,7 @@ coinitializeex
 column
 com
 comes
+commit
 committed
 compare
 complete
@@ -294,6 +297,7 @@ eac3
 each
 earlier
 earlier-build
+early
 edit
 edits
 effect
@@ -372,6 +376,7 @@ folded
 folder
 folder_id
 folders
+following
 follows
 for
 force-aborting
@@ -389,6 +394,7 @@ freeing
 fresh
 freshness
 from
+full
 further
 fuse
 gap
@@ -397,6 +403,7 @@ generation
 getpwuid_r
 getthumbnail
 given-up
+go
 goes
 gone
 graceful
@@ -500,6 +507,7 @@ legacy
 legacy_state_dir
 len
 length
+let
 lifetime
 limit
 limits
@@ -548,12 +556,14 @@ metadata
 mid-hydrate
 migrated
 migration
+min
 mine
 mints
 mirror
 mismatch
 missing
 mixed
+mode
 modifier
 move
 moved
@@ -601,6 +611,7 @@ notify
 notify_conflict
 notify_quota_warning
 notify_sync_complete
+now
 null
 null-envelope
 object
@@ -758,6 +769,7 @@ queued_after_ms
 raised
 ran
 range
+ranges
 rc
 re-bootstrapping
 re-download
@@ -771,6 +783,7 @@ read-only
 read_dir
 read_ms
 readable
+reader
 reads
 real
 reaps
@@ -818,6 +831,7 @@ repair
 replaced
 replacement
 replay
+report
 reported
 request
 request_key
@@ -835,6 +849,7 @@ resnapshot_request_failed
 resolution
 resolved
 resolving
+rest
 restart
 restarting
 restore
@@ -1036,6 +1051,7 @@ tokio
 toml
 too
 took
+torn
 total
 transfer
 transfer_data
@@ -1060,6 +1076,7 @@ unchanged
 under
 undone
 unfinished
+uninstall
 unjournalled
 unknown
 unknown-content
@@ -1113,7 +1130,9 @@ w2
 w3
 waiting
 waits
+walk
 walked
+walking
 was
 watch
 watcher
@@ -1133,6 +1152,7 @@ why
 will
 window
 windows
+wipe
 with
 withdrawn
 withheld
@@ -1146,6 +1166,7 @@ worker
 working
 working-set
 write
+writes
 written
 wrong
 yet

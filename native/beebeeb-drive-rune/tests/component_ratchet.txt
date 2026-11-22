@@ -16,9 +16,9 @@ family_switches 2
 family_toast_copies 3
 family_tool_buttons 5
 family_toolbars_key_outside_ui 0
-local_textstyle_new_outside_theme 282
-radius_number_literals 269
+local_textstyle_new_outside_theme 252
+radius_number_literals 255
 sidebar_assemblies 5
-spacing_literals_in_frames 510
+spacing_literals_in_frames 379
 status_bars_key_outside_ui 0
 toasts 5
