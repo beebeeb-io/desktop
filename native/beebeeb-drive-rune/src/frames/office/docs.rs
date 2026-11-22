@@ -725,6 +725,9 @@ pub fn window_live(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, live: 
 
 fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, pics: &Pictures) -> El {
     let t = tokens::theme(cx.system_dark());
+    // The F6 stops in the order the window reads: the sidebar, then `office::order`'s.
+    let side_bar = sidebar::sidebar(s, &t);
+    super::order(ui.office.edit.is_some(), true, true, ui.show_details);
     // The editor of a Word document that runs: its surface needs the stage's whole rectangle (to keep the caret in view).
     let editing = ui
         .office
@@ -742,10 +745,16 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, pics: &Pic
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(outline(doc, &t))
-        .child(stage(doc, pics, stage_rect, editing, &t));
+        .child(super::panel(outline(doc, &t), super::PANE_SIDE))
+        .child({
+            let own = editing.is_none().then_some("Document");
+            super::document([stage(doc, pics, stage_rect, editing, &t)], own)
+        });
     if ui.show_details {
-        body = body.child(viewers::details::panel(&ui.file, ui.knows_offline(), &t));
+        body = body.child(super::panel(
+            viewers::details::panel(&ui.file, ui.knows_offline(), &t),
+            super::PANE_DETAILS,
+        ));
     }
     let mut main = col()
         .key("content-area")
@@ -754,20 +763,23 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &DocBody, pics: &Pic
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(viewers::office::toolbar(s, ui, false, &t));
+        .child(super::band(viewers::office::toolbar(s, ui, false, &t), super::PANE_TOOLBAR));
     if doc.view.older_format {
         main = main.child(note(&t));
     }
     main = match ui.office.edit.as_ref().map(|e| e.kind) {
         Some(kind) => main.child(super::edit::chrome(s, cx, ui, kind, body)),
-        None => main.child(bar(doc, &t)).child(body).child(status(doc, &t)),
+        None => main
+            .child(bar(doc, &t))
+            .child(body)
+            .child(super::band(status(doc, &t), super::PANE_STATUS)),
     };
     let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
         row()
             .key("body")
             .w_full()
             .h_full()
-            .child(sidebar::sidebar(s, &t))
+            .child(side_bar)
             .child(main),
     );
     if let Some(over) = viewers::office_over::over(ui, &t) {
@@ -1149,4 +1161,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "docs_live_tests.rs"]
-pub(super) mod live_tests;
+pub(crate) mod live_tests;

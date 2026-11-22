@@ -563,6 +563,9 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, layer: Option<El>, t: &The
     let width = |c: u32| view.col_widths.get(c as usize).copied().unwrap_or(0.0);
     let merges = MergesShown::of(view, &shown.rows, &shown.cols, width);
     let selected = view.selection.map(bounds);
+    // A workbook nobody edits: the cell the cursor is on (the far corner of a selection) is the grid's one Tab stop,
+    // and the arrows move it with the keyboard's focus on it. The editor's surface (`layer`) has the keyboard instead.
+    let stop = layer.is_none().then(|| edit_sheet::head(view));
     let in_selection =
         |r: u32, c: u32| selected.is_some_and(|(r0, r1, c0, c1)| r >= r0 && r <= r1 && c >= c0 && c <= c1);
     let mut head = row().key("sh-head").h(HEADER_H).child(
@@ -646,6 +649,9 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, layer: Option<El>, t: &The
                 .px(space::S8)
                 .center_y()
                 .fill(if in_selection(r, c) { t.selection } else { t.paper });
+            if stop == Some(here) {
+                cell = cell.focusable(true);
+            }
             cell = if here == view.current {
                 // The current cell: an ink ring, never Amber.
                 cell.border(2.0, t.text).border_layout()
@@ -845,6 +851,9 @@ fn asks(view: &SheetView, shown: &Shown, screen: (f32, f32)) -> Vec<(u32, u32, u
 
 fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: &Shown, live: Option<&Live>) -> El {
     let t = tokens::theme(cx.system_dark());
+    // The F6 stops in the order the window reads: the sidebar, then `office::order`'s.
+    let side_bar = sidebar::sidebar(s, &t);
+    super::order(ui.office.edit.is_some(), false, true, ui.show_details);
     // The workbook is open for editing (a live one): the grid takes the pointer and the keys, the formula bar edits.
     let editing = live.is_some()
         && ui
@@ -852,11 +861,11 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
             .edit
             .as_ref()
             .is_some_and(|e| e.kind == beebeeb_office_protocol::office::EditKind::Xlsx);
+    let room = cx
+        .layout_size("sh-grid")
+        .map_or((800.0, 600.0), |[w, h]| ((w - ROW_HEAD_W).max(0.0), (h - HEADER_H).max(0.0)));
     let (layer, cellbox, formula) = if editing {
         let geometry = Geometry::of(view, &shown.rows, &shown.cols);
-        let room = cx
-            .layout_size("sh-grid")
-            .map_or((800.0, 600.0), |[w, h]| ((w - ROW_HEAD_W).max(0.0), (h - HEADER_H).max(0.0)));
         (
             Some(edit_sheet::layer(&ui.office.grid, view, geometry, room, &t)),
             Some(edit_sheet::cell_box(&ui.office.grid, view, &t)),
@@ -864,6 +873,8 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
         )
     } else {
         edit_sheet::reset(s);
+        // Nobody edits it: the arrows move the cell cursor themselves (`sheets_scroll::cursor_key_tx`).
+        sheets_scroll::set_room(room);
         (None, None, None)
     };
     let mut cells = grid(view, shown, anchors_of(view, shown, live, &t), layer, &t);
@@ -873,19 +884,20 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
         cells = cells.child(sheets_scroll::overlay(view, down, across, &t));
     }
     let room = cx.layout_size("sh-tabs").map(|[w, _]| w);
-    let mut body = row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(
-        col()
-            .key("sheet")
-            .grow(1.0)
-            .min_w(0.0)
-            .h_full()
-            .child(viewer_bar(&t))
-            .child(formula_bar(view, cellbox, formula, &t))
-            .child(cells)
-            .child(sheet_tabs_edit(view, live.is_some(), room, editing, &t)),
-    );
+    let mut body = row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(super::document([col()
+        .key("sheet")
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .child(viewer_bar(&t))
+        .child(formula_bar(view, cellbox, formula, &t))
+        .child(cells)
+        .child(sheet_tabs_edit(view, live.is_some(), room, editing, &t))], None));
     if ui.show_details {
-        body = body.child(viewers::details::panel(&ui.file, ui.knows_offline(), &t));
+        body = body.child(super::panel(
+            viewers::details::panel(&ui.file, ui.knows_offline(), &t),
+            super::PANE_DETAILS,
+        ));
     }
     let main = col()
         .key("content-area")
@@ -894,7 +906,7 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(viewers::office::toolbar(s, ui, false, &t));
+        .child(super::band(viewers::office::toolbar(s, ui, false, &t), super::PANE_TOOLBAR));
     let main = match ui.office.edit.as_ref() {
         // The editor's frame, with the sheet's own status line: the figures of the selection, then how it is kept
         // (`edit::chrome`'s is the document's: pages and words).
@@ -906,22 +918,30 @@ fn window_with(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView, shown: 
                     .grow(1.0)
                     .min_h(0.0)
                     .w_full()
-                    .child(super::edit::sheet_ribbon::ribbon(ui, edit.unsaved(), &t))
+                    .child(super::band(
+                        super::edit::sheet_ribbon::ribbon(ui, edit.unsaved(), &t),
+                        super::PANE_RIBBON,
+                    ))
                     .child(body)
-                    .child(status(view, Some(&kept), &t)),
+                    .child(super::band(status(view, Some(&kept), &t), super::PANE_STATUS)),
             )
         }
         Some(edit) => main.child(super::edit::chrome(s, cx, ui, edit.kind, body)),
-        None => main.child(body).child(status(view, None, &t)),
+        None => main.child(body).child(super::band(status(view, None, &t), super::PANE_STATUS)),
     };
     let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
         row()
             .key("body")
             .w_full()
             .h_full()
-            .child(sidebar::sidebar(s, &t))
+            .child(side_bar)
             .child(main),
     );
+    // What is open over the workbook (About, the command search, the question before leaving) is drawn here as over a
+    // document: without it About opened a card nobody could see, which then held the keys.
+    if let Some(over) = viewers::office_over::over(ui, &t) {
+        under = under.child(over);
+    }
     if let Some(words) = &ui.toast {
         under = under.child(viewers::dialogs::toast(words, &t));
     }

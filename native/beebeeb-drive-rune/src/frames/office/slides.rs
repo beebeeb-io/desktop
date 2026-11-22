@@ -770,6 +770,9 @@ fn window_with(
     stage_page: &dyn Fn(u32) -> Option<SlidePage>,
 ) -> El {
     let t = tokens::theme(cx.system_dark());
+    // The F6 stops in the order the window reads: the sidebar, then `office::order`'s.
+    let side_bar = sidebar::sidebar(s, &t);
+    super::order(ui.office.edit.is_some(), true, true, false);
     let main = col()
         .key("content-area")
         .role("main")
@@ -777,14 +780,17 @@ fn window_with(
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(viewers::office::toolbar(s, ui, false, &t));
+        .child(super::band(viewers::office::toolbar(s, ui, false, &t), super::PANE_TOOLBAR));
     let body = row()
         .key("viewer-row")
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(filmstrip(deck, thumb, ui.office.edit.is_some(), &t))
-        .child(stage(deck, stage_page, ui.office.edit.as_ref(), &t));
+        .child(super::panel(filmstrip(deck, thumb, ui.office.edit.is_some(), &t), super::PANE_SIDE))
+        .child(super::document(
+            [stage(deck, stage_page, ui.office.edit.as_ref(), &t)],
+            ui.office.edit.is_none().then_some("Slide"),
+        ));
     let main = match ui.office.edit.as_ref() {
         // The editor's frame, composed here rather than by `edit::chrome` so the status line is the deck's (Slide x of
         // y, how it is kept), not the document's.
@@ -796,12 +802,15 @@ fn window_with(
                     .grow(1.0)
                     .min_h(0.0)
                     .w_full()
-                    .child(slide_ribbon::ribbon(ui, edit.unsaved(), &t))
+                    .child(super::band(slide_ribbon::ribbon(ui, edit.unsaved(), &t), super::PANE_RIBBON))
                     .child(body)
-                    .child(status(deck, Some(&kept), &t)),
+                    .child(super::band(status(deck, Some(&kept), &t), super::PANE_STATUS)),
             )
         }
-        None => main.child(bar(deck, &t)).child(body).child(status(deck, None, &t)),
+        None => main
+            .child(bar(deck, &t))
+            .child(body)
+            .child(super::band(status(deck, None, &t), super::PANE_STATUS)),
     };
     let menu = ui.office.edit.is_some().then(|| strip::menu_layer(deck, &t)).flatten();
     let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
@@ -809,7 +818,7 @@ fn window_with(
             .key("body")
             .w_full()
             .h_full()
-            .child(sidebar::sidebar(s, &t))
+            .child(side_bar)
             .child(main),
     );
     // What is open over the deck (the command search, the question before leaving, About) and the window's notice
