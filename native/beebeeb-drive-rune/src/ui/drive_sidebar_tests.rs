@@ -14,7 +14,8 @@ use crate::shell::platform::fake::FakePlatform;
 use crate::{State, view};
 
 /// The windows with a Drive sidebar, each on a board frame, and the row it lights.
-const WINDOWS: [(&str, fn(&mut State), &str); 8] = [
+type Setup = fn(&mut State);
+const WINDOWS: [(&str, Setup, &str); 8] = [
     ("Files", |_| {}, "Files-row"),
     ("Search", |s| s.frames.find.open = true, "Files-row"),
     ("Shared", crate::frames::shared::scenes::dw_0501, "Shared-row"),

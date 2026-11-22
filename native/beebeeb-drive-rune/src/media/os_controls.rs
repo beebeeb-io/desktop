@@ -63,6 +63,7 @@ pub fn playback_kind(now: &NowPlaying) -> PlaybackKind {
 impl NowPlaying {
     /// Builds what the controls show from an item. `file_name` may be a whole path (either separator): only its last
     /// part, without the extension, is ever used, and only when the tag has no title. The folder never reaches the OS.
+    #[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
     pub fn for_item(
         file_name: &str,
         tag_title: &str,

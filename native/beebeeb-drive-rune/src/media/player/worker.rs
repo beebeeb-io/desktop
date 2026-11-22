@@ -640,7 +640,7 @@ impl Worker {
         let per_frame = usize::from(channels);
         if channels != want.channels
             || per_frame == 0
-            || samples.len() % per_frame != 0
+            || !samples.len().is_multiple_of(per_frame)
             || samples.len() / per_frame > want.frames as usize
         {
             return Err(broke());

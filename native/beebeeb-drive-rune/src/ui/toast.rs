@@ -21,7 +21,6 @@ pub const ACTION: TextStyle = TextStyle::new(12.5, 600.0).lh(17.0);
 /// What the glyph says (`.tone-neutral`, `.tone-green`, `.tone-red`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
-    Neutral,
     Done,
     /// Something failed (DW-0109).
     Failed,
@@ -100,7 +99,6 @@ pub fn toast_keyed(
     t: &Theme,
 ) -> El {
     let color = match tone {
-        Tone::Neutral => t.text_secondary,
         Tone::Done => t.green,
         Tone::Failed => t.red,
     };

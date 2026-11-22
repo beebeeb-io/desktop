@@ -9,7 +9,7 @@ fn counts() {
     let t = "foo Foo food";
     assert_eq!(find_all(t, &q("foo", false, false)).len(), 3);
     assert_eq!(find_all(t, &q("foo", true, false)).len(), 2);
-    assert_eq!(find_all(t, &q("foo", true, true)).len(), 1 + 0);
+    assert_eq!(find_all(t, &q("foo", true, true)).len(), 1);
 }
 
 #[test]

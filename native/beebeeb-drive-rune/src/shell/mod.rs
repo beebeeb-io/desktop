@@ -162,7 +162,7 @@ const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-0609", |s| crate::frames::photos::set_scene(s, "DW-0609")),
     ("DW-0610", |s| crate::frames::photos::set_scene(s, "DW-0610")),
     ("DW-0611", |s| crate::frames::photos::set_scene(s, "DW-0611")),
-    // Lane f-shared-search-trash: Shared and Trash, by board frame id.
+    // Shared and Trash, by board frame id.
     ("DW-0501", crate::frames::shared::scenes::dw_0501),
     ("DW-0502", crate::frames::shared::scenes::dw_0502),
     ("DW-0503", crate::frames::shared::scenes::dw_0503),
@@ -590,7 +590,7 @@ pub(crate) fn local_data_of(dirs: &rune::dirs::AppDirs, os: &str) -> std::path::
     if os == "windows" { dirs.state() } else { dirs.data() }.to_path_buf()
 }
 
-/// Ends a start that stops for a reason the person must read (decision 2462: a refused `--api-base`, the test
+/// Ends a start that stops for a reason the person must read (a refused `--api-base`, the test
 /// build's data on this computer not for this run's server, stored credentials without local data). `line` names no
 /// value. It goes to stderr, and into the start-refusal box unless this start shows none (`instance::start_refusal_is_shown`:
 /// not the installer's call, not a tooling run; at login it is shown): a release build has no console, so without the box such
@@ -648,7 +648,7 @@ fn open_engine(
         api_base,
         beebeeb_engine::app::PlatformCredentials,
         {
-            // dc-165: the engine rings once per report (once per row of a first file list). The rings are one ask of
+            // the engine rings once per report (once per row of a first file list). The rings are one ask of
             // the window at most every `AT_MOST_EVERY`, and the ask draws only when the window's poll found something
             // (`redraw.rs`). An empty `update` here drew the whole window once per ring.
             let wakes = redraw::EngineWakes::start(redraw::AT_MOST_EVERY, move || {

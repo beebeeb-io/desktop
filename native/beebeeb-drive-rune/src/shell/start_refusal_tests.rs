@@ -1,5 +1,4 @@
-//! How a start that stops for a reason the person must read says so (decision 2462, the lead's ruling for #335 delta
-//! 2): a refused `--api-base`, the test build's data not for this run's server, stored credentials without local data.
+//! How a start that stops for a reason the person must read says so: a refused `--api-base`, the test build's data not for this run's server, stored credentials without local data.
 //! Each line goes to stderr and into the start-refusal box ([`super::refuse_start`]), except where a start shows no
 //! box (at login, the installer's call, a tooling run), and ends the start with 2. The box is the fake platform's
 //! recorder: `show_start_refusal` keeps the title and the text it was given.

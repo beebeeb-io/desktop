@@ -32,8 +32,8 @@ use crate::theme::tokens::Theme;
 use rune::tok::Family;
 use rune::{Color, El, Icon, Shape, TextEdit, TextStyle, canvas, col, el, row, text, text_input};
 
-use super::account_set::{self as set, SUB};
-use super::au::{self, Tone, type_au};
+use super::account_set as set;
+use super::au::{self, type_au};
 use super::kit;
 
 /// 11px/500 on a 14px line (`.t-cap`).
@@ -48,10 +48,6 @@ pub const BACKUP_CODE: TextStyle = TextStyle::new(15.0, 400.0).family(Family::Mo
 pub const CODE_N: TextStyle = TextStyle::new(10.0, 400.0).family(Family::Mono).lh(17.0).tracking(0.9);
 /// 11.5px/400 on 17px: the strength line.
 pub const STRENGTH: TextStyle = TextStyle::new(11.5, 400.0).lh(17.0);
-/// 17px/600 on 22px, tracked -0.012em (`.t-title`).
-pub const TITLE: TextStyle = TextStyle::new(17.0, 600.0).lh(22.0).tracking(-0.204);
-/// 13px/400 on 17px: a pop-up menu's row.
-pub const POP_ITEM: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
 /// 12px/700 on 15px: the bold lead of a confirm's paragraph.
 pub const SUB_BOLD: TextStyle = TextStyle::new(12.0, 700.0).lh(15.0);
 /// 12px/400 on 15.25px: a paragraph of a confirm whose lead is bold.
@@ -589,75 +585,6 @@ pub fn empty(icon: &'static Icon, title: &str, words: &str, t: &Theme) -> El {
         super::view_state::ViewState::Empty { key: "empty", icon, title, body: words, action: None },
         t,
     )
-}
-
-/// One row of a words-only pop-up menu; `danger` in red. `pad` is the board's own padding
-/// around the words (its Remove row is padded twice: 54 pt tall).
-pub fn pop_item(index: usize, label: &str, danger: bool, t: &Theme) -> El {
-    let key = format!("pop-0-item-{index}");
-    let ink = if danger { au::red_text(t) } else { t.text };
-    let words = kit::label(format!("{key}-label-text"), label, POP_ITEM, ink);
-    let (row_key, label_key) = (key.clone(), format!("{key}-label"));
-    kit::note_text(
-        &label_key,
-        if danger { &label_key } else { &row_key },
-        label,
-        POP_ITEM,
-        ink,
-    );
-    let inner = el()
-        .key(if danger { label_key } else { format!("{key}-pad") })
-        .w_full()
-        .py(9.0)
-        .px(14.0)
-        .child(words);
-    let mut item = el()
-        .key(row_key)
-        .role("menuitem")
-        .label(if danger {
-            format!("{label}, destructive")
-        } else {
-            label.to_string()
-        })
-        .w_full()
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true);
-    if danger {
-        // The board rules its Remove row off and pads it twice (its row is 53.5 pt tall).
-        item = item
-            .py(9.0)
-            .px(14.0)
-            .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-            .border_layout();
-    }
-    item.child(inner)
-}
-
-/// A words-only pop-up menu (`.au-menu.glass`): 180 pt wide, the paper seen through. The
-/// caller places it and makes it modal (Esc and a press outside close it). Key: `pop-0`.
-pub fn pop(name: &str, items: Vec<El>, t: &Theme) -> El {
-    let mut m = col()
-        .key("pop-0")
-        .role("menu")
-        .label(name)
-        .w(180.0)
-        .py(4.0)
-        .radius(12.0)
-        // `--kit-glass`: the paper, seen through.
-        .fill(if t.dark {
-            t.paper2.alpha(0.68)
-        } else {
-            t.paper.alpha(0.72)
-        })
-        .backdrop_blur(22.0)
-        .border(kit::HAIR, t.separator)
-        .border_layout()
-        .box_shadow(kit::drop(10.0, 30.0, Color::BLACK.alpha(0.22)));
-    for item in items {
-        m = m.child(item);
-    }
-    m
 }
 
 /// A confirm's paragraph whose first sentence is bold (DW-A76, DW-A78). Keys: `dlg-text-0`

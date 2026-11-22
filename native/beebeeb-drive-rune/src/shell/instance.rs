@@ -38,7 +38,7 @@ pub const EXPLORER_VERB_FLAG: &str = "--explorer-verb=";
 /// Development only: show the files of that `state.db` (read-only) instead of the fixture.
 pub const DB_FLAG: &str = "--db";
 /// The API base URL (`engine_host::open::api_base`): read by a dev build and by the test build
-/// (decision 2462), never by the real app in a build that ships. Set BEFORE any engine thread
+///, never by the real app in a build that ships. Set BEFORE any engine thread
 /// exists (it goes into `EngineConfig.api_base`).
 pub const API_BASE_FLAG: &str = "--api-base";
 /// `--api-base=<url>`: not a form the app reads. Where the build reads the flag, such an argument
@@ -373,7 +373,7 @@ pub fn refusal_is_shown(launch: &Launch) -> bool {
     !launch.autostart && !launch.quit_for_update && !launch.tooling
 }
 
-/// Whether a START refusal of `refuse_start` is shown in a native message box. These (decision 2462: a refused
+/// Whether a START refusal of `refuse_start` is shown in a native message box. These (a refused
 /// `--api-base`, data made for another server, credentials without data) stop the app until a person acts, so they
 /// are shown at login too: once per login, until fixed. They exist only where `--api-base` or a test build's data
 /// exists, never in a plain release start. Not for the installer's call and not for a tooling run.
@@ -537,7 +537,7 @@ mod tests {
             let launch = parse(flags, false);
             assert_eq!(launch, Launch::default(), "{flags:?}");
             assert!(launch.rune_args.is_empty(), "Rune is handed nothing: {flags:?}");
-            // The test build's shipped profile reads `--api-base` and none of these (decision 2462).
+            // The test build's shipped profile reads `--api-base` and none of these.
             assert_eq!(parse_as(flags, false, true), Launch::default(), "test build: {flags:?}");
         }
         for flag in TOOLING_FLAGS {
@@ -623,7 +623,7 @@ mod tests {
         }
     }
 
-    /// `--api-base=<url>` (#335 review P3-2): where the build reads the flag it is handed to the
+    /// `--api-base=<url>`: where the build reads the flag it is handed to the
     /// check whole, which refuses it, so the spelling never becomes a run on the default server;
     /// where the build does not read the flag it means nothing, like `--api-base` itself.
     #[test]

@@ -21,7 +21,7 @@
 //! Nothing here knows which panes exist or what a press does: a frame attaches `.on_press`.
 
 use crate::theme::icons_settings as ic;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{Theme, type_};
 use rune::tok::Family;
 use rune::{Color, El, Icon, LineCap, Shape, TextStyle, canvas, col, el, row};
 
@@ -29,25 +29,19 @@ use super::au::{self, Tone};
 use super::button;
 use super::dialog::{self, Dialog, Foot, Head, scrim};
 use super::kit;
-use super::settings_dialog::{BUTTON_MD, DIALOG_TITLE, scrim_color};
+use super::settings_dialog::{DIALOG_TITLE};
 use super::settings_list::{VALUE, VALUE_MONO};
-use super::settings_shell::{PANE_TITLE, slug};
+use super::settings_shell::{PANE_TITLE};
 
-/// The settings sidebar is 224 pt wide.
-pub const SIDEBAR_W: f32 = 224.0;
 /// A pane's column (`.au-set-col`).
 pub const COLUMN_W: f32 = 520.0;
 
-/// 10.5px/600 on a 17px line, tracked .07em: a sidebar group's heading (`.kit-side-title`).
-pub const SIDE_TITLE: TextStyle = TextStyle::new(10.5, 600.0).lh(17.0).tracking(0.735);
 /// 12px/400 on a 15px line: a second line (`.t-sub`).
 pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 /// 12px/400 mono on a 15px line: a machine's value inside a second line.
 pub const SUB_MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
 /// 11.5px/400 mono on a 15px line: a row's second line when it is a machine's (`.kit-item-sub.font-mono`).
 pub const SUB_MONO_ROW: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
-/// 11px/600 on a 13px line, tracked .01em: a pill's word (`.kit-pill`).
-pub const PILL: TextStyle = TextStyle::new(11.0, 600.0).lh(13.0).tracking(0.11);
 /// 12px/650: the initials on a 32 pt avatar.
 pub const INITIALS_32: TextStyle = TextStyle::new(12.0, 650.0);
 /// 13px/600 mono on a 17px line, tracked -0.006em: the count inside the score ring.
@@ -463,6 +457,7 @@ pub fn dialog(
 }
 
 /// [`dialog`] where Enter presses foot button `enter` (never a destructive one).
+#[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
 pub fn dialog_enter(
     name: &str,
     width: f32,
@@ -492,6 +487,7 @@ pub fn dialog_with(
 }
 
 /// [`dialog_with`] where Enter presses foot button `enter` (never a destructive one).
+#[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
 pub fn dialog_with_enter(
     name: &str,
     width: f32,

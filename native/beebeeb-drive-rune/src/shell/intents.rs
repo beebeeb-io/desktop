@@ -10,7 +10,7 @@
 //! not said whether the wake locks; review of #464, P3-1): the picker's folder, and an ask to show a place (a
 //! `beebeeb://` link, the b's Settings…, the flyout: `host::request`). Each waits, and goes on once the cover is gone,
 //! checked again ([`after_the_cover`]); a lock, a sign-out or another account drops it, as File Explorer's verbs do
-//! (`platform::windows_verbs`, P3-7). One exception (the lead's ruling of 2026-11-16 05:05): a link only opens a view, so
+//! (`platform::windows_verbs`, P3-7). One exception: a link only opens a view, so
 //! it follows the route machine's rule for a link that comes while locked: kept across a lock of the same account and
 //! opened after the unlock, checked again; a sign-out, an ended session or another account drops it.
 

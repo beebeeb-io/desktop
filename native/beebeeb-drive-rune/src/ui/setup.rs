@@ -287,6 +287,7 @@ pub struct SegInk {
 /// A segmented choice (`.kit-seg`): one of `labels` is chosen. A radio group: the arrow keys
 /// are the caller's (`on_key`), each segment is pressable. Returns the track and the segments
 /// keyed `<key>-<J>-tab`, to which the caller adds `.on_press_tx`.
+#[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
 pub fn segmented(
     key: &str,
     name: &str,
@@ -366,6 +367,7 @@ pub fn small_button(key: &str, label: &str, t: &Theme) -> El {
 /// One row of a list (`.kit-item` at the desktop density): 28 high, 40 with a second line (or
 /// `min_h`). `trailing` sits at its end (a switch, a value, a segmented choice). `ruled`: a hairline
 /// above it (the board rules a row off from the one above where the two are siblings in its markup).
+#[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
 pub fn item(
     keys: &mut Keys,
     icon: Option<&'static Icon>,

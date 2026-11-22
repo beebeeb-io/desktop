@@ -48,7 +48,8 @@ fn drawn(els: &[ElementInfo]) -> Vec<String> {
         .collect()
 }
 
-const DOTS: [(Dot, fn(&Theme) -> El); 5] = [
+type Make = fn(&Theme) -> El;
+const DOTS: [(Dot, Make); 5] = [
     (Dot::Green, |t| {
         bar(Some(Dot::Green), Some("Up to date"), "4 on this PC", t)
     }),

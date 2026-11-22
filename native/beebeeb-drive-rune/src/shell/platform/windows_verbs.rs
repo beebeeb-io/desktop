@@ -1,7 +1,7 @@
 //! Slice B6 (plan40 batch 1): Beebeeb's four items in File Explorer's classic menu (DW-1183, "Show more options"):
 //! Share with Beebeeb…, Copy Beebeeb link, Show in Beebeeb, Version history… (`control::ExplorerVerb`).
 //!
-//! Three parts, one per process and moment (the lead's ruling of 2026-11-15 16:45: no URI scheme):
+//! Three parts, one per process and moment (no URI scheme):
 //!
 //! - **The menu** ([`register`]): per-user verbs under `HKCU\Software\Classes\*\shell`, one key per verb, for files
 //!   whose path starts with the sync folder's (`AppliesTo`). Each runs `"<this program>" --explorer-verb=<verb> "%1"`,

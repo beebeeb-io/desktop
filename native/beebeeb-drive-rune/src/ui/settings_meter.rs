@@ -192,19 +192,6 @@ pub fn chip(index: usize, icon: Option<&'static Icon>, words: &str, t: &Theme) -
     c.child(kit::label(format!("{key}-label"), words, CHIP, t.text_secondary))
 }
 
-/// A skeleton (`.mk-skel`): the shape of something that is still loading. Key: `skel-<N>`.
-pub fn skeleton(index: usize, width: Option<f32>, height: f32, t: &Theme) -> El {
-    let s = el()
-        .key(format!("skel-{index}"))
-        .h(height)
-        .radius(5.0)
-        .fill(t.text.alpha(0.08));
-    match width {
-        Some(width) => s.w(width),
-        None => s.w_full(),
-    }
-}
-
 /// A line of words with machine values inside it (`mono`: byte ranges drawn in JetBrains
 /// Mono), under one key: the board's element holds both, so the gate reads it as one text.
 pub fn mixed(key: &str, words: &str, mono: &[std::ops::Range<usize>], style: TextStyle, ink: Color) -> El {
@@ -215,7 +202,7 @@ pub fn mixed(key: &str, words: &str, mono: &[std::ops::Range<usize>], style: Tex
 
 /// `mixed` for the common case: the value comes first, the words follow ("240 GB used").
 pub fn value_then(key: &str, value: &str, words: &str, style: TextStyle, ink: Color) -> El {
-    mixed(key, &format!("{value}{words}"), &[0..value.len()], style, ink)
+    mixed(key, &format!("{value}{words}"), std::slice::from_ref(&(0..value.len())), style, ink)
 }
 
 /// `mixed` with the value last ("of 1 TB").
@@ -223,7 +210,7 @@ pub fn then_value(key: &str, words: &str, value: &str, style: TextStyle, ink: Co
     mixed(
         key,
         &format!("{words}{value}"),
-        &[words.len()..words.len() + value.len()],
+        std::slice::from_ref(&(words.len()..words.len() + value.len())),
         style,
         ink,
     )

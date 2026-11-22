@@ -16,7 +16,7 @@
 //! power broadcast's suspend and resume (`WM_POWERBROADCAST`) say how long the PC was away
 //! ([`TrayEvent::Resumed`]). The window registers for that broadcast too
 //! (`RegisterSuspendResumeNotification`): on a Modern Standby PC the suspend goes only to a
-//! window that registered (review of #452, P2-A); where it is sent to every top-level window the
+//! window that registered; where it is sent to every top-level window the
 //! registration changes nothing. Where neither comes, the away lock's poll sees the gap
 //! (`shell/away.rs`).
 //!

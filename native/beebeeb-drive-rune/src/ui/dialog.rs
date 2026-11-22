@@ -13,7 +13,9 @@
 //! Callers write `Dialog { head: .., foot: .., ..Dialog::new("dlg", name, 380.0) }`.
 
 use crate::theme::tokens::Theme;
-use rune::{Color, El, col, el, row};
+#[cfg(test)]
+use rune::el;
+use rune::{Color, El, col, row};
 
 use super::kit;
 use super::settings_dialog::{DIALOG_TITLE, scrim_color};
@@ -134,6 +136,7 @@ pub fn modal<S: 'static>(top: f32, card: El, dismiss: impl Fn(&mut S) + 'static,
 /// [`modal`] that hands focus to the control keyed `opener` as it closes (Esc, a button), for
 /// an opener that is gone by then: a menu's row, a toolbar overflow item. An opener that stays
 /// gets focus back from [`modal`] alone.
+#[cfg(test)]
 pub fn modal_from<S: 'static>(
     top: f32,
     card: El,
@@ -151,6 +154,7 @@ pub fn modal_from<S: 'static>(
 /// Two return layers: Rune walks the removed nodes innermost first and skips one whose key is
 /// gone. The opener's layer is a zero-size leaf inside the scrim (its scope is the scrim), the
 /// fallback's is the scrim itself.
+#[cfg(test)]
 pub fn modal_back<S: 'static>(
     top: f32,
     card: El,

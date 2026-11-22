@@ -430,7 +430,9 @@ fn old_card(name: &str, width: f32, title: &str, sub: Option<Sub>, body: Vec<El>
         )
 }
 
-fn boxes(rt: &Runtime<W>) -> Vec<(Option<String>, &'static str, [f32; 4], f32, Color)> {
+type Boxed = (Option<String>, &'static str, [f32; 4], f32, Color);
+
+fn boxes(rt: &Runtime<W>) -> Vec<Boxed> {
     rt.elements()
         .into_iter()
         .filter(|e| !e.exiting)
@@ -447,7 +449,8 @@ fn card_keeps_its_keys_and_boxes() {
             .child(btn(0, "Save", t))
             .child(btn(1, "Cancel", t))
     }
-    let cases: [(fn(&Theme) -> El, fn(&Theme) -> El); 3] = [
+    type Build = fn(&Theme) -> El;
+    let cases: [(Build, Build); 3] = [
         (
             |t| {
                 scrim(

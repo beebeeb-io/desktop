@@ -1,6 +1,7 @@
 //! The sidebar's places: folder art in its tint (selected or not); Trash keeps its glyph and colour.
 
 use super::*;
+use crate::theme::file_icon_colors::tint_color;
 use crate::theme::tokens;
 
 fn colours(dark: bool, on: bool) -> Vec<(SidebarSection, Color)> {

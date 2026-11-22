@@ -10,7 +10,7 @@
 //! keys every `.kit-btn` of the settings view by order). Amber is the primary action only.
 
 use crate::theme::icons_settings as ic;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{Theme, radius};
 use rune::{Color, El, Icon, TextStyle, col, el, row};
 
 use super::button::{self as btn, ButtonState, Size, Variant};

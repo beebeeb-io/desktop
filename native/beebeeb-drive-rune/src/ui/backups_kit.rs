@@ -42,11 +42,6 @@ pub fn red_text(t: &Theme) -> Color {
     }
 }
 
-/// `bg-red`: the fill of a destructive button, the same in both themes.
-pub fn red_fill() -> Color {
-    oklch(0.55, 0.2, 25.0)
-}
-
 /// The panel with 12 pt padding (`.kit-card.p-3.flex.items-center.gap-3`). Key: `card-<N>`.
 pub fn card(index: usize, t: &Theme) -> El {
     row()

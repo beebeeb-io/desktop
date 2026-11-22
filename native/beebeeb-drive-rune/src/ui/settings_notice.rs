@@ -13,17 +13,14 @@
 
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::Theme;
-use rune::{Color, El, Icon, Span, TextStyle, col, el, oklch, rich, row};
+use rune::{Color, El, Icon, Span, TextStyle, el, oklch, rich, row};
 
 use super::kit;
-use super::settings_card as cards;
 
 /// 12.5px/400 on a 17px line: a notice's words (`.mk-banner`).
 pub const NOTE: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
 /// 11px/600 on a 17px line, tracked .01em: a pill's word (`.kit-pill`).
 pub const PILL: TextStyle = TextStyle::new(11.0, 600.0).lh(17.0).tracking(0.11);
-/// 12.5px/550 on a 17px line: a toast's words (`.mk-toast .kit-toast`).
-pub const TOAST: TextStyle = TextStyle::new(12.5, 550.0).lh(17.0);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tone {
@@ -188,25 +185,4 @@ pub fn tile_sized(index: usize, tone: Tone, icon: &'static Icon, size: f32, t: &
         .fill(fill)
         .center()
         .child(kit::glyph(format!("tile-{index}-icon"), icon, size / 2.0, ink))
-}
-
-/// The card for something that could not load: what failed, what is unchanged, and one
-/// way to try again (the caller's button). Says what happened; never blames the person.
-pub fn problem(card: usize, tile_index: usize, head: &str, words: &str, action: Option<El>, t: &Theme) -> El {
-    let mut text = col()
-        .key(format!("card-{card}-words"))
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(4.0)
-        .child(cards::head(card, head, t))
-        .child(cards::sub(card, words, t).wrap());
-    if let Some(action) = action {
-        text = text.child(row().key(format!("card-{card}-actions")).pt(8.0).child(action));
-    }
-    cards::card(card, t)
-        .items_start()
-        .role("alert")
-        .label(format!("{head}. {words}"))
-        .child(tile(tile_index, Tone::Red, &ic::WARN_CIRCLE, t))
-        .child(text)
 }

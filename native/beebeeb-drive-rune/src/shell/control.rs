@@ -17,7 +17,7 @@
 //! any process of this user can write to the pipe, so no verb does more than a click on the b's
 //! menu could, and a link can only ever SHOW a place.
 //!
-//! **A File Explorer verb carries an id, never a path** (slice B6, the lead's ruling of 2026-11-15 16:45): the
+//! **A File Explorer verb carries an id, never a path**: the
 //! launch Explorer started reads the item's id from its placeholder (`platform::windows_verbs`) and sends only the
 //! verb and that id, short and ASCII. The running instance checks everything again (the account, the lock, the
 //! verb), and Share and Copy link only OPEN the window's own Share dialog: nothing is shared from the pipe.

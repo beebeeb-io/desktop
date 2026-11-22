@@ -8,7 +8,9 @@
 use super::player::{AudioFactory, AudioSink};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
+#[cfg(any(windows, target_os = "macos", test))]
+use zeroize::Zeroizing;
 
 #[cfg(test)]
 #[path = "audio_out_tests.rs"]

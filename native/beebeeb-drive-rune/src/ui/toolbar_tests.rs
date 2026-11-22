@@ -14,7 +14,8 @@ use crate::shell::platform::fake::FakePlatform;
 use crate::{State, view};
 
 /// The windows that show no folder of their own, each on a board frame.
-const SECTIONS: [(&str, fn(&mut State)); 6] = [
+type Scene = fn(&mut State);
+const SECTIONS: [(&str, Scene); 6] = [
     ("Shared", crate::frames::shared::scenes::dw_0501),
     ("Shared, Requests", crate::frames::shared::scenes::dw_0503),
     ("Trash", crate::frames::trash::scenes::dw_0747),

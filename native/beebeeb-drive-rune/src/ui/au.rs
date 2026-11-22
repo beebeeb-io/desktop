@@ -35,8 +35,6 @@ pub mod type_au {
     pub const SUB_MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
     /// `.kit-btn-lg` label: 13px/500 on 19.5px.
     pub const BUTTON_LG: TextStyle = TextStyle::new(13.0, 500.0).lh(19.5).tracking(-0.065);
-    /// `.kit-btn-md` label: 13px/500 on 18.57px.
-    pub const BUTTON_MD: TextStyle = TextStyle::new(13.0, 500.0).lh(18.5714).tracking(-0.065);
     /// `.kit-field-outer`: 11px/500 on 15px.
     pub const FIELD_LABEL: TextStyle = TextStyle::new(11.0, 500.0).lh(15.0);
     /// `.kit-field-value`: 13px/400.
@@ -517,11 +515,6 @@ pub fn banner(
         .fill(wash)
         .child(kit::glyph(format!("{key}-icon"), icon, 16.0, mark).mt(1.0))
         .child(words)
-}
-
-/// A pill: a short state, with a dot before it when `dot`. Drawn by `ui::pill`.
-pub fn pill(key: &str, label: &str, tone_: Tone, dot: bool, t: &Theme) -> El {
-    super::pill::pill(key, label, pill_tone(tone_), dot, t)
 }
 
 /// The shared pill's tone for an account tone.

@@ -127,7 +127,7 @@ pub struct Shell {
     media_pump: Arc<dyn Fn() + Send + Sync>,
     /// Stops what plays when the session closes under the window (`media::stop_all`). Held so a test sees the stop.
     media_stop: Arc<dyn Fn(crate::media::StopReason) + Send + Sync>,
-    /// dc-165: what the views read from the engine as the last ring left it (`redraw::follow_engine`).
+    /// what the views read from the engine as the last ring left it (`redraw::follow_engine`).
     pub(super) seen: Option<super::redraw::Seen>,
 }
 
@@ -594,7 +594,7 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 }
 
 /// [`request`] for a `beebeeb://` link (`link`): held under the wake cover the same way, but kept across a lock of the
-/// same account (`intents::after_the_cover`; the lead's ruling of 2026-11-16 05:05: a link only opens a view).
+/// same account (`intents::after_the_cover`: a link only opens a view).
 fn request_as(s: &mut State, intent: Intent, link: bool) -> Outcome {
     if under_the_wake_cover(s) {
         super::intents::hold_under_the_cover(s, intent, link);
@@ -617,14 +617,14 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // Last, so a clear that `media::stop_all` posted above (a lock, a sign-out) reaches Windows in this same poll.
     // The poll also runs for a hidden window whenever it is woken (rune's `poll_hidden`), so the tray case is covered.
     (s.shell.media_pump)();
-    // dc-165: what the views read from the engine while they draw (the status line's words), after a ring only.
+    // what the views read from the engine while they draw (the status line's words), after a ring only.
     changed |= super::redraw::follow_engine(s, changed);
     changed
 }
 
 /// Everything a poll does but the capture decision.
 fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
-    // The open file: the engine's answers, and a route that left it (lane f-viewers).
+    // The open file: the engine's answers, and a route that left it.
     let mut changed = crate::frames::viewers::poll(s, tx);
     // The unsaved-changes question of a quit or the gate's sign-out: Save's follow-up.
     changed |= crate::frames::viewers::unsaved_guard::poll(s, tx);
@@ -772,8 +772,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // session: an answer that comes with a lock or a sign-out finds its wait already ended.
     changed |= crate::frames::account::approve::poll(s);
     // The away lock: how long this PC had no input, to the engine, while the engine's lock is open
-    // (`away.rs`), whatever the window shows: the first-run steps and the no-plan screen too (review
-    // of #452, the lead's ruling: no exception).
+    // (`away.rs`), whatever the window shows: the first-run steps and the no-plan screen too (a review
+    // finding: no exception).
     let shell = &mut s.shell;
     changed |= shell.away.poll(
         shell.actions.screen_open(),
@@ -1206,7 +1206,7 @@ pub fn on_tray(s: &mut State, event: TrayEvent, tx: &mut Tx) {
                 .event(Away::SessionLocked, &shell.actions, shell.wiring.main.as_ref());
         }
         // The PC woke: how long it was away goes to the engine as idle time, before the wake's own
-        // key press can count as input (review of #452, P2-1).
+        // key press can count as input (a review finding).
         TrayEvent::Resumed { away } => {
             let shell = &mut s.shell;
             shell

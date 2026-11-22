@@ -2,7 +2,6 @@
 //! itself is `ui::drive_sidebar`; [`sidebar`] and [`sidebar_in`] draw it.
 
 use crate::State;
-use crate::theme::file_icon_colors::tint_color;
 use crate::theme::file_icons::{FileIcon, IconId, Tint};
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
@@ -220,6 +219,7 @@ pub fn brand(product: &str, t: &Theme) -> El {
 /// The badge count for a section, from the state's live sources. `None`: no badge (the source
 /// has nothing, or is unwired). The snapshot path's fixtures give the board's numbers; a live
 /// window with an engine gives the engine's.
+#[cfg(test)]
 pub(crate) fn badge_for(s: &State, section: SidebarSection) -> Option<Count> {
     match section {
         SidebarSection::Shared => {

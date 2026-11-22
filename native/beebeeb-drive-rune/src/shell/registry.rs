@@ -94,6 +94,7 @@ impl FrameGroup {
     ///
     /// A new variant of [`FrameGroup`] causes a compile error here (exhaustive match); the
     /// [`tests::every_frame_group_is_classified`] test pins the count and the exact set.
+    #[cfg(test)]
     pub fn shows_secret(self) -> bool {
         match self {
             // Password entry.
@@ -438,6 +439,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 
 /// Whether the current route shows a secret: the frame behind the window, or any dialog in
 /// front of it. Used by the shell to set the window's capture-exclusion (`platform::Platform::set_capture_exclusion`).
+#[cfg(test)]
 pub fn route_shows_secret(app: &AppMachine) -> bool {
     let behind = group_for(app);
     if behind.shows_secret() {

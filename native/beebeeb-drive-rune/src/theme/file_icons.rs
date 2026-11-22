@@ -86,6 +86,7 @@ pub enum IconId {
 }
 
 impl IconId {
+    #[cfg(test)]
     pub const ALL: &[IconId] = &[
         IconId::File,
         IconId::Folder,
@@ -189,6 +190,7 @@ pub enum Tint {
 }
 
 impl Tint {
+    #[cfg(test)]
     pub const ALL: &[Tint] = &[
         Tint::Folder,
         Tint::Pdf,
@@ -592,10 +594,10 @@ pub fn icon_for(name: &str, is_dir: bool, mime: Option<&str>) -> FileIcon {
         return fi;
     }
     for (i, _) in n.match_indices('.') {
-        if i > 0 {
-            if let Some(fi) = lookup(EXTENSIONS, &n[i + 1..]) {
-                return fi;
-            }
+        if i > 0
+            && let Some(fi) = lookup(EXTENSIONS, &n[i + 1..])
+        {
+            return fi;
         }
     }
     if let Some(m) = mime {
