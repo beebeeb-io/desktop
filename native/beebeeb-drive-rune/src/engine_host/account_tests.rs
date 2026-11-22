@@ -94,6 +94,8 @@ struct Server {
     two_factor: Arc<Mutex<[Option<bool>; 2]>>,
     /// Runs once, before the next sessions list that is asked to fail is answered.
     during_failed_read: Hook,
+    /// The PC is offline: every request is dropped unanswered (counted in `routes`, answered for nothing).
+    offline: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn sessions_of_the_first() -> Vec<Value> {
@@ -175,7 +177,12 @@ fn server() -> Server {
     let signing_in_second = Mutex::new(false);
     let two_factor: Arc<Mutex<[Option<bool>; 2]>> = Arc::new(Mutex::new([None, None]));
     let two_factor_in = two_factor.clone();
+    let offline: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let offline_in = offline.clone();
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
+        if offline_in.load(Ordering::SeqCst) {
+            return failed(DROP_CONNECTION).expect("a dropped connection");
+        }
         let who = match req.bearer() {
             Some(token) => usize::from(token == people_in[1].account.session_token),
             None => {
@@ -311,6 +318,7 @@ fn server() -> Server {
         during_read,
         two_factor,
         during_failed_read,
+        offline,
     }
 }
 

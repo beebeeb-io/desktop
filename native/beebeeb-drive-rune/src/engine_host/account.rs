@@ -132,6 +132,8 @@ struct Reads {
     failed_for: Option<SessionGeneration>,
     /// The session the last read was asked for.
     asked_for: Option<SessionGeneration>,
+    /// The last failure (`failed_for`) was Beebeeb out of reach, not an answer.
+    offline: bool,
 }
 
 #[allow(clippy::large_enum_variant)] // one value per answer, moved once through a channel: boxing would only add a hop
@@ -472,6 +474,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         let reads = self.reads_of(kind);
         reads.read_at = None;
         reads.failed_for = Some(session);
+        reads.offline = error == AccountCallError::Offline;
     }
 
     fn take_in(&mut self, answer: Answer) {
@@ -698,6 +701,11 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         let turn = self.engine.session_turn();
         if self.refused() {
             return PaneState::SessionEnded;
+        }
+        // The Security page draws from the facts, where every part read from Beebeeb may be unknown, and Sign out
+        // is local first: it never waits on (or fails with) a read, so a PC that is offline can still sign out.
+        if pane == Pane::Security {
+            return PaneState::Ready;
         }
         let (held, reads) = match kind {
             Kind::Overview => (
@@ -1021,6 +1029,13 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
             app_lock_password: self.app_lock.password_offer(),
             ..SecurityFacts::unknown()
         }
+    }
+
+    /// A read of this session's that the page draws found Beebeeb out of reach, and none answered after it.
+    fn offline(&self) -> bool {
+        let turn = self.engine.session_turn();
+        let out = |reads: &Reads| reads.reading.is_none() && reads.failed_for == Some(turn) && reads.offline;
+        self.open() && (out(&self.overview_reads) || out(&self.sessions_reads))
     }
 
     fn set_app_lock(&mut self, on: bool) {

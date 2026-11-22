@@ -696,6 +696,11 @@ pub trait AccountSource {
     fn security_facts(&self) -> SecurityFacts {
         SecurityFacts::unknown()
     }
+    /// Beebeeb could not be reached for what the Security page reads from it: a part nobody read says "Offline"
+    /// there, not "Not known". The page itself (and Sign out) never waits on the network.
+    fn offline(&self) -> bool {
+        false
+    }
     /// Engine: `GET /api/v1/account/sessions`, grouped by device.
     fn sessions(&self) -> Vec<Session>;
 
