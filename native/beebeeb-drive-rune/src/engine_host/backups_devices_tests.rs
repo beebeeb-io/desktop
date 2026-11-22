@@ -598,6 +598,12 @@ fn backups_devices_try_again() {
         fake.reads.load(Ordering::SeqCst) > reads,
         "Try again asks the engine again"
     );
+    let source = rt.state.backups.source().unwrap();
+    assert_eq!(
+        (source.devices_note(), source.devices().len(), fake.reads.load(Ordering::SeqCst) - reads),
+        (None, 4, 1),
+        "the read after Try again answered"
+    );
     assert!(find_key(&rt, RETRY).is_none());
     assert!(has_text(&rt, "Invented Studio"), "the devices show after Try again");
 
