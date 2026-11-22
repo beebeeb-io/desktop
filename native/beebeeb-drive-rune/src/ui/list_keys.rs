@@ -79,6 +79,7 @@ pub enum ListAction {
 }
 
 /// The rows a Shift range covers: from the anchor (else the focus, else `to`) to `to`, in order.
+#[cfg_attr(not(test), allow(dead_code))] // no caller outside the tests yet
 pub fn extend_range(cursor: &ListCursor, to: usize) -> RangeInclusive<usize> {
     let from = cursor.anchor.or(cursor.focus).unwrap_or(to);
     from.min(to)..=from.max(to)

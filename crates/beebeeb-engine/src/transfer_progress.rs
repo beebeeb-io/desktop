@@ -340,7 +340,7 @@ impl ReceiveMeter {
     /// `wire_bytes` that were added are not used after all (a body that broke off, a chunk that
     /// did not authenticate): no longer progress. They stay in [`Self::received`].
     pub fn discard(&self, wire_bytes: u64) {
-        let _ = self.kept.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |k| {
+        let _ = self.kept.try_update(Ordering::Relaxed, Ordering::Relaxed, |k| {
             Some(k.saturating_sub(wire_bytes))
         });
     }
@@ -349,7 +349,7 @@ impl ReceiveMeter {
     pub fn rollback_to(&self, mark: u64) {
         let _ = self
             .kept
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |k| Some(k.min(mark)));
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |k| Some(k.min(mark)));
     }
 
     /// LD-0105 W2: `wire_bytes` arrived but are not progress by themselves (a range session counts its

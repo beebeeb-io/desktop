@@ -9,8 +9,12 @@ use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::engine_host::files_launch::{Start, Starts};
-use crate::engine_host::{launch, open_path, reveal_in_file_explorer};
+#[cfg(target_os = "linux")]
+use crate::engine_host::files_launch::Start;
+use crate::engine_host::files_launch::Starts;
+use crate::engine_host::launch;
+#[cfg(target_os = "linux")]
+use crate::engine_host::{open_path, reveal_in_file_explorer};
 use crate::frames::files::source::AppChoice;
 
 /// The launch lock held on a thread of its own, as Windows' app chooser holds it while it is open.

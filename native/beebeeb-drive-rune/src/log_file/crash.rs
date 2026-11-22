@@ -144,6 +144,7 @@ pub fn take_at_start() -> Option<CrashRecord> {
 }
 
 /// Removes the record (after it was reported or dismissed).
+#[cfg_attr(not(test), allow(dead_code))] // no caller outside the tests yet
 pub fn clear(dir: &Path) {
     let _ = fs::remove_file(dir.join(CRASH_FILE_NAME));
 }

@@ -249,6 +249,7 @@ mod tests {
     /// W3 ships off for 0.8.22. Red on the mutant "the switch
     /// is on".
     #[test]
+    #[allow(clippy::assertions_on_constants)] // the shipped value is what is checked
     fn the_switch_is_off_for_0822() {
         assert!(!STREAMING_ENABLED, "W3 ships switched off");
         assert!(

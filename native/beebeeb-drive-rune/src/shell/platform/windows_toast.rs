@@ -134,6 +134,7 @@ pub(crate) fn words(kind: Kind) -> Words {
 }
 
 /// The words of a notice.
+#[allow(dead_code)] // no caller yet
 pub(crate) fn words_of(notice: &Notice) -> Words {
     words(kind_of(notice))
 }

@@ -119,8 +119,10 @@ fn reg_read_string(key: &str, name: &str) -> Result<Option<String>, PlatformErro
         return Ok(None);
     };
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .take_while(|unit| *unit != 0)
         .collect();
     Ok(Some(String::from_utf16_lossy(&units)))
@@ -275,7 +277,7 @@ impl Platform for WindowsPlatform {
             SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW as isize);
         }
         round_corners(hwnd as HWND);
-        FLYOUT_HWND.store(hwnd as isize, std::sync::atomic::Ordering::SeqCst);
+        FLYOUT_HWND.store(hwnd, std::sync::atomic::Ordering::SeqCst);
         if EXCLUDED.load(std::sync::atomic::Ordering::SeqCst) {
             // SAFETY: as above; a failure leaves the flyout visible to captures, which the main window's call reports.
             unsafe { SetWindowDisplayAffinity(hwnd as HWND, WDA_EXCLUDEFROMCAPTURE) };
@@ -392,6 +394,7 @@ pub(super) fn pc_idle() -> Option<Duration> {
 }
 
 /// `WM_SETTINGCHANGE`: re-read the Windows contrast theme. True if it changed, so the app redraws.
+#[allow(dead_code)] // not wired to the window procedure yet
 pub(super) fn on_setting_change() -> bool {
     super::windows_contrast::refresh()
 }

@@ -918,7 +918,7 @@ fn config_error_display_keeps_the_legacy_message_of_every_variant() {
     assert_eq!(
         ConfigError::ParseFile {
             path: path.to_path_buf(),
-            source: parse,
+            source: Box::new(parse),
         }
         .to_string(),
         expected

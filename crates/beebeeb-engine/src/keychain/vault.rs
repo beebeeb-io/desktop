@@ -239,7 +239,7 @@ impl<S: AuthSecretStore> AuthVault<S> {
     }
 
     /// Tests only: no production caller reads the store back; it asserts what the store holds.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(super) fn store(&self) -> &S {
         &self.store
     }
@@ -507,9 +507,11 @@ impl<S: AuthSecretStore> AuthVault<S> {
     /// Remove every lock entry, app lock first ([`LockFlag::ALL`]'s order); every removal is tried. An account's
     /// first sign-in on this computer carries nothing of a lock setting (core's first `Session::save`).
     pub fn clear_lock_entries(&self) -> AuthResult<()> {
-        LockFlag::ALL
-            .into_iter()
-            .fold(Ok(()), |done, flag| done.and(self.store.delete_lock_flag(flag)))
+        let mut done = Ok(());
+        for flag in LockFlag::ALL {
+            done = done.and(self.store.delete_lock_flag(flag));
+        }
+        done
     }
 
     /// The raw bytes of a lock entry that is not a 1/0 flag ([`LockFlag::Attempts`], [`LockFlag::ScreenCheck`],

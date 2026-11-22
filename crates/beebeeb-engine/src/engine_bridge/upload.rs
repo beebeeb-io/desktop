@@ -528,9 +528,7 @@ impl EngineBridge {
         // written in the landing's own transaction (the journal then owns the retry).
         #[cfg(target_os = "windows")]
         let finalization = match payload_path.as_deref() {
-            Some(path) => self
-                .defer_local_upload_finalization(op, server_file_id, sync_root, Path::new(path))
-                .map_err(EngineError::from)?,
+            Some(path) => self.defer_local_upload_finalization(op, server_file_id, sync_root, Path::new(path))?,
             None => None,
         };
         #[cfg(not(target_os = "windows"))]

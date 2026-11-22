@@ -72,17 +72,17 @@ unsafe extern "system" fn on_message(code: i32, wparam: WPARAM, lparam: LPARAM) 
             WM_DEADCHAR | WM_SYSDEADCHAR => Some(KeyMessage::Dead),
             _ => None,
         };
-        if let Some(key) = key {
-            if is_main(message.hwnd) {
-                let verdict = PACKETS.with(|packets| packets.borrow_mut().on(key));
-                if let Verdict::Take(text) = verdict {
-                    message.message = WM_NULL;
-                    if let Some(text) = text {
-                        unpoisoned(&TAKEN).push(text);
-                        let wake = unpoisoned(&WAKE).clone();
-                        if let Some(wake) = wake {
-                            wake();
-                        }
+        if let Some(key) = key
+            && is_main(message.hwnd)
+        {
+            let verdict = PACKETS.with(|packets| packets.borrow_mut().on(key));
+            if let Verdict::Take(text) = verdict {
+                message.message = WM_NULL;
+                if let Some(text) = text {
+                    unpoisoned(&TAKEN).push(text);
+                    let wake = unpoisoned(&WAKE).clone();
+                    if let Some(wake) = wake {
+                        wake();
                     }
                 }
             }

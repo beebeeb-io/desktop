@@ -56,6 +56,7 @@ pub mod drive_previews;
 pub mod drive_settings;
 pub mod files;
 #[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(test), allow(dead_code))] // the card is not wired into the Windows app yet
 pub mod found_while_paused;
 #[cfg(test)]
 mod files_case_twins_tests;

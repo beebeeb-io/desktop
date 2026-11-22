@@ -452,7 +452,7 @@ thread_local! {
 }
 
 /// Run `hook` at the next keep on this thread, right before it forgets an item's rows and changes.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn before_forget_for_test(hook: impl FnOnce() + 'static) {
     BEFORE_FORGET.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }

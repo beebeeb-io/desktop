@@ -215,7 +215,7 @@ fn hydration_range_plan_uses_authoritative_chunk_size_for_short_last_chunk() {
 }
 
 /// A range request that happens to cover the WHOLE file (offset 0, length
-/// >= size) — this is the `covers_whole_file` branch, which mirrors
+/// at least size) — this is the `covers_whole_file` branch, which mirrors
 /// `hydrate_file_to_memory`'s bookkeeping: mark `Local` + `mark_cached`.
 #[test]
 fn hydrate_file_range_covering_whole_file_marks_local() {
