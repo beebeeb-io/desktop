@@ -157,6 +157,7 @@ changes
 chart
 check
 checked
+checks
 child
 chosen
 chunk
@@ -584,6 +585,7 @@ ms
 name
 name_check_errors
 name_conflicts
+name_unreadable
 names
 needs
 nested
