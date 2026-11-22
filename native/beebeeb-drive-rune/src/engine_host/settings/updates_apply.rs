@@ -131,6 +131,16 @@ impl<C: CredentialStores> Apply for EngineApply<C> {
     /// (the installer is replacing this program), and the record cannot end the worker: a panic in it is caught, as
     /// `set_channel`'s is, so the window still hears `Restarting` and quits.
     fn launch(&mut self, installer: &VerifiedInstaller, offer: &Offer, stopped: EngineStopped) -> bool {
+        // The engine is read once more, through its slot, before the person is asked about. The stop held that slot
+        // for seconds, and whatever waited on it behind the stop gets its turn here, ahead of this read (the slot is
+        // served in order): a lock that closed on the stop's end has landed by the time presence is asked below.
+        // Asked the moment the stop returned, presence still said "open" (dc-171). And a sync started again since the
+        // stop makes the proof stale: no installer starts over a running runner, and nothing is asked back.
+        if self.engine.is_syncing() {
+            log("settings: sync runs again since the stop; the installer was not started");
+            self.stopped_running = false;
+            return false;
+        }
         // The stop can take seconds: Beebeeb may have been locked, or the session changed, meanwhile (or a step that
         // ends it, such as a sign-out, was asked and waits behind this stop). Then no installer starts; the machine
         // resumes the sync this stop ended and keeps the verified file, and the row says the update waits.
