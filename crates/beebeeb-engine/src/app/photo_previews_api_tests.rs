@@ -1070,23 +1070,25 @@ fn made_thumbnail_is_sent_once_sealed_with_the_thumbnail_recipe() {
     assert_eq!(world.thumb_puts().len(), 1);
 }
 
+const M1: &str = "d0000000-0000-4000-8000-000000000101";
 #[test]
 fn made_thumbnail_is_not_sent_unless_the_server_had_none() {
-    let world = world("thumb2", &[(ONE, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    let world = world("thumb2", &[(M1, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
     world.previews.set_setting(JPEG_1920);
-    world.keep_made(ONE, 0);
-    assert_eq!(world.upload_made(ONE, 0, false), MadeUpload::NothingToSend);
+    world.keep_made(M1, 0);
+    assert_eq!(world.upload_made(M1, 0, false), MadeUpload::NothingToSend);
     assert!(world.thumb_puts().is_empty());
 }
 
+const M2: &str = "d0000000-0000-4000-8000-000000000102";
 #[test]
 fn made_thumbnail_waits_while_the_setting_is_off_and_goes_when_it_is_on() {
-    let world = world("thumb3", &[(ONE, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
-    world.keep_made(ONE, 0);
-    assert_eq!(world.upload_made(ONE, 0, true), MadeUpload::NotNow(NotNow::SettingOff));
+    let world = world("thumb3", &[(M2, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    world.keep_made(M2, 0);
+    assert_eq!(world.upload_made(M2, 0, true), MadeUpload::NotNow(NotNow::SettingOff));
     assert!(world.thumb_puts().is_empty());
     world.previews.set_setting(JPEG_1920);
     // The 404 was remembered: a later look without it still sends.
-    assert_eq!(world.upload_made(ONE, 0, false), MadeUpload::Sent);
+    assert_eq!(world.upload_made(M2, 0, false), MadeUpload::Sent);
     assert_eq!(world.thumb_puts().len(), 1);
 }
