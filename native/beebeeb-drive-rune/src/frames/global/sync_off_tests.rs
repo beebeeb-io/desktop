@@ -250,3 +250,20 @@ fn leftover_files_offer_keep_aside_and_discard_and_keep_aside_asks_the_engine_on
     assert!(!open(&rt), "the modal closed");
     assert_eq!(asked(&engine), 1, "the engine was asked once");
 }
+
+/// dc-175 (VM 401): "Discard and switch" when the engine offers nothing to discard (the previous account left only
+/// empty folders) is a plain start that closes the modal, never a press that does nothing.
+#[test]
+fn discard_with_nothing_to_discard_starts_instead_of_doing_nothing() {
+    let engine = Arc::new(FixtureEngine::ready());
+    let mut rt = runtime(engine.clone());
+    let starts = |engine: &FixtureEngine| engine.calls().iter().filter(|c| **c == FixtureCall::StartSync).count();
+    engine.set_sync_refusal(Some(off(1, Refused::LeftoverFilesOfAnotherAccount)));
+    frames(&mut rt, 2);
+    assert!(open(&rt));
+
+    press(&mut rt, "Discard and switch");
+
+    assert!(!open(&rt), "the modal closed");
+    assert_eq!(starts(&engine), 1, "one start was asked for");
+}

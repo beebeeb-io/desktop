@@ -239,3 +239,21 @@ fn a_queued_change_of_the_previous_account_is_not_kept_aside() {
     assert_eq!(listing(&pc.root()), files);
     assert!(!aside(&pc).exists());
 }
+
+/// dc-175 (VM 401): A left only empty folders no row names. They are nothing to keep: the start removes them and the
+/// switch completes, with no refusal for a person to answer. A folder holding a synced copy is never removed this way.
+#[test]
+fn empty_folders_the_previous_account_left_do_not_stop_the_switch() {
+    let pc = Pc::new();
+    a_signed_out(&pc, false);
+    std::fs::create_dir_all(pc.root().join("Empty of A/Deeper")).unwrap();
+    std::fs::create_dir_all(pc.root().join("Also empty")).unwrap();
+    let port = AsidePort::new();
+
+    let start = pc.engine.start_sync_with(pc.root(), &port);
+
+    assert_eq!(start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }), "past the binding");
+    assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
+    assert_eq!(listing(&pc.root()), Vec::<String>::new());
+    assert!(!aside(&pc).exists(), "nothing was kept aside: there was nothing to keep");
+}
