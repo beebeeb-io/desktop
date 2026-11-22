@@ -98,17 +98,20 @@ pub struct Banner<'a> {
 pub fn runs_line(key: &str, figure: &str, runs: &[Run], words: TextStyle, figures: TextStyle, ink: Color) -> El {
     let box_key = format!("{key}-box");
     kit::note_text(key, &box_key, &sentence(runs), words, ink);
-    let mut line = row().key(box_key).a11y_hidden().items_center();
+    // One text element named with the whole sentence (UIA text); the runs inside stay out of
+    // the tree so the sentence is not read twice or in pieces.
+    let mut line = row().key(box_key).role("text").label(sentence(runs)).items_center();
     let mut n = 0;
     for (i, run) in runs.iter().enumerate() {
         line = line.child(match run {
             Run::Words(s) => rune::text(s.clone())
                 .key(format!("{key}-run-{i}"))
                 .font(words)
-                .color(ink),
+                .color(ink)
+                .a11y_hidden(),
             Run::Figure(s) => {
                 n += 1;
-                kit::label(format!("{figure}-{}", n - 1), s.clone(), figures, ink)
+                kit::label(format!("{figure}-{}", n - 1), s.clone(), figures, ink).a11y_hidden()
             }
         });
     }
@@ -178,4 +181,54 @@ pub fn banner(b: &Banner, t: &Theme) -> El {
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::tokens::theme;
+    use rune::{Cx, Env, Runtime};
+    use serde_json::Value;
+
+    struct Page;
+
+    fn runs() -> Vec<Run> {
+        vec![
+            Run::Words("Rebuilt at ".into()),
+            Run::Figure("14:02".into()),
+            Run::Words(" from your files.".into()),
+        ]
+    }
+
+    fn view(_: &Page, _: &mut Cx<Page>) -> El {
+        let r = runs();
+        let b = Banner { tone: Tone::Neutral, icon: &global_icons::CLOSE, runs: &r, action: None, dismiss: None };
+        row().key("page").w(500.0).child(banner(&b, &theme(false)))
+    }
+
+    fn walk<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+        out.push(v);
+        for c in v["children"].as_array().into_iter().flatten() {
+            walk(c, out);
+        }
+    }
+
+    #[test]
+    fn banner_uia_sentence_is_a_text_element_and_the_row_stays_a_status() {
+        let env = Env { system_dark: false, scale: 2.0 };
+        let mut rt = Runtime::new(Page, view, (500.0, 200.0), env);
+        rt.frame(0.0);
+        rt.settle_all();
+        rt.frame(0.0);
+        let tree = rt.accessibility_json();
+        let mut all = Vec::new();
+        walk(&tree, &mut all);
+        let sentence = "Rebuilt at 14:02 from your files.";
+        let named: Vec<_> = all.iter().filter(|n| n["label"] == sentence || n["name"] == sentence).collect();
+        assert!(
+            named.iter().any(|n| n["role"] != "status"),
+            "no text node with the sentence: {tree:#}"
+        );
+        assert!(named.iter().any(|n| n["role"] == "status"), "the status row keeps its label");
+    }
 }
