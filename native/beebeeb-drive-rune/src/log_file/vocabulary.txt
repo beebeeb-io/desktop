@@ -65,6 +65,7 @@ archived_legacy_state_dir
 are
 as
 aside
+ask
 asked
 asked_ms
 asking
@@ -1088,6 +1089,7 @@ unjournalled
 unknown
 unknown-content
 unknown_item
+unlock
 unlocked
 unnamed
 unpin
