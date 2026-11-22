@@ -175,7 +175,7 @@ enum Stored {
 }
 
 /// The groups as the board draws them (DW-0750): a title, and each row's words and store.
-const GROUPS: [(&str, &[(&str, &str, Stored)]); 3] = [
+const GROUPS: [Group; 3] = [
     (
         "Your account",
         &[
@@ -1181,3 +1181,6 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         }
     }
 }
+
+/// A group's name and its rows `(key, label, stored)`.
+type Group = (&'static str, &'static [(&'static str, &'static str, Stored)]);

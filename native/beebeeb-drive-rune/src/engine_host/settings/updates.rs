@@ -986,6 +986,7 @@ pub(crate) fn release_config(
 
 /// What a build sets its updater up with, or why it has none.
 #[cfg(any(windows, test))]
+#[allow(clippy::large_enum_variant)] // one value per answer, moved once through a channel: boxing would only add a hop
 pub(crate) enum ReleaseSetup {
     /// Not a release build (no build time, or no release version): no updater, and not one request.
     NotARelease,

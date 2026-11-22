@@ -192,7 +192,9 @@ fn a_speed_test_landing_after_the_account_changed_is_dropped() {
 
 #[test]
 fn the_speed_test_button_is_off_in_the_test_build() {
-    assert!(!SPEED_TEST_ON);
+    const {
+        assert!(!SPEED_TEST_ON);
+    }
     let source = EngineDriveSettings::new(account(), Arc::new(FakePlatform::default()));
     assert!(!source.shows(Control::SpeedTest));
     assert!(source.shows(Control::SyncOnMetered), "the engine's tick honours the metered setting: the switch is drawn");

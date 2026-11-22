@@ -74,7 +74,7 @@ impl ApiBase {
     }
 
     /// Whether `--api-base` chose it; else it is the engine's default.
-    pub fn from_flag(&self) -> bool {
+    pub fn chosen_by_flag(&self) -> bool {
         self.from_flag
     }
 
@@ -87,7 +87,11 @@ impl ApiBase {
     /// The one line the app prints when it opens the engine (stdout): the origin and where it came from. Nothing
     /// else: no token, no account, no path.
     pub fn start_line(&self) -> String {
-        let from = if self.from_flag() { API_BASE_FLAG } else { "default" };
+        let from = if self.chosen_by_flag() {
+            API_BASE_FLAG
+        } else {
+            "default"
+        };
         format!("api base: {} ({from})", self.origin)
     }
 }

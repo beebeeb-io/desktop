@@ -27,7 +27,7 @@ Modules 67–101, sorted by path.
 | `launch_tests.rs` | Every process the app starts holds the launch lock (`launch.rs`, #460 F11): a scan of the crate's own code for a start outside [`launch::spa | — |
 | `launcher.rs` | The starts the window asks for outside Files: the tray's and the menu's Open in File Explorer, a page opened in the browser, the viewer's Op | — |
 | `launcher_tests.rs` | R-OW1 for the starts outside Files (the tray's and the menu's Open in File Explorer, a page, the viewer's Open in another app): while the la | — |
-| `media.rs` | Slice M7 (`media-bind-viewer`): the player's bytes from the engine. | — |
+| `media.rs` | The player's bytes from the engine. | — |
 | `media_tests.rs` | Slice M7: `EngineViewerSource` playing, against an engine of the test's own (`World`), a real `PlayerHandle` and a helper that is a fake (`F | — |
 | `office_host.rs` | The app's side of the Office helper: one confined renderer per open document, every answer checked before use, killed on close, lock and sig | Anchor (10), CellData (7), CellRange (4), DocKind (5), EditKind, EditOp (23), Edited (10), HitMode, OutlineEntry (3), PageSize (2), Purpose (5), Rect (4), … (+7 more) |
 | `office_host_tests.rs` | The Office host's rules (`office_host.rs`), one test each; the mutant that must turn each red is in the lane's notes. | — |
@@ -37,7 +37,7 @@ Modules 67–101, sorted by path.
 | `passkeys.rs` | The Passkeys pane (DW-A73 to DW-A76) on the real engine: [`PasskeyCalls`], the part of `EngineAccountSource` behind `passkeys`, `add_passkey | — |
 | `passkeys_tests.rs` | The Passkeys pane and the sign-in screen's passkey door on the real engine, against the engine's fake account on loopback with the passkey r | — |
 | `photos.rs` | Photos on the real engine: [`EnginePhotos`], the `PhotosSource` of the running app. | — |
-| `photos_folders.rs` | Slice B1 (plan40 batch 1): the devices' backup line (DW-0601), and slice K4 (batch 2): Photo sources' folders from Files (DW-0604). | — |
+| `photos_folders.rs` | The devices' backup line (DW-0601), and Photo sources' folders from Files (DW-0604). | — |
 | `photos_folders_tests.rs` | Slice B1's rules: the backup line's words, its session rule, and that nothing is invented. | — |
 | `photos_tests.rs` | Photos and the thumbnails on the real engine (`EnginePhotos`, `EngineThumbStore`, `EngineThumbs`), against the engine's fake accounts on loo | — |
 | `photos_video_tests.rs` | A video in Photos plays in the shell's player (M8): which press opens it, which never does, and what a late open under another session does. | — |

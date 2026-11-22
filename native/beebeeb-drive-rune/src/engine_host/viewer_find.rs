@@ -1,4 +1,4 @@
-//! Slice B2 (plan40 batch 1): Find in a PDF (DW-1506), from the PDF's own text. Part of [`EngineViewerSource`]
+//! Find in a PDF (DW-1506), from the PDF's own text. Part of [`EngineViewerSource`]
 //! (`viewer.rs`), which hands `finds` and `find` here.
 //!
 //! The text is read on the worker that holds the document (`viewer_pdf_find.rs`), asked down the channel the pages

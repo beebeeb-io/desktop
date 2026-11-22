@@ -1,6 +1,6 @@
 //! Files' starts, each bound to the session of its press (review of #467, P3-1).
 //!
-//! Open, Show in File Explorer and Open in File Explorer start on the launch worker (`launch::Later`, ruling R-OW1),
+//! Open, Show in File Explorer and Open in File Explorer start on the launch worker (`launch::Later`),
 //! and Open With ▸ an app and ▸ Other… on a thread of their own. Each may wait for the launch lock: Windows' app
 //! chooser holds it for as long as it is open. Two rules keep a start from acting for a session that ended meanwhile:
 //!

@@ -132,9 +132,7 @@ pub trait ThisPcEngine: Send + Sync + 'static {
     fn change_local_state<T>(&self, change: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused>;
     /// Sync runs for this handle. May wait: a worker's.
     fn syncing(&self) -> bool;
-    /// Keep an item on this PC, or stop keeping it. Blocks: a worker's.
-    fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String>;
-    /// [`Self::set_kept`] bound to `session`, the one of the press: nothing is changed once the engine's session
+    /// Keep an item on this PC, or stop keeping it, bound to `session`, the one of the press: nothing is changed once the engine's session
     /// moved on. Blocks: a worker's.
     fn set_kept_for(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), String>;
     /// Task 2530: a way out of the parked change `op_id`, for `session` only (`Engine::settle_parked_for`).
@@ -166,9 +164,6 @@ impl<C: CredentialStores> ThisPcEngine for Engine<C> {
     }
     fn syncing(&self) -> bool {
         self.is_syncing()
-    }
-    fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String> {
-        Engine::set_kept(self, file_id, kept)
     }
     fn set_kept_for(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), String> {
         Engine::set_kept_for(self, session, file_id, kept)

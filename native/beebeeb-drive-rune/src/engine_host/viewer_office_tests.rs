@@ -528,7 +528,7 @@ impl ViewerEngine for TestEngine {
         _opening: u64,
     ) -> Result<SaveEnd, EditRefused> {
         let mut s = self.s();
-        if let Some(says) = s.save_says.clone() {
+        if let Some(says) = s.save_says {
             return says;
         }
         let now = s.versions.get(file_id).copied().unwrap_or(3);
@@ -741,7 +741,6 @@ fn until_settled(
 /// Everything an editing test holds.
 struct Editor {
     fake: Fake,
-    template: Fake,
     engine: Arc<TestEngine>,
     source: EngineViewerSource<TestEngine>,
     viewer_opened: Opened,
@@ -770,7 +769,6 @@ fn editor_over(engine: Arc<TestEngine>, name: &str) -> Editor {
     source.poll("f1");
     Editor {
         fake,
-        template,
         engine,
         source,
         viewer_opened,
@@ -868,7 +866,9 @@ fn a_writable_file_opens_in_the_editor_and_the_rest_in_the_viewer() {
     first_body(&mut source, "f1");
     assert!(edits.lock().unwrap().is_empty() && opened.lock().unwrap().len() == 1, "pptx off: the viewer");
     // The shipped switches: the editor on where the sandbox is, slides too (MPL-2.0 accepted 2026-11-18).
-    assert!(EditShips::SHIPPED.docx && EditShips::SHIPPED.xlsx && EditShips::SHIPPED.pptx);
+    const {
+        assert!(EditShips::SHIPPED.docx && EditShips::SHIPPED.xlsx && EditShips::SHIPPED.pptx);
+    }
 }
 
 #[test]
@@ -1673,7 +1673,7 @@ fn tiles_ask_their_region() {
             x: 512,
             y: 1024,
             w: 512,
-            h: 512.min(1684 - 1024)
+            h: 512
         })
     );
     // The last column, clipped to the raster.

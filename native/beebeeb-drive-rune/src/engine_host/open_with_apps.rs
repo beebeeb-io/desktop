@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::frames::files::source::{ActionError, AppChoice};
 
 /// At most this many apps in the submenu.
+#[cfg(test)]
 pub(crate) const MAX_APPS: usize = 8;
 
 /// The extension Windows is asked about, as it takes it: ".docx", lower case. `None`: the name has none.
@@ -38,6 +39,7 @@ fn is_own(handler: &str, own_exe: &str) -> bool {
 /// The submenu's apps from the handlers Windows reported, `(GetName, GetUIName)` in its order: none whose program is
 /// `own_exe` (Beebeeb is the submenu's first line already, and is never made a type's app), none without words, at
 /// most [`MAX_APPS`].
+#[cfg(test)]
 pub(crate) fn choices(handlers: impl IntoIterator<Item = (String, String)>, own_exe: &str) -> Vec<AppChoice> {
     handlers
         .into_iter()

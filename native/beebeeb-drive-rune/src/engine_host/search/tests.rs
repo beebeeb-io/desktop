@@ -890,10 +890,12 @@ fn the_engine_handle_is_a_search_host() {
 /// before Search opens: signed out, it says it is not available, builds no index and reads no recent search.
 #[test]
 fn a_real_build_shell_gets_the_engine_search_and_nothing_runs_before_it_opens() {
-    assert!(
-        crate::shell::state::SEARCH_ON_ENGINE,
-        "task 2488 is fixed: Search reads the engine"
-    );
+    const {
+        assert!(
+            crate::shell::state::SEARCH_ON_ENGINE,
+            "task 2488 is fixed: Search reads the engine"
+        );
+    }
     let (channel, _messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
         account_id: "search-shell-slot".into(),
@@ -1001,7 +1003,7 @@ fn a_result_and_the_index_print_no_name() {
 
 /// The ways the turn moves on after A searched: a lock; a lock and an unlock (the same account in another turn, with
 /// no pump between them); another account's sign-in; a sign-out.
-fn turn_moves() -> [(&'static str, fn(&Host)); 4] {
+fn turn_moves() -> [TurnMove; 4] {
     [
         ("a lock", Host::lock as fn(&Host)),
         ("a lock and an unlock", |host: &Host| {
@@ -1252,3 +1254,6 @@ fn a_results_shared_line_says_how_it_is_shared_once_the_shares_are_read() {
     assert_eq!(source.details("f-signed").unwrap().shared, "Anyone with the link");
     assert_eq!(source.details("f-draft").unwrap().shared, "", "not shared, or not known: never invented");
 }
+
+/// A named move of the host's turn.
+type TurnMove = (&'static str, fn(&Host));

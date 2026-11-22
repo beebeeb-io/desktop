@@ -496,7 +496,9 @@ fn a_page_is_never_asked_past_the_pixel_limits_whatever_its_box_says() {
         assert_eq!(scale_for(width, height), None, "{width} x {height}");
     }
     // The longest side stays under what the protocol sizes a raster to (4,096 px a side), rounding up included.
-    assert!(PAGE_SIDE_MAX + 1.0 < 4_096.0);
+    const {
+        assert!(PAGE_SIDE_MAX + 1.0 < 4_096.0);
+    }
     // And a real page with such a box comes back within them.
     let said = served(session_of(sample_pdf(1, 200, 14_400)), &[Ask::Page(1)], false, |said| {
         !said.pages.is_empty()

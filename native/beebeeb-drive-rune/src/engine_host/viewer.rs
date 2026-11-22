@@ -14,8 +14,8 @@
 //!   - any other file is downloaded and decrypted IN MEMORY by the engine's own download path
 //!     ([`Engine::open_file_in_memory`]: the path every hydrate uses, no crypto here), with the engine's
 //!     progress.
-//!   Text, Markdown, CSV / TSV (as text), PNG / JPEG / GIF / WebP pictures and PDFs are shown. A PDF's pages are
-//!   drawn by the confined helper, asked from the same worker page by page as the view shows them (`viewer_pdf`).
+//!     Text, Markdown, CSV / TSV (as text), PNG / JPEG / GIF / WebP pictures and PDFs are shown. A PDF's pages are
+//!     drawn by the confined helper, asked from the same worker page by page as the view shows them (`viewer_pdf`).
 //! - which app opens a file: a list's Open of a file that is kept on this PC while sync runs goes to the file's
 //!   own app ([`ViewerSource::kept_on_this_pc`]) when that app shows it (a document, a picture); the viewer is
 //!   for a file that is not on this PC (no download to disk), for a route that names a file directly, and for
@@ -292,7 +292,7 @@ pub trait ViewerEngine: Send + Sync + 'static {
 /// The engine handle, as the viewer asks it.
 pub struct LiveViewerEngine<C: CredentialStores> {
     engine: Arc<Engine<C>>,
-    /// "Open in another app" starts here, never on the window's thread (ruling R-OW1).
+    /// "Open in another app" starts here, never on the window's thread.
     launcher: super::launcher::Launcher,
     /// What opens a file (the system's own; a test's stand-in).
     open: super::files_launch::Start,
@@ -1034,7 +1034,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     moving.done.store(done, Ordering::SeqCst);
                     moving.total.store(total, Ordering::SeqCst);
                     // The window is woken once per whole percent, not once per chunk.
-                    let percent = if total == 0 { 100 } else { done.min(total) * 100 / total };
+                    let percent = (done.min(total) * 100).checked_div(total).unwrap_or(100);
                     if moving.woken_at.swap(percent, Ordering::SeqCst) != percent {
                         waker.wake();
                     }

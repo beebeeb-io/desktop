@@ -136,6 +136,7 @@ impl AppActivity {
     }
 
     /// How many samples each line holds.
+    #[cfg(test)]
     pub fn samples(&self) -> usize {
         self.cpu.len()
     }
@@ -201,7 +202,7 @@ mod tests {
         fn read(&mut self) -> Reading {
             self.0 += 1;
             Reading {
-                cpu_percent: 3.14,
+                cpu_percent: 3.2,
                 memory_bytes: 212_000_000 + self.0,
                 ..Reading::default()
             }

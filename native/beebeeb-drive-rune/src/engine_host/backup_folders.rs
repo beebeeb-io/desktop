@@ -1,4 +1,4 @@
-//! Slice A7 (plan40 batch 1): Add a folder and Stop backing up (DW-0737, DW-0738, DW-1410). Part of
+//! Add a folder and Stop backing up (DW-0737, DW-0738, DW-1410). Part of
 //! [`EngineBackupsSource`] (`backups.rs`), which hands `add_folder`, `remove_folder`, `remove_folder_to_trash` and
 //! `stopping` here, and drains this slice's answers in its `pump`.
 //!
@@ -57,7 +57,7 @@ impl FolderAnswer {
     }
 }
 
-/// What slice A7 keeps between a press and its answer: the inbox its workers answer into, how many are out, and the
+/// What this file keeps between a press and its answer: the inbox its workers answer into, how many are out, and the
 /// one move to Trash on its way. The adapter holds one (`EngineBackupsSource::backup_folders`).
 pub(super) struct BackupFolderCalls {
     answers: mpsc::Sender<FolderAnswer>,

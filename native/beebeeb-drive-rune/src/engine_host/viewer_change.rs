@@ -47,6 +47,7 @@ pub(super) struct Message {
     answer: Answer,
 }
 
+#[allow(clippy::large_enum_variant)] // one value per answer, moved once through a channel: boxing would only add a hop
 enum Answer {
     /// A change's answer, and the version the view holds once it is applied (`None`: not moved: a conflict, a
     /// refusal, the switch, a Keep both copy, which is another file). `worker`: the answer of the change that made the

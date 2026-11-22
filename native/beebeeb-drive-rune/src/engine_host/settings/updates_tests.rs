@@ -965,9 +965,11 @@ fn the_hand_off_starts_nothing_outside_windows() {
 #[test]
 fn the_saved_channel_and_the_one_the_build_came_from() {
     assert_eq!(channels(None), (Channel::Stable, Channel::Stable));
-    let mut config = DesktopConfig::default();
-    config.release_channel = ReleaseChannel::Stable;
-    config.installed_release_channel = Some(ReleaseChannel::Beta);
+    let mut config = DesktopConfig {
+        release_channel: ReleaseChannel::Stable,
+        installed_release_channel: Some(ReleaseChannel::Beta),
+        ..DesktopConfig::default()
+    };
     assert_eq!(channels(Some(&config)), (Channel::Stable, Channel::Beta));
     config.release_channel = ReleaseChannel::Alpha;
     config.installed_release_channel = None;

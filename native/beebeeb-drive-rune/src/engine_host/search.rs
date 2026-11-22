@@ -11,7 +11,7 @@
 //!   (`Answer::NotThisAccounts`: the engine's own word, `LocalStateRefused::not_this_accounts`); any other refusal is
 //!   `Unavailable`.
 //! - `details`: the facts the index holds for a result (kind, size, changed, where, on this PC or online only).
-//! - `recent`, `remember`, `clear_recent` (DW-0801, slice A8): the account's recent searches as the engine keeps them
+//! - `recent`, `remember`, `clear_recent` (DW-0801): the account's recent searches as the engine keeps them
 //!   in its own local state (`Engine::recent_searches_for` and its neighbours: per account, through the same
 //!   account-bound handle; deleted at sign-out and by Clear). Read when Search opens, changed on a worker, one piece
 //!   of work at a time in the order asked; `recent` shows only what the engine answered, for the session of the
@@ -123,7 +123,7 @@ impl<C: CredentialStores> SearchHost for Engine<C> {
         // Task 2488: the signed-in account's local state only; any refusal builds nothing, and keeps its kind.
         let state = self.local_state()?;
         state
-            .with(|db| build_local_index(db))?
+            .with(build_local_index)?
             .map_err(|_| LocalStateRefused::Unreadable)
     }
 
@@ -250,7 +250,7 @@ pub struct EngineSearchSource<H: SearchHost> {
     /// The last result, and the query it answers.
     found: Option<(Asked, Arc<[Hit]>)>,
     /// How the account shares its items (item id to words), and the session it was read in. Read after a build.
-    shared: Option<(Session<H::Turn>, HashMap<String, String>)>,
+    shared: Option<SharedTurn<H::Turn>>,
     /// A read of the shares is on its way.
     shared_out: bool,
     /// The recent searches as the engine last answered them, newest first, and the session that work ran in.
@@ -823,3 +823,6 @@ fn details_of(record: &LocalSearchRecord) -> Details {
         picture: false,
     }
 }
+
+/// A turn's session with the map it shares.
+type SharedTurn<T> = (Session<T>, HashMap<String, String>);

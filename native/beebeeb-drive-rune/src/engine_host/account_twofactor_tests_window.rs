@@ -53,11 +53,10 @@ fn click_text(rt: &mut Runtime<State>, words: &str) {
     let rect = rt
         .elements()
         .into_iter()
-        .filter(|e| {
+        .rfind(|e| {
             !e.exiting
                 && (e.text.as_deref() == Some(words) || e.label.as_deref().is_some_and(|label| label.contains(words)))
         })
-        .last()
         .unwrap_or_else(|| {
             let drawn: Vec<String> = rt
                 .elements()

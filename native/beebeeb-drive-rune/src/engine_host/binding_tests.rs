@@ -226,7 +226,7 @@ fn the_same_server_twice_starts_twice() {
     }
     let default_by_flag =
         open::api_base(Some(&format!("{}/", beebeeb_engine::runner::default_api_base())), true).unwrap();
-    assert!(default_by_flag.from_flag());
+    assert!(default_by_flag.chosen_by_flag());
     assert_eq!(default_by_flag.server(), Server::Default);
 }
 

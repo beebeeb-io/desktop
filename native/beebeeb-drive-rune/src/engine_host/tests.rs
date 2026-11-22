@@ -120,7 +120,7 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
 
     // The local state the engine would have written, with the engine's own writers.
     std::fs::create_dir_all(&state_dir).unwrap(); // the engine's first start makes it
-    let db = StateDb::open(&state_paths::state_db_path_from_state_dir(&state_dir)).unwrap();
+    let db = StateDb::open(state_paths::state_db_path_from_state_dir(&state_dir)).unwrap();
     put(&db, "d-plans", "/Plans", None, true);
     put(&db, "d-2027", "/Plans/2027", Some("d-plans"), true);
     put(&db, "f-1", "/Plans/2027/budget.ods", Some("d-2027"), false);
@@ -286,7 +286,7 @@ fn the_test_build_and_a_dev_build_take_api_base_and_the_real_app_ignores_it() {
     ] {
         let base = run(dev, identity).expect(who);
         assert_eq!(
-            (base.origin(), base.from_flag()),
+            (base.origin(), base.chosen_by_flag()),
             ("http://127.0.0.1:3001", true),
             "{who}"
         );
@@ -328,7 +328,7 @@ fn without_the_flag_every_build_talks_to_the_engines_default_which_is_production
     for (dev, identity) in [(false, &TEST), (true, &TEST), (true, &REAL), (false, &REAL)] {
         let base = open::api_base(None, open::reads_api_base_flag(dev, identity)).expect("no flag is never refused");
         assert_eq!(base, ApiBase::engine_default());
-        assert_eq!((base.origin(), base.from_flag()), (default.as_str(), false));
+        assert_eq!((base.origin(), base.chosen_by_flag()), (default.as_str(), false));
         assert_eq!(base.start_line(), format!("api base: {default} (default)"));
     }
     // A unit-test build cannot reach the production default (the engine's `test-support` replaces it), so the source
@@ -678,7 +678,7 @@ fn account_is_the_engines_source_on_a_live_engine_and_unbound_panes_are_unwired(
     assert_ne!(source.pane_state(AccountPane::Security), PaneState::Unwired);
     // The password change answers too: signed out, it says so, and is not the shell's frame.
     assert_ne!(source.pane_state(AccountPane::Password), PaneState::Unwired);
-    // Deleting the account answers too (slice A6, `account_deletion.rs`).
+    // Deleting the account answers too (`account_deletion.rs`).
     assert_ne!(source.pane_state(AccountPane::Delete), PaneState::Unwired);
     assert!(source.identity().email.is_empty() && source.sessions().is_empty());
     // Nothing was read: the Security page is told nothing, and may do nothing.
@@ -717,13 +717,13 @@ fn storage_split_is_none_on_a_live_engine() {
 fn the_snapshot_path_keeps_every_groups_fixtures() {
     let s = snap_state();
     assert!(s.frames.shared.source.wired());
-    assert!(s.frames.shared.source.with_me().len() > 0);
+    assert!(!s.frames.shared.source.with_me().is_empty());
     assert!(s.frames.trash.source.wired());
-    assert!(s.frames.trash.source.items().len() > 0);
+    assert!(!s.frames.trash.source.items().is_empty());
     assert!(s.photos.source.wired());
-    assert!(s.photos.source.days(None).len() > 0);
+    assert!(!s.photos.source.days(None).is_empty());
     assert!(s.this_pc.wired());
-    assert!(s.this_pc.changes().len() > 0);
+    assert!(!s.this_pc.changes().is_empty());
     assert!(s.this_pc.kept_count() > 0);
     assert!(s.settings.source.wired(crate::frames::settings::Pane::About));
     assert!(s.settings.drive.wired(crate::frames::settings::Pane::Storage));
@@ -857,12 +857,12 @@ fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
         "rename refused by sync guard"
     );
     assert_eq!(
-        source.move_to(&[item.clone()], None),
+        source.move_to(std::slice::from_ref(&item), None),
         Err(ActionError::Unavailable),
         "move_to refused by sync guard"
     );
     assert_eq!(
-        source.duplicate(&[item.clone()], &[]),
+        source.duplicate(std::slice::from_ref(&item), &[]),
         Err(ActionError::Unavailable),
         "duplicate refused by sync guard"
     );
@@ -872,12 +872,12 @@ fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
         "upload refused by sync guard"
     );
     assert_eq!(
-        source.open(&[item.clone()]),
+        source.open(std::slice::from_ref(&item)),
         Err(ActionError::Unavailable),
         "open refused by sync guard"
     );
     assert_eq!(
-        source.show_in_file_explorer(&[item.clone()]),
+        source.show_in_file_explorer(std::slice::from_ref(&item)),
         Err(ActionError::Unavailable),
         "show_in_file_explorer refused by sync guard"
     );

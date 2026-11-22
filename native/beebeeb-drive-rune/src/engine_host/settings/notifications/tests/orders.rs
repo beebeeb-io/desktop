@@ -6,7 +6,7 @@ use super::*;
 
 /// What a person sees of the account: every title with its "New", the two states, "may be out of date", and the
 /// account's switches.
-fn seen_of(source: &Source) -> (Vec<(String, bool)>, ReadState, ReadState, bool, Vec<Option<bool>>) {
+fn seen_of(source: &Source) -> Seen {
     (
         titles(source),
         source.recent_state(),
@@ -301,3 +301,6 @@ fn a_401_after_a_refused_mark_keeps_nothing_said_unconfirmed() {
     assert!(now.0.is_empty(), "nothing of a session Beebeeb ended stays drawn");
     assert_eq!((now.1, now.2, now.3), (ReadState::Failed, ReadState::Failed, false));
 }
+
+/// What a source shows, as the tests compare it.
+type Seen = (Vec<(String, bool)>, ReadState, ReadState, bool, Vec<Option<bool>>);

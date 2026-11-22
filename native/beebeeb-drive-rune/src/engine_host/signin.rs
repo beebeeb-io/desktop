@@ -73,7 +73,7 @@ enum Wait {
     Retry,
     /// The screen lock's password check, and the countdown of the wait after it.
     ScreenPassword,
-    ScreenWait,
+    ScreenCountdown,
     /// The lock screen's Windows Hello prompt.
     Hello,
     /// Sign-up's steps and the wait for a new code (`signup.rs`).
@@ -274,7 +274,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
                     &attempts,
                     seconds,
                     tick,
-                    Wait::ScreenWait,
+                    Wait::ScreenCountdown,
                     |seconds| SignInEvent::ScreenWaitLeft { seconds },
                 );
             }
@@ -288,16 +288,6 @@ impl<C: CredentialStores> EngineSignInSource<C> {
                 event: failed,
             });
         }
-    }
-
-    /// The refusal of a call this source does not bind: in the channel at once, so the screen draws it.
-    fn not_bound(&mut self, what: &'static str, event: SignInEvent) {
-        log(format!("NotWired({what})"));
-        let _ = self.answers.send(Answer {
-            wait: Wait::Unbound,
-            attempt: 0,
-            event,
-        });
     }
 }
 
@@ -389,10 +379,8 @@ fn undo_left_step<C: CredentialStores>(
             | SignInEvent::SignUp(SignUpEvent::Created(Ok(_)))
             | SignInEvent::Passkey(PasskeyOutcome::Succeeded(_)),
             None,
-        ) => {
-            if engine.sign_out_keeping_local_data().is_err() {
-                still_signed_in(answers);
-            }
+        ) if engine.sign_out_keeping_local_data().is_err() => {
+            still_signed_in(answers);
         }
         _ => {}
     }
@@ -844,19 +832,7 @@ pub fn open_web_page(url: &str) -> Result<(), ()> {
     open_on_the_launch_worker(url, super::open_path)
 }
 
-/// Opens a file that ships with the app (the licence notice, beside the exe) with the system's handler, on the same
-/// launch worker as the pages. The path comes from this program's own location, never from the server or a file.
-pub fn open_installed_file(path: &std::path::Path) -> Result<(), ()> {
-    #[cfg(test)]
-    {
-        OPENED.with(|o| o.borrow_mut().push(path.display().to_string()));
-        Ok(())
-    }
-    #[cfg(not(test))]
-    open_on_the_launch_worker(&path.to_string_lossy(), super::open_path)
-}
-
-/// The one launch worker the pages open on: the window's thread never waits for the launch lock (ruling R-OW1). A
+/// The one launch worker the pages open on: the window's thread never waits for the launch lock. A
 /// page has no session (the sign-in page opens signed out), so its start compares none.
 #[cfg_attr(test, allow(dead_code))]
 fn open_on_the_launch_worker(url: &str, start: super::files_launch::Start) -> Result<(), ()> {

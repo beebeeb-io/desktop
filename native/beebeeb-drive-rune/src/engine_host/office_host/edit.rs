@@ -23,7 +23,7 @@ use std::path::Path;
 
 use super::super::{
     Confined, DocKind, DroppedPart, EditKind, EditOp, Edited, HitMode, OfficeHost, OfficeState, Purpose, Registry, RequestId,
-    Template, Timeouts, Wake, lock, open_mode, open_mode_held,
+    Template, Timeouts, Wake, lock, open_mode_held,
 };
 use super::restart::Cadence;
 use super::{Asked, Command, Doc, Out, Phase, Starter, Stop, Worker};

@@ -115,7 +115,7 @@ pub(super) fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, ac
     }
 }
 
-/// The contract rows `rows` has read on this thread (a test's seam: a page that needs none must read none).
+// The contract rows `rows` has read on this thread (a test's seam: a page that needs none must read none).
 #[cfg(test)]
 thread_local! {
     pub(crate) static CONTRACT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -307,7 +307,7 @@ pub(crate) fn count_words(n: usize, one: &str, many: &str) -> String {
     let digits = n.to_string();
     let mut grouped = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(c);

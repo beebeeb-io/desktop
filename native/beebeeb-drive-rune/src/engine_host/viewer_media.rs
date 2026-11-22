@@ -1,4 +1,4 @@
-//! Slice M7 (`media-bind-viewer`): the viewer plays. A list's Open of an audio or a video file shows it through the
+//! The viewer plays. A list's Open of an audio or a video file shows it through the
 //! shell's one `PlayerHandle` (`media::shell_player`): audio with the file's folder as the queue (DW-1503), a video as
 //! `Body::Video`. Part of [`EngineViewerSource`] (`viewer.rs`), which hands `can_play`, `play`, `player`, `previews`,
 //! `opens_here_when_kept` and the poll's media branch here.
@@ -300,10 +300,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// The view is closed (the source is dropped): a video stops with its view; audio keeps playing (Back leaves it).
     pub(super) fn media_closed(&mut self) {
-        if let (Some(shown), Some(player)) = (self.media.on.take(), self.engine.media_player()) {
-            if shown.kind == KindHint::Video && player.state().is_some_and(|state| state.file_id == shown.file_id) {
-                player.stop(StopReason::Closed);
-            }
+        if let (Some(shown), Some(player)) = (self.media.on.take(), self.engine.media_player())
+            && shown.kind == KindHint::Video
+            && player.state().is_some_and(|state| state.file_id == shown.file_id)
+        {
+            player.stop(StopReason::Closed);
         }
     }
 

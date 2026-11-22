@@ -1,4 +1,4 @@
-//! Slice M7 (`media-bind-viewer`): the player's bytes from the engine. [`EngineMediaOpener`] opens a file with the
+//! The player's bytes from the engine. [`EngineMediaOpener`] opens a file with the
 //! engine's range reader (`Engine::open_media_for`) for the press that came WITH the item (`MediaItem::press`: the
 //! session and the account the press was made under), and refuses an item of another account or with no press (the
 //! binding shape of `files_trash.rs` and `stamp.rs`). M7 also creates the shell's one `PlayerHandle` with the real
@@ -168,12 +168,6 @@ pub trait PictureHelper: Send + Sync {
 }
 
 static PICTURE_HELPER: std::sync::OnceLock<Arc<dyn PictureHelper>> = std::sync::OnceLock::new();
-
-/// Registers the process's one [`PictureHelper`] (the first wins). Without one the app's own sandboxed helper is
-/// used (`media::transport::SandboxedPictures`).
-pub fn set_picture_helper(helper: Arc<dyn PictureHelper>) {
-    let _ = PICTURE_HELPER.set(helper);
-}
 
 /// One decode may take this long; then the helper is ended and the picture is `Damaged`.
 const DECODE_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);

@@ -1,4 +1,4 @@
-//! Task 2488 for Search (slice A8), on the REAL engine handle: credential stores in memory and the engine's fake API on
+//! Task 2488 for Search, on the REAL engine handle: credential stores in memory and the engine's fake API on
 //! loopback, with two invented accounts. The local state is a database of this test's own
 //! (`Engine::use_local_state_for_test`), written with the engine's writers and recorded as the first account's. The
 //! first account finds its own name and keeps its search; it signs out keeping the local data; the second account,

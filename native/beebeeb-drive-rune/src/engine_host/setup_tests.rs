@@ -792,15 +792,7 @@ fn another_session_or_account_is_never_written_for_and_never_answered() {
 // The window: the first run's own steps, on the adapter
 // ---------------------------------------------------------------------------
 
-fn window(
-    set: Set,
-) -> (
-    Runtime<State>,
-    Arc<Fake>,
-    Arc<FixtureEngine>,
-    Arc<FirstRun>,
-    Arc<FakePlatform>,
-) {
+fn window(set: Set) -> Window {
     let Set {
         engine,
         asked,
@@ -1111,3 +1103,12 @@ fn a_window_without_the_wiring_never_starts_a_first_run() {
     rt.frame(0.1);
     assert!(rt.state.setup.is_none());
 }
+
+/// The window runtime with what it was built on.
+type Window = (
+    Runtime<State>,
+    Arc<Fake>,
+    Arc<FixtureEngine>,
+    Arc<FirstRun>,
+    Arc<FakePlatform>,
+);

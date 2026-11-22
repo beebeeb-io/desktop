@@ -22,9 +22,9 @@ Modules 139–171, sorted by path.
 | `viewer_change.rs` | The viewer's changes that leave the window's thread: Available offline and saving a text. | — |
 | `viewer_change_tests.rs` | Available offline and saving a text, against the engine of the test's own: the press is answered later, by `settled`, and only while it is s | — |
 | `viewer_edit_lock_tests.rs` | Review of #452 (P1-2): an edit kept open across a lock of the screen (Lock now, Windows' lock, the idle lock) is saved after the unlock, fro | — |
-| `viewer_find.rs` | Slice B2 (plan40 batch 1): Find in a PDF (DW-1506), from the PDF's own text. | — |
+| `viewer_find.rs` | Find in a PDF (DW-1506), from the PDF's own text. | — |
 | `viewer_find_tests.rs` | Find in a PDF (DW-1506) on PDFs built here (Helvetica, which the file names and does not carry; a few objects, an xref table). | — |
-| `viewer_media.rs` | Slice M7 (`media-bind-viewer`): the viewer plays. | — |
+| `viewer_media.rs` | The viewer plays. | — |
 | `viewer_office.rs` | An open Office file in the viewer: one [`OfficeView`] per file, over the file's confined renderer (`engine_host::office_host`), and the sour | — |
 | `viewer_office_tests.rs` | The Office viewer's glue (`viewer_office.rs`) on a fake host: the route, the states, the asks, the cap, the locks. | — |
 | `viewer_pages.rs` | The window's side of an open PDF, and the worker's ends of its channels (moved out of `viewer.rs`, which has no lines to spare). | — |

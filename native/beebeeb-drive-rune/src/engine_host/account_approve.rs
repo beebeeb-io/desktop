@@ -1,4 +1,4 @@
-//! Slice A5 (plan40 batch 1): approving a sign-in from another device (DW-A12 to DW-A17), on the real engine. Part of
+//! Approving a sign-in from another device (DW-A12 to DW-A17), on the real engine. Part of
 //! [`EngineAccountSource`] (`account.rs`). The rules and the crypto are core's, run by the engine
 //! (`beebeeb_engine::app::bindings::approve_sign_in`); this file binds them to the window.
 //!
@@ -116,7 +116,7 @@ enum Inner {
     },
 }
 
-/// What slice A5 keeps between a press and its answer. The adapter holds one (`EngineAccountSource::account_approve`).
+/// What this file keeps between a press and its answer. The adapter holds one (`EngineAccountSource::account_approve`).
 pub(super) struct ApproveCalls {
     held: Vec<Held>,
     next_id: u64,

@@ -621,7 +621,9 @@ fn a_refused_switch_is_not_shown_as_done_once_read_back() {
 
 #[test]
 fn source_for_gives_the_engines_source_now_backups_is_on() {
-    assert!(TURNED_ON);
+    const {
+        assert!(TURNED_ON);
+    }
     assert!(source_for(Fake::new()).is_some());
 }
 

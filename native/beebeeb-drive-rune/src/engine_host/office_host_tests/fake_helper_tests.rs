@@ -437,7 +437,7 @@ impl Starter for Fake {
     }
 
     fn start(&mut self) -> Result<Link<FakeHelper>, SandboxError> {
-        if let Some(error) = self.start_error.clone() {
+        if let Some(error) = self.start_error {
             return Err(error);
         }
         if !self.start_delay.is_zero() {
@@ -611,7 +611,7 @@ struct PipeState {
 pub(super) struct Pipe {
     state: Arc<(Mutex<PipeState>, Condvar)>,
     /// When set, each write is recorded as (kind, id): `write_frame` writes one whole frame at once.
-    frames: Option<Arc<Mutex<Vec<(u16, u32)>>>>,
+    frames: Option<Frames>,
 }
 
 impl Pipe {
@@ -686,3 +686,6 @@ impl Write for Pipe {
         Ok(())
     }
 }
+
+/// The frames a fake helper was sent.
+type Frames = Arc<Mutex<Vec<(u16, u32)>>>;
