@@ -138,6 +138,8 @@ pub fn with_queue(mut local: Option<LocalState>, upload_queued: bool) -> Option<
 }
 
 fn queued_local(db: &StateDb, entry: &FileEntry, item: &mut DriveItem) {
+    // dc-136b: the honest state of a row whose newest server name did not decrypt.
+    item.name_unreadable = db.name_unreadable(&entry.file_id).unwrap_or(false).then_some(true);
     if !entry.is_dir() && entry.status == FileStatus::Local {
         let queued = db.sync_folder_upload_queued(&entry.file_id).unwrap_or(false);
         item.local = with_queue(item.local.take(), queued);
@@ -187,6 +189,7 @@ pub fn item_from(entry: &FileEntry, contract: Option<&FileContractState>, child_
         local: local_state(&entry.status, is_folder, is_pinned(contract)),
         read_only,
         has_thumbnail: !is_folder && has_thumbnail(&name),
+        name_unreadable: None,
         backup: crate::backup_actions::BackupMark::default(),
         name,
     }

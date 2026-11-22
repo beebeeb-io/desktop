@@ -420,7 +420,6 @@ fn flow7_rename_on_locally_edited_local_row_moves_path_without_conflict() {
 }
 
 #[test]
-#[ignore = "FINDING dc-136: an undecryptable rename name replaces the Local row path with the raw blob (desktop #59 guarantee lost); un-ignore when fixed"]
 fn flow7_rename_with_undecryptable_name_keeps_path_and_schedules_resnapshot() {
     let dir = tempfile::tempdir().unwrap();
     let mk = [9u8; 32];
@@ -450,6 +449,37 @@ fn flow7_rename_with_undecryptable_name_keeps_path_and_schedules_resnapshot() {
         "an unresolvable name schedules a re-snapshot so the real name is recovered"
     );
     assert!(conflicts.is_empty());
+    // dc-136b: the row says its name could not be read, and the window shows it with the kept name.
+    assert!(bridge.db().name_unreadable(file).unwrap());
+    let item = crate::drive_v2::model::item_for_entry(bridge.db(), &row).unwrap();
+    assert_eq!(item.name, "notes.txt");
+    assert_eq!(item.name_unreadable, Some(true));
+
+    // The same unreadable name again (a re-snapshot still lists it) asks for no further re-snapshot.
+    flow7_apply_batch(
+        &bridge,
+        dir.path(),
+        &[(
+            52,
+            "file_rename",
+            serde_json::json!({ "id": file, "new_name_encrypted": "not-a-valid-encrypted-blob" }),
+        )],
+    );
+    assert!(!bridge.db().take_needs_resnapshot().unwrap(), "a name that stays unreadable is no loop");
+
+    // A name that decrypts (the keys changed, another client fixed it) is applied and clears the mark.
+    flow7_apply_batch(
+        &bridge,
+        dir.path(),
+        &[(
+            53,
+            "file_rename",
+            serde_json::json!({ "id": file, "new_name_encrypted": enc_name(&mk, file, "notes-fixed.txt") }),
+        )],
+    );
+    let row = bridge.db().get_file(file).unwrap().unwrap();
+    assert_eq!(row.path, "notes-fixed.txt");
+    assert!(!bridge.db().name_unreadable(file).unwrap());
 }
 
 // ── Backlog 2351: no uploaded chunk is larger than 32 MiB ──
