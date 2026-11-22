@@ -1034,6 +1034,10 @@ impl<C: CredentialStores> EngineFilesSource<C> {
 }
 
 impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
+    fn take_rebuilt_notice(&mut self) -> Option<String> {
+        self.engine.take_local_list_rebuilt_notice().map(str::to_string)
+    }
+
     /// Files kept on this PC, once read (`files_facts`); the other two counts are not known here (0: no badge).
     fn counts(&self) -> Option<Counts> {
         self.facts.counts()
