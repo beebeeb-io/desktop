@@ -33,6 +33,69 @@ pub(crate) fn state_db_for_config_unbound(
         .map_err(|e| format!("open state.db: {e}"))
 }
 
+/// What became of the state database at a sign-out or sign-in (backlog 1857).
+#[derive(Debug, PartialEq, Eq)]
+pub enum StateDbCheck {
+    /// No `state.db`, or one that opens: nothing was changed.
+    Sound,
+    /// `state.db` is corrupt (SQLite says not-a-database or malformed). It was moved aside to this path, with its
+    /// `-wal` and `-shm` files, so the next sign-in starts a fresh one. The caller says so to the person.
+    MovedAside(PathBuf),
+}
+
+/// Is this open error SQLite's "the file is corrupt"? By result code only (`error_category`), never by text.
+pub fn is_corrupt_state_db_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    crate::engine_bridge::error_category(error) == "database_corrupt"
+}
+
+/// Opens `state.db` in `state_dir`. A corrupt one is moved aside (never deleted: the person may still want it
+/// looked at) and reported as [`StateDbCheck::MovedAside`]. Any other failure to open (busy, read-only, a
+/// permission error) is an `Err` and the file stays where it is: it fails closed, it never starts over on a
+/// database that may be healthy.
+pub fn move_corrupt_state_db_aside(state_dir: &std::path::Path) -> Result<StateDbCheck, String> {
+    let path = crate::state_paths::state_db_path_from_state_dir(state_dir);
+    match std::fs::metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(StateDbCheck::Sound),
+        Err(error) => return Err(format!("check state.db: {error}")),
+        Ok(meta) if !meta.is_file() => return Err("state.db is not a file".to_string()),
+        Ok(_) => {}
+    }
+    let opened = crate::state_db::StateDb::open(&path).and_then(|db| db.has_account_data().map(|_| ()));
+    let error = match opened {
+        Ok(()) => return Ok(StateDbCheck::Sound),
+        Err(error) => error,
+    };
+    if !is_corrupt_state_db_error(&error) {
+        return Err(format!("open state.db: {error}"));
+    }
+    let aside = unused_aside_path(state_dir)?;
+    std::fs::rename(&path, &aside).map_err(|e| format!("move the corrupt state.db aside: {e}"))?;
+    for suffix in ["-wal", "-shm"] {
+        let mut from = path.clone().into_os_string();
+        from.push(suffix);
+        let mut to = aside.clone().into_os_string();
+        to.push(suffix);
+        let _ = std::fs::rename(from, to);
+    }
+    tracing::warn!("state.db was corrupt; moved aside, the next sign-in starts fresh");
+    Ok(StateDbCheck::MovedAside(aside))
+}
+
+fn unused_aside_path(state_dir: &std::path::Path) -> Result<PathBuf, String> {
+    for n in 0..1000 {
+        let name = if n == 0 {
+            "state.db.corrupt".to_string()
+        } else {
+            format!("state.db.corrupt-{n}")
+        };
+        let candidate = state_dir.join(name);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("no free name to move the corrupt state.db to".to_string())
+}
+
 /// Task 1670 round 2: wipe the macOS hydrate-cache staging directory at every
 /// account-security boundary (sign-out, lock, daemon startup) so a decrypted
 /// plaintext copy staged for a Finder open can never outlive the boundary
