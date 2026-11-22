@@ -92,9 +92,13 @@ fn ask_for_new_codes(fake: &Fake, rt: &mut Runtime<State>) {
                     .is_some_and(|text| text.contains("Asking Beebeeb for your account"))
         })
     };
-    wait_for(rt, "the account is read", read);
+    // The Security page no longer waits for the account read (it is drawn at once, so Sign out works offline):
+    // the Two-factor page, which does wait for it, is drawn first, then its "Asking" waited out.
     rt.update(|s, _| crate::frames::account::go(s, "DW-A71"));
-    wait_for(rt, "the Two-factor page is read", read);
+    rt.frame(0.016);
+    wait_for(rt, "the Two-factor page is read", |rt| {
+        read(rt) && rt.state.account.source.as_deref().is_some_and(|s| s.pane_state(Pane::TwoFactor) == PaneState::Ready)
+    });
     rt.update(|s, _| {
         s.account.dialog = Some(Dialog::Code(CodeFor::NewBackupCodes));
         s.account.form.code.text = "123456".into();
