@@ -2,6 +2,7 @@
 //! dialogs on their scrim (`.wn-dlg`: DW-0604, DW-0607, DW-0609) and the message (`.kit-toast`:
 //! DW-0608, DW-0610).
 
+use crate::theme::scale::space;
 use rune::{Color, El, Icon, Tx, col, el, row, text_input};
 
 use super::route_items::rename::Draft;
@@ -177,7 +178,7 @@ fn pop(key: &str, name: &str, value: &str, t: &Theme) -> El {
         .h(24.0)
         .pl(9.0)
         .pr(6.0)
-        .gap(4.0)
+        .gap(space::S4)
         .center_y()
         .radius(6.0)
         .fill(t.card)
@@ -200,7 +201,7 @@ fn item(n: usize, m: usize, ic: Option<&'static Icon>, title: &str, sub: Option<
         .key(format!("{key}-text"))
         .grow(1.0)
         .min_w(0.0)
-        .gap(1.0)
+        .gap(space::S2)
         .child(kit::label(format!("{key}-title"), title, style::ITEM_TITLE, t.text).truncate());
     if let Some(sub) = sub {
         words = words.child(kit::label(format!("{key}-sub"), sub, style::ITEM_SUB, t.text_tertiary).truncate());
@@ -209,8 +210,8 @@ fn item(n: usize, m: usize, ic: Option<&'static Icon>, title: &str, sub: Option<
         .key(key.clone())
         .w_full()
         .h(if sub.is_some() { 40.0 } else { 28.0 })
-        .px(10.0)
-        .gap(8.0)
+        .px(space::S10)
+        .gap(space::S8)
         .center_y();
     if m > 0 {
         item = item.child(
@@ -233,13 +234,13 @@ fn item(n: usize, m: usize, ic: Option<&'static Icon>, title: &str, sub: Option<
 
 /// A titled list (`.kit-list`).
 fn list(n: usize, title: Option<&str>, items: Vec<El>, t: &Theme) -> El {
-    let mut out = col().key(format!("ph-list-{n}-block")).w_full().gap(6.0);
+    let mut out = col().key(format!("ph-list-{n}-block")).w_full().gap(space::S6);
     if let Some(title) = title {
         out = out.child(
             kit::label(format!("ph-list-{n}-title"), title, style::LIST_TITLE, t.text_tertiary)
                 .role("heading")
                 // `.kit-list-title { padding: 0 var(--pad) }`
-                .px(14.0)
+                .px(space::S14)
                 .w_full(),
         );
     }
@@ -411,7 +412,7 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
         Some(pixels) => thumb.pixels(&pixels),
         None => thumb.fill(t.tile),
     };
-    let what = row().key("ph-dlg-what").gap(12.0).center_y().child(thumb).child(
+    let what = row().key("ph-dlg-what").gap(space::S12).center_y().child(thumb).child(
         col()
             .key("ph-dlg-what-text")
             .items_start()
@@ -592,7 +593,7 @@ fn rename(draft: &Draft, t: &Theme) -> (f32, Vec<El>, Foot) {
         .key("ph-rename-field")
         .w_full()
         .h(30.0)
-        .px(8.0)
+        .px(space::S8)
         .center_y()
         .radius(6.0)
         .fill(t.card)
