@@ -2,6 +2,31 @@
 
 use super::*;
 
+/// RC2-4: at most this many files are checked a tick after a rebuild ([`EngineBridge::check_after_rebuild`]).
+pub const REBUILT_CHECKS_PER_TICK: usize = 20;
+
+/// RC2-4: about this many bytes are downloaded a tick for that check (one file at least, whatever its size).
+pub const REBUILT_CHECK_BYTES_PER_TICK: u64 = 256 * 1024 * 1024;
+
+/// RC2-4: what one tick of the rebuild's check did. Counts only.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RebuiltCheckPass {
+    /// A check is still owed after this tick.
+    pub owed: bool,
+    /// Files found to be the account's current version: agreed now.
+    pub agreed: usize,
+    /// Files found different: held, both versions kept.
+    pub differing: usize,
+    /// Files left for a later tick.
+    pub left: usize,
+}
+
+enum RebuiltVerdict {
+    Agreed,
+    Differs,
+    Later,
+}
+
 impl EngineBridge {
     #[cfg(any(test, feature = "test-support"))]
     pub fn classify_local_path(&self, sync_root: &Path, path: &Path) -> Option<FinderWriteTarget> {
@@ -217,6 +242,191 @@ impl EngineBridge {
             content_unknown.swap(0, Ordering::Relaxed),
             base_unknown.swap(0, Ordering::Relaxed),
         )
+    }
+
+    /// RC2-4: after a corrupt `state.db` was moved aside and a fresh one listed the files again
+    /// (`local_state::RebuiltCheck`), the files on disk have rows with no agreed content, so every edit of
+    /// one would be held as `content_unknown` (a hold made for files hydrated before 0.8.13, not for a
+    /// rebuild). Once the first pull is in, each such file is checked against the server's content: its
+    /// current version is downloaded (to memory; nothing is written to disk or to its row on the way) and
+    /// hashed, and the bytes on disk are hashed. Equal: that version is recorded as the agreed content and
+    /// the hold ends, so a later edit is sent on it. Different: it stays held as a real edit, both versions
+    /// kept, and is not downloaded again. Never decided from size or time. At most
+    /// [`REBUILT_CHECKS_PER_TICK`] files and about [`REBUILT_CHECK_BYTES_PER_TICK`] bytes a tick; the check
+    /// ends (its marker removed) once no file is left to check. A failure leaves the file held, as before.
+    pub async fn check_after_rebuild(&self, sync_root: &Path) -> RebuiltCheckPass {
+        let mut pass = RebuiltCheckPass::default();
+        let Ok(state_dir) = crate::state_paths::beebeeb_state_dir_for(self.identity) else {
+            return pass;
+        };
+        let mut owed = match crate::local_state::RebuiltCheck::read(&state_dir) {
+            Ok(Some(owed)) => owed,
+            Ok(None) => return pass,
+            Err(e) => {
+                tracing::warn!(error = %e, "rebuilt file list: the check could not be read; asked again next tick");
+                return pass;
+            }
+        };
+        pass.owed = true;
+        // The first pull lists the files again; until it is in, no row says what to check.
+        if !matches!(self.db.get_sync_cursor(), Ok(Some(_))) {
+            return pass;
+        }
+        let now = now_secs();
+        let pulled_at = match owed.pulled_at {
+            Some(at) => at,
+            None => {
+                owed.pulled_at = Some(now);
+                if let Err(e) = owed.save(&state_dir) {
+                    tracing::warn!(error = %e, "rebuilt file list: the check's start could not be recorded");
+                }
+                now
+            }
+        };
+        let candidates = match self.rebuilt_check_candidates(sync_root, &owed) {
+            Ok(candidates) => candidates,
+            Err(e) => {
+                tracing::warn!(error = %e, "rebuilt file list: the files to check could not be read; asked again next tick");
+                return pass;
+            }
+        };
+        if candidates.is_empty() {
+            if now.saturating_sub(pulled_at) < crate::local_state::REBUILT_CHECK_SETTLE_SECS {
+                return pass;
+            }
+            match crate::local_state::RebuiltCheck::finish(&state_dir) {
+                Ok(()) => tracing::info!(
+                    differing = owed.differing.len(),
+                    "rebuilt file list: every file on this PC is checked against your account"
+                ),
+                Err(e) => tracing::warn!(error = %e, "rebuilt file list: the finished check could not be cleared"),
+            }
+            pass.owed = false;
+            return pass;
+        }
+        let mut bytes_spent: u64 = 0;
+        for (file_id, path, size) in candidates {
+            if pass.agreed + pass.differing >= REBUILT_CHECKS_PER_TICK
+                || (bytes_spent > 0 && bytes_spent.saturating_add(size) > REBUILT_CHECK_BYTES_PER_TICK)
+            {
+                pass.left += 1;
+                continue;
+            }
+            if self.stopping.load(Ordering::SeqCst) {
+                pass.left += 1;
+                continue;
+            }
+            bytes_spent = bytes_spent.saturating_add(size);
+            match self.check_one_after_rebuild(&file_id, &path).await {
+                Ok(RebuiltVerdict::Agreed) => pass.agreed += 1,
+                Ok(RebuiltVerdict::Differs) => {
+                    owed.differing.insert(file_id);
+                    pass.differing += 1;
+                }
+                Ok(RebuiltVerdict::Later) => pass.left += 1,
+                Err(e) => {
+                    tracing::warn!(file_id = %file_id, error = %e, "rebuilt file list: a file could not be checked; it stays held and is checked again");
+                    pass.left += 1;
+                }
+            }
+        }
+        if pass.differing > 0
+            && let Err(e) = owed.save(&state_dir)
+        {
+            tracing::warn!(error = %e, "rebuilt file list: the files found changed could not be recorded; they are checked again");
+        }
+        tracing::info!(
+            agreed = pass.agreed,
+            differing = pass.differing,
+            left = pass.left,
+            "rebuilt file list: files on this PC checked against your account"
+        );
+        pass
+    }
+
+    /// RC2-4: the files a rebuild's check still owes, `(file_id, absolute path, size on disk)`, oldest row
+    /// first: synced (`Local`) files with no agreed content and no fetched candidate (held as
+    /// `content_unknown`, or not classified yet), wholly on disk, not already found differing.
+    fn rebuilt_check_candidates(
+        &self,
+        sync_root: &Path,
+        owed: &crate::local_state::RebuiltCheck,
+    ) -> Result<Vec<(String, PathBuf, u64)>, EngineError> {
+        let mut ids: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for (file_id, _, reason, _) in self.db.list_held_edits()? {
+            if reason == HELD_CONTENT_UNKNOWN && seen.insert(file_id.clone()) {
+                ids.push(file_id);
+            }
+        }
+        for row in self.db.list_guarded()? {
+            if row.status == FileStatus::Local && seen.insert(row.file_id.clone()) {
+                ids.push(row.file_id);
+            }
+        }
+        let mut out = Vec::new();
+        for file_id in ids {
+            if owed.differing.contains(&file_id) {
+                continue;
+            }
+            let Some(row) = self.db.get_file(&file_id)? else { continue };
+            if row.is_dir() || row.status != FileStatus::Local {
+                continue;
+            }
+            let Ok(path) = local_file_path_under_sync_root(sync_root, &row.path) else {
+                continue;
+            };
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            #[cfg(target_os = "windows")]
+            if !crate::windows_cf::placeholders::fully_on_disk(&path) {
+                // Nothing of a file not wholly on disk can be compared; it is not this check's.
+                continue;
+            }
+            if !matches!(
+                sync_folder_content(&self.db, &file_id, &path, None)?,
+                SyncFolderContent::Unknown
+            ) {
+                continue;
+            }
+            out.push((file_id, path, meta.len()));
+        }
+        Ok(out)
+    }
+
+    /// RC2-4: one file of [`Self::check_after_rebuild`].
+    async fn check_one_after_rebuild(&self, file_id: &str, path: &Path) -> Result<RebuiltVerdict, EngineError> {
+        // The row's version, read before the download, as a legacy download records it: it can say less
+        // than the bytes are (a later edit then parks as stale), never more.
+        let legacy_version = self.legacy_download_version(file_id)?;
+        let meta = self.api.get_file(file_id).await?;
+        let Some(version) = meta["download_version"]["version_number"].as_i64().or(legacy_version) else {
+            // No version can be named: never agreed; it stays held.
+            return Ok(RebuiltVerdict::Differs);
+        };
+        let (plaintext, _) = self.hydrate_whole_file(file_id, &meta, None).await?;
+        let server_hash = sha256_hex(&plaintext);
+        drop(plaintext);
+        let disk_hash = sha256_file_hex(path)?;
+        if disk_hash != server_hash {
+            tracing::debug!(file_id = %file_id, "rebuilt file list: a file on this PC differs from your account's; it stays held, both kept");
+            return Ok(RebuiltVerdict::Differs);
+        }
+        // Still a synced file with no agreed content (nothing landed, queued or fetched meanwhile).
+        let still = self
+            .db
+            .get_file(file_id)?
+            .is_some_and(|row| row.status == FileStatus::Local && !row.is_dir());
+        if !still || !matches!(sync_folder_content(&self.db, file_id, path, None)?, SyncFolderContent::Unknown) {
+            return Ok(RebuiltVerdict::Later);
+        }
+        // A change of the bytes after they were hashed reads as an edit on this version: sent, never lost.
+        self.db.record_local_baseline(file_id, version, &server_hash)?;
+        self.release_unsent_edit(file_id);
+        tracing::debug!(file_id = %file_id, version, "rebuilt file list: a file on this PC is your account's current version");
+        Ok(RebuiltVerdict::Agreed)
     }
 
     /// Task 2190: the one call that ends a held edit's record, when the file reads as agreed, is
