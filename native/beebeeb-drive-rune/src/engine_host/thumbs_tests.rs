@@ -379,6 +379,24 @@ mod local_decode {
     }
 
     #[test]
+    fn only_a_server_with_no_thumbnail_lets_the_one_made_here_be_sent() {
+        use crate::engine_host::thumbs::server_has_none;
+        use beebeeb_engine::app::photos_api::ThumbRefused;
+        // A stored picture that does not decode exists on the server: never replaced from here.
+        assert!(server_has_none(ThumbRefused::NoThumbnail));
+        for other in [
+            ThumbRefused::Unreadable,
+            ThumbRefused::Offline,
+            ThumbRefused::Failed,
+            ThumbRefused::NotSignedIn,
+            ThumbRefused::SessionEnded,
+            ThumbRefused::NotYours,
+        ] {
+            assert!(!server_has_none(other));
+        }
+    }
+
+    #[test]
     fn a_thumbnail_made_here_is_cut_to_the_middle_like_a_stored_one() {
         use beebeeb_engine::app::photos_api::{ThumbCut, ThumbPixels};
 

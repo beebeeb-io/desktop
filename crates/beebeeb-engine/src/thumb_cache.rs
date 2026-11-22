@@ -33,7 +33,15 @@ pub const DEFAULT_CAP_MB: u64 = 200;
 pub const MAX_SIDE: u32 = 2048;
 /// The plaintext inside the seal: `MAGIC || width(4) || height(4) || rgba`.
 const MAGIC: &[u8; 4] = b"BBT1";
+/// The same plus one flags byte after the magic: `MAGIC2 || flags(1) || width(4) || height(4) || rgba`. An entry
+/// written before the flags ([`MAGIC`]) still opens, with no flag set.
+const MAGIC2: &[u8; 4] = b"BBT2";
 const HEAD: usize = 12;
+const HEAD2: usize = 13;
+/// The server answered "no thumbnail" for this file when this PC made its own (115).
+const FLAG_SERVER_404: u8 = 1;
+/// This PC sent its thumbnail to the server (once).
+const FLAG_UPLOADED: u8 = 2;
 /// The snapshot kind the seal records. Core knows document kinds only (1..=3); the cache is told apart by its own
 /// magic inside the sealed bytes and by its own folder.
 const SEAL_KIND: u8 = 1;
@@ -59,6 +67,10 @@ pub struct CachedThumb {
     pub width: u32,
     pub height: u32,
     pub rgba: Zeroizing<Vec<u8>>,
+    /// The server had no thumbnail for the file when this one was made.
+    pub server_404: bool,
+    /// This PC has sent it to the server.
+    pub uploaded: bool,
 }
 
 impl std::fmt::Debug for CachedThumb {
@@ -156,13 +168,18 @@ impl<'a> ThumbCache<'a> {
             let _ = fs::remove_file(&path);
             return None;
         };
-        if plain.len() < HEAD || &plain[0..4] != MAGIC {
-            let _ = fs::remove_file(&path);
-            return None;
-        }
-        let width = u32::from_be_bytes(plain[4..8].try_into().ok()?);
-        let height = u32::from_be_bytes(plain[8..12].try_into().ok()?);
-        if expected_len(width, height) != Some(plain.len() - HEAD) {
+        let (flags, head) = match plain.get(0..4) {
+            Some(m) if m == MAGIC => (0u8, HEAD),
+            Some(m) if m == MAGIC2 && plain.len() >= HEAD2 => (plain[4], HEAD2),
+            _ => {
+                let _ = fs::remove_file(&path);
+                return None;
+            }
+        };
+        let dims = head - 8;
+        let width = u32::from_be_bytes(plain[dims..dims + 4].try_into().ok()?);
+        let height = u32::from_be_bytes(plain[dims + 4..dims + 8].try_into().ok()?);
+        if expected_len(width, height) != Some(plain.len() - head) {
             let _ = fs::remove_file(&path);
             return None;
         }
@@ -174,7 +191,9 @@ impl<'a> ThumbCache<'a> {
             version: meta.base_version,
             width,
             height,
-            rgba: Zeroizing::new(plain[HEAD..].to_vec()),
+            rgba: Zeroizing::new(plain[head..].to_vec()),
+            server_404: flags & FLAG_SERVER_404 != 0,
+            uploaded: flags & FLAG_UPLOADED != 0,
         })
     }
 
@@ -198,11 +217,64 @@ impl<'a> ThumbCache<'a> {
         height: u32,
         rgba: &[u8],
     ) -> Result<(), ThumbCacheError> {
+        self.write(file_id, version, width, height, rgba)
+    }
+
+    /// Note that the server had no thumbnail for `file_id` at `version` (the entry's own version).
+    pub fn mark_server_404(&self, file_id: &str, version: i64) -> Result<(), ThumbCacheError> {
+        self.add_flag(file_id, version, FLAG_SERVER_404)
+    }
+
+    /// Note that this PC sent the thumbnail of `file_id` at `version` to the server.
+    pub fn mark_uploaded(&self, file_id: &str, version: i64) -> Result<(), ThumbCacheError> {
+        self.add_flag(file_id, version, FLAG_UPLOADED)
+    }
+
+    fn add_flag(&self, file_id: &str, version: i64, flag: u8) -> Result<(), ThumbCacheError> {
+        let _one = WRITE.lock().unwrap_or_else(|p| p.into_inner());
+        let held = self.open(file_id).filter(|held| held.version == version).ok_or(ThumbCacheError::Stale)?;
+        let flags = Self::flags_of(&held) | flag;
+        self.write_locked(file_id, version, held.width, held.height, &held.rgba, flags)
+    }
+
+    fn flags_of(held: &CachedThumb) -> u8 {
+        u8::from(held.server_404) * FLAG_SERVER_404 | u8::from(held.uploaded) * FLAG_UPLOADED
+    }
+
+    /// A rewrite of the same version keeps what the entry noted; a newer version starts clean.
+    fn write(
+        &self,
+        file_id: &str,
+        version: i64,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), ThumbCacheError> {
+        let _one = WRITE.lock().unwrap_or_else(|p| p.into_inner());
+        let flags = match self.open(file_id) {
+            Some(held) if held.version > version => return Err(ThumbCacheError::Stale),
+            Some(held) if held.version == version => Self::flags_of(&held),
+            _ => 0,
+        };
+        self.write_locked(file_id, version, width, height, rgba, flags)
+    }
+
+    /// Called under [`WRITE`].
+    fn write_locked(
+        &self,
+        file_id: &str,
+        version: i64,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        flags: u8,
+    ) -> Result<(), ThumbCacheError> {
         if version < 0 || expected_len(width, height) != Some(rgba.len()) {
             return Err(ThumbCacheError::Refused);
         }
-        let mut plain = Zeroizing::new(Vec::with_capacity(HEAD + rgba.len()));
-        plain.extend_from_slice(MAGIC);
+        let mut plain = Zeroizing::new(Vec::with_capacity(HEAD2 + rgba.len()));
+        plain.extend_from_slice(MAGIC2);
+        plain.push(flags);
         plain.extend_from_slice(&width.to_be_bytes());
         plain.extend_from_slice(&height.to_be_bytes());
         plain.extend_from_slice(rgba);
@@ -215,12 +287,6 @@ impl<'a> ThumbCache<'a> {
             seal_recovery_snapshot(self.master, file_id, &meta, &plain).map_err(|_| ThumbCacheError::Failed)?;
         if sealed.len() as u64 > self.cap_bytes {
             return Err(ThumbCacheError::Refused);
-        }
-        let _one = WRITE.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(held) = self.open(file_id) {
-            if held.version > version {
-                return Err(ThumbCacheError::Stale);
-            }
         }
         fs::create_dir_all(&self.dir).map_err(|_| ThumbCacheError::Failed)?;
         let path = self.entry_path(file_id);
@@ -436,5 +502,50 @@ mod thumb_cache_tests {
         wipe_account(dir.path(), "acct").unwrap();
         assert!(files(dir.path()).is_empty());
         wipe_account(dir.path(), "acct").unwrap();
+    }
+
+    #[test]
+    fn thumb_cache_flags_survive_a_rewrite_and_reset_on_a_new_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = key(1);
+        let cache = ThumbCache::new(dir.path(), "acct", &k, DEFAULT_CAP_MB);
+        cache.put(FILE_A, 3, 8, 8, &pixels(7, 8)).unwrap();
+        let fresh = cache.get(FILE_A).unwrap();
+        assert!(!fresh.server_404 && !fresh.uploaded);
+        cache.mark_server_404(FILE_A, 3).unwrap();
+        cache.put(FILE_A, 3, 8, 8, &pixels(7, 8)).unwrap();
+        let got = cache.get_at(FILE_A, 3).unwrap();
+        assert!(got.server_404 && !got.uploaded);
+        assert_eq!(&got.rgba[..], &pixels(7, 8)[..]);
+        cache.mark_uploaded(FILE_A, 3).unwrap();
+        let got = cache.get(FILE_A).unwrap();
+        assert!(got.server_404 && got.uploaded);
+        // A mark for another version changes nothing.
+        assert_eq!(cache.mark_uploaded(FILE_A, 2), Err(ThumbCacheError::Stale));
+        // A newer version starts clean.
+        cache.put(FILE_A, 4, 8, 8, &pixels(9, 8)).unwrap();
+        let got = cache.get(FILE_A).unwrap();
+        assert!(!got.server_404 && !got.uploaded);
+    }
+
+    #[test]
+    fn thumb_cache_reads_an_entry_written_before_the_flags_as_not_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = key(1);
+        let cache = ThumbCache::new(dir.path(), "acct", &k, DEFAULT_CAP_MB);
+        let mut plain = Vec::new();
+        plain.extend_from_slice(b"BBT1");
+        plain.extend_from_slice(&8u32.to_be_bytes());
+        plain.extend_from_slice(&8u32.to_be_bytes());
+        plain.extend_from_slice(&pixels(5, 8));
+        let meta = SnapshotMeta { base_version: 2, saved_at: 1, kind: SEAL_KIND };
+        let sealed = seal_recovery_snapshot(&k, FILE_A, &meta, &plain).unwrap();
+        fs::create_dir_all(&cache.dir).unwrap();
+        fs::write(cache.entry_path(FILE_A), sealed).unwrap();
+        let got = cache.get_at(FILE_A, 2).expect("an old entry still opens");
+        assert_eq!((got.width, got.height, got.server_404, got.uploaded), (8, 8, false, false));
+        assert_eq!(&got.rgba[..], &pixels(5, 8)[..]);
+        cache.mark_server_404(FILE_A, 2).unwrap();
+        assert!(cache.get(FILE_A).unwrap().server_404);
     }
 }

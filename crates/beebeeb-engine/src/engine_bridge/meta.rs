@@ -80,6 +80,16 @@ pub(super) fn owned_key_and_pin(
     owned_key_and_record(db, master, id).map(|(key, record)| (key, record.format))
 }
 
+/// The chunk format the file's row records (the pin a thumbnail seal is bound to), for a caller outside the bridge.
+/// `None`: no key material for the id here. Only the pin leaves; never the key.
+pub(crate) fn recorded_pin(
+    db: &StateDb,
+    master: &[u8; 32],
+    id: &str,
+) -> Option<beebeeb_core::chunk_stream::ExpectedChunkFormat> {
+    owned_key_and_pin(db, master, id).ok().map(|(_, pin)| pin)
+}
+
 /// The item's key and the content record of its current sealed name: the format pin AND the version
 /// commitment. Every re-seal of an existing item's name carries both (`ContentRecord::seal_name`): a
 /// name sealed from the pin alone would drop the commitment, and a v2 version opens only against it.
