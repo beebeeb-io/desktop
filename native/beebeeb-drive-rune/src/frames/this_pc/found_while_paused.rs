@@ -8,6 +8,8 @@
 //! Upload and Keep carry only the ids the last review returned. A shipped build draws no sample card: the card exists
 //! only once the engine's review answered with held changes ([`Card::visible`]).
 
+#![allow(dead_code)] // lint is wrong here: built and tested ahead of its caller; nothing in a shipped build draws the card yet.
+
 use rune::{El, col, el, row};
 
 use super::icons;
