@@ -201,7 +201,7 @@ fn command_icon_uri() -> WinResult<Uri> {
 
 // ── The "Free up space" command shown in the flyout ─────────────────────────
 //
-// Task 2490: the command acts for the signed-in account alone. `State` and
+// The command acts for the signed-in account alone. `State` and
 // `Invoke` ask the engine handle served to `crate::explorer_command` each time
 // (never when the flyout was built: Explorer may keep this object across a lock
 // or a sign-out); no handle, a handle that is gone, or a refusal of the
@@ -302,9 +302,7 @@ impl IStorageProviderUICommand_Impl for InfoCommand_Impl {
 
 // ── The status UI source: builds the flyout's StorageProviderStatusUI ───────
 #[implement(IStorageProviderStatusUISource)]
-struct StatusUiSource {
-    app: &'static crate::identity::EngineIdentity,
-}
+struct StatusUiSource {}
 
 impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
     fn GetStatusUI(&self) -> WinResult<StorageProviderStatusUI> {
@@ -393,16 +391,14 @@ impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
 
 // ── The factory Windows asks for the source, keyed by sync-root id ──────────
 #[implement(IStorageProviderStatusUISourceFactory)]
-struct StatusUiSourceFactory {
-    app: &'static crate::identity::EngineIdentity,
-}
+struct StatusUiSourceFactory {}
 
 impl IStorageProviderStatusUISourceFactory_Impl for StatusUiSourceFactory_Impl {
     fn GetStatusUISource(&self, _syncrootid: &HSTRING) -> WinResult<IStorageProviderStatusUISource> {
         // Single-account today: every sync-root id maps to the one source that
         // reads the shared snapshot. (A future multi-account build would branch
         // on `_syncrootid` here, mirroring CloudMirror's note.)
-        Ok(StatusUiSource { app: self.this.app }.into())
+        Ok(StatusUiSource {}.into())
     }
 }
 
@@ -412,9 +408,7 @@ impl IStorageProviderStatusUISourceFactory_Impl for StatusUiSourceFactory_Impl {
 // (Queried to the requested `riid`). We ignore aggregation (`punkouter`), as the
 // shell never aggregates these.
 #[implement(IClassFactory)]
-struct StatusUiClassFactory {
-    app: &'static crate::identity::EngineIdentity,
-}
+struct StatusUiClassFactory {}
 
 impl IClassFactory_Impl for StatusUiClassFactory_Impl {
     fn CreateInstance(
@@ -433,7 +427,7 @@ impl IClassFactory_Impl for StatusUiClassFactory_Impl {
         if punkouter.is_some() {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
-        let factory: IStorageProviderStatusUISourceFactory = StatusUiSourceFactory { app: self.this.app }.into();
+        let factory: IStorageProviderStatusUISourceFactory = StatusUiSourceFactory {}.into();
         // SAFETY: `riid`/`ppvobject` come from the shell's QueryInterface-style
         // call; `query` writes the requested interface (or an error) into
         // `ppvobject` and returns the HRESULT, which `.ok()` maps to Result.
@@ -481,7 +475,7 @@ pub fn register_status_ui_source(
     // 1. Register the class object so this running exe is the local server for
     //    the CLSID. Once per process (Windows rejects a duplicate).
     if CLASS_OBJECT_COOKIE.get().is_none() {
-        let factory: IClassFactory = StatusUiClassFactory { app: identity }.into();
+        let factory: IClassFactory = StatusUiClassFactory {}.into();
         // SAFETY: `clsid` is a valid CLSID; `factory` outlives
         // the call (it is moved into COM's keeping via the cookie). We pass
         // `CLSCTX_LOCAL_SERVER | REGCLS_MULTIPLEUSE` exactly as CloudMirror does.
@@ -551,7 +545,7 @@ pub fn unregister_status_ui_source(identity: &'static crate::identity::EngineIde
     tracing::info!(shell_id, "Explorer status-flyout source unregistered");
 }
 
-/// Task 2490: remove the flyout's binding for `sync_root` (the engine's stop, lock and sign-out, through
+/// Remove the flyout's binding for `sync_root` (the engine's stop, lock and sign-out, through
 /// `crate::explorer_command::OsExplorerBinding`). The sync folder, its placeholders and Explorer's shell
 /// registration stay; the next engine start binds the flyout again when it connects the folder.
 pub fn remove_for_sync_root(identity: &'static crate::identity::EngineIdentity, sync_root: &std::path::Path) {

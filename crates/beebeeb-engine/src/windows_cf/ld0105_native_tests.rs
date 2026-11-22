@@ -97,7 +97,7 @@ impl Drop for QaRoot {
         }
         let _ = crate::windows_cf::unregister_any_sync_root(&self.root);
         // The driver can hold the root for a moment after the disconnect: retry the removal
-        // instead of letting the TempDir drop race it (backlog 2448).
+        // instead of letting the TempDir drop race it.
         if let Some(dir) = self._dir.take() {
             for _ in 0..50 {
                 if std::fs::remove_dir_all(dir.path()).is_ok() || !dir.path().exists() {
@@ -583,8 +583,8 @@ unsafe extern "system" fn refuse_every_fetch(info: *const CF_CALLBACK_INFO, para
 fn poisoned_whole_pinned(qa: &QaRoot, name: &str) -> Option<(i64, i64)> {
     let path = qa.path(name);
     std::fs::write(&path, content(1 << 20)).unwrap();
-    // Its FileIdentity is its row's file id, `qa-<stem>`, as a real placeholder's is (delta review P2-1:
-    // the discard checks it).
+    // Its FileIdentity is its row's file id, `qa-<stem>`, as a real placeholder's is (the discard
+    // checks it).
     let stem = name.split('.').next().unwrap_or(name);
     placeholders::convert_to_in_sync_placeholder(&path, &format!("qa-{stem}")).unwrap();
     placeholders::set_pin_state(&path, true, false).unwrap();
@@ -910,7 +910,7 @@ fn ld0105_s6_native_a_keyless_poison_needs_attention_and_missing_clears_only_at_
     );
 }
 
-/// Self-review (desktop PR 224): a database error while the sweep reads a poisoned file's row is not
+/// A database error while the sweep reads a poisoned file's row is not
 /// "the row is gone". The poison stays (I5), as the fetch check fails closed on the same error.
 #[test]
 fn ld0105_s6_native_an_unreadable_row_keeps_its_poison() {
@@ -1051,7 +1051,7 @@ unsafe extern "system" fn t10_fetch(info: *const CF_CALLBACK_INFO, params: *cons
     }
 }
 
-/// P1 #1 from the native QA rung (desktop #225, lead ruling 2026-11-06), the data-loss repro: a
+/// The data-loss repro from the native QA rung: a
 /// partly downloaded file; another process writes 21 B at offset 0 (a FileStream, share ReadWrite);
 /// Windows fetches the missing range first, the provider serves it, the write lands and moves
 /// LastWriteTime; then that session fails after a write. Its poison keeps the key the session read
@@ -1107,7 +1107,7 @@ fn ld0105_p1_native_a_write_into_a_partly_downloaded_file_is_kept() {
     );
 }
 
-/// Desktop #225 into #226's UI, end to end (lead 2026-11-06): a poisoned file the person changed is a
+/// Desktop #225 into #226's UI, end to end: a poisoned file the person changed is a
 /// needs-attention row of `get_active_transfers` (the board plus state.db); "Discard and download again"
 /// (the command's `discard_now`) empties and refetches it, and the row is gone. Red on the mutant
 /// "the board alone" (`snapshot_with_attention` returning `snapshot_dtos`): no row to act on.
@@ -1150,7 +1150,7 @@ fn ld0105_u1_native_a_changed_file_is_a_board_row_until_discard_and_download_aga
     assert!(after.is_empty(), "the discard ends the row: {after:?}");
 }
 
-/// Delta review P2-1 (lead 2026-11-06: blocks the merge): "Discard and download again" empties only the
+/// "Discard and download again" empties only the
 /// poisoned file. The row's path holds ANOTHER placeholder (a stale path after a folder rename): refused
 /// `identity_mismatch` under the exclusive handle, that file kept as it is, the poison kept, nothing
 /// fetched. A plain file at the path carries no identity: refused the same way, the poison kept (never

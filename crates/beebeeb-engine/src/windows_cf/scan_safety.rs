@@ -1,4 +1,4 @@
-//! Backlog 1658: Windows Search and a Defender scan pass over a cloud-only file without hydrating it.
+//! Windows Search and a Defender scan pass over a cloud-only file without hydrating it.
 //!
 //! Both honour the attributes Cloud Files puts on a dehydrated placeholder: the indexer
 //! (SearchProtocolHost) indexes a file with `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` by its properties only,

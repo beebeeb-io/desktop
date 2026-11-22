@@ -15,7 +15,7 @@
 //! **Switched on** ([`STREAMING_ENABLED`]) with the streaming callback (plan W2): a declined player's
 //! reads become range demands on the file's one range session (`windows_cf::streaming`).
 
-/// OFF for 0.8.22 (lead ruling 2026-11-06, desktop #225: D2-2 failed natively, VLC's open was served
+/// OFF for 0.8.22 (D2-2 failed natively, VLC's open was served
 /// whole and never declined; per Amendment 5 the per-app decline ships switched off). The code stays.
 pub const STREAMING_ENABLED: bool = false;
 
@@ -246,7 +246,7 @@ mod tests {
         }
     }
 
-    /// Lead ruling 2026-11-06 (desktop #225): W3 ships off for 0.8.22. Red on the mutant "the switch
+    /// W3 ships off for 0.8.22. Red on the mutant "the switch
     /// is on".
     #[test]
     fn the_switch_is_off_for_0822() {

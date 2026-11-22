@@ -11,7 +11,7 @@ use super::placeholders;
 #[path = "populate_tests.rs"]
 mod tests;
 
-/// What one [`populate_placeholders`] pass did (task 2240 slice 2, spec D6: measured, not changed). Counts and
+/// What one [`populate_placeholders`] pass did. Counts and
 /// milliseconds only, never a path.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PopulateStats {
@@ -23,9 +23,9 @@ pub struct PopulateStats {
     pub created: usize,
     pub already_existed: usize,
     pub create_errors: usize,
-    /// Task 2407: rows skipped because a folder on their path reaches a different folder (an 8.3 short name).
+    /// Rows skipped because a folder on their path reaches a different folder (an 8.3 short name).
     pub name_conflicts: usize,
-    /// Task 2407: rows skipped because that check could not finish (retried next pass).
+    /// Rows skipped because that check could not finish (retried next pass).
     pub name_check_errors: usize,
     /// w36: rows that got per-row file work this pass (every row but the ones the memo skipped).
     pub visited: usize,
@@ -415,7 +415,7 @@ impl Pass<'_> {
                 // Review P2 (task 2180): a placeholder minted before identities were recorded (0.8.21), or
                 // kept across a version change, takes the listing's version when it holds nothing: as at a
                 // mint, its first fetch serves that version whole. One that holds bytes stays without.
-                // Task 2407: only an entry that is this name's own (never a different file an 8.3 short name
+                // Only an entry that is this name's own (never a different file an 8.3 short name
                 // reaches) takes the row's identity. Nor the entry of another server item at this place (one name,
                 // or one name but for case): the second of two such rows is not placed, and claims nothing here.
                 if !entry.is_dir()

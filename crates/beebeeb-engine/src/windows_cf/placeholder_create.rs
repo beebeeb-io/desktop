@@ -214,7 +214,7 @@ pub(in crate::windows_cf) fn mint(
             }
             return Err(anyhow::anyhow!("CfCreatePlaceholders: {e}"));
         }
-        // Task 1640 (self-review #3): the entry's own result decides, not only the call's.
+        // The entry's own result decides, not only the call's.
         if entries[0].Result == ALREADY_EXISTS {
             return Ok(false);
         }

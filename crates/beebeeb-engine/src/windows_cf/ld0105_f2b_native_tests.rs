@@ -134,7 +134,7 @@ fn f2b_robocopy(qa: &QaRoot, name: &str, dst: &Path, flags: &[&str]) -> (Option<
     }
 }
 
-/// F2b diagnosis matrix (desktop #225, lead 2026-11-06): which provider behaviour, delay and robocopy
+/// F2b diagnosis matrix (desktop #225): which provider behaviour, delay and robocopy
 /// option decide ERROR 379. Each case: a fresh placeholder of the QA clip's size, robocopy twice (the
 /// second run is robocopy's retry on whatever the first left on disk). A measurement: it prints, it
 /// asserts nothing about robocopy. Run alone:
@@ -209,9 +209,9 @@ fn ld0105_f2b_native_robocopy_matrix() {
 
 static FIX_SERVED: Mutex<Vec<(i64, i64)>> = Mutex::new(Vec::new());
 static FIX_READY_AT: Mutex<Option<Instant>> = Mutex::new(None);
-/// The workers serving a run, joined before its root goes (delta review P3-3).
+/// The workers serving a run, joined before its root goes.
 static FIX_WORKERS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
-/// `transfer_piece` calls Windows refused in a run (delta review P3-3: the rung asserts none).
+/// `transfer_piece` calls Windows refused in a run.
 static FIX_REFUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// A session's preparation before its first transfer (the QA logs: about 1.7 s).
 const FIX_PREP: Duration = Duration::from_millis(1700);
@@ -323,7 +323,7 @@ fn serve_session_piece(r: Request, ready: Instant) {
     }
 }
 
-/// The fix's rung (desktop #225 F2b, lead 2026-11-06: "robocopy buffered x3 -> exit 0"): a provider that
+/// The fix's rung (desktop #225 F2b: "robocopy buffered x3 -> exit 0"): a provider that
 /// serves 16 MiB session pieces as a session does (a worker, after its preparation) through the
 /// session's own `transfer_piece`; three buffered robocopies
 /// of fresh placeholders of the QA clip's size each copy it, byte for byte. Red on the mutant

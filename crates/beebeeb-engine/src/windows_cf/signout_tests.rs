@@ -32,7 +32,7 @@ impl Fixture {
         self.db.mark_no_fetched_content(path).unwrap();
     }
 
-    /// Task 2191: a row of unknown content (synced before task 1640).
+    /// A row of unknown content (synced before task 1640).
     fn track_unknown(&self, path: &str, kind: ItemKind, status: FileStatus) {
         self.db
             .upsert_file(&FileEntry {
@@ -407,7 +407,7 @@ fn journal_finalization(
 }
 
 /// Tasks 2270 / 2280 changed this test's meaning (0.8.19 refused both cases with an error on every tick):
-/// another file's placeholder is held for review and never stamped (spec F4); bytes that are neither the payload
+/// another file's placeholder is held for review and never stamped; bytes that are neither the payload
 /// nor the agreed content get the server identity only, not in sync (F7c). Either way the bytes stay, and sign-out
 /// still refuses to delete them.
 #[test]
@@ -486,10 +486,10 @@ fn round6_verified_upload_finalization_updates_identity() {
     assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
 }
 
-/// Tasks 2270 / 2280 (spec X1, I5; review focus): a row held for review no longer blocks sign-out (the person cannot
+/// A row held for review no longer blocks sign-out (the person cannot
 /// act on it), and sign-out forgets it once it goes ahead. A row still pending (its file is open in another program)
 /// still blocks it, with today's message, until it finishes; a sign-out it refuses keeps the row in review too
-/// (self-review of #195: it was forgotten before the refusal, so the tray lost it and no start retried it).
+///.
 #[test]
 fn signout_purges_review_rows_and_still_refuses_a_pending_one() {
     let registered = RegisteredRoot::new();
@@ -575,7 +575,7 @@ fn task_2191_sign_out_deletes_an_unknown_file_when_asked() {
     assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
 }
 
-/// Task 2191: a file of KNOWN content that is not a clean placeholder still refuses sign-out.
+/// A file of KNOWN content that is not a clean placeholder still refuses sign-out.
 #[test]
 fn task_2191_a_known_file_that_is_not_clean_still_refuses_sign_out() {
     let f = Fixture::new();
@@ -585,7 +585,7 @@ fn task_2191_a_known_file_that_is_not_clean_still_refuses_sign_out() {
     assert!(f.root.join("a.txt").exists(), "nothing deleted");
 }
 
-/// Slice 11: a sign-out that meets work it cannot keep says so in plain words and offers one
+/// A sign-out that meets work it cannot keep says so in plain words and offers one
 /// plain way forward. It never tells the person to unlock, to sync, to resolve anything, or to
 /// deal with "failed changes": those are our internals, not their job.
 #[test]
@@ -609,7 +609,7 @@ fn sign_out_sentence_never_names_internals() {
     );
 }
 
-/// Slice 11: unsent work the person cannot settle is kept, named, and never deleted; the
+/// Unsent work the person cannot settle is kept, named, and never deleted; the
 /// sign-out itself goes ahead. No homework, no internals.
 #[test]
 fn sign_out_keeps_unsent_files_and_names_their_folder() {
@@ -634,7 +634,7 @@ fn sign_out_keeps_unsent_files_and_names_their_folder() {
     assert_eq!(f.db.list_files().unwrap().len(), 0);
 }
 
-/// Slice 11: when a pending file cannot be copied, the sign-out stops with a plain sentence
+/// When a pending file cannot be copied, the sign-out stops with a plain sentence
 /// about space, and every byte stays where it was.
 #[test]
 fn sign_out_stops_plainly_when_it_cannot_keep_a_pending_file() {

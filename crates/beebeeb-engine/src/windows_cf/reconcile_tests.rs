@@ -1,4 +1,4 @@
-//! Task 2240 slice 2: the placeholder reconcile through folder listings, on real Windows.
+//! The placeholder reconcile through folder listings, on real Windows.
 //!
 //! Spec: `docs/superpowers/specs/2026-10-28-2240-reconcile-from-listing-design.md` (workspace repo), T10–T16, T18,
 //! and the source pins on the wiring. Registered roots are confined to a fresh temporary directory and revoked on
@@ -391,7 +391,7 @@ fn task_2240_refresh_and_seed_log_no_path() {
     }
 }
 
-/// The lead's ruling on self-review #1 (2026-10-28): D2's rule applied to eviction. A pin made in Explorer reaches the
+/// D2's rule applied to eviction. A pin made in Explorer reaches the
 /// DB only when the listing shows it; while the listing lags, the DB still says unpinned. "Free up space" picks its
 /// files from the DB, so it reads the file's own attributes before dehydrating and keeps a file pinned on disk.
 #[test]
