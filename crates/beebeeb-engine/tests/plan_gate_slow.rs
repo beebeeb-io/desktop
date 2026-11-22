@@ -23,7 +23,10 @@ fn a_slow_plan_answer_holds_up_neither_the_unlock_nor_the_first_listing() {
     let first_listing = began.elapsed();
     eprintln!("start-to-first-listing with a 4 s plan answer: {first_listing:?}");
     assert_eq!(rows, 7);
-    assert!(first_listing < Duration::from_millis(2500), "waited on the plan: {first_listing:?}");
+    assert!(
+        first_listing < Duration::from_millis(2500),
+        "waited on the plan: {first_listing:?}"
+    );
 
     // The answer lands later: the gate follows, published and woken.
     assert!(

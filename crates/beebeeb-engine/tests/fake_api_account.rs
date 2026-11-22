@@ -30,7 +30,8 @@ use zeroize::Zeroizing;
 // ── Shared setup (once per process) ─────────────────────────────────────────────
 
 struct TestHarness {
-    account: Arc<FakeAccount>,
+    /// Held so the fake account outlives the tests; never read.
+    _account: Arc<FakeAccount>,
     phrase: String,
     fake: FakeApi,
     state_dir: PathBuf,
@@ -48,7 +49,7 @@ fn harness() -> &'static TestHarness {
         let state_dir = state_paths::beebeeb_state_dir_for(identity).expect("state dir");
         std::mem::forget(base);
         TestHarness {
-            account,
+            _account: account,
             phrase,
             fake,
             state_dir,
@@ -266,12 +267,12 @@ fn listing_after_pull_has_7_decrypted_names() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut count = 0;
     while std::time::Instant::now() < deadline {
-        if let Ok(db) = StateDb::open(&db_path) {
-            if let Ok(files) = db.list_files() {
-                count = files.len();
-                if count >= 7 {
-                    break;
-                }
+        if let Ok(db) = StateDb::open(&db_path)
+            && let Ok(files) = db.list_files()
+        {
+            count = files.len();
+            if count >= 7 {
+                break;
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(200));

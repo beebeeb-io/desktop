@@ -80,7 +80,7 @@ pub(super) fn is_word_char(c: char) -> bool {
 }
 
 pub(super) fn boundary_ok(s: &str, start: usize, end: usize) -> bool {
-    let before_ok = s[..start].chars().next_back().map_or(true, |c| !is_word_char(c));
-    let after_ok = s[end..].chars().next().map_or(true, |c| !is_word_char(c));
+    let before_ok = s[..start].chars().next_back().is_none_or(|c| !is_word_char(c));
+    let after_ok = s[end..].chars().next().is_none_or(|c| !is_word_char(c));
     before_ok && after_ok
 }

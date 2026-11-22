@@ -104,7 +104,7 @@ impl ApiClient {
     ) -> anyhow::Result<Vec<u8>> {
         let mut resp = self
             .client
-            .get(&self.chunk_url(FileId::new(file_id), chunk_idx))
+            .get(self.chunk_url(FileId::new(file_id), chunk_idx))
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?

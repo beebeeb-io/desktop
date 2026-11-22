@@ -578,7 +578,7 @@ fn now_unix_seconds() -> i64 {
 mod unix;
 #[cfg(not(target_os = "windows"))]
 pub use unix::free_up_space_unix;
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(test, unix))]
 pub(crate) use unix::{Seams, reclaim_unix};
 #[cfg(all(test, unix))]
 mod unix_tests;

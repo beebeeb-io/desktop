@@ -61,14 +61,14 @@ pub fn provenance_headers() -> HeaderMap {
     headers
 }
 
-/// Extra attempts after the first 429 (so up to 1 + this total requests).
 // ── 429 backoff/retry tuning (account-data GETs) ───────────────────────────────
 //
 // The account-data endpoints (auth/me, billing/*, account/*, clients/*) can 429
 // under load. The client must ride out a transient 429 rather than surfacing a
 // "Couldn't load" to the view, but must stay BOUNDED — it is not a hot loop and
 // must never hang a view waiting on a hammered endpoint.
-
+//
+/// Extra attempts after the first 429 (so up to 1 + this total requests).
 pub(super) const MAX_429_RETRIES: u32 = 3;
 
 /// Hard cap on any SINGLE backoff wait, regardless of what the server asks for.
@@ -149,7 +149,12 @@ pub(super) fn is_idempotent(method: &reqwest::Method) -> bool {
 /// Pure decision after a failure. `connect`: the request never left. `maybe_sent`: a timeout or a 5xx
 /// answer, where the server may have acted. Connect failures retry for any method; the rest only for
 /// idempotent ones. Returns the wait before the next try, or `None` to give up.
-pub(super) fn transport_retry_decision(attempt: u32, connect: bool, maybe_sent: bool, idempotent: bool) -> Option<Duration> {
+pub(super) fn transport_retry_decision(
+    attempt: u32,
+    connect: bool,
+    maybe_sent: bool,
+    idempotent: bool,
+) -> Option<Duration> {
     if attempt >= MAX_TRANSPORT_RETRIES || !(connect || (maybe_sent && idempotent)) {
         return None;
     }

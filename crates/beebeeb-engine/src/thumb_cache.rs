@@ -232,24 +232,20 @@ impl<'a> ThumbCache<'a> {
 
     fn add_flag(&self, file_id: &str, version: i64, flag: u8) -> Result<(), ThumbCacheError> {
         let _one = WRITE.lock().unwrap_or_else(|p| p.into_inner());
-        let held = self.open(file_id).filter(|held| held.version == version).ok_or(ThumbCacheError::Stale)?;
+        let held = self
+            .open(file_id)
+            .filter(|held| held.version == version)
+            .ok_or(ThumbCacheError::Stale)?;
         let flags = Self::flags_of(&held) | flag;
         self.write_locked(file_id, version, held.width, held.height, &held.rgba, flags)
     }
 
     fn flags_of(held: &CachedThumb) -> u8 {
-        u8::from(held.server_404) * FLAG_SERVER_404 | u8::from(held.uploaded) * FLAG_UPLOADED
+        (u8::from(held.server_404) * FLAG_SERVER_404) | (u8::from(held.uploaded) * FLAG_UPLOADED)
     }
 
     /// A rewrite of the same version keeps what the entry noted; a newer version starts clean.
-    fn write(
-        &self,
-        file_id: &str,
-        version: i64,
-        width: u32,
-        height: u32,
-        rgba: &[u8],
-    ) -> Result<(), ThumbCacheError> {
+    fn write(&self, file_id: &str, version: i64, width: u32, height: u32, rgba: &[u8]) -> Result<(), ThumbCacheError> {
         let _one = WRITE.lock().unwrap_or_else(|p| p.into_inner());
         let flags = match self.open(file_id) {
             Some(held) if held.version > version => return Err(ThumbCacheError::Stale),
@@ -321,7 +317,7 @@ impl<'a> ThumbCache<'a> {
         }
         let mut total: u64 = entries.iter().map(|e| e.2).sum();
         // Oldest first; the entry just written sorts after every other.
-        entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        entries.sort_by_key(|a| (a.0, a.1));
         for (_, _, len, path) in entries {
             if total <= self.cap_bytes {
                 break;
@@ -538,12 +534,19 @@ mod thumb_cache_tests {
         plain.extend_from_slice(&8u32.to_be_bytes());
         plain.extend_from_slice(&8u32.to_be_bytes());
         plain.extend_from_slice(&pixels(5, 8));
-        let meta = SnapshotMeta { base_version: 2, saved_at: 1, kind: SEAL_KIND };
+        let meta = SnapshotMeta {
+            base_version: 2,
+            saved_at: 1,
+            kind: SEAL_KIND,
+        };
         let sealed = seal_recovery_snapshot(&k, FILE_A, &meta, &plain).unwrap();
         fs::create_dir_all(&cache.dir).unwrap();
         fs::write(cache.entry_path(FILE_A), sealed).unwrap();
         let got = cache.get_at(FILE_A, 2).expect("an old entry still opens");
-        assert_eq!((got.width, got.height, got.server_404, got.uploaded), (8, 8, false, false));
+        assert_eq!(
+            (got.width, got.height, got.server_404, got.uploaded),
+            (8, 8, false, false)
+        );
         assert_eq!(&got.rgba[..], &pixels(5, 8)[..]);
         cache.mark_server_404(FILE_A, 2).unwrap();
         assert!(cache.get(FILE_A).unwrap().server_404);

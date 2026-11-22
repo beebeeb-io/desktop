@@ -296,10 +296,10 @@ impl FakeAccount {
                 return Reply::json(409, json!({ "error": "not a file" }));
             }
             // A replacement names the version it replaces; the server refuses one that is not the current one.
-            if let Some(base) = body.get("base_version_number").and_then(Value::as_i64) {
-                if base != i64::from(item.version_number) {
-                    return Reply::json(409, json!({ "error": crate::api_client::STALE_BASE_MESSAGE }));
-                }
+            if let Some(base) = body.get("base_version_number").and_then(Value::as_i64)
+                && base != i64::from(item.version_number)
+            {
+                return Reply::json(409, json!({ "error": crate::api_client::STALE_BASE_MESSAGE }));
             }
         }
         let size = body.get("file_size_bytes").and_then(Value::as_u64).unwrap_or(0);

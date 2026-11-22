@@ -30,7 +30,10 @@ fn the_gate_follows_what_the_server_says_and_the_last_known_state_when_it_cannot
     let from = s.fake.requests().len();
     assert_eq!(s.engine.recheck_gate(), GateState::Ready);
     assert_eq!(s.engine.view().gate, GateState::Ready, "published");
-    assert_eq!(s.routes_from(from), vec!["GET /api/v1/billing/subscription".to_string()]);
+    assert_eq!(
+        s.routes_from(from),
+        vec!["GET /api/v1/billing/subscription".to_string()]
+    );
 
     // Unreachable, last known active: not blocked, whatever the server would say.
     s.account.set_plan_unreachable(true);

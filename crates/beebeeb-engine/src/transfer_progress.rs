@@ -58,7 +58,7 @@ impl SpeedWindow {
         self.samples.push_back((now, cumulative_bytes));
         // Drop samples older than `span`
         let cutoff = now.checked_sub(span).unwrap_or(now);
-        while self.samples.front().map_or(false, |(t, _)| *t < cutoff) {
+        while self.samples.front().is_some_and(|(t, _)| *t < cutoff) {
             self.samples.pop_front();
         }
         if self.samples.len() < 2 {
@@ -93,6 +93,12 @@ pub struct FetchSpeed {
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl Default for FetchSpeed {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FetchSpeed {
     pub fn new() -> Self {
         FetchSpeed {
@@ -129,23 +135,21 @@ pub struct NeedsAttention {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn needs_attention(db: &crate::state_db::StateDb) -> Option<Vec<NeedsAttention>> {
     let rows = db.poisoned().ok()?;
-    Some(
-        rows.into_iter()
-            .filter(|r| r.needs_attention)
-            .filter_map(|r| match db.get_file(&r.file_id) {
-                Ok(Some(entry)) => Some(Ok(NeedsAttention {
-                    file_id: r.file_id,
-                    path: entry.path,
-                    size: entry.size_bytes.max(0) as u64,
-                })),
-                // No files row: no exit, no row (above).
-                Ok(None) => None,
-                // Review P3-7: a read error fails the whole read, so the poll keeps the rows it had.
-                Err(e) => Some(Err(e)),
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?,
-    )
+    rows.into_iter()
+        .filter(|r| r.needs_attention)
+        .filter_map(|r| match db.get_file(&r.file_id) {
+            Ok(Some(entry)) => Some(Ok(NeedsAttention {
+                file_id: r.file_id,
+                path: entry.path,
+                size: entry.size_bytes.max(0) as u64,
+            })),
+            // No files row: no exit, no row (above).
+            Ok(None) => None,
+            // Review P3-7: a read error fails the whole read, so the poll keeps the rows it had.
+            Err(e) => Some(Err(e)),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
 }
 
 /// The needs-attention rows the last read returned, kept with the engine generation they were read
@@ -542,7 +546,11 @@ impl TransferBoard {
 
     /// The snapshot is whole (or its ingest failed): no listing is in progress. Rings the wake hook.
     pub fn end_first_listing(&self) {
-        let had = self.first_listing.lock().ok().is_some_and(|mut slot| slot.take().is_some());
+        let had = self
+            .first_listing
+            .lock()
+            .ok()
+            .is_some_and(|mut slot| slot.take().is_some());
         if had {
             self.ring();
         }
@@ -692,7 +700,7 @@ impl TransferBoard {
                     .iter()
                     .filter_map(|(id, t)| {
                         // No timestamp → keep (conservative); timestamp too old → prune.
-                        if t.failed_at_secs.map_or(false, |s| s + FAILED_ROW_TTL_SECS < now_secs) {
+                        if t.failed_at_secs.is_some_and(|s| s + FAILED_ROW_TTL_SECS < now_secs) {
                             Some(id.clone())
                         } else {
                             None

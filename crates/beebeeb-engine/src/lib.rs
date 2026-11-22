@@ -101,11 +101,11 @@ pub mod sync_folder_rule;
 pub mod sync_root_owner;
 pub mod sync_root_port;
 pub mod sync_view;
-pub mod thumb_cache;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_api;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_sandbox;
+pub mod thumb_cache;
 pub mod transfer_progress;
 pub mod unknown_check;
 pub mod upload_finalization_plan;

@@ -555,11 +555,21 @@ fn a_links_expiry_and_password_change_in_place_and_a_revoked_or_unknown_link_is_
     let made = send(
         &fake,
         &account.session_token,
-        call(Method::Post, "/api/v1/shares".into(), Some(json!({ "file_id": file, "token": "t" }))),
+        call(
+            Method::Post,
+            "/api/v1/shares".into(),
+            Some(json!({ "file_id": file, "token": "t" })),
+        ),
     );
     let link = made.1["id"].as_str().unwrap().to_string();
     let path = format!("/api/v1/shares/{link}");
-    let patch = |body: Value| send(&fake, &account.session_token, call(Method::Patch, path.clone(), Some(body)));
+    let patch = |body: Value| {
+        send(
+            &fake,
+            &account.session_token,
+            call(Method::Patch, path.clone(), Some(body)),
+        )
+    };
 
     let (status, body) = patch(json!({ "expires_in_hours": 24, "passphrase": "four" }));
     assert_eq!(status, 200);
@@ -567,7 +577,10 @@ fn a_links_expiry_and_password_change_in_place_and_a_revoked_or_unknown_link_is_
     assert!(body["expires_at"].is_string());
     // Absent is unchanged; null clears.
     let (_, body) = patch(json!({ "expires_in_hours": null }));
-    assert_eq!((body["expires_at"].is_null(), body["has_passphrase"].clone()), (true, json!(true)));
+    assert_eq!(
+        (body["expires_at"].is_null(), body["has_passphrase"].clone()),
+        (true, json!(true))
+    );
     let (_, body) = patch(json!({ "passphrase": null }));
     assert_eq!(body["has_passphrase"], false);
     // Limits as create.
@@ -575,7 +588,15 @@ fn a_links_expiry_and_password_change_in_place_and_a_revoked_or_unknown_link_is_
     assert_eq!(patch(json!({ "expires_in_hours": 0 })).0, 400);
     assert_eq!(patch(json!({ "expires_in_hours": 87601 })).0, 400);
 
-    assert_eq!(send(&fake, &account.session_token, share_flow::revoke_link_request(&link).unwrap()).0, 200);
+    assert_eq!(
+        send(
+            &fake,
+            &account.session_token,
+            share_flow::revoke_link_request(&link).unwrap()
+        )
+        .0,
+        200
+    );
     assert_eq!(patch(json!({ "expires_in_hours": 5 })).0, 404);
     let unknown = call(Method::Patch, format!("/api/v1/shares/{}", id(99)), Some(json!({})));
     assert_eq!(send(&fake, &account.session_token, unknown).0, 404);
@@ -586,17 +607,37 @@ fn a_file_requests_expiry_changes_while_open_and_an_invite_is_left_once() {
     let (account, fake) = start();
     account.add_file_request(&id(5), "Invented request", 10);
     let path = format!("/api/v1/file-requests/{}", id(5));
-    let patch = |body: Value| send(&fake, &account.session_token, call(Method::Patch, path.clone(), Some(body)));
+    let patch = |body: Value| {
+        send(
+            &fake,
+            &account.session_token,
+            call(Method::Patch, path.clone(), Some(body)),
+        )
+    };
     assert_eq!(patch(json!({ "expires_in_secs": 3600 })).0, 200);
-    let listed = send(&fake, &account.session_token, call(Method::Get, "/api/v1/file-requests".into(), None)).1;
+    let listed = send(
+        &fake,
+        &account.session_token,
+        call(Method::Get, "/api/v1/file-requests".into(), None),
+    )
+    .1;
     assert!(listed["file_requests"][0]["expires_at"].is_string());
     assert_eq!(patch(json!({ "expires_in_secs": null })).0, 200);
-    let listed = send(&fake, &account.session_token, call(Method::Get, "/api/v1/file-requests".into(), None)).1;
+    let listed = send(
+        &fake,
+        &account.session_token,
+        call(Method::Get, "/api/v1/file-requests".into(), None),
+    )
+    .1;
     assert!(listed["file_requests"][0]["expires_at"].is_null());
     let close = beebeeb_core::share_flow::request::close_request(&id(5)).unwrap();
     assert_eq!(send(&fake, &account.session_token, close).0, 200);
     assert_eq!(patch(json!({ "expires_in_secs": 60 })).0, 409);
-    let missing = call(Method::Patch, format!("/api/v1/file-requests/{}", id(9)), Some(json!({ "expires_in_secs": 1 })));
+    let missing = call(
+        Method::Patch,
+        format!("/api/v1/file-requests/{}", id(9)),
+        Some(json!({ "expires_in_secs": 1 })),
+    );
     assert_eq!(send(&fake, &account.session_token, missing).0, 404);
 
     account.add_incoming_invite(&id(7), &id(8), "sender@example.eu");

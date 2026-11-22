@@ -187,7 +187,7 @@ impl FakeAccount {
         let recovery_check = {
             use base64::Engine as _;
             let check = beebeeb_core::opaque::compute_recovery_check(&master_key_struct);
-            base64::engine::general_purpose::STANDARD.encode(&*check)
+            base64::engine::general_purpose::STANDARD.encode(*check)
         };
         let master_key = *master_key_struct.to_bytes();
         let session_token = format!("fake-session-{}", uuid::Uuid::new_v4());
@@ -425,13 +425,13 @@ impl FakeAccount {
     /// Trash an item by id. Returns true if found and not already trashed.
     pub fn trash_item(&self, id: &str) -> bool {
         let mut items = self.items.lock().expect("vault items");
-        if let Some(item) = items.get_mut(id) {
-            if !item.is_trashed {
-                item.is_trashed = true;
-                item.version_number += 1;
-                self.seq.fetch_add(1, Ordering::SeqCst);
-                return true;
-            }
+        if let Some(item) = items.get_mut(id)
+            && !item.is_trashed
+        {
+            item.is_trashed = true;
+            item.version_number += 1;
+            self.seq.fetch_add(1, Ordering::SeqCst);
+            return true;
         }
         false
     }
@@ -457,13 +457,13 @@ impl FakeAccount {
     /// Restore a trashed item. Returns true if found and was trashed.
     pub fn restore_item(&self, id: &str) -> bool {
         let mut items = self.items.lock().expect("vault items");
-        if let Some(item) = items.get_mut(id) {
-            if item.is_trashed {
-                item.is_trashed = false;
-                item.version_number += 1;
-                self.seq.fetch_add(1, Ordering::SeqCst);
-                return true;
-            }
+        if let Some(item) = items.get_mut(id)
+            && item.is_trashed
+        {
+            item.is_trashed = false;
+            item.version_number += 1;
+            self.seq.fetch_add(1, Ordering::SeqCst);
+            return true;
         }
         false
     }
@@ -550,9 +550,7 @@ impl FakeAccount {
             },
         };
         match hours {
-            Some(Some(h)) => {
-                link["expires_at"] = json!((chrono::Utc::now() + chrono::Duration::hours(h)).to_rfc3339())
-            }
+            Some(Some(h)) => link["expires_at"] = json!((chrono::Utc::now() + chrono::Duration::hours(h)).to_rfc3339()),
             Some(None) => link["expires_at"] = Value::Null,
             None => {}
         }
@@ -666,10 +664,10 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
         let route = req.route();
         // The stateful routes of their own files, before the broad `/api/v1/files/` arms below.
         if let Some(reply) = account
-            .purge_route(&req)
-            .or_else(|| account.sessions_route(&req))
-            .or_else(|| account.rest_route(&req))
-            .or_else(|| account.sharing_route(&req))
+            .purge_route(req)
+            .or_else(|| account.sessions_route(req))
+            .or_else(|| account.rest_route(req))
+            .or_else(|| account.sharing_route(req))
         {
             return reply;
         }
@@ -1039,7 +1037,7 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
-                account.upload_route(&req)
+                account.upload_route(req)
             }
 
             // ── Search shards ───────────────────────────────────────────

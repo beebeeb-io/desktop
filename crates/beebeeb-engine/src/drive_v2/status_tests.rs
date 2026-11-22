@@ -250,6 +250,12 @@ fn file_with_queued_upload_is_waiting_never_synced() {
     let e = entry("n", "new.txt", None, false, 5);
     let item = model::item_from(&e, None, None);
     assert_eq!(item.local, Some(super::dto::LocalState::Downloaded));
-    assert_eq!(model::with_queue(item.local.clone(), true), Some(super::dto::LocalState::Syncing));
-    assert_eq!(model::with_queue(item.local, false), Some(super::dto::LocalState::Downloaded));
+    assert_eq!(
+        model::with_queue(item.local.clone(), true),
+        Some(super::dto::LocalState::Syncing)
+    );
+    assert_eq!(
+        model::with_queue(item.local, false),
+        Some(super::dto::LocalState::Downloaded)
+    );
 }

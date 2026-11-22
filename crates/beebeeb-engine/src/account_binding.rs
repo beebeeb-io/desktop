@@ -145,7 +145,7 @@ pub const ENGINE_STOP_UNCONFIRMED: &str =
 pub const ENGINE_STOP_FINISHING: &str =
     "Beebeeb’s sync is still finishing its last stop. Nothing was changed. Try again in a moment.";
 
-/// An engine-start refusal the person is shown (Task 12 fix round 2, ruling P): a closed code and its constant
+/// An engine-start refusal the person is shown: a closed code and its constant
 /// sentence, recorded by the engine start and exposed as `engine_refusal` on `sync_status`. The two binding refusals,
 /// and a start refused because an earlier engine stop was never confirmed (spec §5.6). Nothing in it names an account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,7 +231,7 @@ pub fn adopt_unbound(data: &dyn LocalData, vault_key_account: Option<&Identity>)
     data.adopt_once(vault_key_account.filter(|account| account.is_known()))
 }
 
-/// R10 ruling 8 in the native build (lead ruling 2026-11-15 17:35): whether a start's `session` may adopt this
+/// R10 ruling 8 in the native build: whether a start's `session` may adopt this
 /// computer's unowned local data on the upgrade's path. `candidate` is the account whose vault key the credential
 /// store held at the build's first startup (`None`: it held none, or none that is known); the session must be that
 /// same account by the binding's own rule. An unknown session, an unknown candidate or one that cannot be compared
@@ -263,7 +263,12 @@ impl DiscardAsk {
         let names = paths
             .iter()
             .take(NAMES_SHOWN)
-            .map(|path| path.rsplit('/').find(|part| !part.is_empty()).unwrap_or(path).to_string())
+            .map(|path| {
+                path.rsplit('/')
+                    .find(|part| !part.is_empty())
+                    .unwrap_or(path)
+                    .to_string()
+            })
             .collect();
         Self {
             files: paths.len(),
@@ -306,7 +311,6 @@ pub struct DiscardDone {
     pub kept: usize,
     pub start: Result<crate::app::SyncStart, crate::app::SyncStartRefused>,
 }
-
 
 #[cfg(test)]
 mod tests {

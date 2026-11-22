@@ -14,7 +14,8 @@ fn recheck_gate_publishes_the_gate_it_reads_and_runs_no_restore() {
     assert_eq!(s.engine.view().gate, GateState::NeedsRecoveryPhrase);
 
     // The published gate went stale (a store that did not answer, a plan that arrived): the view says so.
-    s.engine.set_view_for_test(|view| view.gate = GateState::KeyStoreUnavailable);
+    s.engine
+        .set_view_for_test(|view| view.gate = GateState::KeyStoreUnavailable);
     assert_eq!(s.engine.view().gate, GateState::KeyStoreUnavailable);
 
     let from = s.fake.requests().len();

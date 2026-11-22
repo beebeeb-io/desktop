@@ -42,7 +42,7 @@ impl ContainerId {
     }
 
     /// The wire text back out; read by this module's tests.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -82,7 +82,7 @@ impl RequestId {
     }
 
     /// The wire text back out; read by this module's tests.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn into_string(self) -> String {
         self.0
     }

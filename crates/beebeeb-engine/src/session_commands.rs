@@ -16,6 +16,12 @@ pub struct SessionCommands {
     /// Woken by [`Self::close`]: a command in flight learns of the lock from this, not from a timer.
     locked: Arc<tokio::sync::Notify>,
 }
+impl Default for SessionCommands {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionCommands {
     pub fn new() -> Self {
         Self {

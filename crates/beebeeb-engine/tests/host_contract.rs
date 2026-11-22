@@ -150,7 +150,7 @@ fn fake_api() -> &'static FakeApi {
         let world = Mutex::new(World::default());
         let snapshot = snapshot();
         let recovery_check = base64::engine::general_purpose::STANDARD
-            .encode(&*beebeeb_core::opaque::compute_recovery_check(&master_key()));
+            .encode(*beebeeb_core::opaque::compute_recovery_check(&master_key()));
         FakeApi::start(Arc::new(move |request: &Request| {
             let body = request.json();
             let mut world = world.lock().unwrap();

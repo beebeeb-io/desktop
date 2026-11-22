@@ -100,7 +100,8 @@ pub fn seal_made(master: &[u8; 32], thumb: &MadeThumb) -> Result<Vec<u8>, SealRe
     let webp = Zeroizing::new(made.data);
     let key = derive_file_key(&MasterKey::from_bytes(*master), thumb.file_id.as_bytes());
     #[allow(deprecated)]
-    let sealed = beebeeb_core::encrypt::encrypt_thumbnail_for(&key, &webp, thumb.pin).map_err(|_| SealRefused::Failed)?;
+    let sealed =
+        beebeeb_core::encrypt::encrypt_thumbnail_for(&key, &webp, thumb.pin).map_err(|_| SealRefused::Failed)?;
     if sealed.len() > MAX_SEALED {
         return Err(SealRefused::TooLarge);
     }
@@ -159,7 +160,10 @@ mod tests {
     const MASTER: [u8; 32] = [7; 32];
 
     fn on() -> PreviewSetting {
-        PreviewSetting { enabled: true, ..PreviewSetting::default() }
+        PreviewSetting {
+            enabled: true,
+            ..PreviewSetting::default()
+        }
     }
 
     fn thumb(id: &str, version: i64) -> MadeThumb {
@@ -184,9 +188,23 @@ mod tests {
     fn setting_off_or_a_hold_means_nothing_now() {
         assert_eq!(not_now(&PreviewSetting::default(), None), Some(NotNow::SettingOff));
         assert_eq!(not_now(&on(), None), None);
-        let saver = decide(None, &FakePower { metered: false, saver: true, connection: None });
+        let saver = decide(
+            None,
+            &FakePower {
+                metered: false,
+                saver: true,
+                connection: None,
+            },
+        );
         assert_eq!(not_now(&on(), saver), Some(NotNow::Hold(PausedFor::BatterySaver)));
-        let metered = decide(Some(true), &FakePower { metered: true, saver: false, connection: None });
+        let metered = decide(
+            Some(true),
+            &FakePower {
+                metered: true,
+                saver: false,
+                connection: None,
+            },
+        );
         assert_eq!(not_now(&on(), metered), Some(NotNow::Hold(PausedFor::Metered)));
     }
 
@@ -247,7 +265,11 @@ mod tests {
         let mut n = 0;
         let mut send = |_: &str, _: &[u8]| {
             n += 1;
-            if n == 1 { SendResult::Refused } else { SendResult::Stop(Stopped::StorageFull) }
+            if n == 1 {
+                SendResult::Refused
+            } else {
+                SendResult::Stop(Stopped::StorageFull)
+            }
         };
         let end = send_all(&MASTER, &on(), None, &thumbs, &mut sent, &mut send).unwrap();
         assert_eq!((end.sent, end.skipped, end.stopped), (0, 1, Some(Stopped::StorageFull)));

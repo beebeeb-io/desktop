@@ -165,7 +165,7 @@ pub static STARTUP_GUARD: StartupGuard = StartupGuard::new();
 
 /// Whether the guard's progress line is due after `done` of `total` rows.
 pub fn guard_progress_due(done: usize, total: usize) -> bool {
-    done > 0 && (done % GUARD_PROGRESS_EVERY == 0 || done == total)
+    done > 0 && (done.is_multiple_of(GUARD_PROGRESS_EVERY) || done == total)
 }
 
 /// How much of a file's bytes are on this PC.

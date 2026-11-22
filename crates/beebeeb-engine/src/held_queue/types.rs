@@ -94,7 +94,7 @@ pub struct Counts {
     pub held_parents_disagree: usize,
     pub held_twin_busy: usize,
     pub rearmed: usize,
-    /// D8 amendment (lead ruling 2026-10-29): an op paused for the person (2267's `found_while_paused`, quota, a
+    /// D8 amendment: an op paused for the person (2267's `found_while_paused`, quota, a
     /// replaced key) whose retry budget is re-armed on a parent 404; its pause stays.
     pub rearmed_paused: usize,
     pub rearm_no_payload: usize,

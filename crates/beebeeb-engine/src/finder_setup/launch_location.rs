@@ -14,7 +14,7 @@ pub enum LaunchLocation {
     /// Gatekeeper App Translocation (a quarantined app opened where it was downloaded).
     Translocated,
     /// A bundle sitting directly at a volume's root (`/Volumes/<name>/Beebeeb.app`): the
-    /// mounted disk image. Nothing deeper under `/Volumes` counts (lead ruling 2026-10-06).
+    /// mounted disk image. Nothing deeper under `/Volumes` counts.
     DiskImage,
     /// Anywhere else: proceed and let macOS decide (a -2002 is still classified).
     Elsewhere,

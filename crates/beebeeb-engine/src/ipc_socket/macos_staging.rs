@@ -601,7 +601,7 @@ pub(super) fn purge_upload_staging_in(
 
 /// Age-bound purge of `dir`, logged. Split from the real-directory caller so a
 /// test can run it on a temp dir.
-#[cfg(any(target_os = "macos", any(test, feature = "test-support")))]
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn sweep_upload_staging_at(dir: &std::path::Path, context: &'static str, now: std::time::SystemTime) {
     let result = purge_stale_upload_staging(dir, UPLOAD_STAGING_MAX_AGE, now);
     log_upload_staging_purge(context, result);

@@ -333,7 +333,7 @@ mod device {
             return;
         }
         while let Some(text) = said.recv().await {
-            if ws.send(Message::Text(text.into())).await.is_err() {
+            if ws.send(Message::Text(text)).await.is_err() {
                 return;
             }
         }

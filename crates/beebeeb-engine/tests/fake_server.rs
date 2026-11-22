@@ -251,7 +251,10 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
         r#"File "${LICENSESRCPATH}""#,
     ];
     if file_commands.len() != packed_files.len()
-        || !file_commands.iter().zip(packed_files).all(|(a, b)| a.eq_ignore_ascii_case(b))
+        || !file_commands
+            .iter()
+            .zip(packed_files)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
     {
         wrong.push(format!("the NSIS scripts pack {file_commands:?}"));
     }

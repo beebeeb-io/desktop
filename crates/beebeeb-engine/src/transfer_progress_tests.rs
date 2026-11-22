@@ -222,7 +222,7 @@ fn a_failed_transfer_lingers_in_snapshot_after_the_guard_drops() {
     // code and GREEN once recently_failed is introduced.
     let board = TransferBoard::new();
     {
-        let g = board.begin_named("f_fail", "docs/report.pdf", Direction::Down, 500);
+        let _g = board.begin_named("f_fail", "docs/report.pdf", Direction::Down, 500);
         board.mark_failed("f_fail");
     } // guard drops here — before fix, entry is gone; after fix it's in recently_failed
     let dtos = board.snapshot_dtos();
@@ -301,7 +301,7 @@ fn paths_are_kept_for_recently_failed_and_pruned_on_expiry() {
     // but must be gone once the entry expires.
     let board = TransferBoard::new();
     {
-        let g = board.begin_named("fx", "media/clip.mp4", Direction::Stream, 1000);
+        let _g = board.begin_named("fx", "media/clip.mp4", Direction::Stream, 1000);
         board.mark_failed("fx");
     }
     {
@@ -313,10 +313,10 @@ fn paths_are_kept_for_recently_failed_and_pruned_on_expiry() {
     }
     // Expire the entry by setting its timestamp to 0 and calling snapshot_dtos
     {
-        if let Ok(mut inner) = board.inner.lock() {
-            if let Some(t) = inner.recently_failed.get_mut("fx") {
-                t.failed_at_secs = Some(0);
-            }
+        if let Ok(mut inner) = board.inner.lock()
+            && let Some(t) = inner.recently_failed.get_mut("fx")
+        {
+            t.failed_at_secs = Some(0);
         }
     }
     board.snapshot_dtos(); // triggers pruning

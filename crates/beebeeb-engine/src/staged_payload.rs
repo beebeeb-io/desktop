@@ -86,13 +86,13 @@ impl Drop for StagedPayload {
             None => same_bytes(Path::new(&self.path), &self.source),
         }
         .unwrap_or(false);
-        if !Path::new(&self.path).exists() || duplicate {
-            if let Err(error) = remove(&self.db, Path::new(&self.path)) {
-                tracing::warn!(
-                    reason = crate::engine_bridge::error_category(error.as_ref()),
-                    "staged payload cleanup deferred; journal retained"
-                );
-            }
+        if (!Path::new(&self.path).exists() || duplicate)
+            && let Err(error) = remove(&self.db, Path::new(&self.path))
+        {
+            tracing::warn!(
+                reason = crate::engine_bridge::error_category(error.as_ref()),
+                "staged payload cleanup deferred; journal retained"
+            );
         }
     }
 }

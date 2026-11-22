@@ -1,9 +1,11 @@
 //! Reusable test-only API for 1612/1615 and native Mac/Linux regression harnesses.
 //! No production credentials, external hosts, global state or native registration.
+#![allow(deprecated)] // sealing with the legacy name sealer; see the note at each use
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
+use beebeeb_core::encrypt::encrypt_name;
 use beebeeb_core::{
-    encrypt::{decrypt_chunk_raw, encrypt_chunk, encrypt_name},
+    encrypt::{decrypt_chunk_raw, encrypt_chunk},
     kdf::{FileKey, MasterKey, derive_file_key},
     opaque,
 };
@@ -230,6 +232,8 @@ impl State {
             object.id.as_bytes(),
         )
     }
+    // Seals names with the legacy sealer on purpose: the fixture predates the NewItemId/WriteTarget sealers (task 2275).
+    #[allow(deprecated)]
     fn row(&self, stored: &Stored) -> Value {
         let o = &stored.object;
         let name = encrypt_name(
@@ -370,38 +374,38 @@ impl State {
             if self.upload.is_none() {
                 return Ok(Response::json(404, json!({"error":"no upload session"})));
             }
-            if method == "PUT" {
-                if let Some(index) = path.strip_prefix("/api/v1/uploads/fixture-upload/chunks/") {
-                    let index: usize = index.parse()?;
-                    if index == 1 && self.counts.faults == 0 {
-                        self.counts.faults += 1;
-                        return Ok(Response::json(
-                            503,
-                            json!({"error":"fixture interruption before acknowledgement"}),
-                        ));
-                    }
-                    let stored = &self.objects[9];
-                    ensure!(
-                        index < stored.chunk_count(self.chunk_size) && !self.upload_complete,
-                        "invalid upload chunk/state"
-                    );
-                    let decoded = decrypt_chunk_raw(&self.key(&stored.object), body)
-                        .map_err(|_| anyhow::anyhow!("fixture upload authentication failed"))?;
-                    let expected = Corpus::bytes(stored.version().context("upload has no content")?)?;
-                    ensure!(
-                        decoded == expected.chunks(self.chunk_size).nth(index).unwrap(),
-                        "fixture uploaded plaintext mismatch"
-                    );
-                    let upload = self.upload.as_mut().unwrap();
-                    let skipped = upload.insert(index, body.to_vec()).is_some();
-                    if !skipped {
-                        self.counts.chunk_writes += 1;
-                    }
+            if method == "PUT"
+                && let Some(index) = path.strip_prefix("/api/v1/uploads/fixture-upload/chunks/")
+            {
+                let index: usize = index.parse()?;
+                if index == 1 && self.counts.faults == 0 {
+                    self.counts.faults += 1;
                     return Ok(Response::json(
-                        200,
-                        json!({"index":index,"size":body.len(),"skipped":skipped}),
+                        503,
+                        json!({"error":"fixture interruption before acknowledgement"}),
                     ));
                 }
+                let stored = &self.objects[9];
+                ensure!(
+                    index < stored.chunk_count(self.chunk_size) && !self.upload_complete,
+                    "invalid upload chunk/state"
+                );
+                let decoded = decrypt_chunk_raw(&self.key(&stored.object), body)
+                    .map_err(|_| anyhow::anyhow!("fixture upload authentication failed"))?;
+                let expected = Corpus::bytes(stored.version().context("upload has no content")?)?;
+                ensure!(
+                    decoded == expected.chunks(self.chunk_size).nth(index).unwrap(),
+                    "fixture uploaded plaintext mismatch"
+                );
+                let upload = self.upload.as_mut().unwrap();
+                let skipped = upload.insert(index, body.to_vec()).is_some();
+                if !skipped {
+                    self.counts.chunk_writes += 1;
+                }
+                return Ok(Response::json(
+                    200,
+                    json!({"index":index,"size":body.len(),"skipped":skipped}),
+                ));
             }
             if method == "POST" && path == "/api/v1/uploads/fixture-upload/complete" {
                 if self.upload.as_ref().unwrap().len() != self.objects[9].chunk_count(self.chunk_size) {

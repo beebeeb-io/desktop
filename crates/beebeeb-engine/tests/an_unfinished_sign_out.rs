@@ -151,7 +151,10 @@ fn a_sign_out_retry_after_an_unconfirmed_stop_is_refused_until_a_restart() {
             // The logout is sent by a task of its own (the sign-out never waits on the network, task 1886): wait for
             // the request itself, with a deadline, never for a fixed time.
             assert!(
-                common::wait_until(10, || s.routes_from(from).iter().any(|route| route.contains("/auth/logout"))),
+                common::wait_until(10, || s
+                    .routes_from(from)
+                    .iter()
+                    .any(|route| route.contains("/auth/logout"))),
                 "the session was ended at the server: {:?}",
                 s.routes_from(from)
             );

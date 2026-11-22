@@ -41,8 +41,14 @@ impl LargeAccount {
     /// folders that must exist.
     fn check(&self) {
         assert!(self.biggest_folder <= self.photos, "the biggest folder is photos");
-        assert!(self.photos + self.backup_records <= self.files, "photos + backups fit the files");
-        assert!(self.folders >= FIXED_FOLDERS + 2, "room for the fixed folders and a backup folder");
+        assert!(
+            self.photos + self.backup_records <= self.files,
+            "photos + backups fit the files"
+        );
+        assert!(
+            self.folders >= FIXED_FOLDERS + 2,
+            "room for the fixed folders and a backup folder"
+        );
     }
 }
 
@@ -83,7 +89,9 @@ const PHOTO_EXT: [&str; 4] = ["jpg", "jpeg", "heic", "png"];
 
 /// A stable pseudo-random number for item `n` of stream `salt` (splitmix64).
 fn mix(salt: u64, n: u64) -> u64 {
-    let mut z = n.wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = n
+        .wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
@@ -100,7 +108,8 @@ fn file_name(kind: u64, n: usize, exts: &[&str]) -> String {
     let (a, b) = (WORDS[(r % 24) as usize], WORDS[((r >> 8) % 24) as usize]);
     let ext = exts[((r >> 16) % exts.len() as u64) as usize];
     if n % 97 == 96 {
-        let long = format!("{a} - {b} - {a} - {b} - the long version with every page of the scanned original kept together");
+        let long =
+            format!("{a} - {b} - {a} - {b} - the long version with every page of the scanned original kept together");
         format!("{long} {n:06}.{ext}")
     } else {
         format!("{a} {b} {n:06}.{ext}")
@@ -143,7 +152,12 @@ pub fn seed(account: &FakeAccount, spec: &LargeAccount) {
         .map(|n| folder(&format!("{} {}", WORDS[n % 24], n), Some(&projects)))
         .collect();
     let backup_ids: Vec<String> = (0..backup_dirs)
-        .map(|n| folder(&format!("{} {n}", WORDS[(n * 7) % 24]), Some(&devices[n % devices.len()])))
+        .map(|n| {
+            folder(
+                &format!("{} {n}", WORDS[(n * 7) % 24]),
+                Some(&devices[n % devices.len()]),
+            )
+        })
         .collect();
     assert_eq!(folders.get(), spec.folders);
 
@@ -155,12 +169,24 @@ pub fn seed(account: &FakeAccount, spec: &LargeAccount) {
             &month_ids[(n - spec.biggest_folder) % months]
         };
         let name = format!("IMG_{n:05} {}", file_name(5, n, &PHOTO_EXT));
-        account.add_item(&id(K_PHOTO, n), Some(parent), &name, false, 1_500_000 + mix(6, n as u64) % 6_000_000);
+        account.add_item(
+            &id(K_PHOTO, n),
+            Some(parent),
+            &name,
+            false,
+            1_500_000 + mix(6, n as u64) % 6_000_000,
+        );
     }
     // Backup records, round-robin over the backup folders.
     for n in 0..spec.backup_records {
         let size = mix(7, n as u64) % 3_000_000;
-        account.add_item(&id(K_BACKUP, n), Some(&backup_ids[n % backup_dirs]), &file_name(8, n, &FILE_EXT), false, size);
+        account.add_item(
+            &id(K_BACKUP, n),
+            Some(&backup_ids[n % backup_dirs]),
+            &file_name(8, n, &FILE_EXT),
+            false,
+            size,
+        );
     }
     // The rest: documents, a third at the root, the others in the project folders.
     let rest = spec.files - spec.photos - spec.backup_records;
@@ -170,7 +196,13 @@ pub fn seed(account: &FakeAccount, spec: &LargeAccount) {
         } else {
             Some(project_ids[n % project_ids.len()].as_str())
         };
-        account.add_item(&id(K_DOC, n), parent, &file_name(9, n, &FILE_EXT), false, mix(10, n as u64) % 900_000);
+        account.add_item(
+            &id(K_DOC, n),
+            parent,
+            &file_name(9, n, &FILE_EXT),
+            false,
+            mix(10, n as u64) % 900_000,
+        );
     }
 }
 
@@ -226,7 +258,11 @@ pub fn local_rows(account: &FakeAccount) -> Vec<LocalRow> {
     let mut files: Vec<_> = items.values().filter(|i| !i.is_folder && !i.is_trashed).collect();
     files.sort_by(|a, b| a.id.cmp(&b.id));
     for i in files {
-        let parent = i.parent_id.as_deref().and_then(|p| paths.get(p).cloned()).unwrap_or_default();
+        let parent = i
+            .parent_id
+            .as_deref()
+            .and_then(|p| paths.get(p).cloned())
+            .unwrap_or_default();
         rows.push(LocalRow {
             id: i.id.clone(),
             parent_id: i.parent_id.clone(),
@@ -249,7 +285,9 @@ mod tests {
         let live = || items.values().filter(|i| !i.is_trashed);
         let files = live().filter(|i| !i.is_folder).count();
         let folders = live().filter(|i| i.is_folder).count();
-        let photos = live().filter(|i| !i.is_folder && i.name_plaintext.starts_with("IMG_")).count();
+        let photos = live()
+            .filter(|i| !i.is_folder && i.name_plaintext.starts_with("IMG_"))
+            .count();
         let backups = live()
             .filter(|i| !i.is_folder && i.id.starts_with(&format!("b{:07x}", 3)))
             .count();
@@ -257,7 +295,12 @@ mod tests {
         for i in live() {
             *per_parent.entry(i.parent_id.clone()).or_insert(0usize) += 1;
         }
-        let biggest = per_parent.iter().filter(|(p, _)| p.is_some()).map(|(_, n)| *n).max().unwrap_or(0);
+        let biggest = per_parent
+            .iter()
+            .filter(|(p, _)| p.is_some())
+            .map(|(_, n)| *n)
+            .max()
+            .unwrap_or(0);
         (files, folders, photos, backups, biggest)
     }
 
@@ -268,13 +311,23 @@ mod tests {
         seed(&account, &spec);
         assert_eq!(
             counts(&account),
-            (spec.files, spec.folders, spec.photos, spec.backup_records, spec.biggest_folder)
+            (
+                spec.files,
+                spec.folders,
+                spec.photos,
+                spec.backup_records,
+                spec.biggest_folder
+            )
         );
         // Deterministic and with the hard names in it: long, accented, no duplicate ids by construction.
         let items = account.items.lock().unwrap();
         assert!(items.values().any(|i| i.name_plaintext.chars().count() > 100));
         assert!(items.values().any(|i| i.name_plaintext.contains('é')));
-        assert!(items.values().any(|i| i.name_plaintext.contains('ü') || i.name_plaintext.contains('Ü')));
+        assert!(
+            items
+                .values()
+                .any(|i| i.name_plaintext.contains('ü') || i.name_plaintext.contains('Ü'))
+        );
         assert_eq!(items.len(), spec.files + spec.folders);
     }
 
@@ -294,10 +347,16 @@ mod tests {
         assert_eq!(rows.len(), 320);
         let mut seen = std::collections::HashSet::new();
         for row in &rows {
-            assert!(row.parent_id.as_ref().is_none_or(|p| seen.contains(p)), "a parent comes first");
+            assert!(
+                row.parent_id.as_ref().is_none_or(|p| seen.contains(p)),
+                "a parent comes first"
+            );
             seen.insert(row.id.clone());
             assert!(row.path.starts_with('/'));
         }
-        assert!(rows.iter().any(|r| r.id == camera_roll_id() && r.path == "/Camera Roll"));
+        assert!(
+            rows.iter()
+                .any(|r| r.id == camera_roll_id() && r.path == "/Camera Roll")
+        );
     }
 }

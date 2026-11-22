@@ -25,6 +25,12 @@ pub struct CallbackLease<T> {
 }
 pub struct Revoked<T>(Arc<T>, Arc<Generation>, Slot<T>);
 
+impl<T> Default for CallbackGate<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> CallbackGate<T> {
     pub fn new() -> Self {
         Self {

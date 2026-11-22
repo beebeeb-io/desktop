@@ -128,7 +128,10 @@ mod tests {
             format!(r#"{{"pid":{pid},"agent":"desktop","hostname":"pc","started_at":"2026-11-12T10:00:00Z"}}"#)
         };
         std::fs::write(&lock, held_by(std::process::id())).unwrap();
-        assert!(!os.engine_lock_held(dir.path()), "this process's own lock is reclaimed by acquire");
+        assert!(
+            !os.engine_lock_held(dir.path()),
+            "this process's own lock is reclaimed by acquire"
+        );
         #[cfg(unix)]
         {
             // Another live process: this test's parent.
@@ -182,13 +185,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let os = OsSyncRoots::new(&crate::identity::TEST);
         assert!(!os.may_hold_bytes(dir.path(), "Budget.docx"), "no item");
-        assert!(!os.may_hold_bytes(dir.path(), "/Plans/Budget.docx"), "no folder, no item");
+        assert!(
+            !os.may_hold_bytes(dir.path(), "/Plans/Budget.docx"),
+            "no folder, no item"
+        );
         std::fs::write(dir.path().join("Budget.docx"), b"typed, not sent").unwrap();
         assert!(os.may_hold_bytes(dir.path(), "Budget.docx"), "an ordinary file");
-        assert!(os.may_hold_bytes(dir.path(), "/Budget.docx"), "the same, as the database writes it");
+        assert!(
+            os.may_hold_bytes(dir.path(), "/Budget.docx"),
+            "the same, as the database writes it"
+        );
         std::fs::write(dir.path().join("Empty.docx"), b"").unwrap();
-        assert!(os.may_hold_bytes(dir.path(), "Empty.docx"), "an ordinary file is never proven empty of work");
+        assert!(
+            os.may_hold_bytes(dir.path(), "Empty.docx"),
+            "an ordinary file is never proven empty of work"
+        );
         std::fs::create_dir(dir.path().join("Plans")).unwrap();
-        assert!(os.may_hold_bytes(dir.path(), "Plans"), "a folder where the file should be");
+        assert!(
+            os.may_hold_bytes(dir.path(), "Plans"),
+            "a folder where the file should be"
+        );
     }
 }

@@ -221,11 +221,10 @@ impl LinkMonitor {
 
     /// Record a finished request: a link failure, or an answer.
     pub fn note_reqwest_error(&self, error: &reqwest::Error, now: i64) {
-        match classify_reqwest(error) {
-            Some(failure) => self.note_failure(failure, now),
-            // Not a link failure (the server answered, or it is a local error): it
-            // does not say the link is down, and does not prove it is up either.
-            None => {}
+        // Not a link failure (the server answered, or it is a local error): that
+        // does not say the link is down, and does not prove it is up either.
+        if let Some(failure) = classify_reqwest(error) {
+            self.note_failure(failure, now)
         }
     }
 
