@@ -28,13 +28,25 @@
 //! sent", the 1887 keep step: never over a name) and records that folder durably; takes each original out of the sync
 //! folder only once its copy holds the same bytes; then starts as any start does, so the clear above runs in 014's
 //! order.
+//!
+//! dc-167, the account switcher (Guus 2026-11-21: a switch keeps the key, a sign-out forgets): every account signed
+//! in on this PC keeps its session (token, owner, email, lock entries) in a parked slot of its own
+//! ([`parked_slot_name`]) while another account is the current one, and its vault key in its R4 slot. A switch parks
+//! the current session, moves the target's parked session into the install slot ([`AuthVault::bind_session_owner`]
+//! then makes its kept key the working key) and restores it as a start would: no twelve words. The host then starts
+//! sync, so step 7 clears the previous account's local data in 014's order, and an unsent file of it offers 111's
+//! discard. Signing out of a parked account ends its server session and forgets its parked session and its key slot
+//! only; the current account and every other one are left alone. The ids of parked accounts are listed in
+//! [`PARKED_INDEX`] beside state.db (ids only: the emails stay in the credential store).
 
 use std::path::{Path, PathBuf};
 
 use super::{CredentialStores, Engine, LocalState};
+use crate::account::SessionTransition;
 use crate::account_binding::{DiscardAsk, DiscardDone, DiscardRefused, Identity, canonical_email};
 use crate::config::DesktopConfig;
-use crate::keychain::AuthSecretStore;
+use crate::keychain::{AuthSecretStore, AuthVault, LockFlag};
+use crate::signin::gate::GateState;
 use crate::state_db::StateDb;
 use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 
@@ -491,6 +503,328 @@ fn keep_copies(root: &Path, paths: &[String], sources: &[PathBuf]) -> Result<(Pa
     }
     Ok((event, copies))
 }
+
+/// The file beside state.db that lists the parked accounts' server user ids, one per line.
+pub const PARKED_INDEX: &str = "accounts-on-this-pc";
+
+/// One account signed in on this PC, as the switcher lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountOnThisPc {
+    pub user_id: String,
+    /// As its sign-in stored it; `None` when the store has none.
+    pub email: Option<String>,
+    /// The account whose session is the install slot's now.
+    pub current: bool,
+}
+
+/// Why a switch, an "Add another account" or a sign-out of a parked account did nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchRefused {
+    /// No such account is signed in on this PC (or its parked session is gone).
+    NotOnThisPc,
+    /// An open document has edits no save has landed: save or discard first (as a sign-out refuses).
+    UnsavedEdits,
+    /// The engine's end was not confirmed; nothing was moved.
+    EngineStillRunning,
+    /// The current session has no server user id yet, so it has no slot to wait in.
+    CurrentUnknown,
+    /// The credential store refused; what was there stays.
+    Store,
+}
+
+impl SwitchRefused {
+    /// One line a person reads.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::NotOnThisPc => "That account is no longer signed in on this PC. Sign in to it again.",
+            Self::UnsavedEdits => "A document has changes that are not saved. Save or close it first.",
+            Self::EngineStillRunning => "Beebeeb could not stop syncing in time. Try again in a moment.",
+            Self::CurrentUnknown => "Beebeeb is still checking this account. Try again in a moment.",
+            Self::Store => "Beebeeb could not reach this PC's credential store. Nothing was changed.",
+        }
+    }
+}
+
+/// The credential-store slot a parked session waits in. Server user ids only (the R4 slot name's rule): an id that is
+/// not one has no slot.
+pub fn parked_slot_name(user_id: &str) -> Option<String> {
+    let kept = crate::app::credential_stores::account_key_slot_name(user_id).ok()?;
+    Some(kept.replacen("account-key-", "parked-session-", 1))
+}
+
+impl<C: CredentialStores> Engine<C> {
+    /// Every account signed in on this PC: the current one first (when there is one), then the parked ones in the
+    /// order they were parked. Reads the credential store; no network.
+    pub fn accounts_on_this_pc(&self) -> Vec<AccountOnThisPc> {
+        let vault = self.vault();
+        let current = vault
+            .session_token()
+            .ok()
+            .flatten()
+            .and_then(|_| vault.session_owner().ok().flatten().or_else(|| self.user_id()));
+        let mut out = Vec::new();
+        if let Some(user_id) = current.clone() {
+            let email = vault.account_email().ok().flatten().or_else(|| self.account_email());
+            out.push(AccountOnThisPc { user_id, email, current: true });
+        }
+        for user_id in self.parked_ids() {
+            if current.as_deref() == Some(user_id.as_str()) {
+                continue;
+            }
+            let Some(store) = self.parked_store(&user_id) else { continue };
+            if !matches!(store.load_session_token(), Ok(Some(_))) {
+                continue;
+            }
+            let email = store.load_account_email().ok().flatten();
+            out.push(AccountOnThisPc { user_id, email, current: false });
+        }
+        out
+    }
+
+    /// "Add another account": the current session waits in its slot (its key in its R4 slot), and the window shows
+    /// the sign-in. Nothing of the current account is forgotten.
+    pub fn add_another_account(&self) -> Result<(), SwitchRefused> {
+        let result = self.runtime.block_on(async {
+            let _step = self.session_ending_step().await;
+            self.leave_current_session().await
+        });
+        self.publish();
+        result
+    }
+
+    /// Switch to `user_id`, an account signed in on this PC: the current session is parked, the target's comes back
+    /// with its own key (no twelve words). The gate the window shows next. The caller starts sync afterwards (the
+    /// start clears the previous account's local data; an unsent file of it is offered "Discard and switch").
+    pub fn switch_account(&self, user_id: &str) -> Result<GateState, SwitchRefused> {
+        let target = self.parked_store(user_id).ok_or(SwitchRefused::NotOnThisPc)?;
+        if !matches!(target.load_session_token(), Ok(Some(_))) {
+            return Err(SwitchRefused::NotOnThisPc);
+        }
+        let current = self.vault().session_owner().ok().flatten();
+        if current.as_deref() == Some(user_id.trim()) {
+            return Ok(self.gate());
+        }
+        let moved = self.runtime.block_on(async {
+            let _step = self.session_ending_step().await;
+            self.leave_current_session().await?;
+            self.take_parked_session(user_id)
+        });
+        if let Err(why) = moved {
+            self.publish();
+            return Err(why);
+        }
+        tracing::info!("account switch: another account signed in on this PC is the current one");
+        Ok(self.restore())
+    }
+
+    /// Sign out of `user_id` while it is parked: its server session ends (best effort, owed until it does), and its
+    /// parked session and its key slot are forgotten. The current account and every other one stay as they are.
+    /// The current account signs out through the plain sign-out.
+    pub fn sign_out_parked_account(&self, user_id: &str) -> Result<(), SwitchRefused> {
+        let store = self.parked_store(user_id).ok_or(SwitchRefused::NotOnThisPc)?;
+        let token = store.load_session_token().map_err(|_| SwitchRefused::Store)?;
+        let cleared = clear_parked(&store);
+        let mut vault = self.vault();
+        let forgotten = vault.forget_account_key(user_id.trim());
+        if cleared.is_err() || forgotten.is_err() {
+            return Err(SwitchRefused::Store);
+        }
+        self.unlist_parked(user_id.trim());
+        if let Some(token) = token {
+            // Recorded as owed before this returns; the server is asked by a task of its own (task 1886).
+            self.runtime.block_on(async {
+                super::session_revoke::revoke_detached(
+                    self.client.clone(),
+                    self.config.api_base.clone(),
+                    token.expose_for_request().to_string(),
+                    self.owed.clone(),
+                );
+            });
+        }
+        tracing::info!("account switch: an account signed in on this PC was signed out");
+        self.publish();
+        Ok(())
+    }
+
+    /// The current session out of the install slot and memory, kept whole in its parked slot; its key kept in its R4
+    /// slot. Under the session step. A refusal leaves the install slot as it was.
+    async fn leave_current_session(&self) -> Result<(), SwitchRefused> {
+        if self.office_unsaved_count() > 0 {
+            return Err(SwitchRefused::UnsavedEdits);
+        }
+        let mut vault = self.vault();
+        let token = vault.session_token().map_err(|_| SwitchRefused::Store)?;
+        let Some(token) = token else { return Ok(()) };
+        let user_id = vault
+            .session_owner()
+            .map_err(|_| SwitchRefused::Store)?
+            .or_else(|| self.user_id())
+            .ok_or(SwitchRefused::CurrentUnknown)?;
+        let parked = self.parked_store(&user_id).ok_or(SwitchRefused::CurrentUnknown)?;
+        let _ = self.stop_proofs().await;
+        if super::unfinished_sign_out::a_task_may_hold_the_keys(&self.acct, self.stop_holding_step().await) {
+            return Err(SwitchRefused::EngineStillRunning);
+        }
+        keep_key_in_its_slot(&vault, &user_id)?;
+        park(&vault, &parked, &token, &user_id).inspect_err(|_| {
+            let _ = clear_parked(&parked);
+        })?;
+        self.list_parked(&user_id).map_err(|_| SwitchRefused::Store)?;
+        // What is the session's in memory and on disk goes as a sign-out's does; its key, slots and server session stay.
+        self.office_before_session_end(super::office_session_end::SessionEnding::SignOut);
+        self.wipe_office_recovery_at_session_end();
+        self.end_office_scratch_at_session_end();
+        self.wipe_thumb_cache_at_session_end();
+        self.forget_session(SessionTransition::SignOut);
+        let cleared = vault
+            .clear_session_token()
+            .and_then(|()| self.stores.for_account(self.identity, &self.config.account_id).delete_account_email())
+            .and_then(|()| vault.clear_lock_entries());
+        if let Ok(mut email) = self.acct.auth_email.lock() {
+            *email = None;
+        }
+        if let Ok(mut profile) = self.acct.cached_profile.lock() {
+            *profile = None;
+        }
+        self.remember_session_user_id(None);
+        self.acct.auth_health.note_result(None);
+        self.set_auth_present(false);
+        cleared.map_err(|_| SwitchRefused::Store)
+    }
+
+    /// `user_id`'s parked session into the install slot: token, email, lock entries, then its owner, which makes its
+    /// kept key the working key (R4). The parked copy goes only once the install slot holds it.
+    fn take_parked_session(&self, user_id: &str) -> Result<(), SwitchRefused> {
+        let user_id = user_id.trim();
+        let parked = self.parked_store(user_id).ok_or(SwitchRefused::NotOnThisPc)?;
+        let token = parked
+            .load_session_token()
+            .map_err(|_| SwitchRefused::Store)?
+            .ok_or(SwitchRefused::NotOnThisPc)?;
+        let vault = self.vault();
+        vault.install_session(token.clone()).map_err(|_| SwitchRefused::Store)?;
+        if let Some(email) = parked.load_account_email().ok().flatten() {
+            vault.store_account_email(&email).map_err(|_| SwitchRefused::Store)?;
+        }
+        vault.clear_lock_entries().map_err(|_| SwitchRefused::Store)?;
+        for flag in LockFlag::ALL {
+            if let Some(bytes) = parked.load_lock_flag(flag).map_err(|_| SwitchRefused::Store)? {
+                vault.set_lock_entry(flag, &bytes).map_err(|_| SwitchRefused::Store)?;
+            }
+        }
+        vault.bind_session_owner(user_id).map_err(|_| SwitchRefused::Store)?;
+        if !matches!(vault.session_token(), Ok(Some(stored)) if stored == token) {
+            return Err(SwitchRefused::Store);
+        }
+        if clear_parked(&parked).is_err() {
+            tracing::warn!("account switch: a parked session copy stays (the next switch writes over it)");
+        }
+        self.unlist_parked(user_id);
+        Ok(())
+    }
+
+    fn parked_store(&self, user_id: &str) -> Option<C::Store> {
+        Some(self.stores.for_account(self.identity, &parked_slot_name(user_id)?))
+    }
+
+    fn parked_index(&self) -> PathBuf {
+        self.config.state_dir.join(PARKED_INDEX)
+    }
+
+    fn parked_ids(&self) -> Vec<String> {
+        std::fs::read_to_string(self.parked_index())
+            .map(|text| text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
+            .unwrap_or_default()
+    }
+
+    fn write_parked_ids(&self, ids: &[String]) -> std::io::Result<()> {
+        let path = self.parked_index();
+        let temporary = path.with_extension("new");
+        let mut text = ids.join("\n");
+        text.push('\n');
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&temporary)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&temporary, &path)
+    }
+
+    fn list_parked(&self, user_id: &str) -> std::io::Result<()> {
+        let mut ids = self.parked_ids();
+        if ids.iter().any(|id| id == user_id) {
+            return Ok(());
+        }
+        ids.push(user_id.to_string());
+        self.write_parked_ids(&ids)
+    }
+
+    fn unlist_parked(&self, user_id: &str) {
+        let mut ids = self.parked_ids();
+        let before = ids.len();
+        ids.retain(|id| id != user_id);
+        if ids.len() != before && self.write_parked_ids(&ids).is_err() {
+            tracing::warn!("account switch: the list of accounts on this PC was not updated");
+        }
+    }
+}
+
+/// R4: the working key, when it is `user_id`'s, is in that account's slot (written and read back) before its session
+/// leaves the install slot. A working key of another or unknown owner, or none (a closed vault never read it), is left
+/// alone: that account then unlocks as it did before.
+fn keep_key_in_its_slot<S: AuthSecretStore>(vault: &AuthVault<S>, user_id: &str) -> Result<(), SwitchRefused> {
+    let its = vault
+        .vault_key_owner()
+        .map_err(|_| SwitchRefused::Store)?
+        .is_some_and(|tag| crate::signin::key_owner::tag_is_account(&tag, user_id));
+    if !its || !vault.has_vault_key().unwrap_or(false) {
+        return Ok(());
+    }
+    vault.bind_vault_key_owner(user_id).map_err(|_| SwitchRefused::Store)?;
+    Ok(())
+}
+
+/// The install slot's session into `parked`, read back.
+fn park<S: AuthSecretStore, P: AuthSecretStore>(
+    vault: &AuthVault<S>,
+    parked: &P,
+    token: &crate::keychain::SessionToken,
+    user_id: &str,
+) -> Result<(), SwitchRefused> {
+    let store = |r: crate::keychain::AuthResult<()>| r.map_err(|_| SwitchRefused::Store);
+    store(parked.save_session_token(token))?;
+    store(parked.save_session_owner(user_id))?;
+    if let Some(email) = vault.account_email().map_err(|_| SwitchRefused::Store)? {
+        store(parked.save_account_email(&email))?;
+    }
+    for flag in LockFlag::ALL {
+        match vault.lock_entry(flag).map_err(|_| SwitchRefused::Store)? {
+            Some(bytes) => store(parked.save_lock_flag(flag, &bytes))?,
+            None => store(parked.delete_lock_flag(flag))?,
+        }
+    }
+    match parked.load_session_token() {
+        Ok(Some(kept)) if &kept == token => Ok(()),
+        _ => Err(SwitchRefused::Store),
+    }
+}
+
+/// Every item of a parked slot; every removal is tried.
+fn clear_parked<P: AuthSecretStore>(parked: &P) -> crate::keychain::AuthResult<()> {
+    let flags = LockFlag::ALL
+        .into_iter()
+        .fold(Ok(()), |done, flag| done.and(parked.delete_lock_flag(flag)));
+    parked
+        .delete_session_token()
+        .and(parked.delete_session_owner())
+        .and(parked.delete_account_email())
+        .and(flags)
+}
+
+#[cfg(test)]
+#[path = "account_switch_switcher_tests.rs"]
+mod switcher_tests;
 
 #[cfg(test)]
 mod discard_ask_tests {
