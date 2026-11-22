@@ -893,6 +893,8 @@ impl<C: CredentialStores> Engine<C> {
             if port.engine_lock_held(&self.config.state_dir) {
                 return Err(SyncStartRefused::StateInUse);
             }
+            // (4b) A corrupt `state.db` is moved aside (dc-144b): the start makes a fresh one and lists again.
+            self.move_aside_a_corrupt_state_db().map_err(|_| SyncStartRefused::Other)?;
             // (5) Never another provider's folder, nor one whose registration cannot be read.
             let registered = port.registration(&sync_root);
             if crate::sync_root_owner::refusal(self.identity, &registered, &sync_root).is_some() {
