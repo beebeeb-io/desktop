@@ -98,17 +98,20 @@ pub struct Banner<'a> {
 pub fn runs_line(key: &str, figure: &str, runs: &[Run], words: TextStyle, figures: TextStyle, ink: Color) -> El {
     let box_key = format!("{key}-box");
     kit::note_text(key, &box_key, &sentence(runs), words, ink);
-    let mut line = row().key(box_key).a11y_hidden().items_center();
+    // One text element named with the whole sentence (UIA text); the runs inside stay out of
+    // the tree so the sentence is not read twice or in pieces.
+    let mut line = row().key(box_key).role("text").label(sentence(runs)).items_center();
     let mut n = 0;
     for (i, run) in runs.iter().enumerate() {
         line = line.child(match run {
             Run::Words(s) => rune::text(s.clone())
                 .key(format!("{key}-run-{i}"))
                 .font(words)
-                .color(ink),
+                .color(ink)
+                .a11y_hidden(),
             Run::Figure(s) => {
                 n += 1;
-                kit::label(format!("{figure}-{}", n - 1), s.clone(), figures, ink)
+                kit::label(format!("{figure}-{}", n - 1), s.clone(), figures, ink).a11y_hidden()
             }
         });
     }
@@ -189,10 +192,7 @@ mod tests {
 
     struct Page;
 
-    const WORDS: [Run; 3] = [Run::Words(String::new()), Run::Figure(String::new()), Run::Words(String::new())];
-
     fn runs() -> Vec<Run> {
-        let _ = WORDS;
         vec![
             Run::Words("Rebuilt at ".into()),
             Run::Figure("14:02".into()),
