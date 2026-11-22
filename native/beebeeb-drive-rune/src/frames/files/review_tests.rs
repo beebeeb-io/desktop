@@ -167,19 +167,11 @@ fn settings_is_dw_0701_and_available_offline_is_dw_0715_and_the_shell_goes_there
     assert!(rt.state.actions.intents.is_empty());
     assert_eq!(group(&rt), FrameGroup::Section(Section::SyncHistory));
 
-    let mut rt = runtime();
-    press(&mut rt, Key::Command('6'), CTRL);
-    assert_eq!(group(&rt), FrameGroup::Section(Section::SyncHistory));
-
+    // Ctrl+6 and Ctrl+7 are the window's keys since RC2-8 (`shell/host_tests_rc2_keys.rs`), not the Files frame's.
     let mut rt = runtime();
     click(&mut rt, "Available offline-row");
     // The sidebar goes through the route machine (`host::dispatch`), not a Files intent.
     assert!(rt.state.actions.intents.is_empty());
-    assert_eq!(group(&rt), FrameGroup::Section(Section::AvailableOffline));
-
-    let mut rt = runtime();
-    press(&mut rt, Key::Command('7'), CTRL);
-    assert_eq!(rt.state.actions.intents, [Intent::Frame("DW-0715")]);
     assert_eq!(group(&rt), FrameGroup::Section(Section::AvailableOffline));
 
     let mut rt = runtime();

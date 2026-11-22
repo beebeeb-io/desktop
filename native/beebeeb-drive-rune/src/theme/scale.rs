@@ -8,6 +8,8 @@
 
 /// Gaps and padding, in points. Named by value: the board's steps are not a clean ramp.
 pub mod space {
+    /// 1px: the zoom group's gap between its tools (the board's `gap-px`).
+    pub const S1: f32 = 1.0;
     pub const S2: f32 = 2.0;
     pub const S4: f32 = 4.0;
     pub const S6: f32 = 6.0;
@@ -16,6 +18,8 @@ pub mod space {
     pub const S9: f32 = 9.0;
     pub const S10: f32 = 10.0;
     pub const S12: f32 = 12.0;
+    /// 13px: the audio queue's title inset.
+    pub const S13: f32 = 13.0;
     pub const S14: f32 = 14.0;
     pub const S16: f32 = 16.0;
     pub const S18: f32 = 18.0;
@@ -35,6 +39,8 @@ pub mod radius {
     pub const DIALOG: f32 = 12.0;
     /// 10px: cards and panels (`--card-r`, the board's most used radius, 55 uses).
     pub const PANEL: f32 = 10.0;
+    /// 8px: a find field (the PDF viewer's find bar).
+    pub const FIELD: f32 = 8.0;
 }
 
 /// Heights and icon sizes, in points.

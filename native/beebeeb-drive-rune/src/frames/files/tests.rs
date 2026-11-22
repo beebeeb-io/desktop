@@ -693,11 +693,7 @@ fn every_shortcut_a_tooltip_names_does_something() {
     assert!(find(&rt, "detail-pane").is_some());
     press(&mut rt, Key::Text("P".into()), Mods { shift: true, ..ALT });
     assert!(find(&rt, "detail-pane").is_none());
-    // Ctrl+1..5: the sections.
-    press(&mut rt, Key::Command('5'), CTRL);
-    assert!(rt.state.sidebar_section == crate::ui::sidebar::SidebarSection::Trash);
-    press(&mut rt, Key::Command('1'), CTRL);
-    assert!(rt.state.sidebar_section == crate::ui::sidebar::SidebarSection::Files);
+    // Ctrl+1..7 (the sections) are the window's keys since RC2-8: `shell/host_tests_rc2_keys.rs`.
     // Forward is off, and says so, until Back has left a folder.
     assert!(!rt.state.can_go_forward());
     press(&mut rt, Key::Right, ALT);

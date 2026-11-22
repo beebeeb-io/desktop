@@ -86,7 +86,7 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
                 .role("image")
                 .label("Not saved")
                 .size(7.0, 7.0)
-                .radius(3.5)
+                .radius(scale::radius::PILL)
                 .fill(t.text),
         );
     }
