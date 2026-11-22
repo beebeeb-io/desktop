@@ -1145,16 +1145,104 @@ mod keys {
         }
     }
 
+    fn settled(rt: &mut Runtime<State>) {
+        rt.settle_all();
+        rt.frame(0.0);
+    }
+
+    const PAGE: &str = crate::frames::office::edit::word::SURFACE;
+
+    /// RC2-11: the keys go on in the document once the command search closes, never on the ribbon's search, whether
+    /// it was opened with Ctrl+K from the page or by a press on the search; typing then edits the page.
     #[test]
-    fn office_the_command_search_hands_focus_back_to_the_ribbons_search() {
-        let (mut rt, _ops, _answers) = live_ribbon::editing(true);
+    fn office_focus_palette_close_returns_to_the_page() {
+        use beebeeb_office_protocol::office::EditOp;
+        let (mut rt, ops, _answers) = live_ribbon::editing(true);
         operate(&mut rt, "rib-find");
         assert!(matches!(ui(&rt).office.over, Some(Over::Palette(_))));
         press(&mut rt, Key::Escape);
-        rt.settle_all();
-        rt.frame(0.0);
+        settled(&mut rt);
         assert!(ui(&rt).office.over.is_none(), "Esc closed the search");
-        assert_eq!(focused(&rt).as_deref(), Some("rib-find"), "focus is back on the ribbon's search");
+        assert_eq!(
+            focused(&rt).as_deref(),
+            Some(PAGE),
+            "the page has the keyboard, not the ribbon's search"
+        );
+        ctrl(&mut rt, 'k');
+        settled(&mut rt);
+        assert!(
+            matches!(ui(&rt).office.over, Some(Over::Palette(_))),
+            "Ctrl+K from the page"
+        );
+        press(&mut rt, Key::Escape);
+        settled(&mut rt);
+        assert_eq!(
+            focused(&rt).as_deref(),
+            Some(PAGE),
+            "back on the page after Ctrl+K and Esc"
+        );
+        ops.borrow_mut().clear();
+        press(&mut rt, Key::Text("x".into()));
+        settled(&mut rt);
+        assert!(
+            ops.borrow()
+                .iter()
+                .any(|op| matches!(op, EditOp::InsertText(t) if t == "x")),
+            "typing goes into the document: {:?}",
+            ops.borrow()
+        );
+    }
+
+    /// RC2-11: Insert link, closed with Esc or by its Insert, hands the keyboard to the page, not the toolbar.
+    #[test]
+    fn office_focus_insert_link_close_returns_to_the_page() {
+        use super::super::office_over::{LINK_TEXT, LINK_URL};
+        use crate::frames::office::edit::word_insert::Insert;
+        use beebeeb_office_protocol::office::EditOp;
+        let (mut rt, ops, _answers) = live_ribbon::editing(true);
+        for ok in [false, true] {
+            crate::frames::viewers::ui(&mut rt.state)
+                .expect("open")
+                .office_insert(Insert::Link);
+            settled(&mut rt);
+            assert!(
+                matches!(ui(&rt).office.over, Some(Over::Link(_))),
+                "the link dialog is open"
+            );
+            assert_eq!(focused(&rt).as_deref(), Some(LINK_TEXT));
+            if ok {
+                press(&mut rt, Key::Text("Beebeeb".into()));
+                press(&mut rt, Key::Tab);
+                settled(&mut rt);
+                assert_eq!(focused(&rt).as_deref(), Some(LINK_URL));
+                press(&mut rt, Key::Text("https://beebeeb.io".into()));
+                press(&mut rt, Key::Enter);
+            } else {
+                press(&mut rt, Key::Escape);
+            }
+            settled(&mut rt);
+            assert!(ui(&rt).office.over.is_none(), "ok {ok}: the dialog closed");
+            assert_eq!(
+                focused(&rt).as_deref(),
+                Some(PAGE),
+                "ok {ok}: the page has the keyboard"
+            );
+        }
+        assert!(
+            ops.borrow().iter().any(|op| matches!(op, EditOp::Link { .. })),
+            "Insert sent the link: {:?}",
+            ops.borrow()
+        );
+        ops.borrow_mut().clear();
+        press(&mut rt, Key::Text("y".into()));
+        settled(&mut rt);
+        assert!(
+            ops.borrow()
+                .iter()
+                .any(|op| matches!(op, EditOp::InsertText(t) if t == "y")),
+            "{:?}",
+            ops.borrow()
+        );
     }
 
     #[test]

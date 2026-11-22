@@ -739,6 +739,11 @@ fn on_drag(s: &mut State, d: &mut Drag, tx: &mut Tx) {
 // What the grid and the formula bar draw
 // ---------------------------------------------------------------------------
 
+/// The key of the drawn grid cell at `cell` (`sheets.rs` draws `sh-cell-<R>-<C>`, its label the address and value).
+pub fn current_cell_key(cell: Cell) -> String {
+    format!("sh-cell-{}-{}", cell.row, cell.col)
+}
+
 /// The surface lying over the grid for the frame drawn with `geometry`, in a grid of `room` points of cells: the keys,
 /// the pointer, and the cell editor over the current cell while it is open there.
 pub fn layer(grid: &SheetGrid, view: &SheetView, geometry: Geometry, room: (f32, f32), t: &Theme) -> rune::El {
@@ -755,9 +760,14 @@ pub fn layer(grid: &SheetGrid, view: &SheetView, geometry: Geometry, room: (f32,
             g.wants_focus = true;
         }
     });
+    // The layer keeps the keyboard, but a screen reader is told the current cell is what is focused (its
+    // `active_descendant`, RC2-11): the cell drawn as `sh-cell-<R>-<C>`, named by its address and value, so each
+    // arrow is heard as the cell it lands on.
     let mut layer = el()
         .key(GRID_KEY)
-        .a11y_hidden()
+        .role("group")
+        .label("Sheet")
+        .active_descendant(current_cell_key(view.current))
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .focusable(true)
         .no_focus_ring()

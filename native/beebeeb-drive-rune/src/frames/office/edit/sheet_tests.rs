@@ -913,3 +913,77 @@ fn office_sheets_palette_the_search_button_shows_the_command_search() {
     rig.press_key("rib-find");
     rig.assert_palette_works();
 }
+
+/// RC2-11: the command search closed over a sheet hands the keyboard back to the grid (the current cell), never to
+/// the ribbon's search: typing then goes into the cell.
+#[test]
+fn office_focus_palette_close_returns_to_the_sheets_grid() {
+    use crate::frames::viewers::office_over::Over;
+    let mut rig = rig();
+    rig.click(2, 1);
+    assert_eq!(rig.focused().as_deref(), Some(GRID_KEY));
+    let cmd = Mods {
+        cmd: true,
+        ..Mods::default()
+    };
+    rig.key_with(Key::Command('k'), cmd);
+    let open = matches!(
+        viewers::ui(&mut rig.rt.state).expect("a file").office.over,
+        Some(Over::Palette(_))
+    );
+    assert!(open, "Ctrl+K from the grid opened the command search");
+    assert_ne!(rig.focused().as_deref(), Some(GRID_KEY), "the search took the keyboard");
+    rig.key(Key::Escape);
+    assert!(
+        viewers::ui(&mut rig.rt.state).expect("a file").office.over.is_none(),
+        "Esc closed it"
+    );
+    assert_eq!(
+        rig.focused().as_deref(),
+        Some(GRID_KEY),
+        "the grid has the keyboard again, not the ribbon's search"
+    );
+    rig.text("7");
+    assert!(rig.editing().is_some(), "typing goes into the current cell");
+    assert_eq!(rig.typed(), "7");
+}
+
+/// RC2-11: after each arrow, what a screen reader is told is focused is the current cell, named by its address and
+/// value (the grid layer keeps the keyboard and points at the cell as its active descendant).
+#[test]
+fn office_focus_an_arrow_makes_the_cell_the_focused_element() {
+    let mut rig = rig();
+    rig.click(1, 1);
+    for key in [Key::Down, Key::Right, Key::Down, Key::Left, Key::Up] {
+        rig.key(key.clone());
+        let current = rig.sheet().current;
+        assert_eq!(
+            rig.focused().as_deref(),
+            Some(GRID_KEY),
+            "{key:?}: the grid keeps the keyboard"
+        );
+        let tree = rig.rt.accessibility_tree();
+        let node = |id| tree.nodes.iter().find(|(n, _)| *n == id).map(|(_, node)| node);
+        let layer = node(tree.focus).expect("the focused node is in the tree");
+        assert_eq!(
+            layer.author_id(),
+            Some(GRID_KEY),
+            "{key:?}: the layer is the focused node"
+        );
+        let cell = layer
+            .active_descendant()
+            .and_then(node)
+            .unwrap_or_else(|| panic!("{key:?}: the layer points at no cell"));
+        let want = format!("sh-cell-{}-{}", current.row, current.col);
+        assert_eq!(
+            cell.author_id(),
+            Some(want.as_str()),
+            "{key:?}: the focused element is the current cell"
+        );
+        let name = cell.label().unwrap_or_default().to_string();
+        assert!(
+            name.starts_with(&format!("{}, ", sheets::a1(current))),
+            "{key:?}: the cell is named by its address and value: {name:?}"
+        );
+    }
+}
