@@ -820,3 +820,98 @@ fn a_long_pdf_builds_only_the_thumbnails_near_the_window_and_its_column_and_its_
     assert_eq!(viewer(&rt).media.page, 901);
     assert_eq!(info(&rt, "page").rect[1], page[1], "a turned page starts at its top");
 }
+
+fn typed(rt: &mut Runtime<State>, text: &str) {
+    press(rt, Key::Text(text.into()));
+}
+
+/// The archive's list on the one list model (`ui::list_keys`, task 159): type-ahead on the entries' names, the ends,
+/// a page; a read-only single-select list, so Space, F2 and Delete are not its keys.
+#[test]
+fn an_archives_list_jumps_by_typed_names_and_keeps_its_keys() {
+    let (mut rt, _) = recording(board::ZIP);
+    // Names: "Shoot selects", "Day 1", "contact-sheet.pdf", "selects-list.csv", "README.txt".
+    typed(&mut rt, "r");
+    assert_eq!(viewer(&rt).media.entry, Some(4), "R: README.txt");
+    typed(&mut rt, "e");
+    assert_eq!(viewer(&rt).media.entry, Some(4), "\"re\": still README.txt");
+    let (mut rt, _) = recording(board::ZIP);
+    typed(&mut rt, "s");
+    typed(&mut rt, "e");
+    assert_eq!(viewer(&rt).media.entry, Some(3), "\"se\": selects-list.csv, by its name");
+    typed(&mut rt, "C");
+    assert_eq!(viewer(&rt).media.entry, Some(3), "\"sec\" matches none: focus stays");
+}
+
+#[test]
+fn an_archives_type_ahead_matches_a_prefix_and_cycles_one_letter() {
+    let (mut rt, _) = recording(board::ZIP);
+    typed(&mut rt, "s");
+    assert_eq!(viewer(&rt).media.entry, Some(0), "S: Shoot selects");
+    typed(&mut rt, "s");
+    assert_eq!(viewer(&rt).media.entry, Some(3), "S again: the next name with S");
+    typed(&mut rt, "s");
+    assert_eq!(viewer(&rt).media.entry, Some(0), "and around");
+    typed(&mut rt, "x");
+    assert_eq!(viewer(&rt).media.entry, Some(0), "no match: focus stays");
+}
+
+#[test]
+fn an_archives_list_moves_to_its_ends_and_by_a_page() {
+    let (mut rt, _) = recording(board::ZIP);
+    press(&mut rt, Key::End);
+    assert_eq!(viewer(&rt).media.entry, Some(4));
+    press(&mut rt, Key::Home);
+    assert_eq!(viewer(&rt).media.entry, Some(0));
+    press(&mut rt, Key::PageDown);
+    assert_eq!(viewer(&rt).media.entry, Some(4), "a page stops at the end");
+    press(&mut rt, Key::PageUp);
+    assert_eq!(viewer(&rt).media.entry, Some(0));
+    // Shift moves as a plain move: no multi-select here.
+    press_with(
+        &mut rt,
+        Key::Down,
+        Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    assert_eq!(viewer(&rt).media.entry, Some(1));
+    // F2 and Delete do nothing to a read-only list; the file stays open.
+    press(&mut rt, Key::Function(2));
+    press(&mut rt, Key::Delete);
+    assert_eq!(viewer(&rt).media.entry, Some(1));
+    assert!(on_a_file(&rt));
+    // Alt+Up: one folder up inside the archive.
+    press(&mut rt, Key::Up);
+    press(&mut rt, Key::Enter);
+    assert_eq!(viewer(&rt).media.dir, "Shoot selects/");
+    press_with(
+        &mut rt,
+        Key::Up,
+        Mods {
+            alt: true,
+            ..Mods::default()
+        },
+    );
+    assert_eq!(viewer(&rt).media.dir, "");
+}
+
+#[test]
+fn home_and_end_go_to_the_first_and_last_photo_of_the_strip() {
+    let (mut rt, _) = recording(board::RAW);
+    let names = |rt: &Runtime<State>| match &viewer(rt).file.body {
+        Body::Photo(doc) => (
+            doc.strip.first().map(|i| i.name.clone()),
+            doc.strip.last().map(|i| i.name.clone()),
+        ),
+        _ => panic!("a photo"),
+    };
+    let (first, last) = names(&rt);
+    press(&mut rt, Key::End);
+    assert_eq!(Some(viewer(&rt).file.name.clone()), last);
+    press(&mut rt, Key::End);
+    assert_eq!(Some(viewer(&rt).file.name.clone()), last, "already the last: it stays");
+    press(&mut rt, Key::Home);
+    assert_eq!(Some(viewer(&rt).file.name.clone()), first);
+}

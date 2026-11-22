@@ -47,14 +47,24 @@ fn button(index: usize, label: &str, look: Look, t: &Theme) -> El {
         .pixel_snap(false)
 }
 
-/// The card on the scrim: Esc and a press outside are the way back to the edit.
+/// The card on the scrim: Esc and a press outside are the way back to the edit. Both editing questions are asked
+/// from the editor (leaving with changes, a save that met another version); an answer may take the editor away
+/// (Discard, Keep theirs), so focus goes back to the editor when it is still there, else into the toolbar
+/// (`ui::dialog::modal_back`).
 fn shell(name: &str, role: &'static str, width: f32, head: El, body: Vec<El>, foot: El, t: &Theme) -> El {
     let keep = |s: &mut State| {
         if let Some(ui) = ui(s) {
             ui.keep_editing();
         }
     };
-    shell_closing(name, role, width, head, body, foot, keep, t)
+    dialog::modal_back(
+        0.0,
+        card(name, role, width, head, body, foot, t),
+        super::EDITOR_KEY,
+        super::chrome::PANE_TOOLBAR,
+        keep,
+        t,
+    )
 }
 
 /// [`shell`] with the caller's way back (Esc, a press outside). `foot`: the buttons row.
@@ -69,19 +79,19 @@ pub(super) fn shell_closing(
     close: impl Fn(&mut State) + 'static,
     t: &Theme,
 ) -> El {
-    dialog::modal(
-        0.0,
-        dialog::dialog(
-            Dialog {
-                alert: role == "alertdialog",
-                head: Head::Raw(head),
-                body,
-                foot: Foot::Custom(el().child(foot)),
-                ..Dialog::new("dlg", name, width)
-            },
-            t,
-        ),
-        close,
+    dialog::modal(0.0, card(name, role, width, head, body, foot, t), close, t)
+}
+
+/// The dialog's card, without its scrim.
+fn card(name: &str, role: &'static str, width: f32, head: El, body: Vec<El>, foot: El, t: &Theme) -> El {
+    dialog::dialog(
+        Dialog {
+            alert: role == "alertdialog",
+            head: Head::Raw(head),
+            body,
+            foot: Foot::Custom(el().child(foot)),
+            ..Dialog::new("dlg", name, width)
+        },
         t,
     )
 }

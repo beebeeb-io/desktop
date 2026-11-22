@@ -454,3 +454,206 @@ fn media_a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app(
         "one button, the default app's: {texts:?}"
     );
 }
+
+/// Up / Down, M and F on a recording or a video (task 159): the volume in 10 % steps (0 to 100 %), mute, each said in
+/// the toast; F is the window's full-screen key on a video only. The player is real, with seams that answer nothing.
+mod media_keys {
+    use std::sync::Arc;
+
+    use rune::{Key, KeyEvent, Mods};
+
+    use super::super::super::kinds::{AudioDoc, Track, VideoDoc};
+    use super::super::super::source::{Body, Details, OpenError, OpenFile, ViewerSource};
+    use crate::media::audio_out::AudioError;
+    use crate::media::player::{
+        AudioFactory, AudioSink, Link, LinkFactory, MediaBytes, MediaOpener, PlayerHandle, Refusal,
+    };
+    use crate::media::video::VideoSurface;
+    use crate::{State, init};
+
+    struct NoOpener;
+    impl MediaOpener for NoOpener {
+        fn open(&self, _file_id: &str) -> Result<Box<dyn MediaBytes>, Refusal> {
+            Err(Refusal::CouldNotPlay)
+        }
+    }
+    struct NoLinks;
+    impl LinkFactory for NoLinks {
+        fn start(&self) -> Result<Box<dyn Link>, Refusal> {
+            Err(Refusal::NotInstalled)
+        }
+    }
+    struct NoAudio;
+    impl AudioFactory for NoAudio {
+        fn start(&self, _rate_hint: u32) -> Result<Box<dyn AudioSink>, AudioError> {
+            Err(AudioError::NoDevice)
+        }
+    }
+
+    /// A source that hands the test's player; an id starting with `v` is a video, any other a recording.
+    struct Plays(PlayerHandle);
+    impl ViewerSource for Plays {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            let body = if id.starts_with('v') {
+                Body::Video(VideoDoc { length: 0 })
+            } else {
+                Body::Audio(AudioDoc {
+                    title: "Invented take".into(),
+                    artist: String::new(),
+                    length: 0,
+                    at: 0,
+                    playing: false,
+                    folder: "Invented demos".into(),
+                    queue: vec![Track {
+                        id: id.into(),
+                        title: "Invented take".into(),
+                        length: 0,
+                        current: true,
+                    }],
+                })
+            };
+            Ok(OpenFile {
+                id: id.into(),
+                path: Vec::new(),
+                name: format!("Invented {id}"),
+                facts: String::new(),
+                version: 1,
+                body,
+                details: Details {
+                    kind: String::new(),
+                    size: String::new(),
+                    facts: Vec::new(),
+                    offline: false,
+                },
+                newer: None,
+            })
+        }
+        fn poll(&mut self, _: &str) -> Option<Body> {
+            None
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.open(id)
+        }
+        fn can_play(&self) -> bool {
+            true
+        }
+        fn player(&self) -> Option<PlayerHandle> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn opened(id: &str) -> (State, PlayerHandle) {
+        let player = PlayerHandle::new(
+            Arc::new(NoOpener),
+            Arc::new(NoLinks),
+            Arc::new(NoAudio),
+            None,
+            VideoSurface::new(),
+        );
+        let mut state = init();
+        state.viewer.ui = Some(super::super::super::Ui::open(Box::new(Plays(player.clone())), id).expect("it opens"));
+        (state, player)
+    }
+
+    fn key(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            mods: Mods::default(),
+        }
+    }
+
+    fn toast(state: &State) -> Option<String> {
+        state.viewer.ui.as_ref().and_then(|ui| ui.toast.clone())
+    }
+
+    fn on_key(state: &mut State, k: Key) -> bool {
+        super::super::super::media::on_key(state, &key(k))
+    }
+
+    #[test]
+    fn up_and_down_step_the_volume_by_ten_and_stop_at_the_ends() {
+        for id in ["a1", "v1"] {
+            let (mut state, player) = opened(id);
+            assert!(on_key(&mut state, Key::Down), "Down is the player's on {id}");
+            assert_eq!(super::super::super::media::volume_percent(&player), 90);
+            assert_eq!(toast(&state).as_deref(), Some("Volume 90 %"));
+            assert!(on_key(&mut state, Key::Up));
+            assert!(on_key(&mut state, Key::Up));
+            assert_eq!(super::super::super::media::volume_percent(&player), 100, "stops at 100 %");
+            assert_eq!(toast(&state).as_deref(), Some("Volume 100 %"));
+            for _ in 0..12 {
+                on_key(&mut state, Key::Down);
+            }
+            assert_eq!(super::super::super::media::volume_percent(&player), 0, "stops at 0 %");
+            assert_eq!(toast(&state).as_deref(), Some("Volume 0 %"));
+        }
+    }
+
+    #[test]
+    fn a_volume_set_off_the_grid_steps_back_onto_it() {
+        let (mut state, player) = opened("a1");
+        player.set_volume(0.43);
+        assert!(on_key(&mut state, Key::Up));
+        assert_eq!(super::super::super::media::volume_percent(&player), 50);
+    }
+
+    #[test]
+    fn m_mutes_and_unmutes_and_says_so_keeping_the_volume() {
+        for id in ["a1", "v1"] {
+            let (mut state, player) = opened(id);
+            on_key(&mut state, Key::Down);
+            assert!(on_key(&mut state, Key::Text("m".into())), "M is the player's on {id}");
+            assert!(player.muted());
+            assert_eq!(toast(&state).as_deref(), Some("Muted"));
+            assert_eq!(super::super::super::media::volume_percent(&player), 90, "muting keeps the volume");
+            assert!(on_key(&mut state, Key::Text("M".into())));
+            assert!(!player.muted());
+            assert_eq!(toast(&state).as_deref(), Some("Sound on"));
+            // A volume step while muted is heard.
+            on_key(&mut state, Key::Text("m".into()));
+            on_key(&mut state, Key::Up);
+            assert!(!player.muted(), "a volume step unmutes");
+        }
+    }
+
+    #[test]
+    fn ctrl_m_and_shift_up_are_not_the_players() {
+        let (mut state, player) = opened("a1");
+        let ctrl = KeyEvent {
+            key: Key::Text("m".into()),
+            mods: Mods {
+                ctrl: true,
+                ..Mods::default()
+            },
+        };
+        assert!(!super::super::super::media::on_key(&mut state, &ctrl));
+        let shift_up = KeyEvent {
+            key: Key::Up,
+            mods: Mods {
+                shift: true,
+                ..Mods::default()
+            },
+        };
+        assert!(!super::super::super::media::on_key(&mut state, &shift_up));
+        assert!(!player.muted());
+        assert_eq!(super::super::super::media::volume_percent(&player), 100);
+    }
+
+    #[test]
+    fn f_is_full_screen_on_a_video_only() {
+        let (video, _) = opened("v1");
+        let (audio, _) = opened("a1");
+        let f = key(Key::Text("f".into()));
+        assert!(super::super::super::chrome::full_screen_key(&video, &f));
+        assert!(!super::super::super::chrome::full_screen_key(&audio, &f), "a recording has no picture");
+        let ctrl_f = KeyEvent {
+            key: Key::Text("f".into()),
+            mods: Mods {
+                ctrl: true,
+                ..Mods::default()
+            },
+        };
+        assert!(!super::super::super::chrome::full_screen_key(&video, &ctrl_f));
+    }
+}
