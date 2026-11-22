@@ -89,7 +89,7 @@ async fn stop_task_and_confirm_is_idempotent_with_nothing_left_to_wait_on() {
     assert!(confirmed);
 }
 
-// ── AuthHealth (task 1546 Codex round 2, finding 5) ────────────────────
+// ── AuthHealth ────────────────────
 
 fn auth_error() -> anyhow::Error {
     anyhow::anyhow!("HTTP 401 Unauthorized: invalid token")
@@ -256,7 +256,7 @@ fn an_offline_or_5xx_tick_keeps_the_count() {
 
 #[test]
 fn a_5xx_whose_body_mentions_401_is_not_a_refusal() {
-    // Task 2521, review P3-2: the status decides, never the text. A gateway page in front of the API during an outage
+    // Task 2521, the status decides, never the text. A gateway page in front of the API during an outage
     // can carry "401", "unauthorized" or "invalid token" in its body; three of those must not close the vault.
     let health = AuthHealth::new();
     for _ in 0..3 {

@@ -469,15 +469,14 @@ impl<S: AuthSecretStore> AuthVault<S> {
         }
         // R4, the first run after the single slot: a key tagged with its account is kept in that account's slot too.
         // From the key just read (no second read of the store).
-        if let Ok(Some(owner)) = self.vault_key_owner() {
-            if matches!(self.kept_key(&owner), Ok(None)) {
+        if let Ok(Some(owner)) = self.vault_key_owner()
+            && matches!(self.kept_key(&owner), Ok(None)) {
                 // Copied straight into the wiped buffer (the field is this module's).
                 let copy = SecretBytes(master_key.0.clone());
                 if let Err(error) = self.store.save_account_key(&owner, copy) {
                     account_slot_refused("keep", &error);
                 }
             }
-        }
         self.master_key = Some(master_key);
         self.state = VaultLockState::Unlocked;
         Ok(())

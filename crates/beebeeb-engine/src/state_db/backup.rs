@@ -643,7 +643,7 @@ impl StateDb {
              ORDER BY 1",
         )?;
         let keys = stmt.query_map(params![category, owner], |row| row.get::<_, Option<String>>(0))?;
-        Ok(keys.filter_map(|key| key.transpose()).collect::<Result<Vec<_>>>()?)
+        keys.filter_map(|key| key.transpose()).collect::<Result<Vec<_>>>()
     }
 
     /// Record that the backup of `category` was turned off, and why. Tests only: a stop is written with its marks in

@@ -40,7 +40,7 @@ thread_local! {
     static FAIL_LANDINGS: std::cell::Cell<(u32, bool)> = const { std::cell::Cell::new((0, false)) };
 }
 
-/// Task 2267 (fix round 2): one `files` row as the ownership proof judges it.
+/// one `files` row as the ownership proof judges it.
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofRow {
@@ -52,11 +52,11 @@ pub struct ProofRow {
     /// In the person's own files (`namespace = 'my_files'`), not a folder shared with them.
     pub my_files: bool,
     /// Judged against the server's tree: not made on this PC. A row made here has `current_version` and
-    /// `remote_updated_at` both at 0 and a queued create names it (lead review of round 2, P2-1).
+    /// `remote_updated_at` both at 0 and a queued create names it.
     pub server_named: bool,
 }
 
-/// Task 2267 (fix round 2): one queued operation, by what it acts on.
+/// one queued operation, by what it acts on.
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofOp {
@@ -67,7 +67,7 @@ pub struct ProofOp {
     pub kind: String,
 }
 
-/// Task 2267 (lead review round 3, P2-2): one change held as `found_while_paused`, as the card counts it.
+/// one change held as `found_while_paused`, as the card counts it.
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldChange {

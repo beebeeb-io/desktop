@@ -655,7 +655,7 @@ fn review_p3_6_a_wrap_under_another_root_does_not_change_the_skip_reason() {
     let report = run(bridge.repair_shared_folder_index(root)).unwrap();
     assert_eq!(report.skip_reasons.get("no_wrap"), Some(&1), "{seen:?}");
     assert!(
-        report.skip_reasons.get("wrap_does_not_open").is_none(),
+        !report.skip_reasons.contains_key("wrap_does_not_open"),
         "another root's wrap is not a reason: {:?}",
         report.skip_reasons
     );
@@ -804,10 +804,12 @@ fn review_p2_1_an_earlier_indexed_owner_folder_is_removed() {
     let initial: Vec<EncryptedShard> = SearchIndex::build(&[(owner_folder.into(), "OwnerFolder".into())], 64)
         .encrypt_shards_with(ShardKeySource::Folder(&folder))
         .unwrap();
-    let blobs: Arc<Mutex<HashMap<(u32, u32), Vec<u8>>>> = Arc::new(Mutex::new(
+    type Blobs = Arc<Mutex<HashMap<(u32, u32), Vec<u8>>>>;
+    let blobs: Blobs = Arc::new(Mutex::new(
         initial.iter().map(|s| ((s.bucket, s.page), s.blob.clone())).collect(),
     ));
-    let puts: Arc<Mutex<Vec<(String, u32, u32, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+    type Puts = Arc<Mutex<Vec<(String, u32, u32, Vec<u8>)>>>;
+    let puts: Puts = Arc::new(Mutex::new(Vec::new()));
     let (served_blobs, captured) = (blobs.clone(), puts.clone());
     let fixture = Fixture::wire(move |req| {
         let json_body = |value: serde_json::Value| serde_json::to_vec(&value).unwrap();
@@ -893,7 +895,7 @@ fn review_p2_1_an_earlier_indexed_owner_folder_is_removed() {
         .collect();
     let repaired = SearchIndex::from_encrypted_shards_with(ShardKeySource::Folder(&folder), &shards, 64).unwrap();
     assert!(
-        !repaired.query("OwnerFolder").contains(&owner_folder.to_string()),
+        !repaired.query("OwnerFolder").contains(owner_folder),
         "an owner folder's name is removed from the old shared index"
     );
 }

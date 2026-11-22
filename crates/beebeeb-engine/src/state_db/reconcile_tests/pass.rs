@@ -24,7 +24,7 @@ fn holds_a_file(_: &str) -> bool {
 fn query_plan(db: &StateDb, sql: &str) -> String {
     let conn = db.0.lock().unwrap();
     let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-    let args = rusqlite::params_from_iter(std::iter::repeat("x").take(stmt.parameter_count()));
+    let args = rusqlite::params_from_iter(std::iter::repeat_n("x", stmt.parameter_count()));
     let steps = stmt.query_map(args, |row| row.get::<_, String>(3)).unwrap();
     steps.map(Result::unwrap).collect::<Vec<_>>().join("\n")
 }
@@ -291,7 +291,7 @@ fn reconcile_remaps_a_ghost_and_leaves_no_reference_to_it() {
     assert_eq!(pc.references("g1"), 0);
     assert!(!pc.has_op("op-g1"));
     assert_eq!(pc.parent_of_row("f1").as_deref(), Some("t1"));
-    // Re-armed into the key check (cross-lane review P2-2), which resumes it under this session's key.
+    // Re-armed into the key check, which resumes it under this session's key.
     assert_eq!(
         pc.op("op-f1"),
         (Some("t1".to_string()), 0, NOW, None, Some("auth".to_string()))
@@ -300,7 +300,7 @@ fn reconcile_remaps_a_ghost_and_leaves_no_reference_to_it() {
     assert_eq!(pc.due(), vec!["op-f1".to_string()]);
 }
 
-/// Goal 2, cross-lane review P2-2: a change D8 gives its retries back to was queued with its name sealed under the
+/// Goal 2, a change D8 gives its retries back to was queued with its name sealed under the
 /// key in force then, like every `auth` change. The pass puts it under `auth`, so the key check that follows the
 /// pass decides it too: under a replaced key it is held as `key_replaced`, never sent.
 #[test]
@@ -496,7 +496,7 @@ fn a_rearmed_upload_runs_before_a_newer_upload_of_the_same_file() {
     pc.ghost_with_twin(1, "Photos");
     pc.upload("op-newer", "f1", Some("g1"), 500);
     pc.db.reconcile_held_queue(&opts(), NOW, &holds_a_file).unwrap();
-    // Under `auth` until the key check (cross-lane review P2-2), it already holds its place: the newer one waits.
+    // Under `auth` until the key check, it already holds its place: the newer one waits.
     assert!(matches!(
         pc.db.claim_operation("op-newer", NOW).unwrap(),
         ClaimOutcome::Wait
@@ -541,7 +541,7 @@ fn a_child_added_between_batches_moves_with_its_ghost() {
     assert_eq!(pc.references("g2"), 0);
 }
 
-/// D8 amendment (lead ruling 2026-10-29): a change held for the person that used its retries on the 404 its ghost
+/// D8 amendment: a change held for the person that used its retries on the 404 its ghost
 /// caused gets its budget back in the pass and keeps its pause; "Upload to my Beebeeb" then makes it due, and it runs.
 #[test]
 fn a_held_upload_exhausted_on_a_parent_404_under_a_remapped_ghost_uploads_after_upload() {

@@ -198,7 +198,7 @@ fn a5_foreign_wrap_under_proven_custody_is_adopted_once_and_verified() {
     }],"next_cursor":null});
     let (fixture, seen) = world(root, &row, &folder, inventory, winner.clone());
     let bridge = bridge_for(&fixture);
-    let prepared = run(bridge.prepare_owned_rows(&[row.clone()])).expect("A5 prepares the row");
+    let prepared = run(bridge.prepare_owned_rows(std::slice::from_ref(&row))).expect("A5 prepares the row");
     assert_eq!(prepared.len(), 1);
     assert!(prepared[0].readable);
     assert_eq!(

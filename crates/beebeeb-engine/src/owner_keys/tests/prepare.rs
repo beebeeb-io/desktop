@@ -223,7 +223,7 @@ fn sf2265_prepare_asks_custody_once_per_folder_not_once_per_row() {
         "created_at":"2026-10-28T00:00:00Z",
         "encrypted_owner_folder_key":purpose_bound_copy(&master, root, &folder)
     }]});
-    // A typed failure to remember (review P3-4): without the per-folder cache
+    // A typed failure to remember: without the per-folder cache
     // the batch repeats the GET and the 501 PUT once per row.
     let (fixture, seen) = prepare_world(
         root,
@@ -323,7 +323,7 @@ fn sf2265_purpose_bound_invites_are_tried_before_newer_legacy_ones() {
     let child = beebeeb_core::kdf::derive_file_key(&master, item.as_bytes());
     let wrap = STANDARD.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&legacy_key, child.as_bytes()).unwrap());
     // The newer invite is legacy and would prove; the older one is
-    // purpose-bound and must win (review P3-6).
+    // purpose-bound and must win.
     let invites = json!({"invites":[
         {"id":"inv-17-legacy","file_id":root,"is_folder_share":true,"status":"approved",
          "created_at":"2026-10-28T00:00:00Z","encrypted_owner_folder_key":legacy_copy(&master, root, &legacy_key)},

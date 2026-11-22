@@ -504,8 +504,7 @@ impl StateDb {
                  DROP TRIGGER IF EXISTS files_unknown_marks_after_update;",
             )?;
         } else {
-            conn.execute_batch(&format!(
-                "CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert_any_status
+            conn.execute_batch("CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert_any_status
              AFTER INSERT ON files
              WHEN NEW.local_hash IS NULL AND NEW.fetched_min_version < 0
              BEGIN
@@ -527,8 +526,7 @@ impl StateDb {
              BEGIN
                  DELETE FROM unknown_checks WHERE file_id = OLD.file_id;
              END;
-             DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;"
-            ))?;
+             DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;")?;
         }
         // LD-0105 / task 2180: the version a Windows placeholder was minted from (`cf_streaming.rs`).
         // NULL on every row from before it: no identity, so bytes on disk for it are never trusted.
@@ -548,7 +546,7 @@ impl StateDb {
         ensure_column(conn, "cf_poison", "write_ticks", "INTEGER")?;
         ensure_column(conn, "cf_poison", "key_size", "INTEGER")?;
         ensure_column(conn, "cf_poison", "needs_attention", "INTEGER NOT NULL DEFAULT 0")?;
-        // Amendment 4 (desktop #225 review P2): a pin the empty step could put back neither through its
+        // Amendment 4: a pin the empty step could put back neither through its
         // handle nor by path. Its own table, so it outlives the poison row it came from; every sweep retries it.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS cf_pin_restore (

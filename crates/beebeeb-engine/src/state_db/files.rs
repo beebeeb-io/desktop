@@ -492,13 +492,13 @@ impl StateDb {
     /// ([`Self::wipe_fetched_content_if_unchanged`]) it guards. `None`: no such row.
     pub fn content_seq(&self, file_id: &str) -> Result<Option<i64>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        Ok(conn
+        conn
             .query_row(
                 "SELECT content_seq FROM files WHERE file_id = ?1",
                 params![file_id],
                 |row| row.get(0),
             )
-            .optional()?)
+            .optional()
     }
     /// Task 2199 (dc-103b; design 1640 "Not done" (a)): the file's placeholder was dehydrated whole, so nothing
     /// fetched is on disk: its agreed content and its fetch candidate are wiped to empty (`0`), so the next range
@@ -548,7 +548,7 @@ impl StateDb {
             params![file_id, version, hash],
         )? == 1)
     }
-    /// Task 1640 (review P2-5): the `Local` files the stamp pass may mark in sync: a recorded
+    /// Task 1640: the `Local` files the stamp pass may mark in sync: a recorded
     /// agreed content and no sync-folder upload queued. Everything else is never marked, so it is
     /// filtered here, before the pass's per-tick cap.
     #[cfg(windows)]
@@ -797,6 +797,7 @@ impl StateDb {
     /// `(entry, contract, child_count)` for the children of `parent_id`, with
     /// LIMIT/OFFSET paging, plus the total count. Child counts for folders are
     /// joined with a correlated subquery so no per-row query is needed.
+    #[allow(clippy::type_complexity)] // the row triple is the return shape callers destructure
     pub fn children_paged(
         &self,
         parent_id: Option<&str>,
@@ -1000,7 +1001,7 @@ mod listing_tests {
 
     fn seeded(files: usize) -> (tempfile::TempDir, StateDb) {
         let dir = tempfile::tempdir().unwrap();
-        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
         let put = |id: &str, path: &str, parent: Option<&str>, kind: ItemKind| {
             let e = row(id, path, parent, kind.clone());
             let parent = parent.map(str::to_string);

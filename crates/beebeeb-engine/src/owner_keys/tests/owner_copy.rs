@@ -213,7 +213,7 @@ fn sf2265_legacy_copy_proves_batch_key_but_never_custody() {
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
-    // Review P2-1: the proven key is batch-only. It is not custody, so no
+    // the proven key is batch-only. It is not custody, so no
     // caller may treat it as one (it would seal index names under a key the
     // server could have chosen).
     let error = run(bridge.shared_folder_custody_key(root))

@@ -54,7 +54,7 @@ pub(super) fn upsert_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C
                 || *remote_updated_at != e.remote_updated_at
         }
     };
-    // Task 2523 (review P1-1): a queued hydrate writes where the file is now, never at the place it left (a pull's
+    // Task 2523: a queued hydrate writes where the file is now, never at the place it left (a pull's
     // remote rename or move, a parent folder's, a shared row's), as `enqueue_local_rename` does for a local rename.
     if let Some((old_path, ..)) = &old
         && old_path != &e.path

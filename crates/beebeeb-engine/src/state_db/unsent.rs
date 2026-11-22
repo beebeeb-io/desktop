@@ -217,7 +217,8 @@ impl StateDb {
                           queued_at, id
                  LIMIT ?1 OFFSET ?2",
             ))?;
-            let items = stmt
+            
+            stmt
                 .query_map(params![i64::from(limit), i64::from(offset)], |row| {
                     let kind: String = row.get(2)?;
                     let metadata_json: Option<String> = row.get(3)?;
@@ -232,7 +233,7 @@ impl StateDb {
                     // Spec D8: any class is a park, as the reconcile pass reads it; a held row keeps its own action.
                     let parked = !paused && error_class.is_some();
                     let backing_off = !parked && group == "waiting" && attempts > 0 && next_retry_at > now;
-                    // As `retry_unsent_change` decides: a claimed row is being sent (2409 review P3).
+                    // As `retry_unsent_change` decides: a claimed row is being sent.
                     let failed = !claimed && (backing_off || (!parked && group == "gave_up"));
                     Ok(UnsentChange {
                         id: row.get(0)?,
@@ -252,8 +253,7 @@ impl StateDb {
                         version: None,
                     })
                 })?
-                .collect::<Result<Vec<_>>>()?;
-            items
+                .collect::<Result<Vec<_>>>()?
         };
         // Task 2414: Try again's own checks (spec D8, the reconcile pass's), so the list never offers it for a change
         // the command would refuse, and says why instead. Only the failed rows on this page, by primary key.

@@ -98,7 +98,7 @@ fn a_tick_whose_request_failed_at_the_link_is_offline_and_not_a_good_check() {
             kind: crate::link_health::LinkFailureKind::Offline,
             reason: crate::link_health::LinkReason::Connect,
         },
-        now_secs() as i64,
+        now_secs(),
     );
     let tracker = StatusTracker::new(None);
     let payload = finish_tick_payload(&tracker, Ok(()), &link, 0, &db, &board).to_json();
@@ -383,7 +383,7 @@ async fn the_real_pulse_reports_a_pause_the_moment_it_happens() {
     pulse.abort();
 }
 
-/// Task 2521, review P3-3: a tick or a beat that ran long (a large upload, a slow answer, a PC that slept) is not
+/// Task 2521, a tick or a beat that ran long (a large upload, a slow answer, a PC that slept) is not
 /// followed by a burst of the periods it missed. With tokio's default (`Burst`) those fire back to back, and an ended
 /// session's refusals would then arrive milliseconds apart: one moment counted as the whole run. `Delay` starts the
 /// next period when the late one ends. Both feeds of the run are pinned: the runner's tick and the heartbeat's beat.

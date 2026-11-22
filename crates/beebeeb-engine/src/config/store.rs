@@ -122,7 +122,7 @@ impl DesktopConfig {
         }
     }
 
-    /// Forget the old `finder_install_last_error` on macOS (lead ruling T4-3). 0.8.11 saved the
+    /// Forget the old `finder_install_last_error` on macOS. 0.8.11 saved the
     /// OS's own message there, and that prose can name a file or a folder. macOS no longer
     /// writes the `finder_install_*` keys (it reads Finder's state from the OS, spec §9), so
     /// nothing there needs the text and the next update drops it from disk. The other old

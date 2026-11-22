@@ -336,7 +336,8 @@ fn the_list_is_a_read() {
 // ── Try again (owner, 13:39: "Add in the try again directly if it failed") ─────────────────────────────────────────
 
 /// Every column Try again may write, for one row: a refusal must leave them all as they were.
-fn row_state(db: &StateDb, op_id: &str) -> Option<(i64, i64, Option<String>, Option<String>, Option<String>, i64)> {
+type RowState = (i64, i64, Option<String>, Option<String>, Option<String>, i64);
+fn row_state(db: &StateDb, op_id: &str) -> Option<RowState> {
     db.0.lock()
         .unwrap()
         .query_row(
@@ -705,7 +706,7 @@ fn try_again_leaves_a_backup_and_a_recorded_completion_to_their_own_paths() {
 }
 
 /// A change that gave up but still holds a claim is being sent (`retry_unsent_change` answers "already queued"): the
-/// list offers no Try again for it either (2409 review P3).
+/// list offers no Try again for it either.
 #[test]
 fn a_claimed_change_that_gave_up_offers_no_try_again() {
     let (_dir, db) = db();

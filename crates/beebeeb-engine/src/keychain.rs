@@ -72,7 +72,7 @@ impl fmt::Debug for SecretBytes {
 // for the one-time migration read/sweep. New code must construct stores via
 // `platform_keychain_store_for(id)` so a reviewer can grep every legacy access.
 
-// The real Keychain store does not EXIST in a macOS test build (Task 9 fix round 2): a test that names it
+// The real Keychain store does not EXIST in a macOS test build: a test that names it
 // fails to compile, instead of reaching the developer's own Keychain items. `TestKeychainStore` takes its
 // place (see `PlatformKeychainStore`).
 #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
@@ -502,7 +502,7 @@ static TEST_KEYCHAIN: std::sync::LazyLock<std::sync::Mutex<std::collections::Has
 static TEST_KEYCHAIN_TOUCHED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Option<String>>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// Account prefixes whose email writes fail, as a locked Keychain's would (Task 12 fix round 2, item 3). Tests only.
+/// Account prefixes whose email writes fail, as a locked Keychain's would. Tests only.
 #[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
 static TEST_KEYCHAIN_EMAIL_WRITES_FAIL: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<Option<String>>>,
