@@ -9,7 +9,8 @@ use rune::{El, Span, TextStyle, col, row};
 
 use super::{style, ui};
 use crate::State;
-use crate::theme::tokens::Theme;
+use crate::theme::scale;
+use crate::theme::tokens::{self, Theme};
 use crate::ui::kit;
 
 /// A run of a line in one manner.
@@ -79,19 +80,17 @@ pub fn parse(source: &str) -> Vec<Block> {
             }
             Event::Start(Tag::List(_)) => {
                 // A nested list: what the parent item said so far stays its own line.
-                if let Some(list) = items.last_mut() {
-                    if !line.is_empty() {
+                if let Some(list) = items.last_mut()
+                    && !line.is_empty() {
                         list.push(std::mem::take(&mut line));
                     }
-                }
                 items.push(Vec::new());
             }
             Event::End(TagEnd::Item) => {
-                if let Some(list) = items.last_mut() {
-                    if !line.is_empty() {
+                if let Some(list) = items.last_mut()
+                    && !line.is_empty() {
                         list.push(std::mem::take(&mut line));
                     }
-                }
             }
             Event::End(TagEnd::List(_)) => {
                 if let Some(list) = items.pop() {
@@ -218,8 +217,8 @@ fn flow(key: String, pieces: &[Piece], t: &Theme) -> El {
                     .key(code_key.clone())
                     .h(15.5)
                     .my(1.0)
-                    .px(4.0)
-                    .radius(4.0)
+                    .px(scale::space::S4)
+                    .radius(tokens::radius::SM)
                     .fill(t.field)
                     .center_y()
                     .child(style::fitted(
@@ -291,7 +290,7 @@ pub fn body(blocks: &[Block], t: &Theme) -> El {
 
 /// [`body`] rooted at `root_key` (the live preview roots elsewhere than the editor).
 pub fn body_in(blocks: &[Block], t: &Theme, root_key: &str) -> El {
-    let mut md = col().key("md").w_full().max_w(620.0).gap(12.0);
+    let mut md = col().key("md").w_full().max_w(620.0).gap(scale::space::S12);
     let (mut h1, mut h2, mut p, mut li, mut pre) = (0usize, 0usize, 0usize, 0usize, 0usize);
     for block in blocks {
         match block {
@@ -331,7 +330,7 @@ pub fn body_in(blocks: &[Block], t: &Theme, root_key: &str) -> El {
                     .role("list")
                     .w_full()
                     .pl(20.0)
-                    .gap(4.0);
+                    .gap(scale::space::S4);
                 for item in items {
                     list = list.child(flow(format!("md-li-{li}"), item, t).role("listitem"));
                     li += 1;
@@ -343,9 +342,9 @@ pub fn body_in(blocks: &[Block], t: &Theme, root_key: &str) -> El {
                     col()
                         .key(format!("md-pre-{pre}"))
                         .w_full()
-                        .px(12.0)
-                        .py(8.0)
-                        .radius(6.0)
+                        .px(scale::space::S12)
+                        .py(scale::space::S8)
+                        .radius(tokens::radius::MD)
                         .fill(t.field)
                         .child(
                             kit::label(

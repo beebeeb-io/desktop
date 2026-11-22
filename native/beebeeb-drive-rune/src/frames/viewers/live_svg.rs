@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use rune::{Image, ImageCache, SurfaceFit, El, col, el};
 
 use super::super::{Ui, style};
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 
@@ -54,11 +55,10 @@ pub(super) fn outcome(source: &str) -> Outcome {
     let mut h = DefaultHasher::new();
     source.hash(&mut h);
     let key = h.finish();
-    if let Some((k, out)) = LAST.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        if *k == key {
+    if let Some((k, out)) = LAST.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && *k == key {
             return out.clone();
         }
-    }
     let out = if links_outside(source) {
         Outcome::Outside
     } else {
@@ -74,7 +74,7 @@ pub(super) fn outcome(source: &str) -> Outcome {
 
 pub fn view(source: &str, _ui: &Ui, t: &Theme) -> El {
     match outcome(source) {
-        Outcome::Drawn(image) => col().key("live-preview-svg").w_full().h_full().fill(t.paper).padding(16.0).child(
+        Outcome::Drawn(image) => col().key("live-preview-svg").w_full().h_full().fill(t.paper).padding(scale::space::S16).child(
             el().key("live-svg-image").w_full().h_full().pixels_fit(image.pixels(), SurfaceFit::Fit),
         ),
         Outcome::Outside => notice(OUTSIDE, t),
@@ -83,7 +83,7 @@ pub fn view(source: &str, _ui: &Ui, t: &Theme) -> El {
 }
 
 fn notice(text: &str, t: &Theme) -> El {
-    kit::label("live-svg-notice", text, style::BANNER, t.text_secondary).padding(16.0)
+    kit::label("live-svg-notice", text, style::BANNER, t.text_secondary).padding(scale::space::S16)
 }
 
 #[cfg(test)]

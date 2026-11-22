@@ -16,7 +16,9 @@
 mod archive;
 mod audio;
 mod chrome;
+#[cfg(test)]
 pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
+#[cfg(test)]
 pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
 pub(crate) mod details;
 mod editor_view;
@@ -673,6 +675,7 @@ fn route_source(s: &State) -> Option<Box<dyn ViewerSource>> {
 
 /// Open a file in the viewer: the route goes to it and its content is asked of the window's
 /// source. `false`: there is no such file, or the window has no source (the route does not move).
+#[allow(dead_code)]
 pub fn open(s: &mut State, file_id: &str) -> bool {
     match route_source(s) {
         Some(source) => open_from(s, source, file_id),
@@ -962,8 +965,8 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if s.viewer.unopened.is_some() && (s.viewer.unopened != here || !gate_open) {
         s.viewer.unopened = None;
     }
-    if let (None, Some(id), true) = (&s.viewer.ui, here, gate_open) {
-        if s.viewer.unopened.as_deref() != Some(id.as_str()) {
+    if let (None, Some(id), true) = (&s.viewer.ui, here, gate_open)
+        && s.viewer.unopened.as_deref() != Some(id.as_str()) {
             match route_source(s).map(|source| Ui::open_or_say_why(source, &id)) {
                 Some(Ok(ui)) => {
                     s.viewer.ui = Some(ui);
@@ -973,7 +976,6 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
                 None => {}
             }
         }
-    }
     let Some(ui) = ui(s) else { return had || new_file };
     let changed = ui.pump() | ui.refind();
     // An open text or note whose version is read: woken when the next read is due, not only by a press.
@@ -1175,11 +1177,10 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     sync(s);
     // A "not built yet" notice goes with the next key.
-    if let Some(ui) = ui(s) {
-        if ui.toast.as_deref().is_some_and(|words| words.starts_with(NOT_BUILT)) {
+    if let Some(ui) = ui(s)
+        && ui.toast.as_deref().is_some_and(|words| words.starts_with(NOT_BUILT)) {
             ui.toast = None;
         }
-    }
     // The editor's frame: the question, the command search, Ctrl+K and Ctrl+S.
     if office_over::on_key(s, ev, tx) {
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
@@ -1191,12 +1192,11 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let page_before = ui(s).map(|ui| ui.media.page);
     if media::on_key(s, ev) {
         // A page turned by a key: its thumbnail comes into view, and the page is read from its top.
-        if let Some(ui) = ui(s).filter(|ui| matches!(ui.file.body, Body::Pdf(_))) {
-            if Some(ui.media.page) != page_before {
+        if let Some(ui) = ui(s).filter(|ui| matches!(ui.file.body, Body::Pdf(_)))
+            && Some(ui.media.page) != page_before {
                 tx.scroll_into_view(pdf::thumb_key(ui.media.page));
                 pdf::show_page_from_its_top(tx);
             }
-        }
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
             tx.focus(key, true);
         }

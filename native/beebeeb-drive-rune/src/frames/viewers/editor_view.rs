@@ -8,6 +8,7 @@ use rune::{Align, Color, El, Span, col, el, row};
 use super::source::{Ink, Run};
 use super::{Editor, Ui, style, text};
 use crate::text_kit::find::FindQuery;
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 
@@ -123,7 +124,7 @@ pub fn underlay(edit: &rune::TextEdit, _file_name: &str, t: &Theme) -> El {
                     if on { t.text_secondary } else { t.text_tertiary },
                 )
                 .w(GUTTER_W)
-                .px(16.0)
+                .px(scale::space::S16)
                 .align(Align::End),
             )
             .child(

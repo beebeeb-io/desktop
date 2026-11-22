@@ -107,11 +107,10 @@ fn picture(text: &str, file_name: &str, t: &Theme) -> Pixels {
     let key = h.finish();
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        if let Some((k, p)) = c.as_ref() {
-            if *k == key {
+        if let Some((k, p)) = c.as_ref()
+            && *k == key {
                 return p.clone();
             }
-        }
         let (rows, buf) = build(text, file_name, t);
         let p = Pixels::new();
         p.set(WIDTH, rows as u32, buf);

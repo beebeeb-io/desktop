@@ -29,23 +29,24 @@ use super::source::Body;
 use super::source::{Conflict, Keep, SaveOutcome};
 use super::{Intent, Ui, icons, style};
 use crate::State;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::scale;
+use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::field::{self, Bare, caret_mark};
 use crate::ui::kit;
 use crate::ui::dialog::{self, Sub};
 use crate::ui::settings_dialog::{DIALOG_TITLE, Weight};
 
 /// 13px on 17px (`.t-body`): a command's name, and what is typed.
-const BODY: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+const BODY: TextStyle = scale::text::READ;
 /// 10px/600 on 13px, tracked 0.7px, capitals (`.t-label`).
-const GROUP: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.7);
+const GROUP: TextStyle = type_::SECTION_LABEL;
 /// 11px/500 on 14px (`.t-cap`).
-const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
+const CAP: TextStyle = type_::CAPTION;
 /// 12px on 15px: a tool's word.
-const TOOL_WORD: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+const TOOL_WORD: TextStyle = scale::text::SUB;
 /// A table's cell on the page.
 const CELL: TextStyle = TextStyle::new(11.0, 400.0).lh(17.0);
-const CELL_HEAD: TextStyle = TextStyle::new(11.0, 600.0).lh(17.0);
+const CELL_HEAD: TextStyle = scale::text::CAPTION_SEMI;
 
 pub const SAVED_FIRST: &str = "Someone else saved first";
 pub const NOT_SAVED: &str = "Not saved. Nothing changed; your edit is still here.";
@@ -569,14 +570,14 @@ fn conflict(opened: u32, other: &Conflict, t: &Theme) -> El {
         .key("dlg-head")
         .w_full()
         .pt(20.0)
-        .px(24.0)
+        .px(scale::space::S24)
         .pb(16.0)
-        .gap(14.0)
+        .gap(scale::space::S14)
         .items_start()
         .child(
             el().key("dlg-tile")
                 .size(36.0, 36.0)
-                .radius(10.0)
+                .radius(tokens::radius::LG)
                 .fill(style::tile_red(t))
                 .center()
                 .pixel_snap(false)
@@ -587,7 +588,7 @@ fn conflict(opened: u32, other: &Conflict, t: &Theme) -> El {
                 .key("dlg-words")
                 .grow(1.0)
                 .min_w(0.0)
-                .gap(6.0)
+                .gap(scale::space::S6)
                 .child(
                     kit::label("dlg-title", SAVED_FIRST, DIALOG_TITLE, t.text)
                         .role("heading")
@@ -615,7 +616,7 @@ fn conflict(opened: u32, other: &Conflict, t: &Theme) -> El {
     let foot = col()
             .key("dlg-stack")
             .w_full()
-            .gap(8.0)
+            .gap(scale::space::S8)
             .child(wide("btn-0", "Save as a new version anyway".into(), Look::Primary).on_press(keep(Keep::Mine)))
             .child(
                 wide(
@@ -642,7 +643,7 @@ fn leave(name: &str, back: &str, t: &Theme) -> El {
     let foot = row()
         .center_y()
         .justify_end()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .child(
             crate::ui::settings_dialog::button(0, "Save", Weight::Primary, t).on_press(|s: &mut State| {
                 if let Some(ui) = super::ui(s) {
@@ -705,8 +706,8 @@ pub(crate) fn recovery_pending(s: &State) -> Vec<(String, String)> {
 pub(super) fn kbd(key: &str, words: &str, t: &Theme) -> El {
     el().key(format!("{key}-box"))
         .h(20.0)
-        .px(6.0)
-        .radius(6.0)
+        .px(scale::space::S6)
+        .radius(tokens::radius::MD)
         .fill(t.card)
         .box_shadow(kit::ring_inset(t.separator))
         .box_shadow(kit::drop(1.0, 0.0, t.separator))
@@ -755,15 +756,15 @@ fn palette(ui: &Ui, palette: &Palette, back: &str, t: &Theme) -> El {
         .key("pal-head")
         .w_full()
         .h(48.0)
-        .px(16.0)
-        .gap(8.0)
+        .px(scale::space::S16)
+        .gap(scale::space::S8)
         .center_y()
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
         .child(kit::glyph("pal-find-icon", &oi::FIND, 15.0, t.text))
         .child(field)
         .child(kbd("pal-esc", "esc", t));
-    let mut list = col().key("pal-list").role("listbox").label("Results").w_full().py(8.0);
+    let mut list = col().key("pal-list").role("listbox").label("Results").w_full().py(scale::space::S8);
     let found = ui.office_found();
     // Fewer results than before: the mark stays on the list.
     let last = found.iter().map(|g| g.commands.len()).sum::<usize>().saturating_sub(1);
@@ -782,7 +783,7 @@ fn palette(ui: &Ui, palette: &Palette, back: &str, t: &Theme) -> El {
             el().key(format!("pal-g{g}-box"))
                 .w_full()
                 .pt(8.0)
-                .px(16.0)
+                .px(scale::space::S16)
                 .pb(4.0)
                 .child(kit::label(format!("pal-g{g}-t"), title, GROUP, t.text_tertiary)),
         );
@@ -796,10 +797,10 @@ fn palette(ui: &Ui, palette: &Palette, back: &str, t: &Theme) -> El {
                 .checked(hot)
                 .mx(8.0)
                 .h(30.0)
-                .px(8.0)
-                .gap(8.0)
+                .px(scale::space::S8)
+                .gap(scale::space::S8)
                 .center_y()
-                .radius(7.0)
+                .radius(tokens::radius::CONTROL)
                 .fill(if hot { t.selection } else { Color::TRANSPARENT })
                 .hover(t.hover)
                 .on_press(|s: &mut State| {
@@ -827,8 +828,8 @@ fn palette(ui: &Ui, palette: &Palette, back: &str, t: &Theme) -> El {
         .key("pal-foot")
         .w_full()
         .h(34.0)
-        .px(16.0)
-        .gap(8.0)
+        .px(scale::space::S16)
+        .gap(scale::space::S8)
         .center_y()
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
         .border_layout()
@@ -845,7 +846,7 @@ fn palette(ui: &Ui, palette: &Palette, back: &str, t: &Theme) -> El {
         .label("Search commands, styles, files")
         .absolute(390.0, 70.0)
         .w(520.0)
-        .radius(14.0)
+        .radius(tokens::radius::XL)
         .fill(t.card)
         .box_shadow(kit::drop(30.0, 80.0, Color::BLACK.alpha(0.30)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -896,9 +897,9 @@ pub fn no_editor(t: &Theme) -> El {
     let content = col()
         .key("empty")
         .role("alert")
-        .py(28.0)
-        .px(24.0)
-        .gap(8.0)
+        .py(scale::space::S28)
+        .px(scale::space::S24)
+        .gap(scale::space::S8)
         .items_center()
         .child(
             el().key("empty-tile")
@@ -922,7 +923,7 @@ pub fn no_editor(t: &Theme) -> El {
         .child(
             row()
                 .key("empty-actions")
-                .gap(8.0)
+                .gap(scale::space::S8)
                 .mt(8.0)
                 .child(
                     button(keys("empty-add"), "Try again", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
@@ -958,10 +959,10 @@ fn worded(key: &str, word: &'static str, icon: &'static Icon, tool: Insert, t: &
         .role("button")
         .label(word)
         .h(28.0)
-        .px(6.0)
-        .gap(4.0)
+        .px(scale::space::S6)
+        .gap(scale::space::S4)
         .center_y()
-        .radius(7.0)
+        .radius(tokens::radius::CONTROL)
         .hover(t.hover)
         .press(t.press)
         .focusable(true)
@@ -1086,7 +1087,7 @@ fn labelled(
     col()
         .key(format!("{key}-col"))
         .w_full()
-        .gap(6.0)
+        .gap(scale::space::S6)
         .child(kit::label(format!("{key}-label"), label, CAP, t.text_tertiary))
         .child(field)
 }
@@ -1128,7 +1129,7 @@ fn table_dialog(form: &TableForm, back: &str, t: &Theme) -> El {
     let fields = row()
         .key("ins-fields")
         .w_full()
-        .gap(12.0)
+        .gap(scale::space::S12)
         .child(labelled(ROWS, "Rows", &form.rows, rows_edit, error_of(&form.error, 0), t))
         .child(labelled(
             COLS,
@@ -1164,7 +1165,7 @@ fn link_dialog(form: &LinkForm, back: &str, t: &Theme) -> El {
     let fields = col()
         .key("ins-fields")
         .w_full()
-        .gap(12.0)
+        .gap(scale::space::S12)
         .child(labelled(
             LINK_TEXT,
             "Text to show",
@@ -1244,8 +1245,8 @@ pub fn table(rows: &[Vec<String>], width: f32, ink: Color) -> El {
                     .role(if r == 0 { "columnheader" } else { "cell" })
                     .label(cell.clone())
                     .w(width / cells.len().max(1) as f32)
-                    .px(8.0)
-                    .py(4.0)
+                    .px(scale::space::S8)
+                    .py(scale::space::S4)
                     .pixel_snap(false)
                     .box_shadow(kit::ring(kit::HAIR, Color::BLACK.alpha(0.20)))
                     .child(

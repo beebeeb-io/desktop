@@ -25,37 +25,38 @@ use super::{Intent, Ui, style};
 use crate::State;
 use crate::frames::office::docs::DocBody;
 use crate::theme::icons;
+use crate::theme::scale;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::toolbar::{self as tb, Bar, Details, New, Sort, View, press};
 use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::{caption, kit, sidebar, status_bar};
 
 /// 12px/600 on 15px: the ribbon's tab that is open.
-const TAB_ON: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
+const TAB_ON: TextStyle = type_::BODY_SEMI;
 /// 12px/500 on 15px: the other tabs.
 const TAB: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
 /// 11px/500 on 14px (`.t-cap`): the command search's words.
-const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
+const CAP: TextStyle = type_::CAPTION;
 /// 12.5px/400 on 17px: a pop-up button's choice.
-const POP: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
+const POP: TextStyle = type_::SEARCH;
 /// 10px mono, 500: a shortcut inside a button.
 const HINT: TextStyle = TextStyle::new(10.0, 500.0)
     .family(Family::Mono)
     .lh(14.2857)
     .tracking(-0.06);
 /// 10px/600 on 13px, tracked 0.7px, capitals (`.t-label`).
-const PANE_LABEL: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.7);
+const PANE_LABEL: TextStyle = type_::SECTION_LABEL;
 /// 12px on 15px: an outline line.
-const OUTLINE: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-const OUTLINE_TOP: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
+const OUTLINE: TextStyle = scale::text::SUB;
+const OUTLINE_TOP: TextStyle = type_::BODY_SEMI;
 /// The page's own type: the document's, not the app's.
 const DOC_TITLE: TextStyle = TextStyle::new(20.0, 650.0).lh(26.0);
 const DOC_BYLINE: TextStyle = TextStyle::new(11.0, 400.0).lh(17.0);
 const DOC_HEADING: TextStyle = TextStyle::new(14.0, 650.0).lh(17.0);
 const DOC_BODY: TextStyle = TextStyle::new(12.5, 400.0).lh(20.0);
 /// 11.5px/600 on 17px: "Encrypted" in the status line.
-const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
-const STATUS_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0);
+const STATUS_ENC: TextStyle = scale::text::STATUS_SEMI;
+const STATUS_MONO: TextStyle = scale::text::META_MONO_LOOSE;
 /// The letters of Bold, Italic, Underline and Strikethrough.
 pub(crate) const LETTER_HEAVY: TextStyle = TextStyle::new(13.5, 800.0).lh(17.0);
 pub(crate) const LETTER: TextStyle = TextStyle::new(13.5, 700.0).lh(17.0);
@@ -286,7 +287,7 @@ pub(crate) fn tool_with(
         .label(name)
         .size(28.0, 28.0)
         .center()
-        .radius(7.0)
+        .radius(tokens::radius::CONTROL)
         .fill(if state == Tool::On {
             t.selection
         } else {
@@ -361,9 +362,9 @@ pub(crate) fn pop_with(
             .h(24.0)
             .pl(9.0)
             .pr(6.0)
-            .gap(4.0)
+            .gap(scale::space::S4)
             .center_y()
-            .radius(6.0),
+            .radius(tokens::radius::MD),
         t,
     )
     .focusable(true)
@@ -396,7 +397,7 @@ pub(crate) fn small_button(
 
 /// The ribbon's first row: the tabs, the command search, Share, Save.
 pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
-    let mut r = row().key("rib-tabs").w_full().h(32.0).px(12.0).gap(4.0).center_y();
+    let mut r = row().key("rib-tabs").w_full().h(32.0).px(scale::space::S12).gap(scale::space::S4).center_y();
     for (i, (tab, word)) in Tab::row_of(ui.office.edit.as_ref().map(|e| e.kind)).into_iter().enumerate() {
         let on = ui.office.tab == tab;
         let mut cell = el()
@@ -405,7 +406,7 @@ pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .label(word)
             .checked(on)
             .h_full()
-            .px(10.0)
+            .px(scale::space::S10)
             .center()
             .focusable(true)
             .on_press(move |s: &mut State| {
@@ -443,9 +444,9 @@ pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .h(24.0)
             .pl(9.0)
             .pr(6.0)
-            .gap(6.0)
+            .gap(scale::space::S6)
             .center_y()
-            .radius(12.0),
+            .radius(scale::radius::DIALOG),
         t,
     )
     .focusable(true)
@@ -465,8 +466,8 @@ pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     .child(
         el().key("rib-find-kbd-box")
             .h(20.0)
-            .px(6.0)
-            .radius(6.0)
+            .px(scale::space::S6)
+            .radius(tokens::radius::MD)
             .fill(t.card)
             .box_shadow(kit::ring_inset(t.separator))
             .box_shadow(kit::drop(1.0, 0.0, t.separator))
@@ -571,8 +572,8 @@ pub(crate) fn ribbon_of(ui: &Ui, unsaved: bool, tools: Vec<El>, t: &Theme) -> El
                 .key("rib-tools")
                 .w_full()
                 .h(38.0)
-                .px(8.0)
-                .gap(2.0)
+                .px(scale::space::S8)
+                .gap(scale::space::S2)
                 .center_y()
                 .fill(t.card)
                 .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
@@ -602,9 +603,9 @@ fn outline(doc: &WordDoc, t: &Theme) -> El {
         .label("Outline")
         .w(210.0)
         .h_full()
-        .py(12.0)
-        .px(8.0)
-        .gap(4.0)
+        .py(scale::space::S12)
+        .px(scale::space::S8)
+        .gap(scale::space::S4)
         .fill(t.surface)
         .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
         .border_layout()
@@ -613,7 +614,7 @@ fn outline(doc: &WordDoc, t: &Theme) -> El {
             row()
                 .key("ol-head")
                 .w_full()
-                .px(8.0)
+                .px(scale::space::S8)
                 .pb(4.0)
                 .center_y()
                 .child(kit::label("ol-title", "OUTLINE", PANE_LABEL, t.text_tertiary))
@@ -636,7 +637,7 @@ fn outline(doc: &WordDoc, t: &Theme) -> El {
                 .h(23.0)
                 .pl(indent)
                 .center_y()
-                .radius(6.0)
+                .radius(tokens::radius::MD)
                 .fill(if here { t.selection } else { Color::TRANSPARENT })
                 .hover(t.hover)
                 .press(t.press)
@@ -662,7 +663,7 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
         .min_h(700.0)
         .px(48.0)
         .py(44.0)
-        .gap(10.0)
+        .gap(scale::space::S10)
         .radius(2.0)
         .fill(Color::WHITE)
         .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)))
@@ -733,10 +734,10 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
                             .label("Selection")
                             .absolute(selection.tools_at.0, selection.tools_at.1)
                             .h(34.0)
-                            .px(4.0)
-                            .gap(2.0)
+                            .px(scale::space::S4)
+                            .gap(scale::space::S2)
                             .center_y()
-                            .radius(10.0)
+                            .radius(tokens::radius::LG)
                             .fill(t.card.alpha(if t.dark { 0.68 } else { 0.72 }))
                             .border(kit::HAIR, t.separator)
                             .border_layout()
@@ -784,7 +785,7 @@ pub(crate) enum Keeping {
 }
 
 /// 11.5px/500 on 17px: a state's words at the start of the status line.
-const STATUS_STATE: TextStyle = TextStyle::new(11.5, 500.0).lh(17.0);
+const STATUS_STATE: TextStyle = type_::STATUS_STRONG;
 /// The board's words in the status line of DW-1556.
 pub const PREPARING: &str = "Preparing the editor on this PC\u{2026}";
 pub const OLDER_FORMAT: &str = "An older Word file (.doc). It opens and saves in the same format.";
@@ -912,7 +913,7 @@ fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at:
     bar.push(
         row()
             .key(format!("{enc}-box"))
-            .gap(4.0)
+            .gap(scale::space::S4)
             .center_y()
             .child(kit::glyph(format!("{enc}-icon"), &oi::PADLOCK, 11.0, t.accent_deep))
             .child(style::fitted(enc, "Encrypted", STATUS_ENC, t.accent_deep)),
@@ -925,7 +926,7 @@ fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at:
             .key(zoom.clone())
             .role("group")
             .label(format!("Zoom, {per_cent} per cent"))
-            .gap(4.0)
+            .gap(scale::space::S4)
             .center_y()
             .child(step(format!("{zoom}-less"), &oi::LESS, "Zoom out", less))
             .child(style::fitted(
@@ -980,7 +981,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
         .role("navigation")
         .label("Path")
         .center_y()
-        .gap(4.0)
+        .gap(scale::space::S4)
         .min_w(0.0);
     for (i, folder) in file.path.iter().enumerate() {
         crumbs = crumbs
@@ -1016,7 +1017,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
         );
         row()
             .key("crumb-here-row")
-            .gap(6.0)
+            .gap(scale::space::S6)
             .center_y()
             .min_w(0.0)
             .child(name)
@@ -1035,7 +1036,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
         .key("folder-info")
         .role("group")
         .label(format!("{}, {}", file.name, file.facts))
-        .px(4.0)
+        .px(scale::space::S4)
         .min_w(0.0)
         .child(crumbs)
         .child(kit::label(
