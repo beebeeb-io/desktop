@@ -1,3 +1,5 @@
+//! The office page tool: renders one document through the app's office host.
+
 #[path = "../../beebeeb-drive-rune/src/engine_host/office_host.rs"]
 mod office_host;
 

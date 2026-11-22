@@ -29,6 +29,12 @@ group, section 1's table) are the truth; `beebeeb-drive --list-scenes` prints th
 - **Not re-read for this update:** the Files, Global, This PC and Tray lists below; their checklists are the truth.
   Not taken by the shell in the viewer: Edit in Sheets and Open in another app.
 
+**Read the numbers below as history (dc-141, 2026-11-22).** Section 1's counts (310 listed, 197 built, 113 not built)
+and the per-group tables are from 2026-11-12 and were not re-measured; do not quote them. To get today's numbers run
+`beebeeb-drive --list-scenes` and count the `DW-` ids in each `src/frames/*/FRAMES.md`. The Drive settings panes
+(Storage, Insights, Sync, Bandwidth, Diagnostics, Keep on this PC, Thumbnails and previews) are wired on the engine
+through `engine_host/drive_settings.rs`; `BoardDrive` is a development and test fixture only.
+
 ## 1. Frames: built and not built
 
 Ten checklists list 310 different frames: 197 are built (each is a scene of the app, `beebeeb-drive

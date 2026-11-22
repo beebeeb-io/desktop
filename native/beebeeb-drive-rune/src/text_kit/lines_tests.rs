@@ -1,3 +1,5 @@
+//! Tests: line splitting and wrapping.
+
 use super::*;
 
 #[test]

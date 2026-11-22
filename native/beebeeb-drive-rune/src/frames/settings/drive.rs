@@ -3,8 +3,9 @@
 //! holds exactly the board's sample content.
 //!
 //! A pane never invents a value: every figure, name and state it draws comes from here, as
-//! the words the board shows. The engine lane replaces `BoardDrive` (which call each method
-//! needs is listed beside it and in the pull request).
+//! the words the board shows. The running app uses `EngineDriveSettings` (`engine_host/drive_settings.rs`);
+//! `BoardDrive` is the board's sample content for development builds and tests, and a shipping build starts on
+//! `UnwiredDrive` (`wired()` is `false`) until the engine is bound.
 
 use super::bandwidth_data::{Bandwidth, BoardBandwidth, Direction, SpeedTest};
 

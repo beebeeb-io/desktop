@@ -1,3 +1,5 @@
+//! Tests: the crash report in the log file.
+
 use super::crash::*;
 
 #[test]

@@ -1,3 +1,5 @@
+//! Tests: transfer progress accounting.
+
 use super::*;
 
 #[test]

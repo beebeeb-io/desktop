@@ -1,3 +1,5 @@
+//! Tests: list keyboard handling.
+
 use rune::{Key, KeyEvent, Mods};
 
 use super::*;

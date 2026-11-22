@@ -1,3 +1,5 @@
+//! Tests: the live HTML viewer.
+
 use super::*;
 
 fn words(p: &[Piece]) -> String {

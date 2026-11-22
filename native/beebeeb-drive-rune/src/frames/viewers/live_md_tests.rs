@@ -1,3 +1,5 @@
+//! Tests: the live Markdown viewer.
+
 use super::{PARSES, blocks_of, body};
 use crate::frames::viewers::markdown::Block;
 use crate::theme::tokens;

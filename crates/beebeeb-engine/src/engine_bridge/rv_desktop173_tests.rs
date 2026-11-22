@@ -1,3 +1,5 @@
+//! Tests: the rv-desktop-173 engine-bridge cases.
+
 include!("tests/fixture_rv173.rs");
 
 #[test]

@@ -1,3 +1,5 @@
+//! Tests: text find.
+
 use super::*;
 
 fn q(n: &str, mc: bool, ww: bool) -> FindQuery {

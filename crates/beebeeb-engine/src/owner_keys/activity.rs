@@ -1,3 +1,5 @@
+//! Readers for one shared-folder activity row (L16, bound envelopes first).
+
 use beebeeb_core::kdf::{FileKey, MasterKey};
 use serde_json::Value;
 

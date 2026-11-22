@@ -1,3 +1,5 @@
+//! Tests: the file row widget.
+
 use super::*;
 use crate::theme::file_icons::{FileIcon, IconId, Tint};
 use crate::theme::tokens;

@@ -1,3 +1,5 @@
+//! Tests: the file list widget.
+
 use super::*;
 use crate::theme::file_icon_colors::tint_color;
 use crate::theme::file_icons::Tint;

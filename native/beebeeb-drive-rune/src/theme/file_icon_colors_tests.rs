@@ -1,3 +1,5 @@
+//! Tests: file icon colors.
+
 use super::super::file_icons::Tint;
 use super::super::tokens::theme;
 use super::tint_color;

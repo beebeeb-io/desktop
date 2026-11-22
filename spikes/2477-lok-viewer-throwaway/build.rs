@@ -1,3 +1,5 @@
+//! Build script: compiles the C shim against the LibreOfficeKit headers (throwaway spike).
+
 // THROWAWAY (task 2477 spike). Compiles the C shim against the LibreOfficeKit headers of the exact
 // LibreOffice version under test. The headers are not vendored: run.ps1 downloads them from the
 // release tag, checks their SHA-256 and passes the folder in LOK_INCLUDE_DIR.

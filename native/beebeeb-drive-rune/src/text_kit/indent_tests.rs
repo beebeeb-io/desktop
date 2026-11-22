@@ -1,3 +1,5 @@
+//! Tests: indentation rules.
+
 use super::*;
 
 #[test]

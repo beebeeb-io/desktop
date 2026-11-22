@@ -1,3 +1,5 @@
+//! Tests: the live SVG viewer.
+
 use super::{Outcome, outcome};
 
 #[test]

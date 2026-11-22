@@ -1,3 +1,5 @@
+//! Tests: file icons.
+
 use super::*;
 use crate::theme::file_icon_art::art;
 use crate::theme::file_icon_colors::tint_color;

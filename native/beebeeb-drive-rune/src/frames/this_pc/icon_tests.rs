@@ -1,3 +1,5 @@
+//! Tests: the This PC frame's icons.
+
 use crate::theme::file_icon_colors::tint_color;
 use crate::theme::file_icons::Tint;
 use crate::theme::tokens;

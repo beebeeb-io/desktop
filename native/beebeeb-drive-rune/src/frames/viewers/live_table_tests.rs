@@ -1,3 +1,5 @@
+//! Tests: the live table viewer.
+
 use super::parse;
 
 #[test]

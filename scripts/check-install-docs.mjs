@@ -24,6 +24,9 @@
 //      release has a `.dmg`, and CONTRIBUTING.md does not deny the PR CI that
 //      `.github/workflows/ci.yml` runs.
 //
+//   6. (GL-0002) The README does not claim selective sync works on every
+//      platform: each "Selective sync" line must say it is not available.
+//
 // Network: needs read-only HTTPS to api.github.com + github.com. It fails
 // closed if it cannot reach them — a check that cannot prove anything is a red.
 //
@@ -177,6 +180,14 @@ try {
 } catch (error) {
   check(false, `could not prove the README key against the latest release: ${error.message}`)
 }
+// ── 6. Selective sync claims (GL-0002) ───────────────────────────────────────
+const selectiveLines = readme.split('\n').filter((l) => /\*\*Selective sync\*\*/.test(l))
+check(selectiveLines.length > 0, 'README mentions Selective sync')
+check(
+  selectiveLines.every((l) => /\bnot (available|offered)\b/i.test(l)),
+  'README does not claim Selective sync on every platform (each mention says it is not available)',
+)
+
 
 console.log(`\ninstall-docs check: ${passes} passed, ${failures.length} failed`)
 process.exit(failures.length === 0 && passes > 0 ? 0 : 1)

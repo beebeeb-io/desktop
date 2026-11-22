@@ -1,3 +1,5 @@
+//! Tests: the live JSON viewer.
+
 use super::*;
 
 fn flat(r: &[Row]) -> Vec<(usize, String)> {

@@ -1,3 +1,5 @@
+//! Tests: the menu widget.
+
 use super::*;
 
 const ENTRIES: [Entry; 6] = [

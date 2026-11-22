@@ -24,7 +24,8 @@
 //!   state. Read when the pane opens and after a change, never at launch. Missing: the live figures, the other
 //!   devices, a metered state the engine reads and honours, a speed test.
 //! - Thumbnails and previews: wired through [`super::drive_previews::PreviewsHost`] (its own module doc).
-//! - Diagnostics: the trait's defaults (no engine module).
+//! - Diagnostics: App activity (the app's own CPU, memory and transfer rates, sampled while the pane is shown) and the
+//!   support bundle (`diagnostics()`); no separate engine module.
 //!
 //! Whose press: a limit is this PC's own setting, not an account's. It is still changed only under the session it
 //! was pressed in (`Engine::session_turn`, read on the window's thread at the press): a session that moved on

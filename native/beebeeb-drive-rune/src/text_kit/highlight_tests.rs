@@ -1,3 +1,5 @@
+//! Tests: syntax highlighting.
+
 use super::*;
 
 #[test]
