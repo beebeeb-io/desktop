@@ -639,6 +639,10 @@ pub use share_marks::{MarkKind, is_unreadable_mark, normalized_email};
 // Task 2523: copies on this PC whose agreed content is behind the current version.
 mod stale_copies;
 pub use stale_copies::StaleCopy;
+// dc-103c: placeholders holding ranges of a version the server moved past.
+mod stale_ranges;
+#[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
+pub use stale_ranges::StaleRanges;
 mod account_switch;
 mod signout;
 mod sync;
