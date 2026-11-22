@@ -294,8 +294,8 @@ fn ld0105_u1_the_cloud_files_callback_runs_that_sequence() {
     );
     assert_eq!(
         body.matches("row.finished()").count(),
-        1,
-        "the row ends as finished only after a whole transfer"
+        2,
+        "the row ends as finished only after a whole transfer (the whole-file path and the streamed size-mismatch refetch)"
     );
     assert_eq!(body.matches("whole_fetch_row(").count(), 1);
 }
