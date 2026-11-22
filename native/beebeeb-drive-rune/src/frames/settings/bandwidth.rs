@@ -35,6 +35,13 @@ pub const DOWNLOAD_MENU_AT: &str = "item-1-1-menu-at";
 /// The menu's top-left corner from its row's own (DW-0785d).
 const MENU_AT: (f32, f32) = (436.0, -5.0);
 
+// Steps the board uses that neither `tokens::space` nor `scale::space` has (3 and 5), and radii
+// between the token steps; they are the base geometry, so they stay exact.
+const GAP_3: f32 = 3.0;
+const GAP_5: f32 = 5.0;
+const RADIUS_3: f32 = 3.0;
+const RADIUS_8: f32 = 8.0;
+
 /// 11.5px/600 on a 17px line: a figure's name (`.mk-fig-k`, `.mk-step-k`).
 const FIG_NAME: TextStyle = text::STATUS_SEMI;
 /// 24px/650 mono on a 30px line, tracked -.02em: a live figure (`.mk-fig-v`).
@@ -256,7 +263,7 @@ fn right_now(bw: &Bandwidth, t: &Theme) -> El {
             .role("group")
             .label(said)
             .w(248.0)
-            .gap(sp::S4)
+            .gap(GAP_3)
             .py(sp::S12)
             .px(sp::S14)
             .radius(sc_radius::DIALOG)
@@ -297,7 +304,7 @@ fn right_now(bw: &Bandwidth, t: &Theme) -> El {
 
 /// A swatch and a total in the chart's legend.
 fn legend(key: &str, direction: Direction, total: &str, t: &Theme) -> El {
-    let mut swatch = el().key(format!("{key}-swatch")).size(10.0, 10.0).radius(rad::SM);
+    let mut swatch = el().key(format!("{key}-swatch")).size(10.0, 10.0).radius(RADIUS_3);
     swatch = match direction {
         Direction::Upload => swatch.fill(t.accent).border(1.0, t.accent_deep),
         Direction::Download => swatch.fill(t.text_tertiary),
@@ -472,10 +479,10 @@ fn chart(h: &History, tip: Option<usize>, t: &Theme) -> El {
             el().key(key.to_string())
                 .absolute(x - 5.0, plot_y(mb, h.top_mb) - 5.0)
                 .size(10.0, 10.0)
-                .radius(rad::SM)
+                .radius(sc_radius::PILL)
                 .fill(t.card)
                 .center()
-                .child(el().key(format!("{key}-ink")).size(6.0, 6.0).radius(rad::SM).fill(ink))
+                .child(el().key(format!("{key}-ink")).size(6.0, 6.0).radius(sc_radius::PILL).fill(ink))
         };
         plot = plot
             .child(dot("chart-dot-up", h.up_mb[i], t.accent))
@@ -489,7 +496,7 @@ fn chart(h: &History, tip: Option<usize>, t: &Theme) -> El {
                     .absolute(if x >= 228.0 { x - 228.0 } else { x + 12.0 }, 18.0)
                     .py(sp::S6)
                     .px(sp::S9)
-                    .radius(rad::CONTROL)
+                    .radius(RADIUS_8)
                     .fill(t.card)
                     .box_shadow(kit::drop(4.0, 14.0, Color::BLACK.alpha(0.14)))
                     .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -554,7 +561,7 @@ fn state_pill(i: usize, state: DeviceState, t: &Theme) -> El {
         .key(key.clone())
         .h(20.0)
         .px(sp::S8)
-        .gap(sp::S6)
+        .gap(GAP_5)
         .center_y()
         .radius(rad::LG)
         .fill(t.green.alpha(0.14))
@@ -580,7 +587,7 @@ fn devices(list: usize, devices: &[Device], t: &Theme) -> El {
                 .weight(400.0)
                 .color(t.text_tertiary);
             kit::note_text(&format!("{key}-name"), &format!("{key}-name"), &name, DEVICE, t.text);
-            let mut words = col().key(format!("{key}-text")).grow(1.0).min_w(0.0).gap(sp::S4).child(
+            let mut words = col().key(format!("{key}-text")).grow(1.0).min_w(0.0).gap(GAP_3).child(
                 rich(name, vec![tag])
                     .key(format!("{key}-name"))
                     .font(DEVICE)
@@ -616,7 +623,7 @@ fn devices(list: usize, devices: &[Device], t: &Theme) -> El {
             r.child(
                 el().key(format!("{key}-tile"))
                     .size(30.0, 30.0)
-                    .radius(rad::CONTROL)
+                    .radius(RADIUS_8)
                     .fill(t.text.alpha(0.07))
                     .center()
                     .child(kit::glyph(format!("{key}-icon"), icon, 15.0, t.text_secondary)),
