@@ -38,7 +38,7 @@ fn each_refusal_says_what_happened_and_offers_a_fix_only_where_one_exists() {
     sentences.dedup();
     assert_eq!(
         (titles.len(), sentences.len()),
-        (11, 11),
+        (12, 12),
         "one title and one sentence per kind"
     );
     for (kind, words) in Refused::ALL.iter().zip(&all) {
@@ -58,6 +58,7 @@ fn each_refusal_says_what_happened_and_offers_a_fix_only_where_one_exists() {
             Refused::OtherAccountsData | Refused::IdentityUnknown => &[Action::Close],
             Refused::StopUnconfirmed => &[Action::Quit, Action::Close],
             Refused::UnsentFileOfAnotherAccount => &[Action::TryAgain, Action::DiscardAndSwitch, Action::Close],
+            Refused::LeftoverFilesOfAnotherAccount => &[Action::KeepAside, Action::DiscardAndSwitch, Action::Close],
             _ => &[Action::TryAgain, Action::Close],
         };
         assert_eq!(words.actions, expected, "{kind:?}");
@@ -210,4 +211,42 @@ fn the_modals_try_again_asks_for_one_start() {
     );
     press(&mut rt, "Close");
     assert_eq!(starts(&engine), 1, "Close asks for nothing");
+}
+
+/// dc-RC-b, the red test (VM 401, RC1: "no fix in this version", Close only): files the previous account left offer
+/// both answers, "Keep them aside" first, and never the sentence that there is no fix. "Keep them aside" asks the
+/// engine once and closes the modal; "Close" asks for nothing, so nothing moves without the person's choice.
+#[test]
+fn leftover_files_offer_keep_aside_and_discard_and_keep_aside_asks_the_engine_once() {
+    let w = words(&off(1, Refused::LeftoverFilesOfAnotherAccount), PRODUCT);
+    assert_eq!(w.actions, [Action::KeepAside, Action::DiscardAndSwitch, Action::Close]);
+    assert!(!w.fix.contains("no fix"), "{}", w.fix);
+    assert!(w.fix.contains("\u{201c}Beebeeb files from\u{201d}"), "{}", w.fix);
+    assert!(w.fix.contains("next to the sync folder"), "{}", w.fix);
+    assert!(w.happened.contains("Nothing was uploaded or deleted"), "{}", w.happened);
+
+    let engine = Arc::new(FixtureEngine::ready());
+    let mut rt = runtime(engine.clone());
+    let asked = |engine: &FixtureEngine| engine.calls().iter().filter(|c| **c == FixtureCall::KeepAside).count();
+    engine.set_sync_refusal(Some(off(1, Refused::LeftoverFilesOfAnotherAccount)));
+    frames(&mut rt, 2);
+    assert!(open(&rt));
+    let labels: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "button" && !e.inert)
+        .filter_map(|e| e.label)
+        .collect();
+    for label in ["Keep them aside", "Discard and switch", "Close"] {
+        assert!(labels.iter().any(|l| l == label), "{label} is not on the card: {labels:?}");
+    }
+    press(&mut rt, "Close");
+    assert_eq!(asked(&engine), 0, "Close moves nothing");
+
+    engine.set_sync_refusal(Some(off(2, Refused::LeftoverFilesOfAnotherAccount)));
+    frames(&mut rt, 2);
+    assert!(open(&rt));
+    press(&mut rt, "Keep them aside");
+    assert!(!open(&rt), "the modal closed");
+    assert_eq!(asked(&engine), 1, "the engine was asked once");
 }

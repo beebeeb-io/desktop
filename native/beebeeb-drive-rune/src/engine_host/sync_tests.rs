@@ -15,13 +15,14 @@ use super::*;
 use crate::shell::tray::{EngineState, tray_model};
 use crate::ui::status_line as words;
 
-const KINDS: [SyncStartRefused; 11] = [
+const KINDS: [SyncStartRefused; 12] = [
     SyncStartRefused::FolderOfAnotherProvider,
     SyncStartRefused::FolderUnreadable,
     SyncStartRefused::FolderMissing,
     SyncStartRefused::RegistrationFailed { code: Some(5) },
     SyncStartRefused::OtherAccountsData,
     SyncStartRefused::UnsentFileOfAnotherAccount,
+    SyncStartRefused::LeftoverFilesOfAnotherAccount,
     SyncStartRefused::IdentityUnknown,
     SyncStartRefused::StopUnconfirmed,
     SyncStartRefused::StopFinishing,

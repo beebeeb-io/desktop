@@ -112,6 +112,11 @@ pub trait EngineActions: Send + Sync {
     fn discard_and_switch(&self, _ask: DiscardAsk) -> Result<(), ActionError> {
         Err(ActionError::NotBuilt("discard and switch"))
     }
+    /// dc-RC-b: move the files the previous account left into a dated folder beside the sync folder, then start, on
+    /// a worker. `Ok` means "asked".
+    fn keep_aside_and_switch(&self) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("keep aside"))
+    }
     /// The away lock's look at `seen`, as a job for a worker ([`AwayJob`]). `None`: this engine has no automatic
     /// lock (the fixture), and the shell asks nothing more.
     fn away_job(&self, _seen: Away) -> Option<AwayJob> {
@@ -160,6 +165,10 @@ pub trait ShellActions: Send + Sync {
     /// See [`EngineActions::discard_and_switch`].
     fn discard_and_switch(&self, _ask: DiscardAsk) -> Result<(), ActionError> {
         Err(ActionError::NotBuilt("discard and switch"))
+    }
+    /// See [`EngineActions::keep_aside_and_switch`].
+    fn keep_aside_and_switch(&self) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("keep aside"))
     }
     /// See [`EngineActions::away_job`].
     fn away_job(&self, _seen: Away) -> Option<AwayJob> {
@@ -241,6 +250,9 @@ impl ShellActions for HostActions {
     fn discard_and_switch(&self, ask: DiscardAsk) -> Result<(), ActionError> {
         self.engine.discard_and_switch(ask)
     }
+    fn keep_aside_and_switch(&self) -> Result<(), ActionError> {
+        self.engine.keep_aside_and_switch()
+    }
     fn away_job(&self, seen: Away) -> Option<AwayJob> {
         self.engine.away_job(seen)
     }
@@ -257,6 +269,7 @@ pub enum FixtureCall {
     Resume,
     OpenInFileExplorer,
     StartSync,
+    KeepAside,
     StopForQuit,
     ResumeAfterCancelledQuit,
 }
@@ -414,6 +427,10 @@ impl EngineActions for FixtureEngine {
     }
     fn sync_refusal(&self) -> Option<SyncOff> {
         self.lock().refusal.clone()
+    }
+    fn keep_aside_and_switch(&self) -> Result<(), ActionError> {
+        self.lock().calls.push(FixtureCall::KeepAside);
+        Ok(())
     }
 }
 

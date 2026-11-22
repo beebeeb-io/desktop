@@ -158,6 +158,7 @@ pub fn refused_of(kind: SyncStartRefused) -> Refused {
         SyncStartRefused::RegistrationFailed { code } => Refused::RegistrationFailed { code },
         SyncStartRefused::OtherAccountsData => Refused::OtherAccountsData,
         SyncStartRefused::UnsentFileOfAnotherAccount => Refused::UnsentFileOfAnotherAccount,
+        SyncStartRefused::LeftoverFilesOfAnotherAccount => Refused::LeftoverFilesOfAnotherAccount,
         SyncStartRefused::IdentityUnknown => Refused::IdentityUnknown,
         SyncStartRefused::StopUnconfirmed => Refused::StopUnconfirmed,
         SyncStartRefused::StopFinishing => Refused::StopFinishing,

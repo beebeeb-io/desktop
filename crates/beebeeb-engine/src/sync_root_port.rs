@@ -38,6 +38,13 @@ pub trait SyncRootPort: Send + Sync {
     fn may_hold_bytes(&self, _folder: &Path, _path: &str) -> bool {
         true
     }
+    /// dc-RC-b: whether the file at `path` (under `folder`, `/` between names) is one a person left that
+    /// [`remove_synced_items`](Self::remove_synced_items) never deletes: an ordinary file, or a synced file whose
+    /// bytes changed since. Asked only after the removal refused, so the person can be offered to keep such files
+    /// aside. An OS that cannot tell says `false`: nothing is offered and nothing is moved.
+    fn left_by_a_person(&self, _folder: &Path, _path: &str) -> bool {
+        false
+    }
 }
 
 /// The OS's answers, for the identity the handle was opened with.
@@ -98,6 +105,20 @@ impl SyncRootPort for OsSyncRoots {
         match std::fs::symlink_metadata(&at) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             _ => !crate::windows_cf::signout::placeholder_holds_nothing(&at),
+        }
+    }
+    /// A file that is no cloud placeholder, or a placeholder Windows no longer has in sync that holds bytes here.
+    /// Read with attribute access only (nothing is fetched). A placeholder in sync, or one holding nothing, is the
+    /// purge's to judge; a folder, a link or nothing there is no file.
+    #[cfg(target_os = "windows")]
+    fn left_by_a_person(&self, folder: &Path, path: &str) -> bool {
+        let at = folder.join(path.trim_start_matches('/').replace('/', "\\"));
+        match std::fs::symlink_metadata(&at) {
+            Ok(item) if item.is_file() => {
+                crate::windows_cf::placeholders::placeholder_in_sync(&at) != Some(true)
+                    && !crate::windows_cf::signout::placeholder_holds_nothing(&at)
+            }
+            _ => false,
         }
     }
 }
