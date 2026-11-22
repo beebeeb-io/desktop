@@ -21,6 +21,7 @@ use crate::State;
 use crate::shell::app::{Event, Route, Screen, Section, SettingsPane};
 use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
 use crate::source::DriveItem;
+use crate::theme::scale;
 use crate::theme::icons;
 use crate::theme::icons_settings;
 use crate::theme::tokens::{Theme, type_};
@@ -405,7 +406,7 @@ const COL_SHARED_W: f32 = 92.0;
 const COL_STATUS_W: f32 = 150.0;
 const COL_PC_W: f32 = 34.0;
 /// The Status column's words (`.mk-row .t-cap`).
-const STATUS: TextStyle = TextStyle::new(12.0, 400.0).lh(14.5);
+const STATUS: TextStyle = crate::theme::scale::text::NOTE;
 /// The words beside a name (`.mk-row .t-cap` in the name cell).
 const NOTE: TextStyle = TextStyle::new(11.0, 400.0).lh(13.0);
 

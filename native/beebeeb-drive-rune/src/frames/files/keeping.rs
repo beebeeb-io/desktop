@@ -9,6 +9,7 @@
 use super::source::{Action, FilesFixture};
 use crate::State;
 use crate::source::DriveItem;
+use crate::theme::scale;
 use crate::theme::icons_settings;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
@@ -91,7 +92,7 @@ pub fn progress(k: &str, item: &DriveItem, d: &Download, width: f32, t: &Theme) 
     col()
         .key(format!("{k}-download"))
         .w(width)
-        .gap(4.0)
+        .gap(scale::space::S4)
         .child(
             kit::label(
                 format!("{k}-download-words"),

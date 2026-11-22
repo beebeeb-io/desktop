@@ -17,6 +17,7 @@ use super::source::{Action, ActionError};
 use super::{Intent, Toast};
 use crate::State;
 use crate::source::{DriveItem, format_size};
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, icons_settings};
 use crate::ui::file_row::RowLook;
@@ -256,7 +257,7 @@ pub fn file_head(item: &DriveItem, name: &str, sub: &str, mono: bool, _tile: f32
         .key("dlg-file")
         .w_full()
         .center_y()
-        .gap(12.0)
+        .gap(scale::space::S12)
         .child(big_tile("dlg-file", item, 40.0, t))
         .child(
             col()

@@ -13,6 +13,7 @@ use super::names::{self, NameError};
 use super::source::{Action, ActionError};
 use crate::State;
 use crate::source::{Crumb, DriveItem};
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, radius};
 use crate::theme::{icons, icons_settings};
 use crate::ui::settings_dialog::{self, Weight};
@@ -582,7 +583,7 @@ pub const MOVE_LIST: &str = "list-0-body";
 /// `.kit-item-title`: 13px/500, tracked -0.005em.
 const ITEM_TITLE: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0).tracking(-0.065);
 /// The path line of the Move dialog (`.t-sub`, the folder shown in ink at 500).
-const PATH_HERE: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
+const PATH_HERE: TextStyle = crate::theme::scale::text::SUB_STRONG;
 
 /// A dialog on the Files window's scrim. `foot`: the buttons, the amber one first; `stack`:
 /// one under the other, each as wide as the dialog (`.wn-dlg-foot.is-stack`).
@@ -663,8 +664,8 @@ fn folder_row(index: usize, of: usize, folder: &DriveItem, picked: bool, t: &The
         .checked(picked)
         .w_full()
         .h(28.0)
-        .px(10.0)
-        .gap(8.0)
+        .px(scale::space::S10)
+        .gap(scale::space::S8)
         .center_y()
         // `.kit-item.is-selected`: ink at 6 % (9 % in the dark).
         .fill(if picked {
@@ -716,7 +717,7 @@ fn move_to(m: &MoveTo, t: &Theme) -> El {
         .role("navigation")
         .label("Folder")
         .center_y()
-        .gap(4.0)
+        .gap(scale::space::S4)
         .child(kit::glyph(
             "dlg-path-icon",
             &icons_settings::FOLDER,

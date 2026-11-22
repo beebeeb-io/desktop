@@ -13,6 +13,7 @@
 use super::Intent;
 use super::source::Action;
 use crate::State;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::icons_files;
 use crate::ui::dialog::{Dialog, Foot, Head, Surface, dialog};
@@ -151,12 +152,12 @@ fn drag_page(i: usize, t: &Theme) -> El {
         .key(format!("drag-page-{i}"))
         .absolute(i as f32 * 5.0, i as f32 * 2.0)
         .size(34.0, 42.0)
-        .radius(4.0)
+        .radius(crate::theme::tokens::radius::SM)
         .fill(t.white)
         .box_shadow(kit::drop(2.0, 10.0, t.shadow_page))
-        .py(6.0)
-        .px(5.0)
-        .gap(3.0)
+        .py(scale::space::S6)
+        .px(scale::space::S4)
+        .gap(scale::space::S4)
         .rotate((i as f32 - 1.0) * 6.0_f32.to_radians())
         .child(line(format!("drag-page-{i}-h"), 6.0, 24.0 * 0.6, Color::BLACK.alpha(0.30)).mb(3.0))
         .child(line(format!("drag-page-{i}-a"), 3.0, 24.0, t.shadow_page))
@@ -180,9 +181,9 @@ pub fn drop_layer(s: &State, t: &Theme) -> Option<El> {
                 .absolute(40.0, -1.0)
                 .min_w(18.0)
                 .h(18.0)
-                .px(5.0)
+                .px(scale::space::S4)
                 .center()
-                .radius(9.0)
+                .radius(scale::radius::TILE)
                 .fill(crate::theme::tokens::red_fill())
                 .child(kit::label("drag-count", count.to_string(), type_::BADGE, t.white)),
         );
@@ -196,10 +197,10 @@ pub fn drop_layer(s: &State, t: &Theme) -> Option<El> {
         .role("status")
         .label(words.clone())
         .h(25.0)
-        .px(8.0)
-        .gap(6.0)
+        .px(scale::space::S8)
+        .gap(scale::space::S6)
         .center_y()
-        .radius(6.0)
+        .radius(crate::theme::tokens::radius::MD)
         .fill(t.card)
         .box_shadow(kit::drop(4.0, 14.0, Color::BLACK.alpha(0.16)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -209,13 +210,13 @@ pub fn drop_layer(s: &State, t: &Theme) -> Option<El> {
         .key("drop-layer")
         .absolute(430.0, top)
         .center_y()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .child(pages);
     Some(layer.child(tip))
 }
 
 /// `.mk-tip`: 11.5 px on the status line's 17 pt line.
-const TIP: rune::TextStyle = rune::TextStyle::new(11.5, 400.0).lh(17.0);
+const TIP: rune::TextStyle = crate::theme::tokens::type_::STATUS;
 
 // ---- Uploads (DW-0426, DW-0427) ----
 
@@ -404,7 +405,7 @@ fn picture_tile(key: &str, upload: &Upload, t: &Theme) -> El {
 }
 
 fn heading(key: &str, words: &str, top: f32, t: &Theme) -> El {
-    el().key(format!("{key}-box")).px(12.0).pt(top).child(kit::label(
+    el().key(format!("{key}-box")).px(scale::space::S12).pt(top).child(kit::label(
         key.to_string(),
         words.to_uppercase(),
         type_::SECTION_LABEL,
@@ -491,7 +492,7 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
     let line = format!("{} \u{00B7} Continues in the background", uploads.figures);
     let head = col()
             .key("uploads-head")
-            .px(12.0)
+            .px(scale::space::S12)
             .pt(12.0)
             .pb(8.0)
             .child(
@@ -535,8 +536,8 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
     let foot = row()
         .w_full()
         .justify_end()
-        .px(12.0)
-        .py(10.0)
+        .px(scale::space::S12)
+        .py(scale::space::S10)
         .mt(4.0)
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
         .border_layout()
