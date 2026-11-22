@@ -802,6 +802,23 @@ fn window_with(
         None => main.child(bar(deck, &t)).child(body).child(status(deck, None, &t)),
     };
     let menu = ui.office.edit.is_some().then(|| strip::menu_layer(deck, &t)).flatten();
+    let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
+        row()
+            .key("body")
+            .w_full()
+            .h_full()
+            .child(sidebar::sidebar(s, &t))
+            .child(main),
+    );
+    // What is open over the deck (the command search, the question before leaving, About) and the window's notice
+    // are drawn here as over a document: without them Ctrl+K opened a search nobody could see, which then held the
+    // keys.
+    if let Some(over) = viewers::office_over::over(ui, &t) {
+        under = under.child(over);
+    }
+    if let Some(words) = &ui.toast {
+        under = under.child(viewers::dialogs::toast(words, &t));
+    }
     let window = col()
         .key("window")
         .role("window")
@@ -810,16 +827,7 @@ fn window_with(
         .h_full()
         .fill(t.bg)
         .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
-        .child(
-            el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
-                row()
-                    .key("body")
-                    .w_full()
-                    .h_full()
-                    .child(sidebar::sidebar(s, &t))
-                    .child(main),
-            ),
-        );
+        .child(under);
     match menu {
         Some(menu) => window.child(menu),
         None => window,

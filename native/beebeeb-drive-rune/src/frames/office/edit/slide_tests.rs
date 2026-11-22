@@ -624,3 +624,223 @@ fn office_slides_edit_keys_duplicate_and_delete_the_current_slide() {
     assert!(matches!(log.borrow().edits.last(), Some(EditOp::Delete { .. })));
     assert_eq!(deck(&mut rt), (3, 3));
 }
+
+// ---------------------------------------------------------------------------
+// The keys as the window gets them (drive-complete RC1, check 11): the keyboard is where a click left it. A click on
+// a thumbnail leaves it on the filmstrip row, not on the stage; every key below goes through the runtime's own
+// routing (the focused element, its ancestors, the window's `on_key`), as a key pressed on the installed build does.
+// ---------------------------------------------------------------------------
+
+/// [`editing`] with the shell's poll, which takes the viewer's intents (a palette command is one).
+fn editing_polled() -> (Runtime<State>, Rc<RefCell<Log>>) {
+    let (mut rt, log) = editing();
+    rt.poll = Some(crate::shell::host::poll);
+    rt.frame(0.0);
+    (rt, log)
+}
+
+fn focused(rt: &Runtime<State>) -> Option<String> {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.focused && !e.exiting)
+        .and_then(|e| e.key)
+}
+
+/// A click on thumbnail `n` (1-based): the stage shows the slide and the keyboard is on the filmstrip row. What the
+/// click itself sent (a shape let go on the slide it left) is dropped from the log.
+fn click_thumbnail(rt: &mut Runtime<State>, log: &Rc<RefCell<Log>>, n: u32) {
+    let row = format!("fs-{}", n - 1);
+    click_in(rt, &format!("{row}-slide"), 0.5, 0.5);
+    assert_eq!(
+        focused(rt).as_deref(),
+        Some(row.as_str()),
+        "a click on a thumbnail leaves the keyboard on its row"
+    );
+    assert_eq!(deck(rt).0, n);
+    log.borrow_mut().edits.clear();
+}
+
+fn type_words(rt: &mut Runtime<State>, words: &str) {
+    for c in words.chars() {
+        plain(rt, Key::Text(c.to_string()));
+    }
+}
+
+fn palette_query(rt: &mut Runtime<State>) -> Option<String> {
+    use crate::frames::viewers::office_over::Over;
+    match viewers::ui(&mut rt.state).and_then(|ui| ui.office.over.as_ref()) {
+        Some(Over::Palette(palette)) => Some(palette.query.text.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn office_slides_window_keys_ctrl_k_from_a_thumbnail_shows_the_palette_and_duplicate_runs_and_undoes() {
+    let (mut rt, log) = editing_polled();
+    click_thumbnail(&mut rt, &log, 2);
+    key(&mut rt, Key::Command('k'), ctrl());
+    assert!(
+        find(&rt, "pal").is_some(),
+        "Ctrl+K draws the command search over the deck"
+    );
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some("pal-input"),
+        "and its field has the keyboard"
+    );
+    type_words(&mut rt, "Duplicate slide");
+    assert_eq!(
+        palette_query(&mut rt).as_deref(),
+        Some("Duplicate slide"),
+        "the typed words land in the search"
+    );
+    assert!(
+        log.borrow().edits.is_empty(),
+        "typing runs nothing: {:?}",
+        log.borrow().edits
+    );
+    plain(&mut rt, Key::Enter);
+    assert_eq!(log.borrow().edits.last(), Some(&EditOp::DuplicateSlide(1)));
+    assert_eq!(deck(&mut rt), (3, 4), "the copy shows");
+    assert!(
+        find(&rt, "pal").is_none() && palette_query(&mut rt).is_none(),
+        "the search closed"
+    );
+    key(&mut rt, Key::Command('z'), ctrl());
+    assert_eq!(
+        log.borrow().edits.last(),
+        Some(&EditOp::Undo),
+        "Ctrl+Z after the palette undoes"
+    );
+}
+
+#[test]
+fn office_slides_window_keys_the_search_button_shows_the_palette_and_delete_runs_and_undoes() {
+    let (mut rt, log) = editing_polled();
+    click_thumbnail(&mut rt, &log, 2);
+    click_in(&mut rt, "rib-find", 0.3, 0.5);
+    assert!(
+        find(&rt, "pal").is_some(),
+        "the search button draws the command search over the deck"
+    );
+    assert_eq!(focused(&rt).as_deref(), Some("pal-input"));
+    type_words(&mut rt, "Delete slide");
+    plain(&mut rt, Key::Enter);
+    assert_eq!(log.borrow().edits.as_slice(), &[EditOp::DeleteSlide(1)]);
+    assert_eq!(deck(&mut rt), (2, 2));
+    key(&mut rt, Key::Command('z'), ctrl());
+    assert_eq!(log.borrow().edits.last(), Some(&EditOp::Undo));
+    // Esc closes a search that ran nothing, and the deck's keys are the deck's again.
+    key(&mut rt, Key::Command('k'), ctrl());
+    assert!(find(&rt, "pal").is_some());
+    plain(&mut rt, Key::Escape);
+    assert!(find(&rt, "pal").is_none() && palette_query(&mut rt).is_none());
+    assert!(
+        viewers::ui(&mut rt.state).is_some(),
+        "Esc closed the search, not the file"
+    );
+}
+
+#[test]
+fn office_slides_window_keys_ctrl_d_and_ctrl_z_from_a_thumbnail() {
+    let (mut rt, log) = editing_polled();
+    click_thumbnail(&mut rt, &log, 1);
+    key(&mut rt, Key::Command('d'), ctrl());
+    assert_eq!(
+        log.borrow().edits.as_slice(),
+        &[EditOp::DuplicateSlide(0)],
+        "Ctrl+D on a filmstrip row"
+    );
+    assert_eq!(deck(&mut rt), (2, 4));
+    key(&mut rt, Key::Command('z'), ctrl());
+    assert_eq!(
+        log.borrow().edits.last(),
+        Some(&EditOp::Undo),
+        "Ctrl+Z on a filmstrip row"
+    );
+    key(&mut rt, Key::Command('y'), ctrl());
+    assert_eq!(log.borrow().edits.last(), Some(&EditOp::Redo));
+    key(&mut rt, Key::Command('z'), Mods { shift: true, ..ctrl() });
+    assert_eq!(log.borrow().edits.last(), Some(&EditOp::Redo));
+    // Delete on the row, then Ctrl+Z: the case the installed build left without an undo.
+    click_thumbnail(&mut rt, &log, 2);
+    plain(&mut rt, Key::Delete);
+    key(&mut rt, Key::Command('z'), ctrl());
+    assert_eq!(log.borrow().edits.as_slice(), &[EditOp::DeleteSlide(1), EditOp::Undo]);
+}
+
+#[test]
+fn office_slides_window_keys_work_with_the_keyboard_nowhere_and_on_a_ribbon_button() {
+    let (mut rt, log) = editing_polled();
+    assert_eq!(focused(&rt), None, "nothing has the keyboard in a deck just opened");
+    key(&mut rt, Key::Command('d'), ctrl());
+    key(&mut rt, Key::Command('z'), ctrl());
+    key(&mut rt, Key::Command('m'), ctrl());
+    assert_eq!(
+        log.borrow().edits.as_slice(),
+        &[
+            EditOp::DuplicateSlide(0),
+            EditOp::Undo,
+            EditOp::NewSlide { layout: None }
+        ]
+    );
+    // The stage still takes each chord once: its own handler, not that and the window's.
+    click_in(&mut rt, "edit-slide", 0.5, 0.5);
+    log.borrow_mut().edits.clear();
+    key(&mut rt, Key::Command('z'), ctrl());
+    key(&mut rt, Key::Command('d'), ctrl());
+    let (current, _) = deck(&mut rt);
+    assert_eq!(
+        log.borrow().edits.as_slice(),
+        &[EditOp::Undo, EditOp::DuplicateSlide(current - 2)]
+    );
+}
+
+#[test]
+fn office_slides_window_keys_are_not_the_decks_under_the_palette_in_the_search_field_or_with_text_in_hand() {
+    let (mut rt, log) = editing_polled();
+    click_thumbnail(&mut rt, &log, 1);
+    // Under the command search: its field's keys, never the deck's.
+    key(&mut rt, Key::Command('k'), ctrl());
+    key(&mut rt, Key::Command('d'), ctrl());
+    key(&mut rt, Key::Command('m'), ctrl());
+    assert!(log.borrow().edits.is_empty(), "{:?}", log.borrow().edits);
+    assert_eq!(deck(&mut rt), (1, 3));
+    plain(&mut rt, Key::Escape);
+    // In "Search names": Ctrl+D and Ctrl+M are not the deck's.
+    click_in(&mut rt, "search-input", 0.5, 0.5);
+    assert_eq!(focused(&rt).as_deref(), Some("search-input"));
+    key(&mut rt, Key::Command('d'), ctrl());
+    key(&mut rt, Key::Command('m'), ctrl());
+    assert!(log.borrow().edits.is_empty(), "{:?}", log.borrow().edits);
+    // A shape's text in hand: Ctrl+D copies no slide.
+    with_caret(&mut rt, &log);
+    key(&mut rt, Key::Command('d'), ctrl());
+    assert!(log.borrow().edits.is_empty(), "{:?}", log.borrow().edits);
+    assert_eq!(deck(&mut rt), (1, 3));
+}
+
+#[test]
+fn office_slides_window_keys_a_viewed_deck_takes_none() {
+    let mut file = slides_fixture::file();
+    file.body = Body::Deck(DeckBody::new(DeckView::of(3)));
+    let log = Rc::new(RefCell::new(Log::default()));
+    let mut state = init();
+    let id = file.id.clone();
+    assert!(viewers::open_from(
+        &mut state,
+        Box::new(EditSource { file, log: log.clone() }),
+        &id
+    ));
+    let env = Env {
+        system_dark: false,
+        scale: 1.0,
+    };
+    let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
+    rt.on_key = Some(crate::shell::host::on_key);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    key(&mut rt, Key::Command('d'), ctrl());
+    key(&mut rt, Key::Command('z'), ctrl());
+    assert!(log.borrow().edits.is_empty() && deck(&mut rt) == (1, 3));
+}

@@ -114,6 +114,10 @@ pub(super) fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if deck_mut(s).is_some_and(|deck| deck.on_key(&ev.key, &ev.mods)) {
         return true;
     }
+    // A deck being edited: its chords (Ctrl+D, Ctrl+Z, ...) when the stage does not have the keyboard.
+    if crate::frames::office::edit::slide::window_key(s, tx, ev) {
+        return true;
+    }
     if docs::on_key(s, ev, tx) {
         return true;
     }

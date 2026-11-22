@@ -335,9 +335,33 @@ pub fn on_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
     }
 }
 
-/// Ctrl chords: new slide, undo and redo, select all, the marks, the word-wise motions and deletions.
-fn command_key(s: &mut State, ev: &KeyEvent, l: Live) -> bool {
-    let shift = ev.mods.shift;
+/// The toolbar's "Search names" field: the window's one text field that is not over the deck.
+const SEARCH_FIELD: &str = "search-input";
+
+/// The deck's chords when the stage does not have the keyboard: a filmstrip row has it (a click on a thumbnail leaves
+/// it there), a button of the ribbon, or nothing. Ctrl+M, Ctrl+D, Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y act on the deck as
+/// they do on the stage. Not while Present is on, nor while something is over the deck (the command search, a
+/// question, the slide menu), nor from the search field.
+pub fn window_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
+    let m = ev.mods;
+    if !(m.cmd || m.ctrl) || m.alt || tx.focused() == Some(SEARCH_FIELD) {
+        return false;
+    }
+    let Some(l) = live(s) else { return false };
+    let covered = viewers::ui(s).is_some_and(|ui| ui.office.over.is_some())
+        || viewers::deck_mut(s).is_some_and(|deck| deck.menu.is_some());
+    if l.presenting || covered {
+        return false;
+    }
+    if !deck_chord(s, ev, l) {
+        return false;
+    }
+    tx.instant();
+    true
+}
+
+/// The chords that are the deck's whatever has the keyboard: a new slide, a copy of the slide, undo and redo.
+fn deck_chord(s: &mut State, ev: &KeyEvent, l: Live) -> bool {
     if ev.is_command('m') {
         new_slide(s);
         return true;
@@ -347,11 +371,20 @@ fn command_key(s: &mut State, ev: &KeyEvent, l: Live) -> bool {
         return true;
     }
     if ev.is_command('z') {
-        send(s, if shift { EditOp::Redo } else { EditOp::Undo });
+        send(s, if ev.mods.shift { EditOp::Redo } else { EditOp::Undo });
         return true;
     }
     if ev.is_command('y') {
         send(s, EditOp::Redo);
+        return true;
+    }
+    false
+}
+
+/// Ctrl chords: new slide, undo and redo, select all, the marks, the word-wise motions and deletions.
+fn command_key(s: &mut State, ev: &KeyEvent, l: Live) -> bool {
+    let shift = ev.mods.shift;
+    if deck_chord(s, ev, l) {
         return true;
     }
     if !l.caret {
