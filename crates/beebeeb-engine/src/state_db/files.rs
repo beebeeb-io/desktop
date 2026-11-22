@@ -167,7 +167,6 @@ impl StateDb {
         )
     }
     /// Task 2191: every file of unknown content (the start-up guard walks them all).
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     pub fn list_guarded(&self) -> Result<Vec<GuardedRow>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(&format!(
