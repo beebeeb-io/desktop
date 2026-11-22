@@ -187,7 +187,7 @@ fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
         Toast::UploadCancelled => plain("Upload cancelled. The copy is in the Recycle Bin.", Lead::None),
         Toast::LinkCopied => plain("Link copied", Lead::Check),
         Toast::ReadOneAtATime => plain(Toast::READ_ONE_AT_A_TIME, Lead::Warn),
-        Toast::KeepFirst => plain(crate::frames::office::docs::KEEP_FIRST, Lead::Warn),
+        Toast::Downloading(size) => plain(&crate::frames::open_file::downloading_words(size), Lead::None),
         Toast::KeptEdits(count) => plain(
             &crate::frames::office::edit::recovery::unlocked_words(usize::from(count), None).unwrap_or_default(),
             Lead::Warn,

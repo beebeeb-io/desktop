@@ -162,8 +162,9 @@ pub enum Toast {
     ReadOneAtATime,
     /// "Upload cancelled. The copy is in the Recycle Bin." (DW-0427)
     UploadCancelled,
-    /// "Keep this file on this PC first." (DW-1562): Open With ▸ an app, on a file that is not kept on this PC.
-    KeepFirst,
+    /// "Downloading 12.3 MB…": a file not kept on this PC was handed to another app (Open, Open With ▸ an app or
+    /// Other…) and Windows fetches it first. Its size from the row; `None`: "Downloading…".
+    Downloading(Option<i64>),
     /// "Unsaved changes to 2 files were kept on this PC.": the office editor's notice after unlock, for that many
     /// files (`frames::office::edit::recovery`).
     KeptEdits(u16),
@@ -174,7 +175,7 @@ impl Toast {
     pub fn stays(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
             Toast::Trashed => 6,
-            Toast::Failed(..) | Toast::ReadOneAtATime | Toast::UploadCancelled | Toast::KeepFirst | Toast::KeptEdits(_) => 8,
+            Toast::Failed(..) | Toast::ReadOneAtATime | Toast::UploadCancelled | Toast::KeptEdits(_) => 8,
             _ => 3,
         })
     }
@@ -792,12 +793,21 @@ impl State {
         }
         self.forget_undo();
         let several = files.len() > 1;
-        if let Some(first) = files.first()
-            && let crate::frames::open_file::Opened::Failed(why) =
-                crate::frames::open_file::open_file(self, crate::frames::open_file::Target::Item(first))
-        {
-            self.failed(Action::Open, why, tx);
-            return false;
+        if let Some(first) = files.first() {
+            // Asked before the hand-over: once Windows has it, the copy may already be on its way.
+            let fetch = crate::frames::open_file::fetch_toast(self, first);
+            match crate::frames::open_file::open_file(self, crate::frames::open_file::Target::Item(first)) {
+                crate::frames::open_file::Opened::Failed(why) => {
+                    self.failed(Action::Open, why, tx);
+                    return false;
+                }
+                crate::frames::open_file::Opened::DefaultApp if !several => {
+                    if let Some(toast) = fetch {
+                        self.show_toast(toast, tx);
+                    }
+                }
+                _ => {}
+            }
         }
         if several {
             self.show_toast(Toast::ReadOneAtATime, tx);

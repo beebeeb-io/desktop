@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::State;
+use crate::frames::files::Toast;
 use crate::frames::files::source::{ActionError, Outside};
 use crate::frames::viewers::{self, kinds};
 use crate::source::DriveItem;
@@ -84,6 +85,21 @@ fn outside(answer: Result<Outside, ActionError>) -> Opened {
 /// of the Office types that have no preview (`.ppt`).
 fn has_preview(s: &State, name: &str) -> bool {
     !matches!(kinds::office_route(name), Some(kinds::OfficeRoute::NoPreview(_))) && viewers::previews(s, name)
+}
+
+/// The toast to show when `item` is handed to another app: `Some` when it is not kept on this PC (asked of the source,
+/// the engine: kept AND its bytes here), so Windows downloads it first; `None` for a file already here or a folder.
+/// Ask before the hand-over.
+pub fn fetch_toast(s: &State, item: &DriveItem) -> Option<Toast> {
+    (!item.is_folder && !s.actions.source.kept_here(item)).then_some(Toast::Downloading(item.size))
+}
+
+/// What [`Toast::Downloading`] says: "Downloading 12.3 MB…", or "Downloading…" with no size known.
+pub fn downloading_words(size: Option<i64>) -> String {
+    match size {
+        Some(bytes) if bytes >= 0 => format!("Downloading {}…", crate::source::format_size(bytes)),
+        _ => "Downloading…".to_string(),
+    }
 }
 
 /// The kinds a local file (not in the drive) is shown as: text and Markdown.
