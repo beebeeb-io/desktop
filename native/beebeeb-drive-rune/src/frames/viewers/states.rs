@@ -96,6 +96,9 @@ pub const DECRYPTED_NOT_KEPT: &str = "Decrypted in memory only; nothing was kept
 /// The same for bytes read from the copy on this PC: nothing was decrypted.
 pub const READ_HERE_NOT_KEPT: &str = "Read from the copy on this PC; nothing was kept";
 
+/// The same for a PDF that arrived whole and could not be read as a PDF.
+pub const PDF_NOT_KEPT: &str = "Held in memory only; nothing was kept";
+
 /// Whether content from `origin` was decrypted on this PC just now (downloaded from Beebeeb). The copy kept on
 /// this PC was read as it is: nothing was decrypted, and no state says so.
 fn was_decrypted(origin: Origin) -> bool {
@@ -140,6 +143,7 @@ pub fn status(body: &Body, origin: Origin) -> Option<Status> {
                 Stopped::NotThisAccounts => "Not opened: this PC's data couldn't be confirmed as this account's",
                 Stopped::NoAccess => "Not opened: you no longer have access to this file",
                 Stopped::Changed => "Not opened: it changed while it was opening",
+                Stopped::HelperStopped => "Not shown: the viewer's helper stopped",
             }
             .into(),
             details: "The copy in Beebeeb is unchanged".into(),
@@ -150,6 +154,9 @@ pub fn status(body: &Body, origin: Origin) -> Option<Status> {
             details: match why {
                 NoPreview::NoViewer | NoPreview::Heic | NoPreview::TooBig { .. } => "Nothing was downloaded",
                 NoPreview::OverLimit { .. } => "Stopped; nothing was kept",
+                // The file arrived whole and was read as it is: the trouble is the PDF's own content, and the line
+                // does not speak of decrypting (RC2-3).
+                NoPreview::PdfUnreadable if was_decrypted(origin) => PDF_NOT_KEPT,
                 NoPreview::Unreadable
                 | NoPreview::PictureTooBig { .. }
                 | NoPreview::PdfLocked
@@ -289,6 +296,11 @@ fn stopped(why: Stopped, t: &Theme) -> El {
             "This file changed while it was opening",
             "A newer version arrived each time it was read, so nothing of it was kept. Try again.",
         ),
+        Stopped::HelperStopped => (
+            "The viewer stopped while showing this file",
+            "The file arrived whole. The separate helper that draws it stopped, so there is nothing to show. \
+             Nothing changed: the copy in Beebeeb is untouched. Try again, or open it in another app.",
+        ),
     };
     let act = if why.can_retry() {
         let label = if why == Stopped::SessionChanged {
@@ -354,11 +366,17 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
                  decode. Nothing was kept."
             ),
         ),
+        // Its own words, and none about decrypting: the file arrived whole, and it is the PDF that is not readable.
         NoPreview::PdfUnreadable => (
-            "Can't show this PDF",
+            "Can't read this PDF",
             format!(
-                "{it_was}, but this app can't read it: it may be damaged or cut short, or protected in a way this \
-                 app doesn't open. Open it in your PDF app. Nothing was kept."
+                "{}, but this app can't read it: it may be damaged or cut short, or protected in a way this \
+                 app doesn't open. Open it in your PDF app. Nothing was kept.",
+                if was_decrypted(origin) {
+                    "It arrived whole from Beebeeb"
+                } else {
+                    it_was
+                }
             ),
         ),
         NoPreview::PdfLocked => (
@@ -448,5 +466,26 @@ mod refusal_words_tests {
             .unwrap_or_default();
         assert_ne!(words(Stopped::NoAccess), failed);
         assert_ne!(words(Stopped::Changed), failed);
+    }
+
+    /// RC2-3: a PDF that is not readable, a failed decryption and a stopped helper are three sentences, and only the
+    /// failed decryption speaks of decrypting.
+    #[test]
+    fn viewer_pdf_failures_each_have_their_own_words() {
+        let line = |body: Body| {
+            status(&body, Origin::Beebeeb)
+                .map(|s| format!("{} {}", s.text, s.details))
+                .unwrap_or_default()
+        };
+        let decrypt = line(Body::Failed);
+        let helper = line(Body::Stopped(Stopped::HelperStopped));
+        let pdf = line(Body::NotPreviewable(NoPreview::PdfUnreadable));
+        assert!(decrypt.contains("Not decrypted"), "{decrypt}");
+        assert!(helper.contains("helper stopped"), "{helper}");
+        for other in [&helper, &pdf] {
+            assert!(!other.to_lowercase().contains("decrypt"), "{other}");
+        }
+        assert_ne!(helper, pdf);
+        assert!(Stopped::HelperStopped.can_retry(), "Try again starts a new helper");
     }
 }

@@ -743,7 +743,8 @@ impl<S: Starter> Worker<S> {
     }
 
     fn kind_has_pages(&self) -> bool {
-        matches!(self.kind, DocKind::Docx | DocKind::Doc | DocKind::Pptx)
+        // A PDF has pages too (RC2-3): without it the helper's `Opened` was "not what was asked", and every PDF failed.
+        matches!(self.kind, DocKind::Docx | DocKind::Doc | DocKind::Pptx | DocKind::Pdf)
     }
 
     /// The answer to the oldest request: it must be the kind that request takes, then pass its check.

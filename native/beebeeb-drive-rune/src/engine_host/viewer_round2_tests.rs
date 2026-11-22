@@ -623,7 +623,7 @@ fn a_pdf_whose_helper_stops_at_a_page_shows_failed_once_and_try_again_opens_it_a
         assert!(began.elapsed() < Duration::from_secs(20), "the stop was never said");
         std::thread::sleep(Duration::from_millis(2));
     };
-    assert_eq!(said, Body::Failed);
+    assert_eq!(said, Body::Stopped(Stopped::HelperStopped), "the helper's stop has its own words (RC2-3)");
     assert_eq!(source.poll("f-pdf"), None, "said once");
     assert!(source.picture("f-pdf", Picture::Page(1)).is_none());
     assert!(!source.finds(), "nothing of the stopped opening is searched");

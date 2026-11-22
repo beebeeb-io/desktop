@@ -564,3 +564,35 @@ fn a_page_the_helper_says_misses_content_lacks_text_and_no_other_page_does() {
         assert_eq!(rendered.lacks_text, lacks, "page {page}");
     }
 }
+
+/// RC2-3: the two kinds of PDF that did not open on the Windows test machine (a 3-page text PDF, a minimal 1-page
+/// one), as files. Each opens, with its page count, by the reader the helper uses and through the session.
+#[test]
+fn viewer_pdf_the_two_rc2_pdfs_open_with_their_page_counts() {
+    let files: [(&str, &[u8], u32); 2] = [
+        ("text-3-pages.pdf", include_bytes!("../../tests/fixtures/pdf/text-3-pages.pdf"), 3),
+        ("minimal-1-page.pdf", include_bytes!("../../tests/fixtures/pdf/minimal-1-page.pdf"), 1),
+    ];
+    for (name, bytes, pages) in files {
+        assert_eq!(open(bytes.to_vec()).map(|document| document.pages()), Ok(pages), "{name}");
+        let session = session(bytes.to_vec()).unwrap_or_else(|why| panic!("{name}: {why:?}"));
+        assert_eq!(session.pages(), pages, "{name}");
+        // Page 1 comes back drawn, at the viewer's width.
+        let said = served(session, &[Ask::Page(1)], false, |said| !said.pages.is_empty());
+        let (page, rendered) = &said.pages[0];
+        let rendered = rendered.as_ref().unwrap_or_else(|| panic!("{name}: page 1 was not drawn"));
+        assert_eq!(*page, 1, "{name}");
+        assert!((1_259..=1_261).contains(&rendered.width), "{name}: {rendered:?}");
+        assert_eq!(said.stopped, 0, "{name}");
+    }
+}
+
+/// RC2-3: a PDF cut short is "not readable" (its own words in the view), never a helper that stopped and never a
+/// failed decryption.
+#[test]
+fn viewer_pdf_a_pdf_cut_short_is_unreadable_not_a_stopped_helper() {
+    let whole: &[u8] = include_bytes!("../../tests/fixtures/pdf/text-3-pages.pdf");
+    let cut = whole[..64].to_vec();
+    assert_eq!(open(cut.clone()).err(), Some(NotOpened::Unreadable));
+    assert_eq!(session(cut).err(), Some(NotOpened::Unreadable));
+}
