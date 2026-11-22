@@ -1174,7 +1174,12 @@ mod guarded_tests {
     #[test]
     fn edit_guarded_notice_names_the_kind_honestly() {
         let notes = DroppedPart::SpeakerNotes.notice();
-        assert!(notes.contains("speaker notes") && notes.contains("drop") && notes.contains("PowerPoint"), "{notes}");
+        assert!(notes.contains("speaker notes") && notes.contains("drop") && notes.contains("another app"), "{notes}");
+        // The button names the default app, or "another app" when none is known: the notice names no app of its
+        // own, so the two never disagree (RC1 008c).
+        for kind in [DroppedPart::SpeakerNotes, DroppedPart::ActiveX, DroppedPart::Ink, DroppedPart::Other] {
+            assert!(!kind.notice().contains("PowerPoint") && !kind.notice().contains("Microsoft"), "{kind:?}");
+        }
         assert!(DroppedPart::ActiveX.notice().contains("controls"));
         assert!(DroppedPart::Ink.notice().contains("ink"));
         assert!(!DroppedPart::Other.notice().is_empty());
