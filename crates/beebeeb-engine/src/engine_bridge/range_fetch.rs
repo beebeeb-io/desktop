@@ -55,7 +55,7 @@ impl EngineBridge {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn range_prep(&self, file_id: &str, file_size: u64, on_disk_bytes: u64) -> Result<RangePrep, PrepEnd> {
         let failed = |e: anyhow::Error| PrepEnd::Failed(e);
-        let meta = self.api.get_file(file_id).await.map_err(|e| failed(e.into()))?;
+        let meta = self.api.get_file(file_id).await.map_err(&failed)?;
         let Some(pin) = crate::download_pin::PinnedVersion::from_metadata(&meta).map_err(|e| failed(e.into()))? else {
             return Err(PrepEnd::WholeFilePath);
         };

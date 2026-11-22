@@ -47,10 +47,10 @@ impl EngineBridge {
                     .await
                     .map_err(|e| match e {
                         crate::api_client::ChunkApiError::Restart => {
-                            anyhow::Error::new(crate::download_pin::VersionGone).into()
+                            anyhow::Error::new(crate::download_pin::VersionGone)
                         }
                         crate::api_client::ChunkApiError::Terminal(status) => {
-                            anyhow::Error::new(crate::direct_download::DirectError::Refused(status)).into()
+                            anyhow::Error::new(crate::direct_download::DirectError::Refused(status))
                         }
                         crate::api_client::ChunkApiError::Failed(message) => anyhow::anyhow!(message),
                         // The same message, with a cause a caller can read "can't reach" from.

@@ -1,4 +1,4 @@
-//! Task 2530 (wave 2, slice S3): the ways out of a parked upload beyond the stale base, through the real accept and
+//! the ways out of a parked upload beyond the stale base, through the real accept and
 //! the real decisions (`resolve_parked`, `StateDb::try_parked_again`, `StateDb::remove_parked_without_bytes`). Every
 //! park is made as the queue's claim makes it: attempts used up, the class recorded. Every name is invented.
 

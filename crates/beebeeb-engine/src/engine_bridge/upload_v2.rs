@@ -52,6 +52,8 @@ pub(super) fn previous_counter(record: Option<u64>, remembered: Option<u64>) -> 
 /// `record` is the item's current record (`ContentRecord::UNRECORDED` for a create). A create
 /// records the format its content was written in; a replacement keeps the file's pin (v2 is never
 /// recorded on a file with v1 history) and follows its counter.
+// The seal inputs are independent values from different owners; a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn seal_completion_name(
     db: &StateDb,
     file_id: &str,

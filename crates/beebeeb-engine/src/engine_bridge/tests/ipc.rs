@@ -707,7 +707,7 @@ fn write_hydrated_plaintext_forces_0600_on_preexisting_file() {
     );
 }
 
-/// Task 1670 round 2: the temp-then-rename publish step must clean up its
+/// the temp-then-rename publish step must clean up its
 /// own temp file when the final `renameat` fails, so a failed hydration
 /// never leaves a stray `.part` file behind in the hydrate-cache (or any
 /// other) directory. Forced deterministically (no quota tricks, no

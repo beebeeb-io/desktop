@@ -39,7 +39,7 @@ pub(crate) enum MediaPlanRefused {
     /// The metadata does not state a chunk stride, a chunk count and a size that agree: which bytes a chunk holds
     /// cannot be known, so no range of the file is read.
     NoGeometry,
-    /// The record pins v2 and commits to no version: no frame of it may open (core's ruling of 2026-11-07).
+    /// The record pins v2 and commits to no version: no frame of it may open (core's rule).
     UncommittedV2,
     /// A span outside the plan was asked for.
     OutsidePlan,

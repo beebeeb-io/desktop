@@ -151,7 +151,7 @@ impl EngineBridge {
         // decrypt-oracle + arbitrary-write primitive (e.g. writing decrypted
         // vault plaintext over ~/.ssh/authorized_keys).
         if !hydrate_dest_is_allowed(dest_path, allowed_roots) {
-            return Err(anyhow::anyhow!("hydrate destination is not within an allowed root").into());
+            return Err(anyhow::anyhow!("hydrate destination is not within an allowed root"));
         }
         // Task 2407 (core 2404): a destination whose name reaches a different entry (a Windows 8.3 short name) is
         // refused before anything is downloaded; the Windows writer checks again right before it writes.
@@ -194,7 +194,7 @@ impl EngineBridge {
         };
         if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution, keep_there)? {
             tracing::warn!(file_id = %file_id, "hydrate refused: the local file holds a change that is not sent");
-            return Err(anyhow::Error::new(UnsentLocalChange).into());
+            return Err(anyhow::Error::new(UnsentLocalChange));
         }
         // Spec §7.4.2: a hydrate never changes the status of a row with a live upload of its
         // own (a Finder upload that has not parked): no `Downloading`, `Local` or `Error`.
@@ -251,14 +251,14 @@ impl EngineBridge {
                     && let Err(e) = std::fs::create_dir_all(parent)
                 {
                     buf.zeroize();
-                    // Task 1670 round 2: this used to `?` straight out of the
+                    // this used to `?` straight out of the
                     // match arm below, which skipped the `Err(e) =>` arm's
                     // `FileStatus::Error` flip entirely — a directory-create
                     // failure left the row stuck on `Downloading` forever.
                     // Route it through the same status flip as every other
                     // failure in this function.
                     set_failed();
-                    return Err(anyhow::anyhow!("create dest dir {}: {e}", parent.display()).into());
+                    return Err(anyhow::anyhow!("create dest dir {}: {e}", parent.display()));
                 }
                 // Write via an O_NOFOLLOW handle (task 1247): the containment
                 // guard at the top of this fn is a check-then-use, and there is
@@ -270,7 +270,7 @@ impl EngineBridge {
                 // `write_hydrated_plaintext` fails closed if the final component
                 // is (or race-becomes) a symlink, closing the race atomically at
                 // open() time rather than re-checking-then-hoping. Since task
-                // 1670 round 2 it also stages the write under a temp name and
+                // it also stages the write under a temp name and
                 // publishes with one atomic rename, so a failure anywhere in
                 // that sequence is guaranteed to leave NOTHING new at
                 // `dest_path` — there is no separate "delete the half-written
@@ -293,7 +293,7 @@ impl EngineBridge {
                 if in_sync_folder
                     && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution, keep_there)?
                 {
-                    return Err(refuse_changed(&mut buf, "the local file was changed during the download").into());
+                    return Err(refuse_changed(&mut buf, "the local file was changed during the download"));
                 }
                 // Review P2-1, S6 (R8): the place (its size, times and inode) compared with the start look once the copy
                 // is written, right before it replaces the place: a save after the start look is never replaced.
@@ -307,7 +307,7 @@ impl EngineBridge {
                     write_hydrated_plaintext_checked(dest_path, allowed_roots, &buf, &mut place_unchanged);
                 if write_result.as_ref().is_err_and(place_changed_before_replace) {
                     return Err(
-                        refuse_changed(&mut buf, "the local file was changed while the download was written").into(),
+                        refuse_changed(&mut buf, "the local file was changed while the download was written"),
                     );
                 }
                 let hydrated_hash = in_sync_folder.then(|| sha256_hex(&buf));
@@ -316,7 +316,7 @@ impl EngineBridge {
                 buf.zeroize();
                 if let Err(e) = write_result {
                     set_failed();
-                    return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()).into());
+                    return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()));
                 }
                 // Task 1640: the bytes just written (one atomic rename: the whole file) are the
                 // content this device agrees with the server on, at the version the download
@@ -335,10 +335,10 @@ impl EngineBridge {
                     }
                 }
 
-                // Task 1698: a Trashing row keeps its marker (viewing a file
+                // a Trashing row keeps its marker (viewing a file
                 // from the macOS Trash view must not un-trash it in the
                 // replica); everything else completes as `Local`.
-                // PR #100 review (Codex P1): the pre-hydrate status is the
+                // the pre-hydrate status is the
                 // row's status BEFORE the flip to `Downloading` — re-reading
                 // the DB here always saw `Downloading`, so a Trashing row
                 // completed as `Local` and reparented itself out of the trash
@@ -356,8 +356,7 @@ impl EngineBridge {
                 transfer.finish();
                 self.record_transfer_done(crate::transfer_progress::Direction::Down, file_id, downloaded_bytes);
 
-                // Task 1670 round 4 (Codex P2 on PR #75, review thread on
-                // `runner.rs:1044`): see [`record_hydration_cache_state`]'s
+                // See [`record_hydration_cache_state`]'s
                 // doc comment for the full "why" — in short, a macOS Finder
                 // `fetchContents` hydration writes here as a HANDOFF, not a
                 // durable local cache copy, and registering it via
@@ -373,7 +372,7 @@ impl EngineBridge {
             Err(e) => {
                 let e = self.owned_open_failure(file_id, land_error_to_anyhow(e)).await;
                 set_failed(); // only writes over Downloading; the recoverable item already left it.
-                Err(e.into())
+                Err(e)
             }
         }
     }
@@ -546,7 +545,7 @@ impl EngineBridge {
                 let _ = self
                     .db
                     .set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
-                Err(e.into())
+                Err(e)
             }
         }
     }
@@ -941,7 +940,7 @@ impl EngineBridge {
     }
 
     /// Shared core of [`Self::do_hydrate`] and [`Self::remote_content_preview`]
-    /// (task 1546 Codex round 2, finding 1): downloads + decrypts every chunk
+    /// downloads + decrypts every chunk
     /// for `file_id` given ALREADY-FETCHED metadata. `remote_content_preview`
     /// needs the metadata anyway to check the remote size before deciding
     /// whether to download at all — routing through this shared helper
@@ -1201,7 +1200,7 @@ impl EngineBridge {
             .await;
         let read = match read {
             Ok(value) => Ok(value),
-            Err(e) => Err(self.owned_open_failure(file_id, land_error_to_anyhow(e)).await.into()),
+            Err(e) => Err(self.owned_open_failure(file_id, land_error_to_anyhow(e)).await),
         };
         if read.is_err() {
             // Every failing exit (a second pass's own error too) ends with the row in Error, never left on
@@ -1296,11 +1295,11 @@ impl EngineBridge {
                 // Task 1643: exactly the pinned version's plaintext for those chunks.
                 match pin.as_ref().map(|pin| pin.plaintext_size_of(chunks.clone())) {
                     Some(want) if want != Some(data.len() as u64) => {
-                        return Err(anyhow::anyhow!(
+                        Err(anyhow::anyhow!(
                             "the range read is {} bytes, the pinned version's manifest says {want:?}",
                             data.len()
                         )
-                        .into());
+                        .into())
                     }
                     _ => Ok(data),
                 }

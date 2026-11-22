@@ -114,7 +114,7 @@ async fn a_v2_upload_reads_back_through_the_engine_and_so_does_its_next_version(
     );
 }
 
-/// Core's ruling of 2026-11-07, through the engine: v2 content whose name carries no commitment is
+/// Core's rule, through the engine: v2 content whose name carries no commitment is
 /// refused, whatever the name's pin says, and the same content is read once the name carries it.
 /// Mutant: a reader that takes the version id from the served frame 0 (both refusals then pass).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -722,7 +722,7 @@ fn a_restore_publishes_the_restored_versions_id_under_a_higher_counter() {
 #[test]
 fn the_remembered_counter_and_name_only_move_forward() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     assert_eq!(db.highest_file_version("f").unwrap(), None);
     assert_eq!(db.published_name("f").unwrap(), None);
     db.observe_file_version("f", 2, Some("name-2")).unwrap();

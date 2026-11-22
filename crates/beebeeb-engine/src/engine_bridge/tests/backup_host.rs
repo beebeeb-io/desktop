@@ -653,7 +653,7 @@ fn the_tighter_clock_is_kept() {
 #[test]
 fn put_record_is_compare_and_set() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     db.set_owner(&crate::account_binding::Identity::new(Some("u-a"), None))
         .unwrap();
     let remote = uuid::Uuid::from_u128(7);

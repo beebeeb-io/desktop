@@ -163,7 +163,7 @@ pub struct TransferLoopOutcome {
     /// trail. Each entry is `"<op_id>: <error>"`.
     pub post_complete_errors: Vec<String>,
     /// Spec 2026-10-10 §6.4: an attempt failed at the link level (`offline`), the server refused the session
-    /// (`session`), or, by the §15 question 4 ruling, the account refused a Finder write it can cure (`account`).
+    /// (`session`), or, the account refused a Finder write it can cure (`account`).
     pub link_failed: bool,
     pub session_refused: bool,
     pub account_refused: bool,
@@ -828,7 +828,8 @@ pub struct ConflictDetected {
 ///
 /// 3. **Known and not in `Local`** — pending download/upload, etc.
 ///    Leave alone; the upload/download path owns those transitions.
-/// Task 1697 review fix (T3): what one sync tick did. The remote ingestion
+///
+/// What one sync tick did. The remote ingestion
 /// path (delta ops + snapshot bootstrap) records every item id it APPLIED so
 /// the runner can signal the File Provider working set about REMOTE changes
 /// — previously only local ops (`operations_applied`) signaled, so Finder

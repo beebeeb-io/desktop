@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn regression_1640_a_candidate_decides_like_a_baseline() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let path = dir.path().join("notes.txt");
     std::fs::write(&path, b"version three").unwrap();
     db.upsert_file(&FileEntry {
@@ -83,7 +83,7 @@ async fn regression_1640_an_edit_before_promotion_is_sent_on_the_candidates_vers
 #[test]
 fn regression_1640_a_candidate_is_promoted_only_when_the_bytes_are_its_own() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     db.upsert_file(&FileEntry {
         file_id: "f97d7f90-511b-52b5-9303-7201b53df85f".into(),
         path: "notes.txt".into(),
@@ -244,7 +244,7 @@ fn regression_1640_tick_partly_on_disk(db: &StateDb, file_id: &str) {
 #[test]
 fn regression_1640_a_tick_between_range_fetches_never_raises_the_base() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let path = dir.path().join("notes.txt");
     regression_1640_new_placeholder(&db, "f97d7f90-511b-52b5-9303-7201b53df85f", "notes.txt");
     regression_1640_fetch(&db, "f97d7f90-511b-52b5-9303-7201b53df85f", 1, b"version one");
@@ -303,7 +303,7 @@ fn regression_1640_a_tick_between_range_fetches_never_raises_the_base() {
 #[test]
 fn regression_1640_a_resize_or_a_cut_off_download_makes_the_content_mixed_never_resets_it() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     // Size resolution: ranges of 1 on disk; a fetch at 2 (recorded, then failed on the size).
     regression_1640_new_placeholder(&db, "resized", "resized.txt");
     regression_1640_fetch(&db, "resized", 1, b"version one");

@@ -190,7 +190,8 @@ fn a_hydrate_reports_per_file_bytes_and_records_a_down_row() {
 
     // Read the board from inside the caller's own progress callback: that is the
     // moment a popover snapshot would see mid-transfer.
-    let seen: Arc<Mutex<Vec<(u64, u64, u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    type Snapshot = (u64, u64, u64, u64);
+    let seen: Arc<Mutex<Vec<Snapshot>>> = Arc::new(Mutex::new(Vec::new()));
     let board = bridge.transfers().clone();
     let seen_in = seen.clone();
     let progress = move |done: u64, total: u64| {

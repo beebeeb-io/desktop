@@ -207,7 +207,7 @@ pub async fn sync_tick(
 }
 
 /// The real tick body — same behavior as [`sync_tick`], plus the applied item
-/// ids for the working-set signal (T3).
+/// ids for the working-set signal.
 pub async fn sync_tick_outcome(
     bridge: &EngineBridge,
     // The on-disk vault root. Needed on Windows so the deletion-reconcile paths
@@ -744,7 +744,7 @@ pub fn apply_snapshot(
     snapshot_fetched_at: i64,
     conflicts: &mut Vec<ConflictDetected>,
 ) -> Result<Vec<String>, EngineError> {
-    // Task 1697 review fix (T3): every ingested and pruned item id flows back
+    // every ingested and pruned item id flows back
     // to the tick, which signals the File Provider working set with the union.
     let mut applied: Vec<String> = Vec::new();
     // Resolve each node's PARENT relative path. The snapshot is a flat node list
@@ -882,7 +882,7 @@ pub fn apply_snapshot(
         #[cfg(not(target_os = "windows"))]
         let removable = pruned.clone();
         remove_pruned_placeholders(bridge.db(), sync_root, &removable);
-        // A pruned row is a REMOTE deletion Finder must see (T3).
+        // A pruned row is a REMOTE deletion Finder must see.
         applied.extend(pruned.iter().map(|row| row.file_id.clone()));
     }
 
@@ -937,11 +937,10 @@ pub(super) fn order_snapshot_nodes(nodes: &[serde_json::Value]) -> Vec<&serde_js
     }
     // Defensive: emit any node not reached (a parent_id cycle) so nothing is lost.
     for n in nodes {
-        if let Some(id) = n["id"].as_str() {
-            if emitted.insert(id) {
+        if let Some(id) = n["id"].as_str()
+            && emitted.insert(id) {
                 ordered.push(n);
             }
-        }
     }
     ordered
 }
@@ -974,7 +973,7 @@ pub(super) fn apply_sync_op(
     now_secs: i64,
     conflicts: &mut Vec<ConflictDetected>,
 ) -> Result<Vec<String>, EngineError> {
-    // Task 1697 review fix (T3): the ids of items this op actually changed on
+    // the ids of items this op actually changed on
     // the local mirror — what the runner's working-set signal must carry.
     let mut applied: Vec<String> = Vec::new();
     let payload = &op.payload;
@@ -997,7 +996,7 @@ pub(super) fn apply_sync_op(
     }
 
     match op.op_type.as_str() {
-        // Task 1698 (trash ruling — full sync): the two server-side deletion
+        // the two server-side deletion
         // kinds now mean different things locally.
         //
         // `file_trash` — the server TRASH (is_trashed=TRUE, recoverable): the
@@ -1014,7 +1013,7 @@ pub(super) fn apply_sync_op(
         // 0802 sweep (flipped by task 1698).
         "file_trash" => match bridge.db().get_file(id)? {
             Some(entry) if entry.status == crate::state_db::FileStatus::Trashing => {
-                // PR #100 review (Codex P1): the root may already be parked
+                // the root may already be parked
                 // `Trashing` by the LOCAL trash flow — `queue_finder_delete`
                 // parks ONLY the folder row, its descendants stay unmarked
                 // until this server echo arrives. This echo IS that arrival:
@@ -1048,7 +1047,7 @@ pub(super) fn apply_sync_op(
                         orphans.len()
                     );
                     remove_pruned_placeholders(bridge.db(), sync_root, &orphans);
-                    // The orphaned children left the mirror (T3); the folder
+                    // The orphaned children left the mirror; the folder
                     // itself never existed locally, so it contributes nothing.
                     applied.extend(orphans.iter().map(|row| row.file_id.clone()));
                 }
@@ -1083,7 +1082,7 @@ pub(super) fn apply_sync_op(
             // on the next tick: the authoritative snapshot re-materialises the
             // restored row. Cheap and matches the existing gap-recovery design.
             //
-            // Task 1698 (trash ruling): when we still HOLD the row — it stayed
+            // when we still HOLD the row — it stayed
             // in the mirror as `Trashing` (the trash view) instead of being
             // pruned — the restore flips it back OUT of the trash view
             // directly: `CloudOnly` (placeholder re-mints; content
@@ -1092,7 +1091,7 @@ pub(super) fn apply_sync_op(
             if let Some(row) = bridge.db().get_file(id)?
                 && row.status == crate::state_db::FileStatus::Trashing
             {
-                // PR #100 review (Codex P1): the restore must take the ENTIRE
+                // the restore must take the ENTIRE
                 // held subtree out of the trash view, not just the root row —
                 // the authoritative re-snapshot preserves `Trashing` rows by
                 // design, so it can never repair the descendants (they would

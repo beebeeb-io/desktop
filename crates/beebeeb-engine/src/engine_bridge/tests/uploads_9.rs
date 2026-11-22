@@ -285,7 +285,7 @@ async fn a_landing_whose_only_later_write_parked_leaves_the_parked_status() {
 
 // ── Rule 6: the upgrade path (spec §10.2–§10.3, m-4c) ──
 
-/// T34, spec §10.3 (ruling 2): an upload an earlier build queued on a wall-clock second is
+/// T34, spec §10.3 : an upload an earlier build queued on a wall-clock second is
 /// marked at engine start and keeps that base. It is sent once, the server refuses it as a
 /// stale base, and it parks at its first attempt with its bytes. It never holds a token.
 #[tokio::test]
