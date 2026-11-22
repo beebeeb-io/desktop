@@ -23,7 +23,6 @@
 //! | Design     | #a855f7   | #a855f7                            | 4.58 / 4.91   |
 //! | Default    | ink-3     | ink-3 (oklch 0.62 0.008 80)        | 4.97 / 5.33   |
 
-
 use super::file_icons::Tint;
 use super::tokens;
 

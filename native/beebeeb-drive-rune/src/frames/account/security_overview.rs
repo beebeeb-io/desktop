@@ -154,7 +154,11 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
         .fill(t.card)
         .box_shadow(kit::ring(kit::HAIR, t.separator))
         .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)));
-    let line = row().key("score").w_full().center_y().gap(crate::theme::scale::space::S14);
+    let line = row()
+        .key("score")
+        .w_full()
+        .center_y()
+        .gap(crate::theme::scale::space::S14);
     let Some(factors) = scored(facts) else {
         return card.child(line.child(ring(1.0, "?".into(), t.separator)).child(words(
             "Security score not known yet".into(),
@@ -314,7 +318,16 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> Option<El> {
         controls.push(super::app_lock_password::link(t));
     }
     controls.push(
-        crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-0"), "", on, true, crate::ui::button::Size::Md, t).label("Lock Beebeeb").on_press(move |s: &mut State| {
+        crate::ui::switch::switch_sized(
+            &format!("{}-switch", "item-1-0"),
+            "",
+            on,
+            true,
+            crate::ui::button::Size::Md,
+            t,
+        )
+        .label("Lock Beebeeb")
+        .on_press(move |s: &mut State| {
             if let Some(source) = s.account.source.as_mut() {
                 source.set_app_lock(!on);
             }
@@ -338,21 +351,30 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> Option<El> {
 /// "Hide Beebeeb from screen capture and remote desktop": a per-PC switch, off by default (`shell::capture_setting`).
 /// Off, the windows show in screenshots, screen shares and remote desktop; on, every window is left out of them.
 fn capture_row(on: bool, t: &Theme) -> El {
-    let it = Row::new(Lead::Icon(&icons::EYE_OFF), "Hide Beebeeb from screen capture and remote desktop").sub(
-        if on {
-            "On: screenshots, recordings and remote desktop show nothing of Beebeeb"
-        } else {
-            "Off: Beebeeb shows in screenshots, screen shares and remote desktop"
-        },
-    );
+    let it = Row::new(
+        Lead::Icon(&icons::EYE_OFF),
+        "Hide Beebeeb from screen capture and remote desktop",
+    )
+    .sub(if on {
+        "On: screenshots, recordings and remote desktop show nothing of Beebeeb"
+    } else {
+        "Off: Beebeeb shows in screenshots, screen shares and remote desktop"
+    });
     set::item(
         1,
         3,
         &it,
         vec![
-            crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-3"), "", on, true, crate::ui::button::Size::Md, t).label("Hide Beebeeb from screen capture and remote desktop").on_press(
-                move |s: &mut State| s.shell.set_hide_from_capture(!on),
-            ),
+            crate::ui::switch::switch_sized(
+                &format!("{}-switch", "item-1-3"),
+                "",
+                on,
+                true,
+                crate::ui::button::Size::Md,
+                t,
+            )
+            .label("Hide Beebeeb from screen capture and remote desktop")
+            .on_press(move |s: &mut State| s.shell.set_hide_from_capture(!on)),
         ],
         t,
     )
@@ -448,10 +470,12 @@ fn sign_out(facts: &SecurityFacts, t: &Theme) -> Option<El> {
         return None;
     }
     let one = |index: usize, it: Row, dialog: Dialog| {
-        Some(set::item(3, index, &it.danger().link(false), Vec::new(), t).on_press(move |s: &mut State| {
-            s.account.dialog = Some(dialog.clone());
-            arrive(&mut s.account);
-        }))
+        Some(
+            set::item(3, index, &it.danger().link(false), Vec::new(), t).on_press(move |s: &mut State| {
+                s.account.dialog = Some(dialog.clone());
+                arrive(&mut s.account);
+            }),
+        )
     };
     let all = facts.can_sign_out_all;
     let rows = vec![
@@ -681,7 +705,11 @@ pub(super) fn follow_save(s: &mut State, tx: &mut rune::Tx) -> bool {
     if !s.account.signing_out.saving {
         return false;
     }
-    let state = s.viewer.ui.as_ref().and_then(|ui| ui.office.edit.as_ref().map(|e| (e.saving, e.unsaved())));
+    let state = s
+        .viewer
+        .ui
+        .as_ref()
+        .and_then(|ui| ui.office.edit.as_ref().map(|e| (e.saving, e.unsaved())));
     match state {
         Some((true, _)) => {
             tx.wake_after(std::time::Duration::from_millis(100));
@@ -698,8 +726,14 @@ pub(super) fn follow_save(s: &mut State, tx: &mut rune::Tx) -> bool {
         _ => {
             let all = s.account.signing_out.all;
             s.account.signing_out = SigningOut::default();
-            let Some(source) = s.account.source.as_mut() else { return true };
-            let answer = if all { source.sign_out_all_apps() } else { source.sign_out_this_app() };
+            let Some(source) = s.account.source.as_mut() else {
+                return true;
+            };
+            let answer = if all {
+                source.sign_out_all_apps()
+            } else {
+                source.sign_out_this_app()
+            };
             settle_sign_out(s, all, answer);
             true
         }
@@ -760,7 +794,13 @@ fn sign_out_confirm(
 /// again after sign-in; unsaved Office recovery copies are removed. `waiting`: uploads not sent yet.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn sign_out_counts_words(waiting: u64, sealed: u64, office_recovery: u64) -> String {
-    let plural = |n: u64, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let plural = |n: u64, one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
     let mut out = Vec::new();
     if waiting > 0 {
         out.push(format!(
@@ -793,6 +833,9 @@ mod sign_out_counts_words_tests {
         let w = sign_out_counts_words(1, 2, 1);
         assert!(w.contains("1 change is not sent yet"), "{w}");
         assert!(w.contains("2 saved copies stay encrypted"), "{w}");
-        assert!(w.contains("1 recovery copy of unsaved Office work will be removed"), "{w}");
+        assert!(
+            w.contains("1 recovery copy of unsaved Office work will be removed"),
+            "{w}"
+        );
     }
 }

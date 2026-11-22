@@ -12,21 +12,21 @@ mod tests_live;
 
 use crate::State;
 use crate::frames::shared::dialogs::{Dialog, PASSWORD_INPUT};
+use crate::frames::shared::parts::chrome;
 use crate::frames::shared::parts::controls::{ButtonKind, button};
 use crate::frames::shared::parts::menu::{Entry, Open, Took, menu};
 use crate::frames::shared::parts::table::{Columns, Row, header, rows, table_row};
 use crate::frames::shared::parts::toolbar::{Bar, toolbar};
-use crate::frames::shared::parts::chrome;
 use crate::frames::shared::state_body;
-use crate::ui::file_row::ROW_H;
-use crate::ui::view_state::{ViewState, try_again};
 use crate::frames::{self, Intent};
 use crate::theme::{icons, tokens};
+use crate::ui::file_row::ROW_H;
 use crate::ui::kit;
+use crate::ui::view_state::{ViewState, try_again};
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el};
+use source::{BoardTrash, Loaded, Notice, PurgeEnd, TrashSource};
 use std::borrow::Cow;
 use std::sync::Arc;
-use source::{BoardTrash, Loaded, Notice, PurgeEnd, TrashSource};
 
 const COLUMNS: Columns = Columns {
     names: ["Name", "Deleted", "Size", "Where it was", ""],
@@ -373,27 +373,31 @@ fn folders_kept_words(done: usize, folders: usize, inside: u64) -> String {
 /// The notice over the list (`.mk-banner` without a bar). Keys: `notice`, `notice-words`.
 fn notice_note(notice: &Notice, t: &tokens::Theme) -> El {
     const WORDS: rune::TextStyle = rune::TextStyle::new(12.5, 400.0).lh(17.0);
-    el().key("notice-wrap").w_full().px(crate::theme::scale::space::S14).pt(10.0).child(
-        col()
-            .key("notice")
-            .role("status")
-            .live_region(rune::LiveRegion::Polite)
-            .label(notice_words(notice))
-            .w_full()
-            .pt(9.0)
-            .pb(9.0)
-            .pl(12.0)
-            .pr(10.0)
-            .radius(crate::theme::tokens::radius::LG)
-            .fill(t.text.alpha(0.06))
-            .child(
-                rune::rich(notice_words(notice), Vec::new())
-                    .key("notice-words")
-                    .font(WORDS)
-                    .color(t.text_secondary)
-                    .w_full(),
-            ),
-    )
+    el().key("notice-wrap")
+        .w_full()
+        .px(crate::theme::scale::space::S14)
+        .pt(10.0)
+        .child(
+            col()
+                .key("notice")
+                .role("status")
+                .live_region(rune::LiveRegion::Polite)
+                .label(notice_words(notice))
+                .w_full()
+                .pt(9.0)
+                .pb(9.0)
+                .pl(12.0)
+                .pr(10.0)
+                .radius(crate::theme::tokens::radius::LG)
+                .fill(t.text.alpha(0.06))
+                .child(
+                    rune::rich(notice_words(notice), Vec::new())
+                        .key("notice-words")
+                        .font(WORDS)
+                        .color(t.text_secondary)
+                        .w_full(),
+                ),
+        )
 }
 
 /// What stands for a list that is not here (`None`: it is, draw it): Loading while the first answer is out, Failed with
@@ -474,37 +478,41 @@ fn emptying_note(e: source::Emptying, t: &tokens::Theme) -> El {
         .font(WORDS)
         .color(t.text_secondary)
         .w_full();
-    el().key("banner-wrap").w_full().px(crate::theme::scale::space::S14).pt(10.0).child(
-        col()
-            .key("banner")
-            .role("status")
-            .label("Emptying Trash")
-            .w_full()
-            .pt(9.0)
-            .pb(9.0)
-            .pl(12.0)
-            .pr(10.0)
-            .gap(crate::theme::scale::space::S6)
-            .radius(crate::theme::tokens::radius::LG)
-            .fill(t.text.alpha(0.06))
-            .child(text)
-            .child(
-                el().key("banner-bar")
-                    .role("progressbar")
-                    .label(format!("{per_cent} %"))
-                    .w_full()
-                    .h(4.0)
-                    .radius(2.0)
-                    .fill(t.selection)
-                    .child(
-                        el().key("banner-bar-fill")
-                            .w_frac(per_cent / 100.0)
-                            .h(4.0)
-                            .radius(2.0)
-                            .fill(t.text_secondary),
-                    ),
-            ),
-    )
+    el().key("banner-wrap")
+        .w_full()
+        .px(crate::theme::scale::space::S14)
+        .pt(10.0)
+        .child(
+            col()
+                .key("banner")
+                .role("status")
+                .label("Emptying Trash")
+                .w_full()
+                .pt(9.0)
+                .pb(9.0)
+                .pl(12.0)
+                .pr(10.0)
+                .gap(crate::theme::scale::space::S6)
+                .radius(crate::theme::tokens::radius::LG)
+                .fill(t.text.alpha(0.06))
+                .child(text)
+                .child(
+                    el().key("banner-bar")
+                        .role("progressbar")
+                        .label(format!("{per_cent} %"))
+                        .w_full()
+                        .h(4.0)
+                        .radius(2.0)
+                        .fill(t.selection)
+                        .child(
+                            el().key("banner-bar-fill")
+                                .w_frac(per_cent / 100.0)
+                                .h(4.0)
+                                .radius(2.0)
+                                .fill(t.text_secondary),
+                        ),
+                ),
+        )
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -611,7 +619,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                     move |s: &State, i| match s.frames.trash.rows().get(i) {
                         Some(r) => table_row(i, r, s.frames.trash.selected == Some(i), &COLUMNS, &t)
                             // The list is one Tab stop: the selected row, or the first.
-                            .tab_index(if s.frames.trash.selected.unwrap_or(0) == i { 0 } else { -1 })
+                            .tab_index(if s.frames.trash.selected.unwrap_or(0) == i {
+                                0
+                            } else {
+                                -1
+                            })
                             // The place in the whole list, not in the rows built.
                             .position_in_set(i + 1, s.frames.trash.rows().len())
                             .on_press(move |s: &mut State| s.frames.trash.pick_row(i))
@@ -655,18 +667,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         "Items in Trash are deleted for good after 30 days",
         ui.menu.as_ref().map(|open| {
             let (name, entries, w) = menu_of(open);
-            menu(
-                name,
-                entries,
-                open,
-                w,
-                window,
-                &t,
-                pick,
-                close_menu,
-                light,
-                on_key,
-            )
+            menu(name, entries, open, w, window, &t, pick, close_menu, light, on_key)
         }),
     )
 }

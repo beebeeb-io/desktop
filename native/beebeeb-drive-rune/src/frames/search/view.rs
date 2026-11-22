@@ -22,16 +22,16 @@ use crate::frames::shared::parts::controls::segments;
 use crate::frames::shared::parts::style;
 use crate::frames::shared::parts::table::{self, Kind};
 use crate::theme::file_icons::icon_for;
-use crate::ui::field::advance;
+use crate::theme::scale::space;
 use crate::theme::tokens::{self, Theme, radius, type_};
 use crate::theme::{icons, icons_settings};
 use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview};
+use crate::ui::field::advance;
 use crate::ui::file_list::{self, pc_glyph};
-use crate::ui::keys::SEARCH_KEY;
 use crate::ui::file_row::{self, Column, RowLook, Width};
 use crate::ui::file_tile::{self, TilePicture, TileSize};
+use crate::ui::keys::SEARCH_KEY;
 use crate::ui::toolbar::{Bar, Details as PaneBtn, New, Sort, View, bar, press, search_box, title_block};
-use crate::theme::scale::space;
 use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::{caption, kit, status_line};
 
@@ -61,7 +61,6 @@ const SIZE_W: f32 = 84.0;
 const WHERE_W: f32 = 170.0;
 const PC_W: f32 = 34.0;
 
-
 fn push(intent: Intent) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| s.frames.intents.push(intent.clone())
 }
@@ -88,7 +87,11 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
         // The one banner of the whole window (`frames::global`: "on every view of the window").
         .children(crate::frames::global::banner_under_toolbar(s, &t))
         .child(crate::ui::focus::pane(
-            col().w_full().grow(1.0).min_h(0.0).child(content.grow(1.0).min_h(0.0).w_full()),
+            col()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .child(content.grow(1.0).min_h(0.0).w_full()),
             "search-content",
         ))
         .child(
@@ -205,7 +208,11 @@ fn toolbar(s: &State, sub: &str, t: &Theme) -> El {
             })),
             sort: if sorting { Sort::Open } else { Sort::Idle },
             on_sort: press(|s, _| s.frames.intents.push(Intent::Frame("DW-0404"))),
-            details: if s.show_detail_pane { PaneBtn::Open } else { PaneBtn::Closed },
+            details: if s.show_detail_pane {
+                PaneBtn::Open
+            } else {
+                PaneBtn::Closed
+            },
             on_details: press(|s, _| s.show_detail_pane = !s.show_detail_pane),
             inert: false,
             on_explorer: Box::new(|s, tx| {
@@ -470,7 +477,9 @@ fn header(t: &Theme) -> El {
         Column::new("date", "Date changed", Width::Fixed(DATE_W)),
         Column::new("size", "Size", Width::Fixed(SIZE_W)).align(Align::End),
         Column::new("shared", "Where", Width::Fixed(WHERE_W)),
-        Column::new("pc", "PC", Width::Fixed(PC_W)).align(Align::Center).spoken("On this PC"),
+        Column::new("pc", "PC", Width::Fixed(PC_W))
+            .align(Align::Center)
+            .spoken("On this PC"),
     ];
     file_row::header(&COLUMNS, None, t)
 }
@@ -500,7 +509,11 @@ fn grid_rows(tiles: Vec<El>) -> Vec<El> {
 /// `row-<i>`, `-thumb`, `-icon`, `-name`, so the keyboard and the pointer treat it like the list's row.
 fn result_tile(i: usize, total: usize, hit: &Hit, selected: bool, t: &Theme) -> El {
     let k = format!("row-{i}");
-    let look = RowLook { selected, position: Some((i + 1, total)), ..RowLook::default() };
+    let look = RowLook {
+        selected,
+        position: Some((i + 1, total)),
+        ..RowLook::default()
+    };
     file_tile::tile(
         &k,
         &hit.name,
@@ -540,11 +553,24 @@ fn result_row(i: usize, total: usize, hit: &Hit, selected: bool, t: &Theme) -> E
         place,
         pc,
     ];
-    let look = RowLook { selected, position: Some((i + 1, total)), ..RowLook::default() };
-    file_row::row_with(&k, &hit.name, table::tile(&k, format!("{k}-icon"), &hit.name, hit.kind, 22.0, 6.0, 14.0, t), &hit.name, Vec::new(), cells, look, t)
-        .description(format!("In {}", hit.place))
-        // The list is one Tab stop: the selected result; the arrows move inside it.
-        .tab_index(if selected { 0 } else { -1 })
+    let look = RowLook {
+        selected,
+        position: Some((i + 1, total)),
+        ..RowLook::default()
+    };
+    file_row::row_with(
+        &k,
+        &hit.name,
+        table::tile(&k, format!("{k}-icon"), &hit.name, hit.kind, 22.0, 6.0, 14.0, t),
+        &hit.name,
+        Vec::new(),
+        cells,
+        look,
+        t,
+    )
+    .description(format!("In {}", hit.place))
+    // The list is one Tab stop: the selected result; the arrows move inside it.
+    .tab_index(if selected { 0 } else { -1 })
 }
 
 /// The results (DW-0802, DW-0802b): the pills, the note of a first sign-in, the list, and the
@@ -775,9 +801,17 @@ fn offline_card(id: &str, d: &Details, t: &Theme) -> El {
                 .child(kit::label("offline-detail", d.offline_note.clone(), sub_style, t.text_tertiary).truncate()),
         )
         .child(
-            crate::ui::switch::switch_sized("offline-switch", "", d.kept_offline, true, crate::ui::button::Size::Md, t).label(title)
-                .description(d.offline_note.clone())
-                .on_press(push(Intent::Do("keep-offline", id))),
+            crate::ui::switch::switch_sized(
+                "offline-switch",
+                "",
+                d.kept_offline,
+                true,
+                crate::ui::button::Size::Md,
+                t,
+            )
+            .label(title)
+            .description(d.offline_note.clone())
+            .on_press(push(Intent::Do("keep-offline", id))),
         );
     el().key("offline-card")
         .w_full()

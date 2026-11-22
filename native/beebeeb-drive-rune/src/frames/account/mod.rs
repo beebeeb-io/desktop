@@ -31,8 +31,8 @@ mod plan;
 mod request;
 mod security_overview;
 mod sessions;
-pub mod switcher;
 pub mod source;
+pub mod switcher;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -563,10 +563,7 @@ fn state_pane(pane: Pane, state: source::PaneState, t: &Theme) -> El {
     let title = title_of(pane);
     let (head, words) = match state {
         source::PaneState::Loading => ("Loading", "Asking Beebeeb for your account."),
-        source::PaneState::SignedOut => (
-            "Not signed in",
-            "Sign in and unlock Beebeeb to see your account.",
-        ),
+        source::PaneState::SignedOut => ("Not signed in", "Sign in and unlock Beebeeb to see your account."),
         source::PaneState::SessionEnded => (
             "Your session ended",
             "Sign in again to see your account. Nothing was changed.",
@@ -941,7 +938,14 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .map(|plan| plan::overlay(&plan, &t)),
         ),
         Pane::Security => {
-            let (page, over) = security_overview::pane(source, dialog, &ui.signing_out, &ui.unsaved_name, s.shell.hide_from_capture(), &t);
+            let (page, over) = security_overview::pane(
+                source,
+                dialog,
+                &ui.signing_out,
+                &ui.unsaved_name,
+                s.shell.hide_from_capture(),
+                &t,
+            );
             (page, over.or_else(|| app_lock_password::over(source, form, dialog, &t)))
         }
         Pane::Sessions => sessions::pane(source, dialog, &t),
@@ -963,7 +967,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(crate::ui::focus::pane(row().h_full().child(sidebar(s, section, &t)), "settings-sidebar"))
+        .child(crate::ui::focus::pane(
+            row().h_full().child(sidebar(s, section, &t)),
+            "settings-sidebar",
+        ))
         // One scroller per pane (Rune keeps a scroller's offset by its path): a page opened from a page that
         // was scrolled down starts at its own top, never at the other's offset.
         .child(
@@ -973,7 +980,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .min_w(0.0)
                 .min_h(0.0)
                 .h_full()
-                .child(crate::ui::focus::pane(row().grow(1.0).min_w(0.0).h_full().child(pane_el), "settings-page")),
+                .child(crate::ui::focus::pane(
+                    row().grow(1.0).min_w(0.0).h_full().child(pane_el),
+                    "settings-page",
+                )),
         );
     if let Some(overlay) = overlay {
         body = body.child(overlay);
@@ -1029,7 +1039,10 @@ pub(super) fn row_keys(row: El, act: impl Fn(&mut State, RowKey) -> bool + 'stat
 /// card already in it (no card alone to give `modal_back`), so its two return layers go on that scrim here, as
 /// `modal_back` puts them: focus back on `opener` while it is still there, else into `fallback` (the list).
 pub(super) fn modal_back(scrim: El, opener: &str, fallback: &str, dismiss: impl Fn(&mut State) + 'static) -> El {
-    let back = el().size(0.0, 0.0).pin(Some(0.0), Some(0.0), None, None).focus_return(opener);
+    let back = el()
+        .size(0.0, 0.0)
+        .pin(Some(0.0), Some(0.0), None, None)
+        .focus_return(opener);
     scrim.child(back).modal(false, dismiss).focus_return(fallback)
 }
 

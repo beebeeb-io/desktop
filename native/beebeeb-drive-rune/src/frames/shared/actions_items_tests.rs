@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use super::super::Tab;
 use super::super::dialogs::Dialog;
 use super::super::parts::table::Row;
 use super::super::scenes;
@@ -10,7 +11,6 @@ use super::super::source::{
     Access, BoardShared, Invitation, InviteResult, LinkShare, Member, PeopleShare, Request, RowTarget, SharedSource,
 };
 use super::super::tests::{click, runtime, settle};
-use super::super::Tab;
 use crate::State;
 use crate::frames::Intent;
 use rune::Runtime;
@@ -115,7 +115,10 @@ fn leave_sends_one_leave_only_after_the_confirmation() {
     let (mut rt, asked) = window(scenes::dw_0505);
     let id = rt.state.frames.shared.source.with_me()[1].id.clone();
     click(&mut rt, "mi-leave");
-    assert_eq!(rt.state.frames.shared.dialog, Some(Dialog::ConfirmLeave { id: id.clone() }));
+    assert_eq!(
+        rt.state.frames.shared.dialog,
+        Some(Dialog::ConfirmLeave { id: id.clone() })
+    );
     drain(&mut rt);
     assert!(asked.borrow().left.is_empty(), "nothing is sent by the menu");
     // Cancel sends nothing.
@@ -148,7 +151,10 @@ fn an_answer_without_its_confirmation_does_nothing() {
 fn stop_sharing_and_close_request_ask_first() {
     let (mut rt, asked) = window(scenes::dw_0506);
     click(&mut rt, "mi-stop-sharing");
-    assert!(matches!(rt.state.frames.shared.dialog, Some(Dialog::ConfirmStop { .. })));
+    assert!(matches!(
+        rt.state.frames.shared.dialog,
+        Some(Dialog::ConfirmStop { .. })
+    ));
     assert!(asked.borrow().stopped.is_empty());
     click(&mut rt, "btn-stop-sharing");
     drain(&mut rt);
@@ -156,7 +162,10 @@ fn stop_sharing_and_close_request_ask_first() {
 
     let (mut rt, asked) = window(scenes::dw_0507);
     click(&mut rt, "mi-close-request");
-    assert!(matches!(rt.state.frames.shared.dialog, Some(Dialog::ConfirmClose { .. })));
+    assert!(matches!(
+        rt.state.frames.shared.dialog,
+        Some(Dialog::ConfirmClose { .. })
+    ));
     assert!(asked.borrow().closed.is_empty());
     click(&mut rt, "btn-close-request");
     drain(&mut rt);

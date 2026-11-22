@@ -477,7 +477,11 @@ fn share_says_which_way_keeps_the_encryption_and_asks_for_it() {
     let harbour = id(board::HARBOUR);
     assert!(text(&rt, "ph-dlg-note").starts_with("Copy link keeps it encrypted. Send a copy decrypts it"));
     click(&mut rt, "ph-item-0-2-switch");
-    assert_eq!(text(&rt, "ph-item-0-0-pop-label"), "Can download", "a link has no Can edit");
+    assert_eq!(
+        text(&rt, "ph-item-0-0-pop-label"),
+        "Can download",
+        "a link has no Can edit"
+    );
     // Password on and none typed: no link, the dialog stays and says so.
     press(&mut rt, Key::Enter);
     assert!(rt.state.photos.take_intents().is_empty());
@@ -735,15 +739,21 @@ fn a_tile_without_a_thumbnail_shows_the_photo_or_video_icon() {
     let photo = Some(tint_color(icon_for("", false, Some("image/*")).tint, false));
     let video = Some(tint_color(icon_for("", false, Some("video/*")).tint, false));
     assert_eq!(icon_for("", false, Some("image/*")).tint, Tint::Image);
-    assert!(none.contains(&photo) && none.contains(&video), "photo and video icons drawn");
-    assert!(colours(Ui::new(Box::new(FixturePhotos::new()))).is_empty(), "a thumbnail, no type icon");
+    assert!(
+        none.contains(&photo) && none.contains(&video),
+        "photo and video icons drawn"
+    );
+    assert!(
+        colours(Ui::new(Box::new(FixturePhotos::new()))).is_empty(),
+        "a thumbnail, no type icon"
+    );
 }
 
 /// The status line says the PC's real sync state, not a fixed "Up to date": each state its own words and dot.
 #[test]
 fn the_status_line_says_the_real_sync_state() {
     use crate::frames::PcStatus;
-    use crate::ui::status_bar::{Dot, PAUSED, SIGN_IN_AGAIN, SYNCING, SYNC_STOPPED, UP_TO_DATE, dot_for};
+    use crate::ui::status_bar::{Dot, PAUSED, SIGN_IN_AGAIN, SYNC_STOPPED, SYNCING, UP_TO_DATE, dot_for};
     struct Pc(&'static str);
     impl PcStatus for Pc {
         fn sync_words(&self) -> String {

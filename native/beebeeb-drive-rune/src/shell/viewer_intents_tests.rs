@@ -34,7 +34,11 @@ fn runtime() -> Runtime<State> {
 fn press(rt: &mut Runtime<State>, intent: Intent) {
     rt.update(|s, _| {
         if viewers::ui(s).is_none() {
-            assert!(viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::AUDIO));
+            assert!(viewers::open_from(
+                s,
+                Box::new(FixtureViewerSource::new()),
+                board::AUDIO
+            ));
         }
         viewers::ui(s).expect("open").intent(intent);
     });
@@ -112,9 +116,15 @@ fn report_a_problem_opens_settings_general_with_the_report_dialog() {
 fn only_web_links_open_in_the_browser() {
     OPENED.with(|o| o.borrow_mut().clear());
     let mut rt = runtime();
-    press(&mut rt, Intent::OpenInBrowser("file:///C:/Windows/system32/calc.exe".into()));
+    press(
+        &mut rt,
+        Intent::OpenInBrowser("file:///C:/Windows/system32/calc.exe".into()),
+    );
     press(&mut rt, Intent::OpenInBrowser("javascript:alert(1)".into()));
-    assert!(OPENED.with(|o| o.borrow().is_empty()), "nothing but http(s) reaches the opener");
+    assert!(
+        OPENED.with(|o| o.borrow().is_empty()),
+        "nothing but http(s) reaches the opener"
+    );
     assert_eq!(toast(&mut rt).as_deref(), Some("Only web links open in the browser"));
     press(&mut rt, Intent::OpenInBrowser("https://beebeeb.io/security".into()));
     assert_eq!(OPENED.with(|o| o.borrow().clone()), vec!["https://beebeeb.io/security"]);
@@ -123,12 +133,22 @@ fn only_web_links_open_in_the_browser() {
 #[test]
 fn links_that_are_not_in_drive_are_refused() {
     let here = vec!["Files".to_string(), "Trips".to_string()];
-    for bad in ["../secret.md", "C:\\Users\\a\\b.md", "C:/x.md", "https://x/y.md", "", "other/place/x.md"] {
+    for bad in [
+        "../secret.md",
+        "C:\\Users\\a\\b.md",
+        "C:/x.md",
+        "https://x/y.md",
+        "",
+        "other/place/x.md",
+    ] {
         assert_eq!(resolve_in_folder(bad, &here), None, "{bad}");
     }
     assert_eq!(resolve_in_folder("notes.md", &here).as_deref(), Some("notes.md"));
     assert_eq!(resolve_in_folder("./notes.md", &here).as_deref(), Some("notes.md"));
-    assert_eq!(resolve_in_folder("Files/Trips/notes.md", &here).as_deref(), Some("notes.md"));
+    assert_eq!(
+        resolve_in_folder("Files/Trips/notes.md", &here).as_deref(),
+        Some("notes.md")
+    );
     assert_eq!(resolve_in_folder("/Trips/notes.md", &here).as_deref(), Some("notes.md"));
 }
 
@@ -151,7 +171,15 @@ fn a_command_the_running_editor_did_not_take_says_so() {
     rt.update(|s, _| viewers::ui(s).expect("open").office.edit = Some(EditUi::new(EditKind::Docx)));
     press(&mut rt, Intent::Office("Bold"));
     assert_eq!(toast(&mut rt).as_deref(), Some(NOT_TAKEN));
-    rt.update(|s, _| viewers::ui(s).expect("open").office.edit.as_mut().expect("edit").stopped = true);
+    rt.update(|s, _| {
+        viewers::ui(s)
+            .expect("open")
+            .office
+            .edit
+            .as_mut()
+            .expect("edit")
+            .stopped = true
+    });
     press(&mut rt, Intent::Office("Bold"));
     assert_eq!(
         toast(&mut rt).as_deref(),
@@ -169,24 +197,38 @@ fn a_file_named_by_the_command_search_asks_about_unsaved_changes_first_and_opens
     let mut rt = runtime();
     let name = "Invented: notes of 14.md";
     rt.update(|s, _| {
-        let row = s.listing.items.iter_mut().find(|row| !row.is_folder).expect("a file in the folder shown");
+        let row = s
+            .listing
+            .items
+            .iter_mut()
+            .find(|row| !row.is_folder)
+            .expect("a file in the folder shown");
         row.name = name.to_string();
     });
     // Unsaved changes: the question, and the document stays.
     rt.update(|s, _| {
         if viewers::ui(s).is_none() {
-            assert!(viewers::open_from(s, Box::new(FixtureViewerSource::new()), board::AUDIO));
+            assert!(viewers::open_from(
+                s,
+                Box::new(FixtureViewerSource::new()),
+                board::AUDIO
+            ));
         }
         let mut edit = EditUi::new(EditKind::Docx);
         edit.revision = 2;
         viewers::ui(s).expect("open").office.edit = Some(edit);
-        viewers::ui(s).expect("open").intent(Intent::OpenInDrive(name.to_string()));
+        viewers::ui(s)
+            .expect("open")
+            .intent(Intent::OpenInDrive(name.to_string()));
     });
     rt.frame(1.0);
     rt.update(|s, _| {
         let ui = viewers::ui(s).expect("the document stays open");
         assert_eq!(ui.file.id, board::AUDIO);
-        assert!(matches!(ui.office.over, Some(Over::Leave)), "the question about unsaved changes is up");
+        assert!(
+            matches!(ui.office.over, Some(Over::Leave)),
+            "the question about unsaved changes is up"
+        );
         // Answered (nothing unsaved any more): the same press goes on.
         ui.office.over = None;
         ui.office.edit = None;
@@ -196,7 +238,11 @@ fn a_file_named_by_the_command_search_asks_about_unsaved_changes_first_and_opens
     rt.frame(1.0);
     rt.update(|s, _| {
         let said = viewers::ui(s).and_then(|ui| ui.toast.clone());
-        assert_ne!(said.as_deref(), Some("That link isn't in your Beebeeb Drive"), "a name is not a path");
+        assert_ne!(
+            said.as_deref(),
+            Some("That link isn't in your Beebeeb Drive"),
+            "a name is not a path"
+        );
         assert_ne!(said.as_deref(), Some("Couldn't find that in this folder"));
     });
 }
@@ -211,8 +257,8 @@ mod slide_palette {
     use super::*;
     use crate::frames::office::edit::EditUi;
     use crate::frames::office::slides::{DeckBody, DeckView, slides_fixture};
-    use crate::frames::viewers::source::{Body, EditAnswer, OpenError, OpenFile, ViewerSource};
     use crate::frames::viewers::office_over::Over;
+    use crate::frames::viewers::source::{Body, EditAnswer, OpenError, OpenFile, ViewerSource};
 
     struct DeckSource {
         file: OpenFile,
@@ -253,7 +299,14 @@ mod slide_palette {
         let edits = Rc::new(RefCell::new(Vec::new()));
         let id = file.id.clone();
         rt.update(|s, _| {
-            assert!(viewers::open_from(s, Box::new(DeckSource { file, edits: edits.clone() }), &id));
+            assert!(viewers::open_from(
+                s,
+                Box::new(DeckSource {
+                    file,
+                    edits: edits.clone()
+                }),
+                &id
+            ));
             let ui = viewers::ui(s).expect("open");
             ui.office.edit = Some(EditUi::new(EditKind::Pptx));
             viewers::deck_mut(s).unwrap().go(current);
@@ -266,11 +319,16 @@ mod slide_palette {
         rt.update(|s, _| {
             let ui = viewers::ui(s).expect("open");
             ui.office_palette();
-            let Some(Over::Palette(p)) = &mut ui.office.over else { panic!("palette") };
+            let Some(Over::Palette(p)) = &mut ui.office.over else {
+                panic!("palette")
+            };
             p.query.insert(typed);
         });
         rt.frame(1.0);
-        rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+        rt.key(KeyEvent {
+            key: Key::Enter,
+            mods: Mods::default(),
+        });
         rt.frame(1.0);
         rt.frame(1.0);
     }
@@ -286,7 +344,12 @@ mod slide_palette {
         palette_run(&mut rt, "duplicate slide");
         assert_eq!(edits.borrow().last(), Some(&EditOp::DuplicateSlide(1)));
         assert_eq!(deck(&mut rt), (3, 4), "one more slide, on the copy");
-        let r = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("edit-slide")).expect("stage").rect;
+        let r = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("edit-slide"))
+            .expect("stage")
+            .rect;
         let (x, y) = (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
         rt.pointer_move(x, y);
         rt.frame(0.0);
@@ -294,7 +357,14 @@ mod slide_palette {
         rt.frame(0.0);
         rt.pointer_up(x, y);
         rt.frame(0.0);
-        rt.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ctrl: true, ..Mods::default() } });
+        rt.key(KeyEvent {
+            key: Key::Command('z'),
+            mods: Mods {
+                cmd: true,
+                ctrl: true,
+                ..Mods::default()
+            },
+        });
         rt.frame(0.0);
         assert_eq!(edits.borrow().last(), Some(&EditOp::Undo));
     }

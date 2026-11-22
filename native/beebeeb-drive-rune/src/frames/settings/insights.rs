@@ -3,12 +3,13 @@
 
 use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::{space as sp, text};
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::settings_card as cards;
 use crate::ui::settings_meter as meters;
-use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::settings_shell::{self as shell, SUB};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use rune::tok::Family;
 use rune::{El, TextStyle, col, el, row};
 
@@ -21,9 +22,9 @@ pub const FIGURE: TextStyle = TextStyle::new(24.0, 650.0)
     .lh(30.0)
     .tracking(-0.48);
 /// 12px/500 on a 15px line: a kind's name (`.t-sub` in ink 2, medium).
-const KIND: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
+const KIND: TextStyle = text::SUB_STRONG;
 /// 12px mono: a path, and its size in semibold (`.mk-lrow .p`, `.s`).
-const PATH: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.5);
+const PATH: TextStyle = text::MONO;
 const SIZE: TextStyle = TextStyle::new(12.0, 600.0).family(Family::Mono).lh(15.5);
 
 /// The inner width of a card on the pane's column (540 less 16 each side).
@@ -41,13 +42,20 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         ),
     ];
     match ui.drive.insights() {
-        Insights::Loading => children.push(view_state(ViewState::Loading { words: "Loading your insights…" }, t)),
+        Insights::Loading => children.push(view_state(
+            ViewState::Loading {
+                words: "Loading your insights…",
+            },
+            t,
+        )),
         Insights::Failed(why) => children.push(view_state(
             ViewState::Failed {
                 key: "insights-failed",
                 title: "Couldn't load your insights",
                 why,
-                retry: Some(try_again("insights-failed", t).on_press(|s: &mut State| s.settings.drive.reload_insights())),
+                retry: Some(
+                    try_again("insights-failed", t).on_press(|s: &mut State| s.settings.drive.reload_insights()),
+                ),
             },
             t,
         )),
@@ -86,7 +94,7 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
                 .child(
                     col()
                         .key("card-0-figure")
-                        .gap(4.0)
+                        .gap(sp::S4)
                         .child(kit::label(
                             "card-0-cap-0",
                             "Encrypted storage",
@@ -96,7 +104,7 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
                         .child(
                             row()
                                 .key("card-0-figure-line")
-                                .gap(8.0)
+                                .gap(sp::S8)
                                 .items_start()
                                 .child(kit::label("fig-0", d.used.clone(), FIGURE, t.text))
                                 .child(el().key("card-0-sub-box").pt(12.0).child(meters::then_value(
@@ -146,7 +154,7 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
                 .role("listitem")
                 .label(format!("{}: {}", kind.name, kind.says))
                 .w_full()
-                .gap(6.0)
+                .gap(sp::S6)
                 .child(
                     row()
                         .key(format!("kind-{i}-line"))
@@ -171,7 +179,7 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
             .w_full()
             .items_start()
             .pt(12.0)
-            .px(16.0)
+            .px(sp::S16)
             .pb(8.0)
             .child(kit::label("card-2-head", "Largest files", type_::HEAD, t.text))
             .child(spacer("card-2-top-gap"))
@@ -191,8 +199,8 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
                 .help(file.path.clone())
                 .w_full()
                 .h(36.0)
-                .px(16.0)
-                .gap(12.0)
+                .px(sp::S16)
+                .gap(sp::S12)
                 .center_y()
                 .hover(t.hover)
                 .press(t.press)
@@ -221,7 +229,7 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
                 .key("lrow-more-row")
                 .w_full()
                 .h(30.0)
-                .px(16.0)
+                .px(sp::S16)
                 .center_y()
                 .child(meters::then_value("lrow-more", words, size, type_::CAPTION, t.text_tertiary).w(412.0)),
         );

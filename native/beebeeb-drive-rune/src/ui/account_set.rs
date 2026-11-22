@@ -29,9 +29,9 @@ use super::au::{self, Tone};
 use super::button;
 use super::dialog::{self, Dialog, Foot, Head, scrim};
 use super::kit;
-use super::settings_dialog::{DIALOG_TITLE};
+use super::settings_dialog::DIALOG_TITLE;
 use super::settings_list::{VALUE, VALUE_MONO};
-use super::settings_shell::{PANE_TITLE};
+use super::settings_shell::PANE_TITLE;
 
 /// A pane's column (`.au-set-col`).
 pub const COLUMN_W: f32 = 520.0;
@@ -316,7 +316,11 @@ pub fn item(list: usize, index: usize, it: &Row, extra: Vec<El>, t: &Theme) -> E
     // A link or selectable row is itself the focusable item, so a `roving_list` can hold it;
     // a row with buttons of its own stays text around them.
     r = if it.link {
-        r.role("link").hover(t.hover).press(t.press).focusable(true).focus_selected(it.selected)
+        r.role("link")
+            .hover(t.hover)
+            .press(t.press)
+            .focusable(true)
+            .focus_selected(it.selected)
     } else if it.selected && extra.is_empty() {
         r.role("listitem").focusable(true).focus_selected(true)
     } else {
@@ -433,7 +437,11 @@ pub fn button(
         Size::Small => button::Size::Sm,
         Size::Medium => button::Size::Md,
     };
-    let state = if dimmed { button::ButtonState::Disabled } else { button::ButtonState::Enabled };
+    let state = if dimmed {
+        button::ButtonState::Disabled
+    } else {
+        button::ButtonState::Enabled
+    };
     button::button(button::keys(key), label, icon, variant, size, state, t)
 }
 

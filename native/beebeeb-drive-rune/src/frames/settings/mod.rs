@@ -409,6 +409,7 @@ pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, t: &Theme) -> Option<El> {
 
 /// The frames of this group that are built: the id, and what shows it on a fresh `State`.
 /// (`main.rs` adds this table to its scenes; the shell lane registers it.)
+#[allow(clippy::type_complexity)]
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0701", |s| open_on(s, "DW-0701")),
     ("DW-0781", |s| {
@@ -852,7 +853,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             )),
             SIDEBAR_PANE,
         ))
-        .child(focus::pane(row().grow(1.0).min_w(0.0).h_full().child(pane_el), PAGE_PANE));
+        .child(focus::pane(
+            row().grow(1.0).min_w(0.0).h_full().child(pane_el),
+            PAGE_PANE,
+        ));
     if let Some(overlay) = overlay {
         body = body.child(overlay);
     }
@@ -912,6 +916,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
 }
 
 /// Every `Intent::Open` target the panes can raise, and the file that takes it (`shell::settings_open`).
+#[allow(dead_code)] // the shell lane reads it
 pub const OPEN_TARGETS: [&str; 7] = [
     "log-folder",
     "open-source-licences",

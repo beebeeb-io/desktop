@@ -136,13 +136,7 @@ pub fn modal<S: 'static>(top: f32, card: El, dismiss: impl Fn(&mut S) + 'static,
 /// an opener that is gone by then: a menu's row, a toolbar overflow item. An opener that stays
 /// gets focus back from [`modal`] alone.
 #[cfg(test)]
-pub fn modal_from<S: 'static>(
-    top: f32,
-    card: El,
-    opener: &str,
-    dismiss: impl Fn(&mut S) + 'static,
-    t: &Theme,
-) -> El {
+pub fn modal_from<S: 'static>(top: f32, card: El, opener: &str, dismiss: impl Fn(&mut S) + 'static, t: &Theme) -> El {
     modal(top, card, dismiss, t).focus_return(opener)
 }
 
@@ -161,8 +155,14 @@ pub fn modal_back<S: 'static>(
     dismiss: impl Fn(&mut S) + 'static,
     t: &Theme,
 ) -> El {
-    let back = el().size(0.0, 0.0).pin(Some(0.0), Some(0.0), None, None).focus_return(opener);
-    scrim(top, card, t).child(back).modal(false, dismiss).focus_return(fallback)
+    let back = el()
+        .size(0.0, 0.0)
+        .pin(Some(0.0), Some(0.0), None, None)
+        .focus_return(opener);
+    scrim(top, card, t)
+        .child(back)
+        .modal(false, dismiss)
+        .focus_return(fallback)
 }
 
 /// A dialog's card. `foot`: the buttons in the caller's layout, the primary first, the way out

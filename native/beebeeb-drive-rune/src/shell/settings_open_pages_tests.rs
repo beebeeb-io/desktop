@@ -20,7 +20,10 @@ fn runtime() -> Runtime<crate::State> {
         state,
         registry::view,
         (1280.0, 800.0),
-        Env { system_dark: false, scale: 2.0 },
+        Env {
+            system_dark: false,
+            scale: 2.0,
+        },
     );
     rt.poll = Some(poll);
     super::super::intents::poll_drains_for_this_test();
@@ -39,7 +42,10 @@ fn privacy_and_export_my_data_each_ask_for_their_web_page() {
     rt.frame(1.0);
     assert_eq!(
         OPENED.with(|o| o.borrow().clone()),
-        vec!["https://app.beebeeb.io/settings/privacy", "https://app.beebeeb.io/settings/privacy"]
+        vec![
+            "https://app.beebeeb.io/settings/privacy",
+            "https://app.beebeeb.io/settings/privacy"
+        ]
     );
 }
 

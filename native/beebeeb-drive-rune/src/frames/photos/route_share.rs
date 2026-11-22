@@ -47,7 +47,11 @@ fn share_several(s: &mut State, ids: &[PhotoId]) {
 }
 
 fn versions(s: &mut State, id: PhotoId) {
-    let item = s.photos.source.file_items(&[id]).and_then(|items| items.into_iter().next());
+    let item = s
+        .photos
+        .source
+        .file_items(&[id])
+        .and_then(|items| items.into_iter().next());
     let Some(item) = item else {
         s.photos.toast = Some(Toast::Words(NOT_HERE));
         return;
@@ -73,10 +77,16 @@ fn copy_link(s: &mut State, id: PhotoId, expires: LinkExpiry, password: bool) {
     }
     // One link at a time: an answer names no item, so a second is not asked for while one is on its way.
     if s.actions.link.asked.is_some() || s.actions.link.share.is_some() {
-        s.photos.toast = Some(Toast::Words("Couldn\u{2019}t make the link. The last change is still on its way."));
+        s.photos.toast = Some(Toast::Words(
+            "Couldn\u{2019}t make the link. The last change is still on its way.",
+        ));
         return;
     }
-    let options = ShareOptions { access: LinkAccess::default(), expires, password: typed };
+    let options = ShareOptions {
+        access: LinkAccess::default(),
+        expires,
+        password: typed,
+    };
     let answer = s.actions.source.share_link(&items, &options);
     let password_on = options.password.is_some();
     drop(options);
@@ -94,7 +104,9 @@ fn copy_link(s: &mut State, id: PhotoId, expires: LinkExpiry, password: bool) {
         }
         Ok(()) => s.photos.toast = Some(Toast::Words("Link copied")),
         Err(ActionError::Offline) => {
-            s.photos.toast = Some(Toast::Words("Couldn\u{2019}t make the link \u{00B7} needs a connection"))
+            s.photos.toast = Some(Toast::Words(
+                "Couldn\u{2019}t make the link \u{00B7} needs a connection",
+            ))
         }
         Err(_) => s.photos.toast = Some(Toast::Words("Couldn\u{2019}t make the link")),
     }

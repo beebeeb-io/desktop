@@ -671,7 +671,10 @@ mod tests {
             plan(&named, Claim::Running, AppIdentity::Test),
             Plan::Hand(Request::ShowOn("http://127.0.0.1:9".to_owned()))
         );
-        assert_eq!(after_hand(Delivery::OtherServer), Start::Refuse(Refusal::ServerAlreadyChosen));
+        assert_eq!(
+            after_hand(Delivery::OtherServer),
+            Start::Refuse(Refusal::ServerAlreadyChosen)
+        );
         assert!(refusal_is_shown(&named));
         // The first instance starts with it; a later launch without it is handed over as before.
         assert_eq!(plan(&named, Claim::First, AppIdentity::Test), Plan::BeTheApp);

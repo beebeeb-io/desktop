@@ -26,10 +26,9 @@ pub(super) fn full_screen_key(s: &State, ev: &rune::KeyEvent) -> bool {
     let plain = !m.alt && !m.shift && !m.cmd && !m.ctrl;
     plain
         && matches!(&ev.key, rune::Key::Text(k) if k.eq_ignore_ascii_case("f"))
-        && s.viewer
-            .ui
-            .as_ref()
-            .is_some_and(|ui| ui.editor.is_none() && ui.dialog.is_none() && matches!(ui.file.body, super::source::Body::Video(_)))
+        && s.viewer.ui.as_ref().is_some_and(|ui| {
+            ui.editor.is_none() && ui.dialog.is_none() && matches!(ui.file.body, super::source::Body::Video(_))
+        })
 }
 
 fn window_keys(s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
@@ -99,7 +98,12 @@ pub fn toolbar(_s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> E
     // The file's own controls and "more" sit 6 apart (`.flex.items-center.gap-1.5`).
     // One Tab stop (`ui::toolbar::roving`): Tab enters it once, Left/Right/Home/End move inside it.
     let file_tools = toolbar::roving(
-        row().key("file-tools").center_y().gap(scale::space::S6).children(tools).child(more),
+        row()
+            .key("file-tools")
+            .center_y()
+            .gap(scale::space::S6)
+            .children(tools)
+            .child(more),
         "File tools",
     );
     toolbar::file_bar(
@@ -237,7 +241,10 @@ pub fn window(
         .h_full()
         .fill(t.bg)
         // The toolbar, the body and the details panel are F6 stops (`ui::focus::pane`).
-        .child(focus::pane(col().w_full().child(toolbar(s, ui, &head, tools, t)), PANE_TOOLBAR));
+        .child(focus::pane(
+            col().w_full().child(toolbar(s, ui, &head, tools, t)),
+            PANE_TOOLBAR,
+        ));
     if let Some(banner) = banner {
         main = main.child(banner);
     }

@@ -214,13 +214,28 @@ pub fn switch_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El
                 .child(kit::label(format!("{key}-label"), title, type_::ITEM_TITLE, t.text).truncate())
                 .child(kit::label(format!("{key}-detail"), sub, type_::BODY.lh(15.0), t.text_tertiary).truncate()),
         )
-        .child(crate::ui::switch::switch_sized(&format!("{key}-switch"), "", on, true, crate::ui::button::Size::Md, t).label(title))
+        .child(
+            crate::ui::switch::switch_sized(&format!("{key}-switch"), "", on, true, crate::ui::button::Size::Md, t)
+                .label(title),
+        )
 }
 
 /// A small outlined button (`.kit-btn.kit-btn-sm`). Keys: `<key>-box`, `<key>-icon`, `<key>-btn`.
 pub fn action_button(key: &str, label: &str, ic: &'static Icon, t: &Theme) -> El {
-    let keys = ButtonKeys { root: format!("{key}-box"), icon: format!("{key}-icon"), label: format!("{key}-btn") };
-    btn::button(keys, label, Some(ic), Variant::Secondary, Size::Sm, ButtonState::Enabled, t)
+    let keys = ButtonKeys {
+        root: format!("{key}-box"),
+        icon: format!("{key}-icon"),
+        label: format!("{key}-btn"),
+    };
+    btn::button(
+        keys,
+        label,
+        Some(ic),
+        Variant::Secondary,
+        Size::Sm,
+        ButtonState::Enabled,
+        t,
+    )
 }
 
 fn kind_of(item: &DriveItem) -> &'static str {

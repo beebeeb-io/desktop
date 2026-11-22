@@ -12,6 +12,8 @@
 use crate::State;
 use crate::frames::signin::setup::source::{BUNDLED_SAMPLE_PNG, Sample};
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::space as sp;
+use crate::theme::tokens::radius as rad;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::button as ui_button;
 use crate::ui::kit;
@@ -20,9 +22,9 @@ use crate::ui::settings_dialog::{self as dialogs, Weight};
 use crate::ui::settings_list::{self as lists, Item, Trailing};
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell::{self as shell, SUB};
-use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::setup::{self, SegInk, SegSize};
-use rune::{Color, El, Family, Pixels, Span, TextStyle, col, el, rich, row};
+use crate::ui::view_state::{ViewState, try_again, view_state};
+use rune::{Color, El, Pixels, Span, TextStyle, col, el, rich, row};
 
 pub use crate::frames::signin::setup::source::{PreviewFormat, PreviewSize};
 pub use crate::frames::signin::setup::{Compare, CompareMode};
@@ -42,7 +44,7 @@ pub const REBUILDING: &str = "Making new previews in the background";
 pub const NOT_MEASURED: &str = "not measured yet";
 
 /// 11px/500 mono: what a choice weighs, in the compare view (`.t-cap.font-mono`).
-const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
+const CAP_MONO: TextStyle = type_::KBD;
 
 /// What Thumbnails and previews shows. Every figure is the engine's, as words.
 #[derive(Clone, PartialEq, Debug)]
@@ -103,6 +105,7 @@ pub fn name(size: PreviewSize, format: PreviewFormat) -> String {
 
 /// What the source answers for this pane.
 #[derive(Clone, PartialEq, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum PhotoPreviews {
     /// Nothing answers yet (the default of `DriveSettings::photo_previews`): no value is drawn.
     Unavailable,
@@ -200,9 +203,12 @@ fn decode_rgba(png_bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let bytes = &buf[..info.buffer_size()];
     let rgba: Vec<u8> = match (info.color_type, info.bit_depth) {
         (png::ColorType::Rgba, png::BitDepth::Eight) => bytes.to_vec(),
-        (png::ColorType::Rgb, png::BitDepth::Eight) => {
-            bytes.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect()
-        }
+        (png::ColorType::Rgb, png::BitDepth::Eight) => bytes
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
         _ => return None,
     };
     Some((info.width, info.height, rgba))
@@ -340,8 +346,16 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             &Item::new(Some(&ic::IMAGE), "Photo previews")
                 .sub("Photos open instantly, without downloading the original"),
             vec![
-                crate::ui::switch::switch_sized(&format!("{}-switch", "item-0-0"), "", on, true, crate::ui::button::Size::Md, t).label("Photo previews")
-                    .on_press(move |s: &mut State| s.settings.drive.set_photo_previews(!on)),
+                crate::ui::switch::switch_sized(
+                    &format!("{}-switch", "item-0-0"),
+                    "",
+                    on,
+                    true,
+                    crate::ui::button::Size::Md,
+                    t,
+                )
+                .label("Photo previews")
+                .on_press(move |s: &mut State| s.settings.drive.set_photo_previews(!on)),
             ],
             t,
         )],
@@ -354,7 +368,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let formats: Vec<&str> = PreviewFormat::ALL.iter().map(|f| f.label()).collect();
     let size_at = PreviewSize::ALL.iter().position(|s| *s == p.size).unwrap_or(0);
     let format_at = PreviewFormat::ALL.iter().position(|f| *f == p.format).unwrap_or(0);
-    let seg_row = |key: &str, seg: El| el().key(key.to_string()).w_full().px(12.0).py(10.0).child(seg);
+    let seg_row = |key: &str, seg: El| el().key(key.to_string()).w_full().px(sp::S12).py(sp::S10).child(seg);
     children.push(lists::list(
         1,
         Some("Preview size"),
@@ -508,7 +522,12 @@ const FORMAT_CAPTION: &str = "HEIC is about half the size at the same quality. J
 
 /// While the source reads: the shared loading state, never a value.
 fn loading(t: &Theme) -> El {
-    view_state(ViewState::Loading { words: "Loading your preview settings" }, t)
+    view_state(
+        ViewState::Loading {
+            words: "Loading your preview settings",
+        },
+        t,
+    )
 }
 
 /// The read failed: said plainly, with a Try again that reads again.
@@ -566,8 +585,8 @@ fn sample_card(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         .role("group")
         .label(format!("Sample: {words}"))
         .w_full()
-        .padding(12.0)
-        .gap(12.0)
+        .padding(sp::S12)
+        .gap(sp::S12)
         .center_y()
         .radius(radius::LG)
         .fill(t.card)
@@ -578,7 +597,7 @@ fn sample_card(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
                 .role("image")
                 .label("Sample photo")
                 .size(84.0, 64.0)
-                .radius(6.0)
+                .radius(rad::MD)
                 .pixels(&ui.previews.original),
         )
         .child(
@@ -636,9 +655,9 @@ fn stage(t: &Theme) -> Color {
 fn tag(key: &str, words: &str) -> El {
     el().key(format!("{key}-box"))
         .h(18.0)
-        .px(8.0)
+        .px(sp::S8)
         .center()
-        .radius(4.0)
+        .radius(rad::SM)
         .fill(Color::BLACK.alpha(0.5))
         .child(kit::label(key.to_string(), words, type_::CAPTION, Color::WHITE))
 }
@@ -653,7 +672,7 @@ fn photo(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         Some(weight) => format!("{} \u{b7} {weight}", name(size, format)),
         None => name(size, format),
     };
-    let frame = |key: &str| el().key(key.to_string()).size(w, h).radius(4.0);
+    let frame = |key: &str| el().key(key.to_string()).size(w, h).radius(rad::SM);
     match compare.mode {
         CompareMode::Wipe => {
             let x = (compare.wipe * w).round();
@@ -695,14 +714,14 @@ fn photo(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
                     .role("image")
                     .label(name.to_string())
                     .size(half * w / h, half)
-                    .radius(4.0)
+                    .radius(rad::SM)
                     .pixels(pixels)
                     .child(el().absolute(12.0, 12.0).child(tag(key, words)))
             };
             col()
                 .key("cmp-photo")
                 .size(w, h)
-                .gap(10.0)
+                .gap(sp::S10)
                 .items_center()
                 .child(one("cmp-tag-0", original, &original_tag, "The original"))
                 .child(one("cmp-tag-1", preview, &preview_tag, "The preview"))
@@ -746,9 +765,9 @@ fn option(j: usize, label: &str, weight: Option<String>, on: bool, t: &Theme) ->
             + rune::text::advance(label, type_::HEAD)
                 .max(weight.as_deref().map_or(0.0, |w| rune::text::advance(w, CAP_MONO))))
         .h(43.0)
-        .py(6.0)
+        .py(sp::S6)
         .items_center()
-        .radius(8.0)
+        .radius(rad::CONTROL)
         .focusable(true)
         .focus_ring(2.0, 0.0, t.accent_deep)
         .cursor(rune::Cursor::Pointer)
@@ -782,8 +801,8 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         .key("cmp-head")
         .w_full()
         .h(48.0)
-        .px(16.0)
-        .gap(12.0)
+        .px(sp::S16)
+        .gap(sp::S12)
         .center_y()
         .child(
             ui_button::button(
@@ -826,7 +845,7 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         .key("cmp-foot")
         .w_full()
         .pb(16.0)
-        .gap(24.0)
+        .gap(sp::S24)
         .center()
         .role("group")
         .focus_group()

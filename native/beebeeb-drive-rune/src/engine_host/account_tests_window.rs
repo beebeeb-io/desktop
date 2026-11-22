@@ -46,11 +46,9 @@ fn has(rt: &Runtime<State>, key: &str) -> bool {
 /// The pane's toast is drawn as a failure: its lead is the red warning glyph (the toast's role is "status" either way).
 fn toast_is_failure(rt: &Runtime<State>) -> bool {
     let red = crate::theme::tokens::theme(false).red;
-    rt.elements().iter().any(|e| {
-        !e.exiting
-            && e.key.as_deref() == Some("toast-icon")
-            && (e.fill == red || e.text_color == Some(red))
-    })
+    rt.elements()
+        .iter()
+        .any(|e| !e.exiting && e.key.as_deref() == Some("toast-icon") && (e.fill == red || e.text_color == Some(red)))
 }
 
 fn wait_for(rt: &mut Runtime<State>, what: &str, done: impl Fn(&Runtime<State>) -> bool) {
@@ -383,10 +381,7 @@ fn a_refusal_with_nothing_to_try_again_is_still_drawn_as_a_failure() {
         click(&mut rt, "btn-2");
     }
     assert!(shows(&rt, STILL_SIGNING_OUT));
-    assert!(
-        toast_is_failure(&rt),
-        "drawn as a failure"
-    );
+    assert!(toast_is_failure(&rt), "drawn as a failure");
     assert!(!has(&rt, "toast-action") && !has(&rt, "toast-0"));
     wait_for(&mut rt, "the sign-out lands", |rt| shows(rt, SIGNED_OUT));
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"], "sent once");
@@ -491,7 +486,10 @@ fn offline_the_running_app_shows_the_security_page_and_can_sign_out_of_drive() {
         shows(rt, "Sign out of Drive") && shows(rt, "Offline")
     });
     assert!(!says_anywhere(&rt, "Couldn't load this"));
-    assert!(!says_anywhere(&rt, "3 signed in") && !has(&rt, "item-0-1-check"), "nothing guessed");
+    assert!(
+        !says_anywhere(&rt, "3 signed in") && !has(&rt, "item-0-1-check"),
+        "nothing guessed"
+    );
     let before = server.asked("POST /api/v1/auth/logout");
     rt.update(|s, _| crate::frames::account::go(s, "DW-A57"));
     rt.frame(0.4);

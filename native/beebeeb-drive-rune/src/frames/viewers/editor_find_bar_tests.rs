@@ -28,7 +28,10 @@ fn find_bar_replace_all_marks_unsaved() {
     v.find.replacement.replace_text("x");
     assert_eq!(replace_all(&mut v, &mut e), "Replaced 2");
     assert_eq!(e.text, "x bar x");
-    assert!(!e.is_pristine() && e.text != "foo bar foo", "the editor compares to its base: unsaved");
+    assert!(
+        !e.is_pristine() && e.text != "foo bar foo",
+        "the editor compares to its base: unsaved"
+    );
 }
 
 #[test]

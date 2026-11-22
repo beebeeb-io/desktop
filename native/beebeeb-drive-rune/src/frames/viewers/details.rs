@@ -7,8 +7,8 @@ use rune::{El, Span, col, row};
 use super::source::OpenFile;
 use super::{Intent, ui};
 use crate::State;
-use crate::theme::scale;
 use crate::theme::icons;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::{detail_pane, kit};
 

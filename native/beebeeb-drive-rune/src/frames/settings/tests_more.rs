@@ -801,15 +801,24 @@ fn no_pane_raises_a_target_nothing_takes() {
     for text in panes {
         for target in quoted(text, "Intent::Open(\"") {
             seen += 1;
-            assert!(super::OPEN_TARGETS.contains(&target.as_str()), "Open({target}) has no taker");
+            assert!(
+                super::OPEN_TARGETS.contains(&target.as_str()),
+                "Open({target}) has no taker"
+            );
         }
         for page in quoted(text, "Intent::Web(\"") {
             seen += 1;
-            assert!(crate::shell::web_pages::url(&page).is_some(), "Web({page}) has no address");
+            assert!(
+                crate::shell::web_pages::url(&page).is_some(),
+                "Web({page}) has no address"
+            );
         }
         for frame in quoted(text, "Intent::Show(\"") {
             seen += 1;
-            assert!(super::TRAY_FRAMES.contains(&frame.as_str()), "Show({frame}) is not taken");
+            assert!(
+                super::TRAY_FRAMES.contains(&frame.as_str()),
+                "Show({frame}) is not taken"
+            );
         }
     }
     assert!(seen >= 10, "the scan found only {seen} targets");

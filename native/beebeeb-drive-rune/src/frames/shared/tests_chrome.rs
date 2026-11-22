@@ -47,15 +47,24 @@ fn sort_by_size_orders_by_bytes_not_by_the_drawn_words() {
     let mut sort = SectionSort::default();
     sort.pick(2);
     assert_eq!(sort.by, By::Size);
-    assert_eq!(names(&sort.arrange(samples())), ["b-big", "c-mid", "a-small", "d-folder"]);
+    assert_eq!(
+        names(&sort.arrange(samples())),
+        ["b-big", "c-mid", "a-small", "d-folder"]
+    );
     sort.pick(2);
-    assert_eq!(names(&sort.arrange(samples())), ["d-folder", "a-small", "c-mid", "b-big"]);
+    assert_eq!(
+        names(&sort.arrange(samples())),
+        ["d-folder", "a-small", "c-mid", "b-big"]
+    );
 }
 
 #[test]
 fn date_is_newest_first_by_default_and_name_ignores_case() {
     let sort = SectionSort::default();
-    assert_eq!(names(&sort.arrange(samples())), ["b-big", "c-mid", "a-small", "d-folder"]);
+    assert_eq!(
+        names(&sort.arrange(samples())),
+        ["b-big", "c-mid", "a-small", "d-folder"]
+    );
     let mut sort = SectionSort::default();
     sort.pick(0);
     let mut rows = samples();
@@ -90,7 +99,11 @@ fn shared_sort_menu_sorts_the_rows_drawn_and_search_filters_them() {
         assert!(crate::frames::shared::actions::take(s, tx, &intent));
     });
     settle(&mut rt);
-    assert!(drawn(&rt).iter().all(|n| n.to_lowercase().contains(&first.to_lowercase())));
+    assert!(
+        drawn(&rt)
+            .iter()
+            .all(|n| n.to_lowercase().contains(&first.to_lowercase()))
+    );
 }
 
 fn row_name(rt: &rune::Runtime<crate::State>, i: usize) -> Option<String> {
@@ -127,7 +140,12 @@ fn shared_and_trash_say_the_sync_words_files_says() {
         let mut rt = runtime(scene);
         rt.state.frames.pc = Box::new(crate::frames::UnwiredPc);
         settle(&mut rt);
-        let words = rt.state.actions.source.sync_state().expect("the board's Files source has sync words");
+        let words = rt
+            .state
+            .actions
+            .source
+            .sync_state()
+            .expect("the board's Files source has sync words");
         assert_eq!(info(&rt, "status-text").text.as_deref(), Some(words.as_str()));
     }
 }

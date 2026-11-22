@@ -784,7 +784,10 @@ fn each_shown_word_says_its_place_of_twelve_and_never_the_word() {
         assert_eq!(nodes.len(), 1, "word-{i}");
         assert_eq!(nodes[0]["name"], format!("Word {}", i + 1));
         assert_eq!(nodes[0]["position"], i + 1, "{} of 12", i + 1);
-        assert_eq!(super::steps_tests::a11y_set_size_of(&rt, &format!("word-{i}")), Some(12));
+        assert_eq!(
+            super::steps_tests::a11y_set_size_of(&rt, &format!("word-{i}")),
+            Some(12)
+        );
     }
     let tree = rt.accessibility_json().to_string();
     for word in board::WORDS {

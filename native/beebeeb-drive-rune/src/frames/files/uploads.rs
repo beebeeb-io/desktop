@@ -13,17 +13,17 @@
 use super::Intent;
 use super::source::Action;
 use crate::State;
+use crate::theme::icons_files;
 use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
-use crate::theme::icons_files;
 use crate::ui::dialog::{Dialog, Foot, Head, Surface, dialog};
 use crate::ui::file_row::{self, RowLook};
 use crate::ui::file_tile::{self, TilePicture, TileSize};
 use crate::ui::grid_tiles::Thumb;
 use crate::ui::kit;
 use crate::ui::menu::{self, Entry};
-use crate::ui::status_bar::{Dot, bar as status_bar};
 use crate::ui::settings_controls::{self as controls, Emphasis};
+use crate::ui::status_bar::{Dot, bar as status_bar};
 use rune::{Color, El, Tx, col, el, row};
 
 // ---- The system's picker ----
@@ -405,12 +405,15 @@ fn picture_tile(key: &str, upload: &Upload, t: &Theme) -> El {
 }
 
 fn heading(key: &str, words: &str, top: f32, t: &Theme) -> El {
-    el().key(format!("{key}-box")).px(scale::space::S12).pt(top).child(kit::label(
-        key.to_string(),
-        words.to_uppercase(),
-        type_::SECTION_LABEL,
-        t.text_tertiary,
-    ))
+    el().key(format!("{key}-box"))
+        .px(scale::space::S12)
+        .pt(top)
+        .child(kit::label(
+            key.to_string(),
+            words.to_uppercase(),
+            type_::SECTION_LABEL,
+            t.text_tertiary,
+        ))
 }
 
 /// The one entry of an upload's menu.
@@ -436,7 +439,11 @@ fn upload_row(i: usize, of: usize, upload: &Upload, menu_open: bool, t: &Theme) 
         UploadState::Uploading { words, done, .. } => (words.clone(), t.text_tertiary, Some(*done)),
         UploadState::Waiting(words) => (words.clone(), t.text_tertiary, None),
     };
-    let mut cells = vec![kit::label(format!("{key}-sub"), sub.clone(), type_::CAPTION, ink).truncate().w(150.0)];
+    let mut cells = vec![
+        kit::label(format!("{key}-sub"), sub.clone(), type_::CAPTION, ink)
+            .truncate()
+            .w(150.0),
+    ];
     if let Some(done) = done {
         cells.push(bar(&format!("{key}-bar"), done, &format!("{}, {sub}", upload.name), t).w(80.0));
     }
@@ -456,7 +463,10 @@ fn upload_row(i: usize, of: usize, upload: &Upload, menu_open: bool, t: &Theme) 
         &upload.name,
         Vec::new(),
         cells,
-        RowLook { position: Some((i + 1, of)), ..RowLook::default() },
+        RowLook {
+            position: Some((i + 1, of)),
+            ..RowLook::default()
+        },
         t,
     )
     .on_secondary_press(move |s: &mut State, _: rune::PointerPress, _: &mut Tx| {
@@ -491,25 +501,25 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
     // The figures are a machine's: JetBrains Mono inside the Inter line.
     let line = format!("{} \u{00B7} Continues in the background", uploads.figures);
     let head = col()
-            .key("uploads-head")
-            .px(scale::space::S12)
-            .pt(12.0)
-            .pb(8.0)
-            .child(
-                kit::label("uploads-title", "Uploads", type_::HEAD, t.text)
-                    .role("heading")
-                    .level(2),
-            )
-            .child(
-                kit::label("uploads-figures", line, type_::CAPTION, t.text_tertiary)
-                    .spans(vec![rune::Span {
-                        start: 0,
-                        end: uploads.figures.len() as u32,
-                        mono: true,
-                        ..rune::Span::default()
-                    }])
-                    .mt(2.0),
-            );
+        .key("uploads-head")
+        .px(scale::space::S12)
+        .pt(12.0)
+        .pb(8.0)
+        .child(
+            kit::label("uploads-title", "Uploads", type_::HEAD, t.text)
+                .role("heading")
+                .level(2),
+        )
+        .child(
+            kit::label("uploads-figures", line, type_::CAPTION, t.text_tertiary)
+                .spans(vec![rune::Span {
+                    start: 0,
+                    end: uploads.figures.len() as u32,
+                    mono: true,
+                    ..rune::Span::default()
+                }])
+                .mt(2.0),
+        );
     let mut body: Vec<El> = Vec::new();
     let groups: [(&str, fn(&UploadState) -> bool, f32); 3] = [
         ("Needs attention", |s| matches!(s, UploadState::Failed(_)), 4.0),

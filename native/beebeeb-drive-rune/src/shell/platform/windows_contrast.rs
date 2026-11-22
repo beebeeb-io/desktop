@@ -26,7 +26,11 @@ struct HighContrastW {
 static STATE: Mutex<Option<Option<SystemColors>>> = Mutex::new(None);
 
 fn read() -> Option<SystemColors> {
-    let mut hc = HighContrastW { cb_size: std::mem::size_of::<HighContrastW>() as u32, flags: 0, default_scheme: std::ptr::null_mut() };
+    let mut hc = HighContrastW {
+        cb_size: std::mem::size_of::<HighContrastW>() as u32,
+        flags: 0,
+        default_scheme: std::ptr::null_mut(),
+    };
     // SAFETY: `hc` is a live, correctly sized HIGHCONTRASTW and `cb_size` says so.
     let ok = unsafe { SystemParametersInfoW(SPI_GETHIGHCONTRAST, hc.cb_size, &mut hc as *mut _ as *mut _, 0) };
     if ok == 0 || hc.flags & HCF_HIGHCONTRASTON == 0 {

@@ -196,7 +196,10 @@ fn insights_say_loading_failed_and_empty_and_try_again_loads() {
     assert!(find(&rt, "insbar-0").is_none());
 
     let rt = runtime("DW-0783d");
-    assert_eq!(info(&rt, "insights-empty-title").text.as_deref(), Some("Nothing is stored yet"));
+    assert_eq!(
+        info(&rt, "insights-empty-title").text.as_deref(),
+        Some("Nothing is stored yet")
+    );
 
     let mut rt = runtime("DW-0783c");
     assert!(find(&rt, "insights-failed").is_some());
@@ -239,6 +242,7 @@ fn sync_switches_turn_by_keyboard_and_are_never_amber() {
     );
     let amber = crate::theme::tokens::theme(false).accent;
     // No "Show sync status on files" row: the engine cannot switch Explorer's status.
+    #[allow(clippy::single_element_loop)]
     for (switch, read) in [(
         "item-1-1-switch",
         (|d: &dyn DriveSettings| d.sync().open_at_login) as fn(&dyn DriveSettings) -> bool,
@@ -514,7 +518,15 @@ fn the_previews_row_is_hidden_while_the_source_has_none() {
         let mut state = init();
         assert!(super::scene("DW-0712", &mut state));
         state.settings.drive = drive;
-        let mut rt = Runtime::new(state, view, (958.0, 718.0), Env { system_dark: false, scale: 2.0 });
+        let mut rt = Runtime::new(
+            state,
+            view,
+            (958.0, 718.0),
+            Env {
+                system_dark: false,
+                scale: 2.0,
+            },
+        );
         rt.on_key = Some(host::on_key);
         rt.poll = Some(host::poll);
         rt.frame(0.0);
@@ -523,6 +535,12 @@ fn the_previews_row_is_hidden_while_the_source_has_none() {
             .iter()
             .any(|e| e.key.as_deref() == Some("item-1-1") && !e.exiting)
     };
-    assert!(rows(Box::new(Bare(BoardDrive::new()))), "a source that shows it: the row is there");
-    assert!(!rows(Box::new(NoRow(Bare(BoardDrive::new())))), "a source with none: no row");
+    assert!(
+        rows(Box::new(Bare(BoardDrive::new()))),
+        "a source that shows it: the row is there"
+    );
+    assert!(
+        !rows(Box::new(NoRow(Bare(BoardDrive::new())))),
+        "a source with none: no row"
+    );
 }

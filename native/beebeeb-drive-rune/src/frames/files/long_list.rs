@@ -25,7 +25,6 @@ use rune::{Color, El, Tx, el};
 #[cfg(test)]
 pub use crate::ui::file_row::{NAME_MAX, shortened};
 
-
 /// A file's size in the list: one decimal under 10 ("4.0 MB"), and no ".0" from 10 up ("112 MB").
 pub fn size_words(bytes: i64) -> String {
     let words = crate::source::format_size(bytes);

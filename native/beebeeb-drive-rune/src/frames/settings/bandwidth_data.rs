@@ -65,16 +65,29 @@ pub fn live_flows(rate: Option<(u64, u64)>, waiting_metered: bool) -> (String, F
     let flow = |bytes, busy: &str, idle: &str| {
         let speed = speed_figure(bytes);
         let says = if speed.is_some() { busy } else { idle };
-        Flow { speed, says: says.into() }
+        Flow {
+            speed,
+            says: says.into(),
+        }
     };
     if waiting_metered {
         return (
             "Waiting for another network".into(),
-            Flow { speed: None, says: "Waiting: this PC is on a metered connection".into() },
-            Flow { speed: None, says: "Files you open still download".into() },
+            Flow {
+                speed: None,
+                says: "Waiting: this PC is on a metered connection".into(),
+            },
+            Flow {
+                speed: None,
+                says: "Files you open still download".into(),
+            },
         );
     }
-    let now = if up > 0 || down > 0 { "Syncing" } else { "Nothing is moving" };
+    let now = if up > 0 || down > 0 {
+        "Syncing"
+    } else {
+        "Nothing is moving"
+    };
     (
         now.into(),
         flow(up, "Encrypting and uploading", "Nothing is uploading"),
@@ -602,7 +615,10 @@ mod upload_speed_tests {
     use super::BoardBandwidth;
 
     fn speed(limit: Option<u32>) -> (String, String) {
-        let board = BoardBandwidth { upload_limit: limit, ..BoardBandwidth::default() };
+        let board = BoardBandwidth {
+            upload_limit: limit,
+            ..BoardBandwidth::default()
+        };
         board.upload_speed()
     }
 

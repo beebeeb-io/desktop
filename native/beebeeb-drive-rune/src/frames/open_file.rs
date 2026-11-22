@@ -232,7 +232,10 @@ mod tests {
         fixture.no_default_app.store(true, Ordering::SeqCst);
         let calls = fixture.calls.clone();
         s.actions.source = Box::new(fixture);
-        assert_eq!(open_file(&mut s, Target::Item(&item("a.unknownkind"))), Opened::Explorer);
+        assert_eq!(
+            open_file(&mut s, Target::Item(&item("a.unknownkind"))),
+            Opened::Explorer
+        );
         assert_eq!(*calls.lock().unwrap(), [Call::OpenRevealed("f-1".into())]);
     }
 
@@ -243,7 +246,10 @@ mod tests {
             is_folder: true,
             ..item("Folder")
         };
-        assert_eq!(open_file(&mut s, Target::Item(&folder)), Opened::Failed(ActionError::Failed));
+        assert_eq!(
+            open_file(&mut s, Target::Item(&folder)),
+            Opened::Failed(ActionError::Failed)
+        );
         assert!(calls.lock().unwrap().is_empty());
         let mut s = crate::init();
         crate::frames::viewers::wire(&mut s, Box::new(|| Box::new(super::testing::Viewer { shows: false })));
@@ -264,7 +270,10 @@ mod tests {
         let (mut s, calls) = state(false);
         assert_eq!(open_file(&mut s, Target::Path(md)), Opened::InApp);
         let body = &s.viewer.ui.as_ref().unwrap().file.body;
-        assert!(matches!(body, crate::frames::viewers::source::Body::Markdown(_)), "{body:?}");
+        assert!(
+            matches!(body, crate::frames::viewers::source::Body::Markdown(_)),
+            "{body:?}"
+        );
         assert!(calls.lock().unwrap().is_empty());
         assert_eq!(open_file(&mut s, Target::Path(bin.clone())), Opened::DefaultApp);
         assert_eq!(*calls.lock().unwrap(), [Call::OpenPathDefault(bin)]);

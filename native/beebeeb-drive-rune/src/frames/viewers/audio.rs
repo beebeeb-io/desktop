@@ -9,8 +9,8 @@ use super::kinds::clock;
 use super::source::{AudioDoc, Picture};
 use super::{Intent, Ui, details, media, media_icons, style, video};
 use crate::State;
-use crate::theme::scale;
 use crate::media::player::{PlayState, PlayerHandle};
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 use crate::ui::toolbar::{self, ToolState, tool_button};
@@ -79,7 +79,11 @@ fn skip(key: &'static str, name: &'static str, icon: &'static Icon, delta: isize
     let button = toolbar::tool(key, name, icon, t).on_press(move |s: &mut State| {
         media::step(s, delta);
     });
-    if can { button } else { button.disabled(true).focusable(false) }
+    if can {
+        button
+    } else {
+        button.disabled(true).focusable(false)
+    }
 }
 
 /// What the player says of THIS recording, when the source hands a player whose current item it is. Another

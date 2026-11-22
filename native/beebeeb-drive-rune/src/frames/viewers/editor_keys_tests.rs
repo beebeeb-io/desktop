@@ -3,8 +3,8 @@ use rune::{Key, KeyEvent, Mods};
 
 use rune::{Env, Runtime};
 
-use super::source::{Body, Details, MdDoc, OpenError, OpenFile, TextDoc, ViewerSource, plain_lines};
 use super::open_from;
+use super::source::{Body, Details, MdDoc, OpenError, OpenFile, TextDoc, ViewerSource, plain_lines};
 use crate::{State, init, view};
 
 /// A source that opens one invented file and can save it.
@@ -76,10 +76,12 @@ fn editing(name: &str, text: &str) -> Runtime<State> {
     rt.frame(0.0);
     rt.settle_all();
     rt.frame(0.0);
-    assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some(), "Ctrl+E opens the editor");
+    assert!(
+        rt.state.viewer.ui.as_ref().unwrap().editor.is_some(),
+        "Ctrl+E opens the editor"
+    );
     rt
 }
-
 
 fn press(rt: &mut rune::Runtime<crate::State>, key: Key, mods: Mods) {
     rt.key(KeyEvent { key, mods });
@@ -87,11 +89,24 @@ fn press(rt: &mut rune::Runtime<crate::State>, key: Key, mods: Mods) {
 }
 
 fn ctrl() -> Mods {
-    Mods { cmd: true, ..Mods::default() }
+    Mods {
+        cmd: true,
+        ..Mods::default()
+    }
 }
 
 fn text(rt: &rune::Runtime<crate::State>) -> String {
-    rt.state.viewer.ui.as_ref().unwrap().editor.as_ref().unwrap().edit.text.clone()
+    rt.state
+        .viewer
+        .ui
+        .as_ref()
+        .unwrap()
+        .editor
+        .as_ref()
+        .unwrap()
+        .edit
+        .text
+        .clone()
 }
 
 fn edit_mut(rt: &mut rune::Runtime<crate::State>) -> &mut rune::TextEdit {
@@ -124,7 +139,14 @@ fn editor_keys_tab_indents_selected_lines_and_shift_tab_undoes() {
     edit_mut(&mut rt).set_selection(0, end);
     press(&mut rt, Key::Tab, Mods::default());
     assert_eq!(text(&rt), "\t\ta\n\t\tb\n\t\tc\n");
-    press(&mut rt, Key::Tab, Mods { shift: true, ..Mods::default() });
+    press(
+        &mut rt,
+        Key::Tab,
+        Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    );
     assert_eq!(text(&rt), src);
 }
 
@@ -167,7 +189,10 @@ fn plain() -> Mods {
 }
 
 fn shift() -> Mods {
-    Mods { shift: true, ..Mods::default() }
+    Mods {
+        shift: true,
+        ..Mods::default()
+    }
 }
 
 #[test]
@@ -182,9 +207,15 @@ fn editor_a11y_the_field_is_named_after_the_file_and_tells_its_text_and_selectio
     let field = node(&tree, super::EDITOR_KEY).unwrap_or_else(|| panic!("no editor node in {tree}"));
     assert_eq!(field["name"], "Editing notes.md", "{field}");
     assert_eq!(field["value"], "hello\n", "the screen reader reads the text: {field}");
-    let sel = field["selection"].as_array().unwrap_or_else(|| panic!("no selection: {field}"));
+    let sel = field["selection"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no selection: {field}"));
     let (anchor, focus) = (sel[1].as_u64().unwrap(), sel[3].as_u64().unwrap());
-    assert_eq!((anchor.min(focus), anchor.max(focus)), (0, 1), "Shift+Right selected one character: {field}");
+    assert_eq!(
+        (anchor.min(focus), anchor.max(focus)),
+        (0, 1),
+        "Shift+Right selected one character: {field}"
+    );
 }
 
 #[test]
@@ -202,7 +233,11 @@ fn editor_keys_f6_cycles_the_field_the_find_bar_and_the_preview() {
     // With find open: field, find bar, preview.
     press(&mut rt, Key::Command('f'), ctrl());
     settle(&mut rt);
-    assert_eq!(focused(&rt), "find-needle", "Ctrl+F puts the keyboard in the find field");
+    assert_eq!(
+        focused(&rt),
+        "find-needle",
+        "Ctrl+F puts the keyboard in the find field"
+    );
     press(&mut rt, Key::Function(6), plain());
     settle(&mut rt);
     assert_eq!(focused(&rt), "live-preview", "F6 from the find bar: the preview");
@@ -226,8 +261,14 @@ fn editor_keys_escape_in_the_find_bar_gives_the_field_the_keyboard() {
     assert_eq!(focused(&rt), "find-needle");
     press(&mut rt, Key::Escape, plain());
     settle(&mut rt);
-    assert!(!rt.state.viewer.ui.as_ref().unwrap().editor_view.find.open, "Esc closed find");
-    assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some(), "the editor stays");
+    assert!(
+        !rt.state.viewer.ui.as_ref().unwrap().editor_view.find.open,
+        "Esc closed find"
+    );
+    assert!(
+        rt.state.viewer.ui.as_ref().unwrap().editor.is_some(),
+        "the editor stays"
+    );
     assert_eq!(focused(&rt), super::EDITOR_KEY, "the keyboard is back in the field");
 }
 
@@ -239,8 +280,15 @@ fn editor_keys_f2_and_delete_edit_the_text() {
     press(&mut rt, Key::Function(2), plain());
     press(&mut rt, Key::Delete, plain());
     settle(&mut rt);
-    assert!(rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.editor.is_some()), "still editing the same file");
-    assert_eq!(text(&rt), "bc\n", "Delete removed the character after the caret, nothing was renamed or trashed");
+    assert!(
+        rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.editor.is_some()),
+        "still editing the same file"
+    );
+    assert_eq!(
+        text(&rt),
+        "bc\n",
+        "Delete removed the character after the caret, nothing was renamed or trashed"
+    );
 }
 
 #[test]
@@ -260,7 +308,11 @@ fn unsaved_question_traps_focus_closes_on_escape_and_gives_the_field_back() {
     for _ in 0..4 {
         press(&mut rt, Key::Tab, plain());
         settle(&mut rt);
-        assert!(focused(&rt).starts_with("btn-"), "Tab stays on the question's buttons, not {}", focused(&rt));
+        assert!(
+            focused(&rt).starts_with("btn-"),
+            "Tab stays on the question's buttons, not {}",
+            focused(&rt)
+        );
     }
     press(&mut rt, Key::Escape, plain());
     settle(&mut rt);

@@ -55,8 +55,6 @@ mod binding_tests;
 pub mod drive_previews;
 pub mod drive_settings;
 pub mod files;
-#[cfg(any(target_os = "windows", test))]
-pub mod found_while_paused;
 #[cfg(test)]
 mod files_case_twins_tests;
 mod files_conflicts;
@@ -76,6 +74,8 @@ mod files_uploads;
 mod files_versions;
 #[cfg(test)]
 mod files_window_support;
+#[cfg(any(target_os = "windows", test))]
+pub mod found_while_paused;
 pub mod guide;
 mod launcher;
 mod open_folder;
@@ -359,10 +359,15 @@ mod explorer_select_tests {
     #[test]
     fn the_path_is_quoted_inside_the_select_argument() {
         assert_eq!(
-            explorer_select_arg(Path::new("C:\\Users\\Jo Doe\\Beebeeb\\my folder\\r\u{e9}sum\u{e9} \u{4e2d}.pdf")),
+            explorer_select_arg(Path::new(
+                "C:\\Users\\Jo Doe\\Beebeeb\\my folder\\r\u{e9}sum\u{e9} \u{4e2d}.pdf"
+            )),
             "/select,\"C:\\Users\\Jo Doe\\Beebeeb\\my folder\\r\u{e9}sum\u{e9} \u{4e2d}.pdf\""
         );
-        assert_eq!(explorer_select_arg(Path::new(r"C:\a\b.txt")), "/select,\"C:\\a\\b.txt\"");
+        assert_eq!(
+            explorer_select_arg(Path::new(r"C:\a\b.txt")),
+            "/select,\"C:\\a\\b.txt\""
+        );
     }
 }
 
@@ -534,7 +539,9 @@ impl<C: CredentialStores + 'static> crate::frames::account::switcher::Switcher f
     }
 
     fn sign_out(&self, id: &str) -> Result<(), String> {
-        self.engine.sign_out_parked_account(id).map_err(|why| why.words().to_string())
+        self.engine
+            .sign_out_parked_account(id)
+            .map_err(|why| why.words().to_string())
     }
 }
 
@@ -644,7 +651,12 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     /// else the suggestion, as `setup_folder::start_now` picks it). The engine's own ask rides along as the token.
     fn discard_ask(&self) -> Result<crate::frames::signin::discard_switch::Ask, actions::ActionError> {
         use setup::SetupEngine as _;
-        let folder = self.engine.settings_folder().ok().flatten().unwrap_or_else(|| self.engine.suggested_folder());
+        let folder = self
+            .engine
+            .settings_folder()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| self.engine.suggested_folder());
         let ask = self
             .engine
             .discard_and_switch_ask(&folder)
@@ -663,7 +675,12 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
         let Ok(ask) = ask.token.downcast::<beebeeb_engine::account_binding::DiscardAsk>() else {
             return Err(actions::ActionError::NotAvailable("not this engine's ask"));
         };
-        let folder = self.engine.settings_folder().ok().flatten().unwrap_or_else(|| self.engine.suggested_folder());
+        let folder = self
+            .engine
+            .settings_folder()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| self.engine.suggested_folder());
         let (engine, name, first_run) = (self.engine.clone(), self.starts.folder(), self.first_run.clone());
         self.starts
             .ask(move || match engine.discard_and_switch(&ask, folder) {
@@ -682,7 +699,12 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     /// folder; a plain start then follows, so the refusal modal opens again with the truth.
     fn keep_aside_and_switch(&self) -> Result<(), actions::ActionError> {
         use setup::SetupEngine as _;
-        let folder = self.engine.settings_folder().ok().flatten().unwrap_or_else(|| self.engine.suggested_folder());
+        let folder = self
+            .engine
+            .settings_folder()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| self.engine.suggested_folder());
         let (engine, name, first_run) = (self.engine.clone(), self.starts.folder(), self.first_run.clone());
         self.starts
             .ask(move || match engine.keep_aside_and_switch(folder) {
@@ -747,7 +769,10 @@ mod worker_tests {
             gate.recv().unwrap();
             done.send(std::thread::current().id()).unwrap();
         });
-        assert!(finished.try_recv().is_err(), "the caller got back while the job still waits");
+        assert!(
+            finished.try_recv().is_err(),
+            "the caller got back while the job still waits"
+        );
         release.send(()).unwrap();
         let ran_on = finished.recv_timeout(Duration::from_secs(5)).expect("the job ran");
         assert_ne!(ran_on, caller);

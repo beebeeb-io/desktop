@@ -315,7 +315,10 @@ fn offline_the_security_page_shows_and_sign_out_runs_with_its_revoke_owed() {
         if let Some(answer) = source.sign_out_result() {
             break answer;
         }
-        assert!(began.elapsed() < Duration::from_secs(15), "the sign-out never answered offline");
+        assert!(
+            began.elapsed() < Duration::from_secs(15),
+            "the sign-out never answered offline"
+        );
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(answer, SignOutAnswer::Done, "signed out offline");

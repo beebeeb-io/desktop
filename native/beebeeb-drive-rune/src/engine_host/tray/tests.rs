@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use super::*;
 use crate::engine_host::open::{self, Opened};
-use crate::frames::tray::source::{BoardFixture, Action, Changes, FRAMES, Hidden, Status, What};
+use crate::frames::tray::source::{Action, BoardFixture, Changes, FRAMES, Hidden, Status, What};
 use crate::shell::actions::EngineActions;
 use crate::shell::tray::tray_model;
 
@@ -571,7 +571,11 @@ fn a_real_account_from_signed_out_to_locked_shows_what_the_engine_knows() {
     let locked = tray.snapshot();
     assert_eq!(
         (&locked.status, &locked.changes, locked.button),
-        (&Status::LockedSyncOff, &Changes::Hidden(Hidden::Locked), Some((Action::Unlock, true)))
+        (
+            &Status::LockedSyncOff,
+            &Changes::Hidden(Hidden::Locked),
+            Some((Action::Unlock, true))
+        )
     );
     let facts = tray.facts();
     assert!(

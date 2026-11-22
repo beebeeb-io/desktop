@@ -2,11 +2,11 @@
 //! size, one column in words or with a person, and the PC state where the section has it.
 
 use super::style;
+use crate::theme::file_icons::icon_for;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
-use crate::ui::file_list::{PcState, pc_glyph};
-use crate::theme::file_icons::icon_for;
 use crate::ui::file_icon::file_icon;
+use crate::ui::file_list::{PcState, pc_glyph};
 use crate::ui::kit;
 use rune::{Align, Color, El, Icon, col, el, row};
 
@@ -265,16 +265,31 @@ mod icon_tests {
 
     fn drawn(name: &str, kind: Kind) -> Option<Color> {
         kit::record();
-        let _ = tile("row-0", "row-0-icon".into(), name, kind, 22.0, 6.0, 14.0, &tokens::theme(false));
+        let _ = tile(
+            "row-0",
+            "row-0-icon".into(),
+            name,
+            kind,
+            22.0,
+            6.0,
+            14.0,
+            &tokens::theme(false),
+        );
         kit::take().get("row-0-icon").and_then(|n| n.color)
     }
 
     #[test]
     fn a_row_draws_the_registry_icon_in_its_tint() {
         assert_eq!(drawn("Documents", Kind::Folder), Some(tint_color(Tint::Word, false)));
-        assert_eq!(drawn("notes.md", Kind::Document), Some(tint_color(Tint::Markdown, false)));
+        assert_eq!(
+            drawn("notes.md", Kind::Document),
+            Some(tint_color(Tint::Markdown, false))
+        );
         assert_eq!(drawn("song.flac", Kind::Document), Some(tint_color(Tint::Audio, false)));
-        assert_eq!(drawn("deck.pptx", Kind::Document), Some(tint_color(Tint::PowerPoint, false)));
+        assert_eq!(
+            drawn("deck.pptx", Kind::Document),
+            Some(tint_color(Tint::PowerPoint, false))
+        );
     }
 }
 
@@ -284,7 +299,11 @@ pub const PAGE: usize = 10;
 /// The row PageUp / PageDown (`down`) lands on, from `at` (none: the first row), within `count` rows.
 pub fn page_to(at: Option<usize>, count: usize, down: bool) -> usize {
     let at = at.unwrap_or(0);
-    if down { (at + PAGE).min(count.saturating_sub(1)) } else { at.saturating_sub(PAGE) }
+    if down {
+        (at + PAGE).min(count.saturating_sub(1))
+    } else {
+        at.saturating_sub(PAGE)
+    }
 }
 
 /// Type-ahead: for a typed letter or digit, the next row after `at` (wrapping, `at` last) whose name starts with it.
@@ -301,7 +320,12 @@ pub fn jump_to<'a>(names: impl Iterator<Item = &'a str>, at: Option<usize>, ev: 
     let n = names.len();
     (1..=n)
         .map(|d| (at.map_or(0, |a| a + 1) + d - 1) % n.max(1))
-        .find(|&i| names[i].chars().next().is_some_and(|f| f.to_lowercase().next() == Some(c)))
+        .find(|&i| {
+            names[i]
+                .chars()
+                .next()
+                .is_some_and(|f| f.to_lowercase().next() == Some(c))
+        })
 }
 
 #[cfg(test)]
@@ -310,7 +334,10 @@ mod key_tests {
     use rune::{Key, KeyEvent, Mods};
 
     fn typed(c: &str) -> KeyEvent {
-        KeyEvent { key: Key::Text(c.into()), mods: Mods::default() }
+        KeyEvent {
+            key: Key::Text(c.into()),
+            mods: Mods::default(),
+        }
     }
 
     #[test]

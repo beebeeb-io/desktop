@@ -7,9 +7,7 @@ use beebeeb_office_protocol::office::{EditKind, Template};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 use super::*;
-use crate::frames::viewers::source::{
-    Body, FixtureViewerSource, OpenError, OpenFile, Settled, ViewerSource, board,
-};
+use crate::frames::viewers::source::{Body, FixtureViewerSource, OpenError, OpenFile, Settled, ViewerSource, board};
 use crate::frames::viewers::{self, new_file::Step};
 use crate::{init, view};
 
@@ -44,7 +42,11 @@ impl ViewerSource for Maker {
         self.take
     }
     fn settled(&mut self, _id: &str) -> Option<Settled> {
-        if self.asked.lock().unwrap().is_empty() { None } else { self.answer.take() }
+        if self.asked.lock().unwrap().is_empty() {
+            None
+        } else {
+            self.answer.take()
+        }
     }
 }
 
@@ -98,7 +100,9 @@ fn info(rt: &Runtime<crate::State>, key: &str) -> rune::ElementInfo {
 }
 
 fn has(rt: &Runtime<crate::State>, key: &str) -> bool {
-    rt.elements().iter().any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+    rt.elements()
+        .iter()
+        .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
 fn open(rt: &mut Runtime<crate::State>, kind: Option<Kind>) {
@@ -159,7 +163,11 @@ fn new_document_sheets_and_slides_have_blank_only_and_their_own_extension() {
     assert_eq!(name(&rt), "Untitled document.pptx");
     choose_kind(&mut rt.state, Kind::Word);
     let d = rt.state.viewer.new_file.as_ref().unwrap().doc.as_ref().unwrap();
-    assert_eq!(d.template, Template::Blank, "the template goes back to Blank with the app");
+    assert_eq!(
+        d.template,
+        Template::Blank,
+        "the template goes back to Blank with the app"
+    );
 }
 
 #[test]
@@ -187,7 +195,11 @@ fn new_document_waits_for_the_answer_and_asks_once() {
     open(&mut rt, None);
     press_create(&mut rt);
     press_create(&mut rt);
-    assert_eq!(asked.lock().unwrap().len(), 1, "a second press while it works asks nothing");
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "a second press while it works asks nothing"
+    );
     assert_eq!(step(&rt), Some(Step::Document));
     assert_eq!(info(&rt, "btn-0").label.as_deref(), Some("Creating\u{2026}"));
 }
@@ -205,7 +217,11 @@ fn new_document_refusal_is_said_and_the_dialog_stays() {
     open(&mut rt, None);
     press_create(&mut rt);
     assert_eq!(info(&rt, "doc-failed").text.as_deref(), Some("Couldn't make the file."));
-    assert_eq!(info(&rt, "btn-0").label.as_deref(), Some("Create"), "Create can be pressed again");
+    assert_eq!(
+        info(&rt, "btn-0").label.as_deref(),
+        Some("Create"),
+        "Create can be pressed again"
+    );
 }
 
 #[test]

@@ -116,7 +116,10 @@ impl EngineWakes {
                 {
                     let mut guard = worker.lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     while !worker.pending.load(Ordering::Acquire) && !worker.closed.load(Ordering::Acquire) {
-                        guard = worker.rang.wait(guard).unwrap_or_else(std::sync::PoisonError::into_inner);
+                        guard = worker
+                            .rang
+                            .wait(guard)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                     }
                 }
                 if worker.closed.load(Ordering::Acquire) {
@@ -138,7 +141,11 @@ impl EngineWakes {
     pub(crate) fn ring(&self) {
         RANG.store(true, Ordering::Release);
         if !self.rings.pending.swap(true, Ordering::AcqRel) {
-            let _guard = self.rings.lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _guard = self
+                .rings
+                .lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.rings.rang.notify_one();
         }
     }
@@ -147,7 +154,11 @@ impl EngineWakes {
 impl Drop for EngineWakes {
     fn drop(&mut self) {
         self.rings.closed.store(true, Ordering::Release);
-        let _guard = self.rings.lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = self
+            .rings
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.rings.rang.notify_one();
     }
 }

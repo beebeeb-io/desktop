@@ -279,9 +279,9 @@ mod tests {
     #[test]
     fn office_glue_editor_frames_are_filled() {
         let is_placeholder = |frames: &[crate::ui::gate::Scene<State>], id: &str| {
-            frames
-                .iter()
-                .any(|(f, scene)| *f == id && *scene as usize == crate::frames::placeholder::scene as *const () as usize)
+            frames.iter().any(|(f, scene)| {
+                *f == id && *scene as usize == crate::frames::placeholder::scene as *const () as usize
+            })
         };
         assert!(!is_placeholder(dialogs::FRAMES, "DW-1558"));
         assert!(!is_placeholder(sheets::FRAMES, "DW-1559"));

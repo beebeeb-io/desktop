@@ -32,7 +32,10 @@ fn state_on_real_source() -> (State, FakeApi) {
 #[test]
 fn report_a_problem_opens_from_general_and_from_diagnostics() {
     let (mut state, _fake) = state_on_real_source();
-    assert!(state.settings.source.opens("DW-0782"), "the real source opens the dialog");
+    assert!(
+        state.settings.source.opens("DW-0782"),
+        "the real source opens the dialog"
+    );
     // General's row and Diagnostics' button both press `go(s, "DW-0782")`.
     for from in [Pane::General, Pane::Diagnostics] {
         state.settings.dialog = None;

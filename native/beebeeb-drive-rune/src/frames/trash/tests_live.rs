@@ -137,7 +137,11 @@ fn three() -> Vec<Row> {
 #[test]
 fn every_state_of_a_list_that_is_not_here_is_drawn_and_none_says_trash_is_empty() {
     for (loaded, key, title) in [
-        (Loaded::Loading, "loading-words", "Loading Trash\u{2026} Getting the list from Beebeeb."),
+        (
+            Loaded::Loading,
+            "loading-words",
+            "Loading Trash\u{2026} Getting the list from Beebeeb.",
+        ),
         (Loaded::Offline, "trash-failed-title", "Can\u{2019}t reach Beebeeb"),
         (Loaded::Failed, "trash-failed-title", "Couldn\u{2019}t load Trash"),
         (Loaded::SessionEnded, "trash-failed-title", "Your session ended"),
@@ -185,7 +189,10 @@ fn try_again_on_a_failed_trash_reads_again_and_a_failed_refresh_offers_it_too() 
     let before = held.borrow().opened;
     click(&mut rt, "trash-failed-retry");
     assert_eq!(held.borrow().opened, before + 1);
-    assert!(rt.find("trash-failed-retry").is_none(), "the failure goes once it is tried again");
+    assert!(
+        rt.find("trash-failed-retry").is_none(),
+        "the failure goes once it is tried again"
+    );
 }
 
 #[test]

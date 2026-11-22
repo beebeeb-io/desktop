@@ -13,9 +13,9 @@ use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::button::{ButtonState, Size, Variant, button as ui_button, keys};
 use crate::ui::dialog::{self, Dialog, Foot, Head};
-use crate::ui::toast::{Lead, toast_with};
-use crate::ui::settings_dialog::{BUTTON_MD, DIALOG_TITLE};
 use crate::ui::kit;
+use crate::ui::settings_dialog::{BUTTON_MD, DIALOG_TITLE};
+use crate::ui::toast::{Lead, toast_with};
 
 /// How a dialog button reads.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,8 +44,16 @@ impl Look {
 
 fn button(index: usize, label: &str, look: Look, t: &Theme) -> El {
     // On the dialog's quarter point, as the dialog is.
-    ui_button(keys(&format!("dlg-btn-{index}")), label, None, look.variant(), Size::Md, ButtonState::Enabled, t)
-        .pixel_snap(false)
+    ui_button(
+        keys(&format!("dlg-btn-{index}")),
+        label,
+        None,
+        look.variant(),
+        Size::Md,
+        ButtonState::Enabled,
+        t,
+    )
+    .pixel_snap(false)
 }
 
 /// The card on the scrim: Esc and a press outside are the way back to the edit. Both editing questions are asked
@@ -281,23 +289,23 @@ pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El 
         .child(kit::label("dlg-sub", sub, style::SUB, t.text_tertiary).wrap().w_full());
     let body = vec![
         row()
-                .key("dlg-sides")
-                .w_full()
-                .gap(scale::space::S12)
-                .child(side(
-                    0,
-                    &icons::LAPTOP,
-                    "Your edit",
-                    &format!("this PC \u{00B7} not saved \u{00B7} {mine}"),
-                    t,
-                ))
-                .child(side(
-                    1,
-                    other_icon,
-                    &other_title,
-                    &format!("{} \u{00B7} version {}", other.at, other.version),
-                    t,
-                )),
+            .key("dlg-sides")
+            .w_full()
+            .gap(scale::space::S12)
+            .child(side(
+                0,
+                &icons::LAPTOP,
+                "Your edit",
+                &format!("this PC \u{00B7} not saved \u{00B7} {mine}"),
+                t,
+            ))
+            .child(side(
+                1,
+                other_icon,
+                &other_title,
+                &format!("{} \u{00B7} version {}", other.at, other.version),
+                t,
+            )),
         kit::label(
             "dlg-note",
             "Either way, the other version stays in version history.",
@@ -338,15 +346,7 @@ pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El 
                 ui.keep_editing();
             }
         }));
-    shell(
-        "Two versions",
-        "dialog",
-        540.0,
-        head,
-        body,
-        buttons,
-        t,
-    )
+    shell("Two versions", "dialog", 540.0, head, body, buttons, t)
 }
 
 /// The message after a save, over the content area with the lock: the shared toast.

@@ -275,7 +275,13 @@ impl Drop for Script {
 fn letter(pages: u32) -> OfficeState {
     OfficeState::Pages {
         pages,
-        sizes: vec![PageSize { w_pt: 612.0, h_pt: 792.0 }; pages as usize],
+        sizes: vec![
+            PageSize {
+                w_pt: 612.0,
+                h_pt: 792.0
+            };
+            pages as usize
+        ],
     }
 }
 
@@ -360,9 +366,13 @@ fn the_page_is_asked_of_the_helper_at_the_viewers_scale_and_only_once_while_it_i
         ask.send(Ask::Page(2)).unwrap();
         std::thread::sleep(Duration::from_millis(60));
     });
-    session.serve(&asks, &AtomicBool::new(false), &|_, _| panic!("no page came"), &|_, _| {}, &|| {
-        panic!("it did not stop")
-    });
+    session.serve(
+        &asks,
+        &AtomicBool::new(false),
+        &|_, _| panic!("no page came"),
+        &|_, _| {},
+        &|| panic!("it did not stop"),
+    );
     asker.join().unwrap();
     let told = told.lock().unwrap();
     assert_eq!(told.asked, [(2, PAGE_WIDTH_PX / 612.0)]);
@@ -380,13 +390,19 @@ fn what_is_not_a_pdf_and_a_pdf_with_too_many_pages_are_not_opened() {
         "at the limit it opens"
     );
     let long = sample_pdf(PAGES_MAX as usize + 1, 100, 100);
-    assert_eq!(open(long.clone()).err(), Some(NotOpened::TooLong { pages: PAGES_MAX + 1 }));
+    assert_eq!(
+        open(long.clone()).err(),
+        Some(NotOpened::TooLong { pages: PAGES_MAX + 1 })
+    );
     assert_eq!(session(long).err(), Some(NotOpened::TooLong { pages: PAGES_MAX + 1 }));
 }
 
 #[test]
 fn what_the_helper_says_at_the_open_is_what_the_viewer_says() {
-    assert_eq!(not_opened(OfficeState::NoPreview(HostNoPreview::Password)), Some(NotOpened::Locked));
+    assert_eq!(
+        not_opened(OfficeState::NoPreview(HostNoPreview::Password)),
+        Some(NotOpened::Locked)
+    );
     // No helper beside the app, no sandbox on this system, a Windows too old for it: nothing is parsed here instead.
     for none in [
         HostNoPreview::NotInstalled,
@@ -394,13 +410,20 @@ fn what_the_helper_says_at_the_open_is_what_the_viewer_says() {
         HostNoPreview::NeedsWindowsUpdate,
         HostNoPreview::ThisType,
     ] {
-        assert_eq!(not_opened(OfficeState::NoPreview(none)), Some(NotOpened::NoRenderer), "{none:?}");
+        assert_eq!(
+            not_opened(OfficeState::NoPreview(none)),
+            Some(NotOpened::NoRenderer),
+            "{none:?}"
+        );
     }
     for cannot in [CannotOpen::Damaged, CannotOpen::TooLarge] {
         assert_eq!(not_opened(OfficeState::CannotOpen(cannot)), Some(NotOpened::Unreadable));
     }
     assert_eq!(not_opened(letter(0)), Some(NotOpened::Unreadable));
-    assert_eq!(not_opened(letter(PAGES_MAX + 1)), Some(NotOpened::TooLong { pages: PAGES_MAX + 1 }));
+    assert_eq!(
+        not_opened(letter(PAGES_MAX + 1)),
+        Some(NotOpened::TooLong { pages: PAGES_MAX + 1 })
+    );
     // A helper that crashed, timed out or could not be started while it opened the file: Failed, with Try again.
     for why in [Stop::Exited, Stop::TimedOut, Stop::Protocol, Stop::Failed] {
         let stopped = OfficeState::Stopped { why, can_retry: true };
@@ -431,9 +454,13 @@ fn a_helper_that_stops_at_a_page_ends_only_itself_and_the_worker_says_so_once() 
     let (ask, asks) = mpsc::channel();
     ask.send(Ask::Page(1)).unwrap();
     let stopped = RefCell::new(0);
-    session.serve(&asks, &AtomicBool::new(false), &|_, _| panic!("no page came"), &|_, _| {}, &|| {
-        *stopped.borrow_mut() += 1
-    });
+    session.serve(
+        &asks,
+        &AtomicBool::new(false),
+        &|_, _| panic!("no page came"),
+        &|_, _| {},
+        &|| *stopped.borrow_mut() += 1,
+    );
     assert_eq!(stopped.into_inner(), 1);
     assert!(told.lock().unwrap().dropped, "the stopped helper is let go");
     drop(ask);
@@ -444,9 +471,13 @@ fn a_helper_that_stops_at_a_page_ends_only_itself_and_the_worker_says_so_once() 
     let (ask, asks) = mpsc::channel();
     ask.send(Ask::Page(1)).unwrap();
     let stopped = RefCell::new(0);
-    session_of(hostile).serve(&asks, &AtomicBool::new(false), &|_, _| panic!("no page came"), &|_, _| {}, &|| {
-        *stopped.borrow_mut() += 1
-    });
+    session_of(hostile).serve(
+        &asks,
+        &AtomicBool::new(false),
+        &|_, _| panic!("no page came"),
+        &|_, _| {},
+        &|| *stopped.borrow_mut() += 1,
+    );
     assert_eq!(stopped.into_inner(), 1);
     drop(ask);
 }
@@ -463,7 +494,9 @@ fn a_helper_that_is_closed_by_a_lock_while_the_pdf_is_open_ends_the_worker_withi
     told.lock().unwrap().state = Some(OfficeState::Closed(office_host::CloseWhy::Locked));
     let (ask, asks) = mpsc::channel::<Ask>();
     let stopped = RefCell::new(0);
-    session.serve(&asks, &AtomicBool::new(false), &|_, _| {}, &|_, _| {}, &|| *stopped.borrow_mut() += 1);
+    session.serve(&asks, &AtomicBool::new(false), &|_, _| {}, &|_, _| {}, &|| {
+        *stopped.borrow_mut() += 1
+    });
     assert_eq!(stopped.into_inner(), 1);
     assert!(told.lock().unwrap().dropped);
     drop(ask);
@@ -511,13 +544,18 @@ fn a_page_is_never_asked_past_the_pixel_limits_whatever_its_box_says() {
 #[test]
 fn only_the_newest_page_waiting_is_asked_and_a_page_that_is_not_there_is_said() {
     let asks = [Ask::Page(1), Ask::Page(2), Ask::Page(3)];
-    let said = served(session_of(sample_pdf(3, 300, 300)), &asks, false, |said| !said.pages.is_empty());
+    let said = served(session_of(sample_pdf(3, 300, 300)), &asks, false, |said| {
+        !said.pages.is_empty()
+    });
     let pages: Vec<u32> = said.pages.iter().map(|(page, _)| *page).collect();
     assert_eq!(pages, [3]);
     for missing in [0, 4, u32::MAX] {
-        let said = served(session_of(sample_pdf(3, 300, 300)), &[Ask::Page(missing)], false, |said| {
-            !said.pages.is_empty()
-        });
+        let said = served(
+            session_of(sample_pdf(3, 300, 300)),
+            &[Ask::Page(missing)],
+            false,
+            |said| !said.pages.is_empty(),
+        );
         assert!(matches!(said.pages[..], [(page, None)] if page == missing), "{missing}");
     }
 }
@@ -559,7 +597,9 @@ fn a_page_the_helper_says_misses_content_lacks_text_and_no_other_page_does() {
         Writes::JapaneseSans,
     ]);
     for (page, lacks) in [(1, false), (2, true), (3, false), (4, true), (5, true)] {
-        let said = served(session_of(pdf.clone()), &[Ask::Page(page)], false, |said| !said.pages.is_empty());
+        let said = served(session_of(pdf.clone()), &[Ask::Page(page)], false, |said| {
+            !said.pages.is_empty()
+        });
         let rendered = said.pages[0].1.as_ref().expect("it renders");
         assert_eq!(rendered.lacks_text, lacks, "page {page}");
     }

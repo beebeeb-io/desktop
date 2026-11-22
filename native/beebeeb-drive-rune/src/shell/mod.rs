@@ -17,15 +17,15 @@
 //! | `deeplink.rs`, `autostart.rs` | links, start at login |
 //! | `platform/` | the OS seam: `windows` real, `macos` and `linux` stubs |
 
-pub mod actions;
-pub mod app;
 #[cfg(test)]
 mod a11y_walk_tests;
+pub mod actions;
+pub mod app;
 // The pure half of Windows-only code: used by `platform/windows.rs`, tested on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod autostart;
-pub mod capture_setting;
 pub mod away;
+pub mod capture_setting;
 // The transport is Windows-only (`platform/windows_control.rs`); the protocol is tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod control;
@@ -40,17 +40,15 @@ pub mod host;
 pub mod identity;
 pub mod instance;
 pub mod intents;
-mod settings_open;
-mod settings_open_pages;
-mod settings_open_places;
-mod settings_show_in_files;
-mod viewer_intents;
-pub(crate) mod viewer_save;
 pub mod placeholder;
 pub mod platform;
 pub(crate) mod redraw;
 pub mod registry;
 pub mod session_gate;
+mod settings_open;
+mod settings_open_pages;
+mod settings_open_places;
+mod settings_show_in_files;
 #[cfg(test)]
 mod start_refusal_tests;
 pub mod state;
@@ -58,6 +56,8 @@ pub mod storage_view;
 pub mod surfaces;
 pub mod tray;
 pub mod tray_tip_window;
+mod viewer_intents;
+pub(crate) mod viewer_save;
 // Rendered by `platform/windows.rs`; tested (and looked at) on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod tray_icon;
@@ -81,12 +81,12 @@ use actions::{EngineActions, FixtureEngine, HostActions, ShellActions};
 use app::{Dialog, Event, GateState, Route, Section, SettingsPane};
 use control::Reply;
 use flyout_window::FlyoutState;
-use tray_tip_window::TipState;
 use host::{Shell, Wiring};
 use identity::AppIdentity;
 use instance::{Claim, Plan, Start};
 use platform::{Platform, ServeError};
 use state::State;
+use tray_tip_window::TipState;
 
 /// Titlebar height in points — the single source of truth used by both
 /// `App::titlebar` and `ui::caption::caption_bar`.
@@ -194,10 +194,7 @@ const CONTROL_SEND_WAIT: Duration = Duration::from_secs(5);
 
 /// The control channel's handler: hands the request to the window thread and waits for it to
 /// be taken, so the caller's acknowledgement means "the app has it", not "a pipe exists".
-fn control_handler(
-    target: Arc<Mutex<Option<rune::AppHandle<State>>>>,
-    own_origin: String,
-) -> platform::ControlHandler {
+fn control_handler(target: Arc<Mutex<Option<rune::AppHandle<State>>>>, own_origin: String) -> platform::ControlHandler {
     Arc::new(move |request| {
         // A launch that named another server than this instance runs on: nothing is shown (bug 9: the same one is).
         let request = match request {
@@ -267,7 +264,10 @@ pub fn run() {
     let (claim, _control_server) = if launch.tooling {
         (Claim::First, None)
     } else {
-        match platform.serve_control(identity, control_handler(control_target.clone(), api_base.origin().to_owned())) {
+        match platform.serve_control(
+            identity,
+            control_handler(control_target.clone(), api_base.origin().to_owned()),
+        ) {
             Ok(server) => (Claim::First, Some(server)),
             Err(ServeError::AlreadyRunning) => (Claim::Running, None),
             Err(ServeError::NotBuilt(what)) => {
@@ -519,7 +519,9 @@ pub fn run() {
         let monitors = work_area::usable(&surfaces::monitors(displays), &work_areas);
         // Where the b is until a click on it says otherwise: the primary display, by its taskbar.
         if let Some(anchor) = surfaces::primary_anchor(&surfaces::monitors(displays), &work_areas) {
-            let mut slot = tray_anchor_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut slot = tray_anchor_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             slot.get_or_insert(anchor);
         }
         let first_place = saved_main.or_else(|| {

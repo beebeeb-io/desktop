@@ -106,7 +106,9 @@ impl EditUi {
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let focused = tx.focused().is_some_and(|key| key.starts_with(FOCUS_PREFIX));
     let Some(ui) = viewers::ui(s) else { return false };
-    let Some(mut edit) = ui.office.edit.take() else { return false };
+    let Some(mut edit) = ui.office.edit.take() else {
+        return false;
+    };
     let mut changed = edit.has_keyboard != focused;
     edit.has_keyboard = focused;
     loop {

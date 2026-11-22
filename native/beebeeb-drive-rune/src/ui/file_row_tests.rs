@@ -6,7 +6,15 @@ use crate::theme::tokens;
 use rune::{Env, Runtime, col};
 
 fn draw(view: fn(&(), &mut rune::Cx<()>) -> El) -> Vec<rune::ElementInfo> {
-    let mut rt = Runtime::new((), view, (900.0, 300.0), Env { system_dark: false, scale: 1.0 });
+    let mut rt = Runtime::new(
+        (),
+        view,
+        (900.0, 300.0),
+        Env {
+            system_dark: false,
+            scale: 1.0,
+        },
+    );
     rt.frame(0.0);
     rt.elements().into_iter().filter(|e| !e.exiting).collect()
 }
@@ -17,7 +25,10 @@ fn info<'a>(all: &'a [rune::ElementInfo], key: &str) -> &'a rune::ElementInfo {
         .unwrap_or_else(|| panic!("no element keyed {key}"))
 }
 
-const PDF: FileIcon = FileIcon { id: IconId::Pdf, tint: Tint::Pdf };
+const PDF: FileIcon = FileIcon {
+    id: IconId::Pdf,
+    tint: Tint::Pdf,
+};
 const LONG: &str = "Quarterly report for the board of directors, second draft, with appendix 12.pdf";
 
 fn rows(_: &(), _: &mut rune::Cx<()>) -> El {
@@ -25,14 +36,26 @@ fn rows(_: &(), _: &mut rune::Cx<()>) -> El {
     let cell = |k: &str| el().key(k.to_string()).w(80.0).h(10.0);
     col()
         .w_full()
-        .child(row("row-0", "a.pdf", PDF, "a.pdf", vec![cell("c-0")], RowLook::default(), &t))
+        .child(row(
+            "row-0",
+            "a.pdf",
+            PDF,
+            "a.pdf",
+            vec![cell("c-0")],
+            RowLook::default(),
+            &t,
+        ))
         .child(row(
             "row-1",
             LONG,
             PDF,
             LONG,
             vec![cell("c-1")],
-            RowLook { selected: true, position: Some((2, 212)), ..RowLook::default() },
+            RowLook {
+                selected: true,
+                position: Some((2, 212)),
+                ..RowLook::default()
+            },
             &t,
         ))
         .child(row(
@@ -41,7 +64,10 @@ fn rows(_: &(), _: &mut rune::Cx<()>) -> El {
             PDF,
             "b.pdf",
             vec![],
-            RowLook { dimmed: true, ..RowLook::default() },
+            RowLook {
+                dimmed: true,
+                ..RowLook::default()
+            },
             &t,
         ))
 }
@@ -76,7 +102,11 @@ fn a_dimmed_row_shows_less_and_a_long_name_is_cut_in_the_middle() {
     let name = info(&all, "row-1-name").text.clone().unwrap();
     assert!(name.contains('\u{2026}'), "{name}");
     assert!(name.ends_with("appendix 12.pdf"), "{name}");
-    assert_eq!(info(&all, "row-1").label.as_deref(), Some(LONG), "the label stays whole");
+    assert_eq!(
+        info(&all, "row-1").label.as_deref(),
+        Some(LONG),
+        "the label stays whole"
+    );
 }
 
 #[test]

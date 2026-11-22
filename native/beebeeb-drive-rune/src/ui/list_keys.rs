@@ -65,7 +65,10 @@ pub enum ListAction {
     /// Not a list key, or nothing to do.
     None,
     /// Focus moved to `to` (already set on the cursor); apply `select`.
-    Move { to: usize, select: Select },
+    Move {
+        to: usize,
+        select: Select,
+    },
     /// Toggle this row in the selection.
     Toggle(usize),
     Open(usize),
@@ -144,10 +147,16 @@ pub fn on_list_key(
                 cursor.anchor = Some(f);
                 ListAction::Toggle(f)
             } else if keys.multi && m.shift {
-                ListAction::Move { to: f, select: Select::Extend }
+                ListAction::Move {
+                    to: f,
+                    select: Select::Extend,
+                }
             } else {
                 cursor.anchor = Some(f);
-                ListAction::Move { to: f, select: Select::Only }
+                ListAction::Move {
+                    to: f,
+                    select: Select::Only,
+                }
             };
         }
         Key::Enter if !ctrl && !m.shift => return focus.map_or(ListAction::None, ListAction::Open),
@@ -181,7 +190,11 @@ fn type_ahead(
     typing: bool,
     label: &impl Fn(usize) -> String,
 ) -> ListAction {
-    let typed: String = s.chars().filter(|c| !c.is_control()).flat_map(char::to_lowercase).collect();
+    let typed: String = s
+        .chars()
+        .filter(|c| !c.is_control())
+        .flat_map(char::to_lowercase)
+        .collect();
     if typed.is_empty() {
         return ListAction::None;
     }
@@ -210,7 +223,10 @@ fn type_ahead(
         Some(to) => {
             cursor.focus = Some(to);
             cursor.anchor = Some(to);
-            ListAction::Move { to, select: Select::Only }
+            ListAction::Move {
+                to,
+                select: Select::Only,
+            }
         }
         None => ListAction::None,
     }

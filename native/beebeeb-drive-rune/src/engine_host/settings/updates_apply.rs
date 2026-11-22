@@ -252,10 +252,7 @@ mod active_work_tests {
         panic!("the updater did not settle");
     }
 
-    fn ready(
-        dir: &tempfile::TempDir,
-        apply: EngineApply<MemoryCredentials>,
-    ) -> Machine {
+    fn ready(dir: &tempfile::TempDir, apply: EngineApply<MemoryCredentials>) -> Machine {
         let key = TestKey::generate();
         let mut http = FakeHttp::default();
         Publish::new(Channel::Stable, "0.9.1", testkit::artifact_bytes(300_000)).serve(&mut http, &key);
@@ -265,7 +262,13 @@ mod active_work_tests {
             installed: testkit::version("0.9.0"),
             staging_dir: dir.path().to_path_buf(),
         };
-        let mut updater = Updater::new(config, http, FakeClock(Cell::new(testkit::NOW)), MemStore::default(), apply);
+        let mut updater = Updater::new(
+            config,
+            http,
+            FakeClock(Cell::new(testkit::NOW)),
+            MemStore::default(),
+            apply,
+        );
         let check = Event::Check {
             channel: Channel::Stable,
             intent: Intent::Background,
@@ -325,7 +328,12 @@ mod active_work_tests {
         let presence = Presence::from_fns(
             {
                 let here = still_here.clone();
-                move || (Some(beebeeb_engine::account::SessionGeneration::for_test(1)), here.load(Ordering::SeqCst))
+                move || {
+                    (
+                        Some(beebeeb_engine::account::SessionGeneration::for_test(1)),
+                        here.load(Ordering::SeqCst),
+                    )
+                }
             },
             || 0,
             || false,
@@ -347,8 +355,18 @@ mod active_work_tests {
         });
         let after = updater.step(Event::Apply).clone();
         closer.join().unwrap();
-        assert!(matches!(after, State::Failed { failure: Failure::InstallerDidNotStart, .. }));
+        assert!(matches!(
+            after,
+            State::Failed {
+                failure: Failure::InstallerDidNotStart,
+                ..
+            }
+        ));
         assert!(sync_back.take());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the download is kept");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "the download is kept"
+        );
     }
 }

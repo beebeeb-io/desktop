@@ -87,5 +87,8 @@ fn no_settings_pane_draws_the_not_built_frame_on_the_real_sources() {
         }
     }
     let _state: &State = &rt.state;
-    assert!(placeholders.is_empty(), "panes drawing the not-built frame: {placeholders:?}");
+    assert!(
+        placeholders.is_empty(),
+        "panes drawing the not-built frame: {placeholders:?}"
+    );
 }

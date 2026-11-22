@@ -9,8 +9,8 @@
 use super::source::{Action, FilesFixture};
 use crate::State;
 use crate::source::DriveItem;
-use crate::theme::scale;
 use crate::theme::icons_settings;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use rune::{El, col, el};

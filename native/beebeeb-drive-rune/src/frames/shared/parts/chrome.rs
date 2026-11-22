@@ -26,7 +26,11 @@ pub fn window(s: &State, cx: &mut Cx<State>, t: &Theme, toolbar: El, body: El, s
         // The one banner of the whole window (`frames::global`: "on every view of the window").
         .children(crate::frames::global::banner_under_toolbar(s, t))
         .child(crate::ui::focus::pane(
-            col().grow(1.0).min_h(0.0).w_full().child(body.grow(1.0).min_h(0.0).w_full()),
+            col()
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(body.grow(1.0).min_h(0.0).w_full()),
             "pane-list",
         ))
         .child(status_line(&crate::frames::sync_words(s), status, t));

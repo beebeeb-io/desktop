@@ -1035,7 +1035,9 @@ fn two_factor_then_the_recovery_phrase_never_says_the_account_changed() {
     // The engine's answer for this account: the code is right, the vault key is not on this PC.
     rt.update(|s, _| {
         let ui_ = s.signin.as_mut().expect("the sign-in window is open");
-        ui_.apply(super::source::SignInEvent::TwoFactor(Ok(NextAfterSignIn::RecoveryPhrase)));
+        ui_.apply(super::source::SignInEvent::TwoFactor(Ok(
+            NextAfterSignIn::RecoveryPhrase,
+        )));
     });
     rt.frame(0.0);
     assert_eq!(ui(&mut rt).screen, Screen::Phrase);
@@ -1082,7 +1084,8 @@ pub(super) fn a11y_set_size_of(rt: &Runtime<State>, key: &str) -> Option<u64> {
         match v {
             serde_json::Value::Object(map) => {
                 let holds = map.values().any(|c| {
-                    c.as_array().is_some_and(|kids| kids.iter().any(|k| k.get("key").and_then(|k| k.as_str()) == Some(key)))
+                    c.as_array()
+                        .is_some_and(|kids| kids.iter().any(|k| k.get("key").and_then(|k| k.as_str()) == Some(key)))
                 });
                 if holds {
                     return Some(map.get("setSize").and_then(|s| s.as_u64()));
@@ -1132,7 +1135,11 @@ fn the_arrows_space_and_backspace_move_word_to_word_through_the_grid() {
     press(&mut rt, Key::Text(" ".into()));
     assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[1]));
     press(&mut rt, Key::Text(" ".into()));
-    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[1]), "an empty box keeps its place");
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some(WORD_KEYS[1]),
+        "an empty box keeps its place"
+    );
     assert!(ui(&mut rt).words[1].text.is_empty());
     // Backspace in an empty box: back one, the word untouched.
     press(&mut rt, Key::Backspace);

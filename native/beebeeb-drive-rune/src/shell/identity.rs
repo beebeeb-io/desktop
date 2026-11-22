@@ -386,7 +386,11 @@ mod tests {
     /// start question is the same in this test build as in a shipped one: the test exception never reaches it.
     #[test]
     fn the_test_build_is_refused_on_macos_only() {
-        assert!(AppIdentity::Test.start_refusal("macos").is_some_and(|words| words.contains("macOS")));
+        assert!(
+            AppIdentity::Test
+                .start_refusal("macos")
+                .is_some_and(|words| words.contains("macOS"))
+        );
         for os in ["windows", "linux"] {
             assert_eq!(AppIdentity::Test.start_refusal(os), None, "{os}");
         }

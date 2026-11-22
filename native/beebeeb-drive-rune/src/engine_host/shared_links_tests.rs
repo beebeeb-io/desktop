@@ -23,7 +23,10 @@ fn change_expiry_on_a_link_sends_one_patch_with_the_chosen_hours_and_only_for_a_
     assert!(patches(&fake.fake).is_empty());
 
     assert!(source.change_link(REQ, LinkEdit::Expiry(Some(24 * 7))));
-    assert!(!source.change_link(REQ, LinkEdit::Expiry(None)), "an answer is on its way");
+    assert!(
+        !source.change_link(REQ, LinkEdit::Expiry(None)),
+        "an answer is on its way"
+    );
     assert!(settle(&mut source).is_empty());
     let sent = patches(&fake.fake);
     assert_eq!(sent.len(), 1, "one PATCH per press");

@@ -356,7 +356,12 @@ fn each_status_button_does_what_the_board_says() {
             &[Intent::OpenSettings, Close],
             "Version 0.9.2 is available",
         ),
-        ("DW-1214", Action::RestartToUpdate, &[Intent::OpenSettings, Close], "Update Beebeeb"),
+        (
+            "DW-1214",
+            Action::RestartToUpdate,
+            &[Intent::OpenSettings, Close],
+            "Update Beebeeb",
+        ),
         ("DW-1211", Action::Unlock, &[OpenWindow, Close], "Beebeeb is locked"),
         ("DW-1213", Action::ChoosePlan, &[Close], "Choose a plan"),
         (

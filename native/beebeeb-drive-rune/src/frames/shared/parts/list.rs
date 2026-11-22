@@ -117,17 +117,20 @@ pub fn list(n: usize, name: &str, items: Vec<El>, t: &Theme) -> El {
             rule.into_iter().chain(std::iter::once(item))
         }));
     // The ring is outside the card's box, so the card that carries it does not clip; the items' well does.
-    el().key(format!("list-{n}-wrap")).w_full().px(crate::theme::scale::space::S16).child(
-        col()
-            .key(format!("list-{n}"))
-            .role("list")
-            .label(name)
-            .w_full()
-            .radius(crate::theme::tokens::radius::LG)
-            .fill(t.card)
-            .box_shadow(kit::ring(kit::HAIR, t.separator))
-            .child(inner),
-    )
+    el().key(format!("list-{n}-wrap"))
+        .w_full()
+        .px(crate::theme::scale::space::S16)
+        .child(
+            col()
+                .key(format!("list-{n}"))
+                .role("list")
+                .label(name)
+                .w_full()
+                .radius(crate::theme::tokens::radius::LG)
+                .fill(t.card)
+                .box_shadow(kit::ring(kit::HAIR, t.separator))
+                .child(inner),
+        )
 }
 
 /// A section label over a list (`.t-label`). Key: `label-<words>`.

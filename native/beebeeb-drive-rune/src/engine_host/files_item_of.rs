@@ -9,5 +9,7 @@ use crate::source::DriveItem;
 use crate::source_engine;
 
 pub(super) fn item_of(db: &StateDb, id: &str) -> Option<DriveItem> {
-    model::details(db, id).ok().map(|details| source_engine::item(details.item))
+    model::details(db, id)
+        .ok()
+        .map(|details| source_engine::item(details.item))
 }

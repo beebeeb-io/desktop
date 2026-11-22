@@ -492,19 +492,24 @@ pub fn undone(name: &str, t: &Theme, cx: &mut Cx<State>) -> El {
             t,
         ))
         .child(
-            col().key("au-actions").w_full().gap(crate::theme::scale::space::S6).mt(6.0).child(
-                au::button(
-                    &mut keys,
-                    "Continue to Drive",
-                    None,
-                    ButtonKind::Primary,
-                    ButtonSize::Lg,
-                    ButtonState::Enabled,
-                    t,
-                )
-                .default_button()
-                .on_press(|s: &mut State| super::go(s, "DW-0401")),
-            ),
+            col()
+                .key("au-actions")
+                .w_full()
+                .gap(crate::theme::scale::space::S6)
+                .mt(6.0)
+                .child(
+                    au::button(
+                        &mut keys,
+                        "Continue to Drive",
+                        None,
+                        ButtonKind::Primary,
+                        ButtonSize::Lg,
+                        ButtonState::Enabled,
+                        t,
+                    )
+                    .default_button()
+                    .on_press(|s: &mut State| super::go(s, "DW-0401")),
+                ),
         );
     au::page(name, "Drive", [&si::LOCK, &si::PEOPLE, &si::GLOBE], column, t, cx).on_key(super::on_key)
 }

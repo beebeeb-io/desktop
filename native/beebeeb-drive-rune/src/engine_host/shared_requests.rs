@@ -38,7 +38,10 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             return false;
         }
         // The session of the press: the lists' own when they are current, else the one in memory now.
-        let session = self.current().map(|held| held.session).unwrap_or_else(|| self.engine.session_turn());
+        let session = self
+            .current()
+            .map(|held| held.session)
+            .unwrap_or_else(|| self.engine.session_turn());
         let note = form.note.trim();
         let choices = RequestChoices {
             title,
@@ -48,27 +51,33 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             max_bytes: form.max_total_bytes,
             expires_in_days: form.expires_in_hours.map(|hours| hours.div_ceil(24)),
         };
-        let (engine, answers, made) = (self.engine.clone(), self.answers.clone(), self.shared_requests.made.clone());
-        let started = std::thread::Builder::new().name("shared-request".into()).spawn(move || {
-            let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                engine.file_request_create_for(session, &choices)
-            }))
-            .unwrap_or(Err(ShareLinkError::Refused));
-            let done = match done {
-                Ok(link) => {
-                    if let Ok(mut held) = made.lock() {
-                        held.push((link.session, LinkText::new(link.expose())));
+        let (engine, answers, made) = (
+            self.engine.clone(),
+            self.answers.clone(),
+            self.shared_requests.made.clone(),
+        );
+        let started = std::thread::Builder::new()
+            .name("shared-request".into())
+            .spawn(move || {
+                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    engine.file_request_create_for(session, &choices)
+                }))
+                .unwrap_or(Err(ShareLinkError::Refused));
+                let done = match done {
+                    Ok(link) => {
+                        if let Ok(mut held) = made.lock() {
+                            held.push((link.session, LinkText::new(link.expose())));
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                }
-                Err(why) => {
-                    log(format!("shared: a request was not made ({why:?})"));
-                    Err(ShareChangeError::Refused)
-                }
-            };
-            let _ = answers.send(Answer::Changed(NEW_REQUEST.to_string(), session, done));
-            engine.wake_host();
-        });
+                    Err(why) => {
+                        log(format!("shared: a request was not made ({why:?})"));
+                        Err(ShareChangeError::Refused)
+                    }
+                };
+                let _ = answers.send(Answer::Changed(NEW_REQUEST.to_string(), session, done));
+                engine.wake_host();
+            });
         if started.is_err() {
             log("shared: could not start a thread for a request");
             return self.refuse(Notice::ChangeRefused);

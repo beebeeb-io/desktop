@@ -616,8 +616,14 @@ fn the_window_draws_the_lists_its_states_a_notice_and_nothing_of_the_account_bef
     );
     assert!(crate::ui::sidebar::badge_for(&rt.state, crate::ui::sidebar::SidebarSection::Shared).is_some());
     // The footer names the signed-in account, never the board's sample.
-    assert!(seen.contains(fake.first.email.as_str()), "the footer names the account: {seen}");
-    assert!(!seen.contains("Anna Visser") && !seen.contains("anna@northwind.studio"), "{seen}");
+    assert!(
+        seen.contains(fake.first.email.as_str()),
+        "the footer names the account: {seen}"
+    );
+    assert!(
+        !seen.contains("Anna Visser") && !seen.contains("anna@northwind.studio"),
+        "{seen}"
+    );
 
     // Every control is bound now (slice B4 bound the last one): the lists stay drawn.
     poll(&mut rt);
@@ -641,7 +647,10 @@ fn the_window_draws_the_lists_its_states_a_notice_and_nothing_of_the_account_bef
     poll(&mut rt);
     // The footer names the second account (its email holds "two@example.eu"): leave that out of the share words.
     let seen = words(&rt);
-    assert!(seen.contains(fake.second.email.as_str()), "the footer names the second account: {seen}");
+    assert!(
+        seen.contains(fake.second.email.as_str()),
+        "the footer names the second account: {seen}"
+    );
     let seen = seen.replace(fake.second.email.as_str(), "");
     for gone in [
         "Invented trip",

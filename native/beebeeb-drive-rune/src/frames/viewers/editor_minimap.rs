@@ -108,9 +108,10 @@ fn picture(text: &str, file_name: &str, t: &Theme) -> Pixels {
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if let Some((k, p)) = c.as_ref()
-            && *k == key {
-                return p.clone();
-            }
+            && *k == key
+        {
+            return p.clone();
+        }
         let (rows, buf) = build(text, file_name, t);
         let p = Pixels::new();
         p.set(WIDTH, rows as u32, buf);
@@ -146,12 +147,7 @@ pub fn minimap(edit: &rune::TextEdit, file_name: &str, scroll: f32, t: &Theme) -
                 tx.scroll_to_y(SCROLL_KEY, scroll_for(line));
             }
         })
-        .child(
-            el().key("minimap-picture")
-                .w_full()
-                .h_full()
-                .pixels(&pixels),
-        )
+        .child(el().key("minimap-picture").w_full().h_full().pixels(&pixels))
         .child(
             el().key("minimap-view")
                 .absolute(0.0, top * h)

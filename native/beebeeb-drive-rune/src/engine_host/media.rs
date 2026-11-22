@@ -276,11 +276,13 @@ fn decode_in_a_helper(bytes: &[u8], max_px: u32) -> Result<DecodedPicture, Image
     // A helper that stops answering is ended, so the read below ends too.
     let (done, late) = std::sync::mpsc::channel::<()>();
     let watched = child.clone();
-    let watch = std::thread::Builder::new().name("picture-helper-watch".into()).spawn(move || {
-        if late.recv_timeout(DECODE_WITHIN) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-            watched.kill();
-        }
-    });
+    let watch = std::thread::Builder::new()
+        .name("picture-helper-watch".into())
+        .spawn(move || {
+            if late.recv_timeout(DECODE_WITHIN) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                watched.kill();
+            }
+        });
     if watch.is_err() {
         child.kill();
         return Err(ImageRefusal::Damaged);

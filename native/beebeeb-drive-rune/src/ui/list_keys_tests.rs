@@ -4,23 +4,50 @@ use rune::{Key, KeyEvent, Mods};
 
 use super::*;
 
-const NAMES: [&str; 8] = ["Alpha", "apple", "Banana", "berry", "Cherry", "alder", "Date", "date palm"];
+const NAMES: [&str; 8] = [
+    "Alpha",
+    "apple",
+    "Banana",
+    "berry",
+    "Cherry",
+    "alder",
+    "Date",
+    "date palm",
+];
 
 fn keys(multi: bool) -> ListKeys {
-    ListKeys { len: NAMES.len(), page: 3, multi }
+    ListKeys {
+        len: NAMES.len(),
+        page: 3,
+        multi,
+    }
 }
 
 fn at(focus: usize) -> ListCursor {
-    ListCursor { focus: Some(focus), anchor: Some(focus), ..ListCursor::default() }
+    ListCursor {
+        focus: Some(focus),
+        anchor: Some(focus),
+        ..ListCursor::default()
+    }
 }
 
 fn ev(key: Key, mods: Mods) -> KeyEvent {
     KeyEvent { key, mods }
 }
 
-const NONE: Mods = Mods { shift: false, cmd: false, alt: false, ctrl: false, logo: false };
+const NONE: Mods = Mods {
+    shift: false,
+    cmd: false,
+    alt: false,
+    ctrl: false,
+    logo: false,
+};
 const SHIFT: Mods = Mods { shift: true, ..NONE };
-const CTRL: Mods = Mods { ctrl: true, cmd: true, ..NONE };
+const CTRL: Mods = Mods {
+    ctrl: true,
+    cmd: true,
+    ..NONE
+};
 const ALT: Mods = Mods { alt: true, ..NONE };
 
 fn press(key: Key, mods: Mods, k: &ListKeys, c: &mut ListCursor) -> ListAction {
@@ -79,7 +106,11 @@ fn page_keys_move_a_page_and_stop_at_the_ends() {
 
 #[test]
 fn page_zero_still_moves_one_row() {
-    let k = ListKeys { len: 5, page: 0, multi: false };
+    let k = ListKeys {
+        len: 5,
+        page: 0,
+        multi: false,
+    };
     let mut c = at(2);
     assert_eq!(press(Key::PageDown, NONE, &k, &mut c), mv(3, Select::Only));
 }
@@ -102,7 +133,11 @@ fn shift_move_extends_from_the_anchor() {
 #[test]
 fn shift_move_without_anchor_starts_at_the_focus() {
     let k = keys(true);
-    let mut c = ListCursor { focus: Some(5), anchor: None, ..ListCursor::default() };
+    let mut c = ListCursor {
+        focus: Some(5),
+        anchor: None,
+        ..ListCursor::default()
+    };
     assert_eq!(press(Key::Up, SHIFT, &k, &mut c), mv(4, Select::Extend));
     assert_eq!(c.anchor, Some(5));
 }
@@ -129,11 +164,19 @@ fn single_select_shift_and_ctrl_move_are_plain_moves() {
 #[test]
 fn space_selects_and_ctrl_space_toggles() {
     let k = keys(true);
-    let mut c = ListCursor { focus: Some(3), anchor: Some(1), ..ListCursor::default() };
+    let mut c = ListCursor {
+        focus: Some(3),
+        anchor: Some(1),
+        ..ListCursor::default()
+    };
     assert_eq!(press(Key::Text(" ".into()), CTRL, &k, &mut c), ListAction::Toggle(3));
     assert_eq!(c.anchor, Some(3));
     assert_eq!(press(Key::Text(" ".into()), NONE, &k, &mut c), mv(3, Select::Only));
-    let mut c = ListCursor { focus: Some(5), anchor: Some(2), ..ListCursor::default() };
+    let mut c = ListCursor {
+        focus: Some(5),
+        anchor: Some(2),
+        ..ListCursor::default()
+    };
     assert_eq!(press(Key::Text(" ".into()), SHIFT, &k, &mut c), mv(5, Select::Extend));
     assert_eq!(extend_range(&c, 5), 2..=5);
     let mut c = ListCursor::default();
@@ -169,7 +212,11 @@ fn command_keys_without_focus_do_nothing_but_parent_and_delete() {
 
 #[test]
 fn empty_list_moves_nowhere() {
-    let k = ListKeys { len: 0, page: 10, multi: true };
+    let k = ListKeys {
+        len: 0,
+        page: 10,
+        multi: true,
+    };
     let mut c = at(3);
     assert_eq!(press(Key::Down, NONE, &k, &mut c), ListAction::None);
     assert_eq!(c.focus, None);
@@ -179,7 +226,11 @@ fn empty_list_moves_nowhere() {
 
 #[test]
 fn a_list_that_shrank_clamps_the_cursor() {
-    let k = ListKeys { len: 3, page: 10, multi: true };
+    let k = ListKeys {
+        len: 3,
+        page: 10,
+        multi: true,
+    };
     let mut c = at(7);
     assert_eq!(press(Key::Up, NONE, &k, &mut c), mv(1, Select::Only));
 }
@@ -246,7 +297,10 @@ fn space_outside_a_live_buffer_selects_and_another_key_clears_it() {
     typed("d", 0, &k, &mut c);
     press(Key::Down, NONE, &k, &mut c);
     // The buffer was cleared by Down, so Space selects instead of typing.
-    assert_eq!(on_list_key(&ev(Key::Text(" ".into()), NONE), &k, &mut c, 100, |i| NAMES[i].into()), mv(7, Select::Only));
+    assert_eq!(
+        on_list_key(&ev(Key::Text(" ".into()), NONE), &k, &mut c, 100, |i| NAMES[i].into()),
+        mv(7, Select::Only)
+    );
 }
 
 #[test]

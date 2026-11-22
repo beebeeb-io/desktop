@@ -329,7 +329,10 @@ fn w31_a_first_list_that_failed_is_said_with_try_again() {
     assert!(find(&rt, "banner").is_some(), "the failure is said");
     let button = info(&rt, "banner-action");
     assert_eq!((button.role, button.label.as_deref()), ("button", Some("Try again")));
-    assert!(find(&rt, "banner-dismiss").is_none(), "it cannot be dismissed while it is true");
+    assert!(
+        find(&rt, "banner-dismiss").is_none(),
+        "it cannot be dismissed while it is true"
+    );
     click(&mut rt, "banner-action");
     assert_eq!(seen.list_retries.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

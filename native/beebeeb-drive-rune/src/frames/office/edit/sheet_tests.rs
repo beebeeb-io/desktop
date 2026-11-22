@@ -567,7 +567,11 @@ fn office_sheets_a_change_the_helper_does_not_take_stays_in_the_editor() {
     rig.take.set(false);
     rig.key(Key::Enter);
     assert!(rig.sets().is_empty());
-    assert_eq!(rig.editing().map(|e| e.cell), Some(Cell { row: 7, col: 1 }), "still open");
+    assert_eq!(
+        rig.editing().map(|e| e.cell),
+        Some(Cell { row: 7, col: 1 }),
+        "still open"
+    );
     assert_eq!(rig.typed(), "7", "nothing was lost");
     let toast = viewers::ui(&mut rig.rt.state).and_then(|ui| ui.toast.clone());
     assert_eq!(toast.as_deref(), Some(NOT_TAKEN));
@@ -810,10 +814,17 @@ fn office_sheets_the_grid_asks_for_the_keyboard_once_when_opened() {
     let mut rig = rig();
     // The window's poll hands the ask to Rune (`take_focus`, next to the viewer's own one-shot focus): the grid has
     // the keyboard, and nothing asks again.
-    assert!(!with(&rig.rt.state, |g| g.wants_focus), "the ask was taken by the window's poll");
+    assert!(
+        !with(&rig.rt.state, |g| g.wants_focus),
+        "the ask was taken by the window's poll"
+    );
     let mut focused = None;
     rig.rt.update(|_, tx| focused = tx.focused().map(str::to_string));
-    assert_eq!(focused.as_deref(), Some(GRID_KEY), "the grid has the keyboard when the file opens");
+    assert_eq!(
+        focused.as_deref(),
+        Some(GRID_KEY),
+        "the grid has the keyboard when the file opens"
+    );
 }
 
 #[test]
@@ -826,5 +837,8 @@ fn office_sheets_the_window_renames_a_tab_on_a_double_press() {
         rig.rt.pointer_up(x, y);
     }
     rig.settle();
-    assert!(rig.find("edit-sheet-tab-name").is_some(), "the rename field is in the window's tabs");
+    assert!(
+        rig.find("edit-sheet-tab-name").is_some(),
+        "the rename field is in the window's tabs"
+    );
 }
