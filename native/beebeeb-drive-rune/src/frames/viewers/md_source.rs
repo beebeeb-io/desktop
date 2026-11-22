@@ -45,8 +45,8 @@ pub fn line(text: &str) -> Vec<Run> {
         }
     };
     while !rest.is_empty() {
-        if let Some(inner) = rest.strip_prefix("**") {
-            if let Some(end) = inner.find("**").filter(|end| *end > 0) {
+        if let Some(inner) = rest.strip_prefix("**")
+            && let Some(end) = inner.find("**").filter(|end| *end > 0) {
                 flush(&mut plain, &mut out);
                 out.push(mark("**"));
                 out.push(run(&inner[..end], Ink::Strong, true, false));
@@ -54,9 +54,8 @@ pub fn line(text: &str) -> Vec<Run> {
                 rest = &inner[end + 2..];
                 continue;
             }
-        }
-        if let Some(inner) = rest.strip_prefix('`') {
-            if let Some(end) = inner.find('`').filter(|end| *end > 0) {
+        if let Some(inner) = rest.strip_prefix('`')
+            && let Some(end) = inner.find('`').filter(|end| *end > 0) {
                 flush(&mut plain, &mut out);
                 out.push(mark("`"));
                 out.push(run(&inner[..end], Ink::Green, false, false));
@@ -64,10 +63,9 @@ pub fn line(text: &str) -> Vec<Run> {
                 rest = &inner[end + 1..];
                 continue;
             }
-        }
-        if let Some(inner) = rest.strip_prefix('[') {
-            if let Some((words, target)) = inner.split_once("](") {
-                if let Some(end) = target.find(')').filter(|_| !words.contains('[')) {
+        if let Some(inner) = rest.strip_prefix('[')
+            && let Some((words, target)) = inner.split_once("](")
+                && let Some(end) = target.find(')').filter(|_| !words.contains('[')) {
                     flush(&mut plain, &mut out);
                     out.push(mark("["));
                     out.push(run(words, Ink::Plain, false, false));
@@ -77,8 +75,6 @@ pub fn line(text: &str) -> Vec<Run> {
                     rest = &target[end + 1..];
                     continue;
                 }
-            }
-        }
         let ch = rest.chars().next().unwrap_or(' ');
         plain.push(ch);
         rest = &rest[ch.len_utf8()..];

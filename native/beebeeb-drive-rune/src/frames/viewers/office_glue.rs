@@ -8,7 +8,6 @@ use rune::{Cx, El, KeyEvent, Tx};
 
 use super::Ui;
 use super::kinds::OfficePicture;
-use super::office_over::Over;
 use super::source::{Body, FixtureViewerSource, OpenFile};
 use crate::State;
 use crate::frames::office::docs::{self, Asks, DocBody, Live};
@@ -282,7 +281,7 @@ mod tests {
         let is_placeholder = |frames: &[crate::ui::gate::Scene<State>], id: &str| {
             frames
                 .iter()
-                .any(|(f, scene)| *f == id && *scene as usize == crate::frames::placeholder::scene as usize)
+                .any(|(f, scene)| *f == id && *scene as usize == crate::frames::placeholder::scene as *const () as usize)
         };
         assert!(!is_placeholder(dialogs::FRAMES, "DW-1558"));
         assert!(!is_placeholder(sheets::FRAMES, "DW-1559"));

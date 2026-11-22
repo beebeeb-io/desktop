@@ -270,6 +270,7 @@ fn a_name_the_folder_already_has_says_why_and_typing_takes_the_message_away() {
 
 /// Lock 4 (D-OV-3) is off: the editor ships, so the Office types are offered. Mutant: `OFFICE_EDITOR = false` -> red.
 #[test]
+#[allow(clippy::assertions_on_constants)]
 fn new_file_offers_the_office_types() {
     assert!(super::new_file::OFFICE_EDITOR, "the editor ships: the office types are offered");
     assert_eq!(Kind::offered().len(), Kind::ALL.len());

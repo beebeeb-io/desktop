@@ -80,19 +80,17 @@ pub fn parse(source: &str) -> Vec<Block> {
             }
             Event::Start(Tag::List(_)) => {
                 // A nested list: what the parent item said so far stays its own line.
-                if let Some(list) = items.last_mut() {
-                    if !line.is_empty() {
+                if let Some(list) = items.last_mut()
+                    && !line.is_empty() {
                         list.push(std::mem::take(&mut line));
                     }
-                }
                 items.push(Vec::new());
             }
             Event::End(TagEnd::Item) => {
-                if let Some(list) = items.last_mut() {
-                    if !line.is_empty() {
+                if let Some(list) = items.last_mut()
+                    && !line.is_empty() {
                         list.push(std::mem::take(&mut line));
                     }
-                }
             }
             Event::End(TagEnd::List(_)) => {
                 if let Some(list) = items.pop() {

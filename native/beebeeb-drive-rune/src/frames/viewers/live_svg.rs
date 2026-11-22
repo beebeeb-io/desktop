@@ -55,11 +55,10 @@ pub(super) fn outcome(source: &str) -> Outcome {
     let mut h = DefaultHasher::new();
     source.hash(&mut h);
     let key = h.finish();
-    if let Some((k, out)) = LAST.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        if *k == key {
+    if let Some((k, out)) = LAST.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && *k == key {
             return out.clone();
         }
-    }
     let out = if links_outside(source) {
         Outcome::Outside
     } else {

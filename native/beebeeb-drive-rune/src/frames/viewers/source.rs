@@ -661,12 +661,14 @@ pub trait ViewerSource {
     /// Whether the file's bytes are kept on this PC, where the system can open them with the file's own app.
     /// `true`: a list's Open hands the file to that app (`viewers::open_item`), as it did before there was a
     /// viewer here; the viewer is for files that are not on this PC, where it saves a download to disk.
+    #[allow(dead_code)]
     fn kept_on_this_pc(&self, _file_id: &str) -> bool {
         false
     }
     /// Whether a recording or a video named `name` that is kept on this PC still opens HERE, in Beebeeb's player,
     /// from a list's Open (decision D-MED-13; "Open in another app…" stays one press away). `false` (the default):
     /// it goes to its own app, as before (`viewers::open_item`).
+    #[allow(dead_code)]
     fn opens_here_when_kept(&self, _name: &str) -> bool {
         false
     }
@@ -1363,7 +1365,7 @@ pub fn count_words(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);

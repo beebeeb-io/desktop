@@ -106,6 +106,7 @@ pub(crate) fn save_state(s: &State) -> Option<bool> {
 }
 
 /// The question: "You have unsaved changes in <name>." with Save, `discard` and Cancel.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn question(
     title: &str,
     words: &str,
