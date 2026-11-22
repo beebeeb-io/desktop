@@ -47,7 +47,10 @@ async fn rebuilt(on_disk: &[u8]) -> Rebuilt {
         move_corrupt_state_db_aside(&state_dir).unwrap(),
         StateDbCheck::MovedAside(_)
     ));
-    assert!(state_dir.join(REBUILT_CHECK_FILENAME).exists(), "the rebuild owes the check");
+    assert!(
+        state_dir.join(REBUILT_CHECK_FILENAME).exists(),
+        "the rebuild owes the check"
+    );
     let db = Arc::new(StateDb::open(&db_path).unwrap());
     let api = Arc::new(ApiClient::new(
         fake.base.clone(),
@@ -55,7 +58,9 @@ async fn rebuilt(on_disk: &[u8]) -> Rebuilt {
         account.master_key,
     ));
     let bridge = EngineBridge::new(&beebeeb_engine::identity::REAL, db, api);
-    let ticked = STATE_DIR_OVERRIDE.scope(state_dir.clone(), sync_tick(&bridge, &sync_root)).await;
+    let ticked = STATE_DIR_OVERRIDE
+        .scope(state_dir.clone(), sync_tick(&bridge, &sync_root))
+        .await;
     ticked.expect("the first pull");
     assert!(bridge.db.get_file(FILE).unwrap().is_some(), "listed again");
     // What the rebuild leaves for a file that is on disk: synced, no content agreed with the server.
@@ -152,7 +157,9 @@ async fn after_rebuild_an_unchanged_file_is_agreed_and_its_later_edit_is_sent() 
     .await;
 
     // Once every file is checked and the settle time is over, the check ends.
-    let mut owed = RebuiltCheck::read(&state_dir).unwrap().expect("still owed inside the settle time");
+    let mut owed = RebuiltCheck::read(&state_dir)
+        .unwrap()
+        .expect("still owed inside the settle time");
     owed.pulled_at = Some(0);
     owed.save(&state_dir).unwrap();
     in_state(&state_dir, async {
@@ -173,7 +180,11 @@ async fn after_rebuild_a_changed_file_stays_held_and_nothing_is_overwritten() {
         assert_eq!(held(&r), vec!["content_unknown".to_string()]);
         sync_tick(&r.bridge, &r.sync_root).await.unwrap();
         scan(&r);
-        assert_eq!(held(&r), vec!["content_unknown".to_string()], "still held as a real edit");
+        assert_eq!(
+            held(&r),
+            vec!["content_unknown".to_string()],
+            "still held as a real edit"
+        );
         assert_eq!(agreed_hash(&r), None, "never agreed");
         assert_eq!(uploads(&r), 0, "not sent");
         assert_eq!(
