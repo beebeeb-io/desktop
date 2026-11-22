@@ -59,6 +59,8 @@ mod open_with_menu_tests;
 #[cfg(test)]
 mod protected_tests;
 #[cfg(test)]
+mod rebuilt_tests;
+#[cfg(test)]
 mod rest_tests;
 #[cfg(test)]
 mod review_tests;

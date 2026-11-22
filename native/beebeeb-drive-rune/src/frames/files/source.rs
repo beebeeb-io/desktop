@@ -490,6 +490,11 @@ pub trait FilesSource: Send + 'static {
     fn backup_entry(&self, _item: &DriveItem) -> Option<super::protected::BackupEntry> {
         None
     }
+    /// The one-time "the local file list was rebuilt" words, once, after the engine moved a damaged state.db aside
+    /// (144b); `None` every call after, and for a source with no engine.
+    fn take_rebuilt_notice(&mut self) -> Option<String> {
+        None
+    }
     /// The note over a folder a service manages (DW-0424).
     fn folder_notice(&self, _folder: Option<&str>) -> Option<super::protected::FolderNotice> {
         None

@@ -342,6 +342,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .children(
             super::browse_states::card(s, &t)
                 .or_else(|| crate::frames::global::under_toolbar(s, &t))
+                .or_else(|| super::protected::rebuilt_notice(s, &t))
                 .or_else(|| super::protected::notice(s, &t)),
         )
         // Several rows selected: what can be done to all of them (DW-0403).

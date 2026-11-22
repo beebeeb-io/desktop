@@ -80,6 +80,30 @@ pub struct BackupEntry {
     pub note: Option<String>,
 }
 
+/// What the window says once the local file list was rebuilt (144b moved a damaged `state.db` aside).
+pub const REBUILT_WORDS: &str =
+    "Beebeeb rebuilt its list of your files on this PC. Nothing was lost; your files are on the server.";
+
+fn dismiss_rebuilt(s: &mut State, _: &mut Tx) {
+    s.actions.protected.rebuilt = None;
+}
+
+/// The calm banner for a rebuilt local list, with Dismiss.
+pub fn rebuilt_notice(s: &State, t: &Theme) -> Option<El> {
+    let words = s.actions.protected.rebuilt.as_deref()?;
+    let runs = [Run::Words(words.to_string())];
+    Some(banner::banner(
+        &Banner {
+            tone: Tone::Neutral,
+            icon: &icons::CHECK_CIRCLE,
+            runs: &runs,
+            action: None,
+            dismiss: Some(dismiss_rebuilt as banner::Handler),
+        },
+        t,
+    ))
+}
+
 /// The note over a folder a service manages (DW-0424).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderNotice {
@@ -97,6 +121,9 @@ pub struct Ui {
     seen: Option<Section>,
     /// The window's `session_no` and the folder the source was last told is shown ([`FilesSource::folder_shown`]).
     told: Option<(u64, Option<String>)>,
+    /// The "local file list was rebuilt" words, taken from the source once and shown until Dismiss (the engine says
+    /// it once per move, so it is gone after a restart too).
+    pub rebuilt: Option<String>,
 }
 
 /// Contacts in a device's backup (DW-0423).
@@ -282,6 +309,11 @@ pub fn show_backups(s: &mut State) -> bool {
 /// sidebar's Backups (Ctrl+4) shows the Backups folder, opening the Backups row in Files moves
 /// the sidebar to Backups, and Back out of it moves it to Files again.
 pub fn poll(s: &mut State) -> bool {
+    // The engine says a rebuilt local list once; kept here until the user dismisses it.
+    if s.actions.protected.rebuilt.is_none() && s.actions.source.take_rebuilt_notice().is_some() {
+        s.actions.protected.rebuilt = Some(REBUILT_WORDS.to_string());
+        return true;
+    }
     // The source is told which folder is shown, once per folder and per session, before anything else: every way a
     // folder comes to be shown (a click, Back, a breadcrumb, the sidebar, a reset) ends here.
     let shown = (s.actions.session_no, s.listing.folder.id.clone());
