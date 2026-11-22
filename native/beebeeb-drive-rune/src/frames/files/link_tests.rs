@@ -27,9 +27,11 @@ const BEFORE: &str = "what was on the clipboard before";
 
 /// What the test keeps of the source: what it was asked, and what it will answer.
 #[derive(Default, Clone)]
+type Asked = Arc<Mutex<Vec<(Action, Vec<String>)>>>;
+
 struct Spy {
     later: Arc<Mutex<Vec<Change>>>,
-    asked: Arc<Mutex<Vec<(Action, Vec<String>)>>>,
+    asked: Asked,
     /// The next link is refused at once with this.
     refuse: Arc<Mutex<Option<ActionError>>>,
     /// The source has no link on its way any more (the answer of the last press was dropped).

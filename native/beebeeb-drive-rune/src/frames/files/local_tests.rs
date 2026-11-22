@@ -17,10 +17,12 @@ type R = Result<(), ActionError>;
 
 /// What the test keeps of the source: what it was asked, what it will answer, when it was asked to wake.
 #[derive(Default, Clone)]
+type Asked = Arc<Mutex<Vec<(Action, Vec<String>)>>>;
+
 struct Spy {
     later: Arc<Mutex<Vec<Change>>>,
     /// Each change of what this PC holds that was asked: the direction and the ids.
-    asked: Arc<Mutex<Vec<(Action, Vec<String>)>>>,
+    asked: Asked,
     /// The next change of what this PC holds is refused at once with this.
     refuse: Arc<Mutex<Option<ActionError>>>,
     wakes: Arc<Mutex<Vec<Duration>>>,

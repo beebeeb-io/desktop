@@ -19,9 +19,11 @@ type R = Result<(), ActionError>;
 
 /// What the test keeps of the source: what it was asked, and what it will answer.
 #[derive(Default, Clone)]
+type Asked = Arc<Mutex<Vec<(Action, Vec<String>)>>>;
+
 struct Spy {
     later: Arc<Mutex<Vec<Change>>>,
-    asked: Arc<Mutex<Vec<(Action, Vec<String>)>>>,
+    asked: Asked,
     /// The next move to Trash is refused at once with this.
     refuse: Arc<Mutex<Option<ActionError>>>,
 }
@@ -272,7 +274,7 @@ fn what_was_selected_since_the_press_stays_selected_when_the_answer_moves_the_ro
     let at = rt.state.listing.items.iter().position(|item| item.id == other).unwrap();
     assert_eq!(at, 0, "the two rows above it left");
     let selected: Vec<String> = rt.state.selected_items().into_iter().map(|item| item.id).collect();
-    assert_eq!(selected, [other.clone()], "the same item, at its new place");
+    assert_eq!(selected, std::slice::from_ref(&other), "the same item, at its new place");
     assert_eq!(rt.state.actions.rename.as_ref().map(|r| r.row), Some(0));
 
     // Undo: the rows come back above it, and it is still the one selected.
@@ -280,7 +282,7 @@ fn what_was_selected_since_the_press_stays_selected_when_the_answer_moves_the_ro
     spy.answer(Action::Restore, &[(&ids[0], None), (&ids[1], None)]);
     assert!(frame(&mut rt));
     let selected: Vec<String> = rt.state.selected_items().into_iter().map(|item| item.id).collect();
-    assert_eq!(selected, [other.clone()]);
+    assert_eq!(selected, std::slice::from_ref(&other));
     let at = rt.state.listing.items.iter().position(|item| item.id == other).unwrap();
     assert_eq!(rt.state.actions.rename.as_ref().map(|r| r.row), Some(at));
 }
@@ -395,7 +397,7 @@ fn second_delete_after_failed_move_clears_old_failure() {
     // A second Delete, of another row, is accepted: the old failure and its Try again go.
     select(&mut rt, &other);
     rt.update(|s, tx| assert!(s.trash_selection(tx)));
-    assert_eq!(spy.asked(), [(Action::Trash, vec![other.clone()])]);
+    assert_eq!(spy.asked(), [(Action::Trash, vec!std::slice::from_ref(&other))]);
     assert_eq!(rt.state.actions.toast, None, "the old failure still stands");
     assert_eq!(rt.state.actions.trash.again, None, "and its Try again with it");
 
@@ -408,7 +410,7 @@ fn second_delete_after_failed_move_clears_old_failure() {
     );
     select(&mut rt, &ids[0]);
     rt.update(|s, tx| s.retry(tx));
-    assert_eq!(spy.asked(), [(Action::Trash, vec![other.clone()])]);
+    assert_eq!(spy.asked(), [(Action::Trash, vec!std::slice::from_ref(&other))]);
 }
 
 /// Review of 2468, L317: Undo is for every row moved since the last Undo, not only the last answer's. A partial move

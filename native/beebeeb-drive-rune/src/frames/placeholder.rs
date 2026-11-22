@@ -8,6 +8,7 @@ use crate::State;
 use crate::shell::app::Section;
 
 /// The Files window, nothing selected, no pane open: a neutral state, never a frame's content.
+#[cfg(test)]
 pub fn scene(s: &mut State) {
     super::go(s, Section::Files);
     s.clear_selection();

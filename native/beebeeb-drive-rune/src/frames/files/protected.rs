@@ -21,7 +21,6 @@ use crate::State;
 use crate::shell::app::{Event, Route, Screen, Section, SettingsPane};
 use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
 use crate::source::DriveItem;
-use crate::theme::scale;
 use crate::theme::icons;
 use crate::theme::icons_settings;
 use crate::theme::tokens::{Theme, type_};
@@ -166,7 +165,7 @@ pub fn grouped(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
