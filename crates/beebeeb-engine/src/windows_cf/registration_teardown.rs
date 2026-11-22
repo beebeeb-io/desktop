@@ -288,7 +288,7 @@ pub fn uninstall(identity: &'static EngineIdentity, choice: SyncFolderChoice) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::windows_cf::placeholders::{convert_to_in_sync_placeholder, dehydrate_placeholder, is_cloud_placeholder};
+    use crate::windows_cf::placeholders::{convert_to_in_sync_placeholder, create_placeholder, is_cloud_placeholder};
     use crate::windows_cf::{HYDRATION_POLICY, QA_PROVIDER, register_sync_root_with, registered_provider_name};
 
     const REPARSE: u32 = 0x400;
@@ -348,9 +348,8 @@ mod tests {
             std::fs::create_dir(root.join("folder")).unwrap();
             std::fs::write(root.join("folder").join("downloaded.txt"), b"kept bytes").unwrap();
             convert_to_in_sync_placeholder(&root.join("folder").join("downloaded.txt"), "f-1").unwrap();
-            std::fs::write(root.join("cloud.bin"), vec![7u8; 4096]).unwrap();
-            convert_to_in_sync_placeholder(&root.join("cloud.bin"), "f-2").unwrap();
-            dehydrate_placeholder(&root.join("cloud.bin")).unwrap();
+            // Cloud-only: minted with no bytes (no provider is connected, so nothing can fetch it).
+            assert!(create_placeholder(&root, "f-2", "cloud.bin", 4096, 0, false).unwrap());
             std::fs::write(root.join("made-here.txt"), b"never sent").unwrap();
             assert!(is_cloud_placeholder(&root.join("folder").join("downloaded.txt")));
             assert!(is_cloud_placeholder(&root.join("cloud.bin")));
