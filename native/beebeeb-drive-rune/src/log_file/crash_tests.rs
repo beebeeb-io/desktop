@@ -158,8 +158,8 @@ fn crash_record_version_is_the_one_about_shows() {
 
 #[test]
 fn crash_record_version_with_spaces_keeps_its_shape() {
-    let t = render("test build abc1234", Some("x"), "a.rs", 3, "t");
-    assert_eq!(t, "t CRASH version=test build abc1234 thread=other location=a.rs:3\n");
+    let t = render("test build abc1234", Some("x"), "a.rs", 3, "2026-11-22T10:00:00Z");
+    assert_eq!(t, "2026-11-22T10:00:00Z CRASH version=test build abc1234 thread=other location=a.rs:3\n");
     assert_eq!(reduce(&t), t);
-    assert_eq!(reduce("t CRASH version=1.0 thread=main location=a.rs:3 extra\n"), "");
+    assert_eq!(reduce("2026-11-22T10:00:00Z CRASH version=1.0 thread=main location=a.rs:3 extra\n"), "");
 }
