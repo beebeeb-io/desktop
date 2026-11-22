@@ -638,7 +638,7 @@ fn conflict(opened: u32, other: &Conflict, t: &Theme) -> El {
 }
 
 /// DW-1525 in the office editor: Back with changes no version holds. Save keeps the document open while it saves.
-fn leave(name: &str, t: &Theme) -> El {
+fn leave(name: &str, back: &str, t: &Theme) -> El {
     let foot = row()
         .center_y()
         .justify_end()
@@ -674,6 +674,8 @@ fn leave(name: &str, t: &Theme) -> El {
             foot,
             t,
         ),
+        back,
+        back,
         t,
     )
 }
@@ -713,7 +715,7 @@ pub(super) fn kbd(key: &str, words: &str, t: &Theme) -> El {
 }
 
 /// DW-1551: the command search over the document.
-fn palette(ui: &Ui, palette: &Palette, t: &Theme) -> El {
+fn palette(ui: &Ui, palette: &Palette, back: &str, t: &Theme) -> El {
     let typed = palette.query.text.as_str();
     let typed_w = rune::text::advance(typed, BODY);
     if !typed.is_empty() {
@@ -861,27 +863,30 @@ fn palette(ui: &Ui, palette: &Palette, t: &Theme) -> El {
         .fill(crate::ui::settings_dialog::scrim_color(t))
         .child(card)
         .modal(false, close)
+        .focus_return(back)
 }
 
 /// DW-1557: the "About this viewer" card at the bottom right, no dimming; Esc or a press outside closes it.
-fn licence(t: &Theme) -> El {
+fn licence(back: &str, t: &Theme) -> El {
     col()
         .key("scrim")
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .child(super::office_glue::licence(t).pin(None, None, Some(16.0), Some(36.0)))
         .modal(false, close)
+        .focus_return(back)
 }
 
 /// What is open over the document, if anything.
 pub fn over(ui: &Ui, t: &Theme) -> Option<El> {
+    let back = doc_key(&ui.file.name);
     Some(match ui.office.over.as_ref()? {
         Over::Conflict(other) => conflict(ui.file.version, other, t),
-        Over::Palette(p) => palette(ui, p, t),
-        Over::Licence => licence(t),
-        Over::Table(form) => table_dialog(form, t),
-        Over::Link(form) => link_dialog(form, t),
-        Over::Image(_) => image_dialog(t),
-        Over::Leave => leave(ui.file.name.as_str(), t),
+        Over::Palette(p) => palette(ui, p, back, t),
+        Over::Licence => licence(back, t),
+        Over::Table(form) => table_dialog(form, back, t),
+        Over::Link(form) => link_dialog(form, back, t),
+        Over::Image(_) => image_dialog(back, t),
+        Over::Leave => leave(ui.file.name.as_str(), back, t),
     })
 }
 
@@ -1090,9 +1095,20 @@ fn error_of(error: &Option<word_insert::Why>, field: usize) -> Option<&str> {
     error.as_ref().filter(|(at, _)| *at == field).map(|(_, words)| words.as_str())
 }
 
-/// The scrim and the card of one of Insert's dialogs: Esc and a press outside close it.
-fn insert_card(card: El, t: &Theme) -> El {
-    dialog::scrim(0.0, card, t).modal(false, close)
+/// The scrim and the card of one of the editor's dialogs: Esc and a press outside close it, Tab stays inside. As it
+/// closes, focus goes back to `opener` (the Insert tool that opened it) when it is still there, else to the document.
+fn insert_card(card: El, opener: &str, back: &str, t: &Theme) -> El {
+    dialog::modal_back(0.0, card, opener, back, close, t)
+}
+
+/// What takes the keyboard in the open document once a dialog over it closes: the page, the slide or the grid.
+pub fn doc_key(name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "pptx" | "ppt" | "odp" | "key" => crate::frames::office::edit::slide::FOCUS_KEY,
+        "xlsx" | "xls" | "ods" | "csv" => crate::frames::office::edit::sheet::GRID_KEY,
+        _ => crate::frames::office::edit::word::SURFACE,
+    }
 }
 
 fn insert_foot(ok: &'static str, on_ok: fn(&mut State), t: &Theme) -> El {
@@ -1108,7 +1124,7 @@ fn insert_foot(ok: &'static str, on_ok: fn(&mut State), t: &Theme) -> El {
 }
 
 /// DW-1550: Table... asks for its rows and columns.
-fn table_dialog(form: &TableForm, t: &Theme) -> El {
+fn table_dialog(form: &TableForm, back: &str, t: &Theme) -> El {
     let fields = row()
         .key("ins-fields")
         .w_full()
@@ -1137,12 +1153,14 @@ fn table_dialog(form: &TableForm, t: &Theme) -> El {
             foot,
             t,
         ),
+        "rt-0",
+        back,
         t,
     )
 }
 
 /// DW-1550: Link... asks for the words and the address. The address is only text in the document.
-fn link_dialog(form: &LinkForm, t: &Theme) -> El {
+fn link_dialog(form: &LinkForm, back: &str, t: &Theme) -> El {
     let fields = col()
         .key("ins-fields")
         .w_full()
@@ -1178,12 +1196,14 @@ fn link_dialog(form: &LinkForm, t: &Theme) -> El {
             foot,
             t,
         ),
+        "rt-2",
+        back,
         t,
     )
 }
 
 /// DW-1550: Image... while the platform's file picker is open.
-fn image_dialog(t: &Theme) -> El {
+fn image_dialog(back: &str, t: &Theme) -> El {
     let foot = row()
         .center_y()
         .justify_end()
@@ -1200,6 +1220,8 @@ fn image_dialog(t: &Theme) -> El {
             foot,
             t,
         ),
+        "rt-1",
+        back,
         t,
     )
 }

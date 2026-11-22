@@ -285,7 +285,7 @@ pub fn editor(editor: &super::Editor, file_name: &str, spans: Vec<Span>, t: &The
         .child(
             text_input(&editor.edit, style::CODE)
                 .key(super::EDITOR_KEY)
-                .label("Text")
+                .label(editor_name(file_name))
                 .shortcut_hint("Ctrl+S")
                 .color(t.text)
                 .spans(spans)
@@ -295,6 +295,8 @@ pub fn editor(editor: &super::Editor, file_name: &str, spans: Vec<Span>, t: &The
                 .on_input_key(super::editor_key)
                 .pin(Some(GUTTER_W), Some(0.0), Some(0.0), Some(0.0)),
         );
+    // An F6 stop: the field, the find bar and the live preview (`editor_view::f6_stop`).
+    let field = crate::ui::focus::pane(field, super::editor_view::FIELD_PANE);
     col()
         .key("viewer-body")
         .role("document")
@@ -308,6 +310,15 @@ pub fn editor(editor: &super::Editor, file_name: &str, spans: Vec<Span>, t: &The
         .min_h(0.0)
         .scroll(rune::ScrollSpec { stick_bottom: false })
         .child(field)
+}
+
+/// What a screen reader calls the editor's field: the file it edits ("Editing notes.md").
+pub fn editor_name(file_name: &str) -> String {
+    if file_name.is_empty() {
+        "Editing the file".to_string()
+    } else {
+        format!("Editing {file_name}")
+    }
 }
 
 /// The toolbar's controls of the editor: Save, a plain button with the lock (New stays the

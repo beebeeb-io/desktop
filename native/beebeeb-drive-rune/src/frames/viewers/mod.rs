@@ -811,6 +811,11 @@ pub fn editor_edit(s: &mut State) -> &mut rune::TextEdit {
 /// nothing. It is handed to the field as the line break, so undo and a held key work as for any typing.
 pub fn editor_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let m = ev.mods;
+    // F6 / Shift+F6: the find bar, the live preview (a focused field's keys reach no pane's handler).
+    if let Some(back) = crate::ui::focus::f6(ev) {
+        editor_f6(s, editor_view::FIELD_PANE, back, tx);
+        return true;
+    }
     // The field reads Esc as "blur", so it is taken here while the find bar is open.
     if ev.key == Key::Escape && !m.alt && !m.cmd && !m.ctrl && !m.shift && close_find(s) {
         return true;
@@ -839,6 +844,19 @@ pub fn editor_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     editor.edit.key(&line_break, None);
     tx.scroll_into_view(format!("caret-{}", editor.caret_line()));
     true
+}
+
+/// F6 from the editor stop `from`: focus goes to the next (`back`: previous) one, with the ring. The fields' own
+/// focus marks follow, so the caret is drawn in the field that has the keyboard.
+pub fn editor_f6(s: &mut State, from: &str, back: bool, tx: &mut Tx) {
+    let Some(ui) = ui(s) else { return };
+    let Some(to) = editor_view::f6_stop(ui, from, back) else { return };
+    if let Some(editor) = ui.editor.as_mut() {
+        editor.edit.focused = to == editor_view::FIELD_PANE;
+    }
+    ui.editor_view.find.needle.focused = to == editor_view::FIND_PANE;
+    ui.editor_view.find.replacement.focused = false;
+    tx.focus(to, true);
 }
 
 /// The find keys while the editor is open. `true`: the key was used.

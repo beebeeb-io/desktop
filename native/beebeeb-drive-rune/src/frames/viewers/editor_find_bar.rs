@@ -164,22 +164,54 @@ fn replacement_edit(s: &mut State) -> &mut rune::TextEdit {
     }
 }
 
-/// Enter steps (Shift+Enter backwards), Esc closes.
-fn needle_key(s: &mut State, ev: &KeyEvent, _tx: &mut rune::Tx) -> bool {
+/// F6 / Shift+F6 in a find field: the next / previous editor stop (a focused field's keys reach no pane).
+fn field_f6(s: &mut State, ev: &KeyEvent, tx: &mut rune::Tx) -> bool {
+    match crate::ui::focus::f6(ev) {
+        Some(back) => {
+            super::super::editor_f6(s, super::FIND_PANE, back, tx);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Close find; the keyboard goes back to the editor's field.
+fn close_to_field(s: &mut State, tx: &mut rune::Tx) {
+    with(s, |ui, e| {
+        close(&mut ui.editor_view, e);
+        None
+    });
+    tx.focus(super::super::EDITOR_KEY, true);
+}
+
+/// Enter steps (Shift+Enter backwards), Esc closes, F6 moves on.
+fn needle_key(s: &mut State, ev: &KeyEvent, tx: &mut rune::Tx) -> bool {
+    if field_f6(s, ev, tx) {
+        return true;
+    }
     match ev.key {
         Key::Enter => {
             go(s, ev.mods.shift);
             true
         }
         Key::Escape => {
-            with(s, |ui, e| {
-                close(&mut ui.editor_view, e);
-                None
-            });
+            close_to_field(s, tx);
             true
         }
         _ => false,
     }
+}
+
+/// The replacement's keys: Esc closes, F6 moves on.
+fn replacement_key(s: &mut State, ev: &KeyEvent, tx: &mut rune::Tx) -> bool {
+    if field_f6(s, ev, tx) {
+        return true;
+    }
+    if ev.key == Key::Escape {
+        close_to_field(s, tx);
+        return true;
+    }
+    false
 }
 
 fn chip(key: &str, label: &str, on: bool, t: &Theme) -> El {
@@ -217,7 +249,7 @@ fn field(key: &'static str, edit: &rune::TextEdit, t: &Theme) -> El {
     if key == "find-needle" {
         f.on_edit(needle_edit).on_input_key(needle_key)
     } else {
-        f.on_edit(replacement_edit)
+        f.on_edit(replacement_edit).on_input_key(replacement_key)
     }
 }
 
@@ -249,13 +281,8 @@ pub fn bar(view: &EditorView, t: &Theme) -> Option<El> {
                 None
             })
         }))
-        .child(chip("find-close", "\u{00d7}", false, t).on_press(|s: &mut State| {
-            with(s, |ui, e| {
-                close(&mut ui.editor_view, e);
-                None
-            })
-        }));
-    let mut b = rune::col().key("find-bar").mx(14.0).mt(10.0).px(12.0).py(8.0).gap(6.0).radius(10.0).fill(style::banner(t)).child(line1);
+        .child(chip("find-close", "\u{00d7}", false, t).on_press_tx(close_to_field));
+    let mut b = rune::col().key("find-bar-box").mx(14.0).mt(10.0).px(12.0).py(8.0).gap(6.0).radius(10.0).fill(style::banner(t)).child(line1);
     if view.find.replace_open {
         b = b.child(
             row()
@@ -274,7 +301,7 @@ pub fn bar(view: &EditorView, t: &Theme) -> Option<El> {
                 })),
         );
     }
-    Some(b)
+    Some(super::stop(b, super::FIND_PANE).w_full())
 }
 
 #[cfg(test)]

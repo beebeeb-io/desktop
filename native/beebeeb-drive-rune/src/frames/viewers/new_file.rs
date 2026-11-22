@@ -735,6 +735,9 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .child(dialog::scrim(crate::TITLEBAR_H, card, &t))
         .on_key(dialog_key)
-        .modal_tx(false, |s: &mut State, _tx: &mut Tx| close(s));
+        .modal_tx(false, |s: &mut State, _tx: &mut Tx| close(s))
+        // Its opener (the New menu's row, Ctrl+N in the list) is gone or is the list: the keyboard goes back to the
+        // list, as after Files' own dialogs (`ui::dialog::modal_back`'s fallback).
+        .focus_return(list_key(s));
     window.child(layer)
 }

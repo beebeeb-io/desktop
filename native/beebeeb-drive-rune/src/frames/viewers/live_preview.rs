@@ -37,15 +37,18 @@ pub fn pane(kind: PreviewKind, source: &str, ui: &Ui, t: &Theme) -> El {
         PreviewKind::Svg => live_svg::view(source, ui, t),
         PreviewKind::Html => live_html::view(source, ui, t),
     };
-    col()
+    let region = col()
         .key("live-preview")
         .role("region")
         .label("Preview")
+        // F6 lands here even when the preview holds no control of its own.
+        .focusable(true)
         .w_full()
         .h_full()
         .min_w(0.0)
         .fill(t.bg)
         .border(1.0, t.separator)
         .border_layout()
-        .child(view)
+        .child(view);
+    super::stop(region, super::PREVIEW_PANE).w_full().h_full().min_w(0.0)
 }
