@@ -828,3 +828,88 @@ fn office_sheets_the_window_renames_a_tab_on_a_double_press() {
     rig.settle();
     assert!(rig.find("edit-sheet-tab-name").is_some(), "the rename field is in the window's tabs");
 }
+
+// ---------------------------------------------------------------------------
+// The command search (dc-175, as RC-c for a deck): Ctrl+K and the ribbon's search draw it over the workbook, its
+// field has the keyboard, typed words land in it and not in a cell, Esc closes it and not the file.
+// ---------------------------------------------------------------------------
+
+impl Rig {
+    fn focused(&self) -> Option<String> {
+        self.rt
+            .elements()
+            .into_iter()
+            .find(|e| e.focused && !e.exiting)
+            .and_then(|e| e.key)
+    }
+
+    fn palette_query(&mut self) -> Option<String> {
+        use crate::frames::viewers::office_over::Over;
+        match viewers::ui(&mut self.rt.state).and_then(|ui| ui.office.over.as_ref()) {
+            Some(Over::Palette(palette)) => Some(palette.query.text.clone()),
+            _ => None,
+        }
+    }
+
+    fn press_key(&mut self, key: &str) {
+        let r = self.find(key).unwrap_or_else(|| panic!("no element keyed {key}")).rect;
+        let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+        self.rt.pointer_down(x, y);
+        self.rt.pointer_up(x, y);
+        self.settle();
+    }
+
+    fn assert_palette_works(&mut self) {
+        assert!(
+            self.find("pal").is_some(),
+            "the command search is drawn over the workbook"
+        );
+        assert_eq!(
+            self.focused().as_deref(),
+            Some("pal-input"),
+            "and its field has the keyboard"
+        );
+        for c in "Bold".chars() {
+            self.text(&c.to_string());
+        }
+        assert_eq!(
+            self.palette_query().as_deref(),
+            Some("Bold"),
+            "the typed words land in the search"
+        );
+        assert!(
+            self.editing().is_none() && self.sets().is_empty(),
+            "no cell was edited: {:?}",
+            self.ops()
+        );
+        self.key(Key::Escape);
+        assert!(
+            self.find("pal").is_none() && self.palette_query().is_none(),
+            "Esc closed the search"
+        );
+        assert!(viewers::ui(&mut self.rt.state).is_some(), "not the file");
+    }
+}
+
+#[test]
+fn office_sheets_palette_ctrl_k_after_a_cell_click_shows_the_command_search() {
+    let mut rig = rig();
+    rig.click(1, 1);
+    rig.key_with(Key::Command('k'), ctrl());
+    rig.assert_palette_works();
+}
+
+#[test]
+fn office_sheets_palette_ctrl_k_with_the_keyboard_nowhere_shows_the_command_search() {
+    let mut rig = rig();
+    rig.key_with(Key::Command('k'), ctrl());
+    rig.assert_palette_works();
+}
+
+#[test]
+fn office_sheets_palette_the_search_button_shows_the_command_search() {
+    let mut rig = rig();
+    rig.click(2, 0);
+    rig.press_key("rib-find");
+    rig.assert_palette_works();
+}

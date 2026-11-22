@@ -83,7 +83,20 @@ impl<C: CredentialStores> Engine<C> {
             return None;
         }
         let previous = owner.as_ref()?;
-        match self.remove_the_previous_account(data, previous, sync_root, port) {
+        let mut removed = self.remove_the_previous_account(data, previous, sync_root, port);
+        // dc-175: folders no row names that hold no file a person left are nothing to keep: the empty ones go (only
+        // `remove_dir`, so a folder still holding anything stays) and the removal is asked once more.
+        if removed == Err(ITEMS_STAY)
+            && discard_offered_on_this_os()
+            && let Ok(left) = left_by_a_person(&data.db, sync_root, port, false)
+            && left.files.is_empty()
+            && !left.folders.is_empty()
+        {
+            tracing::info!(folders = left.folders.len(), "account switch: empty folders the previous account left go");
+            let _ = take_out(sync_root, &[], &left.folders);
+            removed = self.remove_the_previous_account(data, previous, sync_root, port);
+        }
+        match removed {
             Ok(()) => {
                 tracing::info!("account switch: the previous account's local data was removed");
                 self.wipe_thumb_cache_at_session_end(); // A's thumbnails (079); the cache is keyed by this install's slot.

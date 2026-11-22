@@ -639,3 +639,50 @@ fn the_surface_is_a_focusable_text_area() {
     assert_eq!(surface.label.as_deref(), Some("Document text"));
     assert!(SURFACE.starts_with(edit::FOCUS_PREFIX));
 }
+
+// ---------------------------------------------------------------------------
+// The command search (dc-175, as RC-c for a deck): with the page's surface holding the keyboard, Ctrl+K and the
+// ribbon's search draw it over the document, its field takes the keyboard, and the typed words are not sent as text.
+// ---------------------------------------------------------------------------
+
+fn focused_key(rt: &Runtime<State>) -> Option<String> {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.focused && !e.exiting)
+        .and_then(|e| e.key)
+}
+
+fn palette_shows_and_takes_the_keys(rt: &mut Runtime<State>, shared: &Shared) {
+    rt.frame(0.0);
+    assert!(find(rt, "pal").is_some(), "the command search is drawn over the document");
+    assert_eq!(focused_key(rt).as_deref(), Some("pal-input"), "and its field has the keyboard");
+    plain(rt, Key::Text("b".into()));
+    assert!(
+        !ops(shared).iter().any(|op| matches!(op, EditOp::InsertText(_))),
+        "typed words are the search's: {:?}",
+        ops(shared)
+    );
+    plain(rt, Key::Escape);
+    rt.frame(0.0);
+    assert!(find(rt, "pal").is_none(), "Esc closed the search");
+    assert!(viewers::ui(&mut rt.state).is_some(), "not the file");
+}
+
+#[test]
+fn office_docs_palette_ctrl_k_from_the_page_shows_the_command_search() {
+    let (mut rt, shared) = editor(true);
+    focus_surface(&mut rt);
+    press(&mut rt, Key::Command('k'), ctrl());
+    palette_shows_and_takes_the_keys(&mut rt, &shared);
+}
+
+#[test]
+fn office_docs_palette_the_search_button_shows_the_command_search() {
+    let (mut rt, shared) = editor(true);
+    focus_surface(&mut rt);
+    let r = rect(&rt, "rib-find");
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    palette_shows_and_takes_the_keys(&mut rt, &shared);
+}

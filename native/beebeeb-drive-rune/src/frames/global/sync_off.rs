@@ -300,7 +300,11 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
             Action::DiscardAndSwitch => button.on_press(|s: &mut State| {
                 let Some(attempt) = s.shell.sync_off().map(|off| off.attempt) else { return };
                 let actions = s.shell.actions.clone();
-                crate::frames::signin::discard_switch::CONFIRMATION.open(attempt, &*actions);
+                // dc-175: with nothing to discard (what kept the switch out is gone, or only empty folders are left,
+                // which the start removes itself) the press is a plain start rather than nothing at all.
+                if !crate::frames::signin::discard_switch::CONFIRMATION.open(attempt, &*actions) {
+                    crate::shell::host::try_sync_again(s);
+                }
             }),
             Action::KeepAside => button.on_press(|s: &mut State| {
                 let actions = s.shell.actions.clone();
