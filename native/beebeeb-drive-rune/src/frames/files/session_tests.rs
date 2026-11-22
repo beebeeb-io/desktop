@@ -315,7 +315,7 @@ fn sign_in_asks_the_engine_and_the_sign_in_screen_shows() {
 #[test]
 fn the_other_answer_is_one_switch_no_row_name_or_count_is_drawn() {
     let mut app = app(true);
-    assert!(super::session::KEEP_THE_LIST, "the board's answer is the default");
+    const { assert!(super::session::KEEP_THE_LIST, "the board's answer is the default") };
     assert!(shows(&app.rt, "Contract draft.pdf"));
     app.rt.update(|s, _| s.actions.session.keep_the_list = Some(false));
     settle(&mut app.rt);

@@ -286,9 +286,11 @@ mod tests {
         assert!(!is_placeholder(dialogs::FRAMES, "DW-1558"));
         assert!(!is_placeholder(sheets::FRAMES, "DW-1559"));
         assert!(!is_placeholder(slides::FRAMES, "DW-1560"));
-        assert!(
-            super::super::kinds::OFFICE_VIEWER_ON,
-            "the viewer is on since O-CP3; the editor frames are filled"
-        );
+        const {
+            assert!(
+                super::super::kinds::OFFICE_VIEWER_ON,
+                "the viewer is on since O-CP3; the editor frames are filled"
+            )
+        };
     }
 }

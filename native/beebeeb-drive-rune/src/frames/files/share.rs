@@ -53,6 +53,7 @@ pub struct Share {
 }
 
 /// Is a password field on screen? The window is then kept out of screen captures.
+#[cfg(test)]
 pub fn shows_secret(s: &State) -> bool {
     matches!(&s.actions.dialog, Some(Dialog::Share(share)) if share.password_on)
 }

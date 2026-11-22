@@ -511,7 +511,8 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
                     .mt(2.0),
             );
     let mut body: Vec<El> = Vec::new();
-    let groups: [(&str, fn(&UploadState) -> bool, f32); 3] = [
+    type Group = (&'static str, fn(&UploadState) -> bool, f32);
+    let groups: [Group; 3] = [
         ("Needs attention", |s| matches!(s, UploadState::Failed(_)), 4.0),
         ("Uploading", |s| matches!(s, UploadState::Uploading { .. }), 8.0),
         ("Waiting", |s| matches!(s, UploadState::Waiting(_)), 8.0),

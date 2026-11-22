@@ -5,7 +5,6 @@
 
 use crate::State;
 use crate::frames::files::source::ActionError;
-use crate::source::DriveItem;
 
 /// The button's words on `os` (`std::env::consts::OS`).
 pub fn label_for(os: &str) -> &'static str {
