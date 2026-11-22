@@ -829,6 +829,7 @@ pub fn apply_snapshot(
         if let Some((rel_path, _kind)) =
             process_metadata_row(bridge, f, &parent_rel_path, now_secs, RowSource::Snapshot, conflicts)?
         {
+            store_has_thumbnail(bridge.db(), file_id, f)?;
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
                 applied.push(file_id.to_string());
@@ -1173,6 +1174,9 @@ pub(super) fn apply_sync_op(
             if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
                 applied.push(id.to_string());
             }
+            // dc-168: after the row's version is written, so the flag is stored at the version it speaks of. A
+            // thumbnail-flag op (`{id, has_thumbnail}`) changes no row field and is stored all the same.
+            store_has_thumbnail(bridge.db(), id, payload)?;
             #[cfg(target_os = "macos")]
             {
                 if touches_existing_row {
@@ -1218,6 +1222,15 @@ pub(super) fn apply_sync_op(
         rebase_folder_descendants(bridge, id, now_secs, &mut applied)?;
     }
     Ok(applied)
+}
+
+/// dc-168: a server row's or op's `has_thumbnail` into `files.has_thumbnail`, at the row's current version. A row or
+/// op without the field (an older server, a rename, a move) leaves the stored flag as it is.
+fn store_has_thumbnail(db: &StateDb, file_id: &str, f: &serde_json::Value) -> Result<(), EngineError> {
+    if let Some(has) = f.get("has_thumbnail").and_then(serde_json::Value::as_bool) {
+        db.set_server_has_thumbnail(file_id, has)?;
+    }
+    Ok(())
 }
 
 pub(super) fn rebase_folder_descendants(
@@ -1434,6 +1447,20 @@ mod shared_folder_index_dirty_tests {
     fn run(bridge: &EngineBridge, sync_root: &Path, op_type: &str, payload: serde_json::Value) {
         let op = crate::api_client::SyncOp { seq_id: 1, op_type: op_type.into(), payload };
         apply_sync_op(bridge, sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
+    }
+
+    /// dc-168: a thumbnail-flag op and a content op carrying the field store it at the row's version; an op
+    /// without it leaves it.
+    #[test]
+    fn has_thumbnail_is_stored_from_file_update_ops() {
+        let (_dir, sync_root, bridge) = setup();
+        assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), None);
+        run(&bridge, &sync_root, "file_update", serde_json::json!({ "id": FILE, "has_thumbnail": true }));
+        assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), Some(true));
+        run(&bridge, &sync_root, "file_update", serde_json::json!({ "id": FILE, "has_large_thumbnail": true }));
+        assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), Some(true), "no field, kept");
+        run(&bridge, &sync_root, "file_update", serde_json::json!({ "id": FILE, "has_thumbnail": false }));
+        assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), Some(false));
     }
 
     #[test]

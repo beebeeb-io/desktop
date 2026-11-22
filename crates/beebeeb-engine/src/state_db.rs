@@ -347,6 +347,7 @@ mod tests {
     mod landing_and_snapshots;
     // Task 2199 (dc-103b).
     mod content_seq;
+    mod thumbnail_flag;
 
     // ── orphan-subtree + delete_file_subtree coverage (task 0806) ──────────────
 
@@ -648,6 +649,8 @@ mod signout;
 mod sync;
 // LD-0113: the server's `system_role` of a row (the Backups root).
 mod system_role;
+// dc-168: the server's `has_thumbnail` of a row.
+mod thumbnail_flag;
 mod test_hooks;
 // Task 2409: the changes "Not sent" counts, one row each.
 mod unsent;
