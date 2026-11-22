@@ -16,7 +16,8 @@ pub fn files_window(s: &State, cx: &mut Cx<State>) -> El {
             .grow(1.0)
             .min_w(0.0)
             .h_full()
-            .child(file_list::column_headers(&t))
+            // The columns the list has room for, by its own width.
+            .child(file_list::column_headers(file_list::Fit::of_list(cx), &t))
             // A folder that could not be read says so. It never draws as an empty folder.
             .child(match s.list_error {
                 Some(error) => file_list::list_error(error, &t),

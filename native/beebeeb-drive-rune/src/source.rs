@@ -94,8 +94,18 @@ pub trait DriveSource: Send + 'static {
     fn storage(&self) -> Option<StorageSummary>;
 }
 
-/// Format bytes as "84 KB", "1.2 MB", "3.1 GB" etc. Shared by file_list and detail_pane.
+/// Format bytes as "84 KB", "1.2 MB", "3.1 GB" etc. Shared by file_list and detail_pane. The decimal separator is
+/// the regional format's ("1,2 MB" in nl-NL, `ui::region`); the units stay English.
 pub fn format_size(bytes: i64) -> String {
+    let words = format_size_dot(bytes);
+    match crate::ui::region::current().decimal {
+        '.' => words,
+        sep => words.replacen('.', &sep.to_string(), 1),
+    }
+}
+
+/// [`format_size`] with a decimal point.
+fn format_size_dot(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = 1024.0 * 1024.0;
     const GB: f64 = 1024.0 * 1024.0 * 1024.0;

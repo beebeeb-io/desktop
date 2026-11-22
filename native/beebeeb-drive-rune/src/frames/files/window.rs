@@ -4,13 +4,15 @@
 use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
 use super::{select_bar, toolbar};
 use crate::State;
+use crate::theme::icons;
 use crate::theme::scale;
 use crate::theme::tokens::{self, Theme};
-use crate::theme::icons;
 use crate::ui::{button, caption, empty, file_list, kit, menu, status_line, toast};
 use rune::{Cx, El, Tx, col, el, row};
 
-/// "4 on this PC · 3 available offline · 4 online only", counted from the rows.
+/// "4 on this PC · 3 available offline · 4 online only", counted from the rows. While the first list still
+/// arrives the rows are only those listed so far, and the words say so: "Listed so far: …" (RC2-10, the large
+/// account read "483 online only" for a folder of thousands).
 pub fn pc_summary(s: &State) -> String {
     if s.listing.items.is_empty() {
         // The whole account is empty (DW-0114), or this folder is (DW-1106).
@@ -27,12 +29,18 @@ pub fn pc_summary(s: &State) -> String {
             .filter(|i| i.pc_status.as_deref() == Some(status))
             .count()
     };
-    format!(
+    let grouped = |n: usize| super::protected::grouped(i64::try_from(n).unwrap_or(i64::MAX));
+    let counts = format!(
         "{} on this PC \u{00B7} {} available offline \u{00B7} {} online only",
-        count("on_this_pc"),
-        count("available_offline"),
-        count("online_only")
-    )
+        grouped(count("on_this_pc")),
+        grouped(count("available_offline")),
+        grouped(count("online_only"))
+    );
+    if s.global.source.status().loading.is_some() {
+        format!("Listed so far: {counts}")
+    } else {
+        counts
+    }
 }
 
 fn pick(s: &mut State, index: usize, tx: &mut Tx) {
@@ -275,7 +283,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .min_w(0.0)
                 .h_full()
                 .child(
-                    super::protected::column_headers(s, &t).unwrap_or_else(|| list::column_headers(s.actions.sort, &t)),
+                    super::protected::column_headers(s, &t)
+                        .unwrap_or_else(|| list::column_headers(s.actions.sort, file_list::Fit::of_list(cx), &t)),
                 )
                 // A folder that could not be read says so. It never draws as an empty folder.
                 .child(match s.list_error {
