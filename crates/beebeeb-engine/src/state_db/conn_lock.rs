@@ -105,8 +105,7 @@ impl ConnLock {
             return;
         }
         let seen = owner.3;
-        let _ = self
-            .taken
+        self.taken
             .wait_timeout_while(owner, std::time::Duration::from_millis(100), |o| o.3 == seen && o.2 > 0)
             .map(|_| ())
             .unwrap_or_else(|p| drop(p.into_inner()));

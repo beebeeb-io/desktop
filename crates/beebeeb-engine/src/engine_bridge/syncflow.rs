@@ -1546,7 +1546,9 @@ mod first_pull_batch_tests {
         first_pull(&bridge, &sync_root, &nodes).await;
         let commits = bridge.db().wal_commits_for_test() - before;
         println!("first pull of {ITEMS} items: {commits} commits, {:?}", started.elapsed());
-        assert!(commits <= ITEMS / 500, "{commits} commits for {ITEMS} items");
+        // dc-170: batches also commit every BATCH_MAX_TIME, so a slow (debug) build commits more often than
+        // ITEMS / PULL_BATCH_ROWS; one commit per row (the dc-086 bug) is still 100x over this bound.
+        assert!(commits <= ITEMS / 100, "{commits} commits for {ITEMS} items");
         assert_eq!(rows(&db, "SELECT COUNT(*) FROM files"), ITEMS as i64);
         assert_eq!(rows(&db, "SELECT COUNT(*) FROM owned_key_records"), ITEMS as i64);
         assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(41));
