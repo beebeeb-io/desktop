@@ -10,6 +10,7 @@ use super::media::LIST_KEY;
 use super::source::{ArchiveDoc, Entry, EntryKind};
 use super::{Intent, Ui, details, media_icons, text, ui};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::file_icons::icon_for;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::file_row::{self, Column, RowLook, Width};
@@ -118,8 +119,8 @@ pub fn body(ui: &Ui, t: &Theme) -> El {
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .px(6.0)
-        .py(4.0)
+        .px(scale::space::S6)
+        .py(scale::space::S4)
         .focusable(true)
         .no_focus_ring()
         .scroll(rune::ScrollSpec { stick_bottom: false });

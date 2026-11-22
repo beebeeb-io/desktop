@@ -1,6 +1,6 @@
 # Recorded counts for tests/component_ratchet.rs. Counts may only go down; lower a line when a count drops.
 button_builders_role_button_outside_ui 57
-colour_literals_outside_theme 70
+colour_literals_outside_theme 69
 dialog_cards_role_dialog_outside_ui 4
 empty_states 6
 family_button_builders 1
@@ -8,17 +8,17 @@ family_dialog_cards 1
 family_drive_sidebars 1
 family_file_rows 10
 family_file_tiles 5
-family_menus_outside_ui_menu 7
-family_pills 4
-family_state_views 15
+family_menus_outside_ui_menu 6
+family_pills 3
+family_state_views 14
 family_status_bars 1
 family_switches 2
 family_toast_copies 3
 family_tool_buttons 5
 family_toolbars_key_outside_ui 0
-local_textstyle_new_outside_theme 252
-radius_number_literals 255
+local_textstyle_new_outside_theme 196
+radius_number_literals 209
 sidebar_assemblies 5
-spacing_literals_in_frames 379
+spacing_literals_in_frames 206
 status_bars_key_outside_ui 0
 toasts 5

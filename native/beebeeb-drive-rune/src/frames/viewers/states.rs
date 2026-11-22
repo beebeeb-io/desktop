@@ -12,6 +12,7 @@ use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::source::{Body, NoPreview, OpenFile, Origin, Stopped, percent, progress_words, size_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::view_state::{self, ViewState, view_state};
 
@@ -31,7 +32,7 @@ fn stage(content: El, t: &Theme) -> El {
 
 /// The button row under a state's words.
 fn actions(buttons: Vec<El>) -> El {
-    row().key("state-actions").gap(8.0).children(buttons)
+    row().key("state-actions").gap(scale::space::S8).children(buttons)
 }
 
 /// A state's words and actions through `ui::view_state`, centred on the stage.
@@ -180,7 +181,7 @@ fn decrypting(file: &OpenFile, done: u64, total: u64, t: &Theme) -> El {
         .key("state")
         .w(300.0)
         .items_center()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .child(view_state(ViewState::Loading { words: &words }, t))
         // Closing cancels: nothing is kept half-decrypted.
         .child(button(keys("state-btn-0"), "Cancel", None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t).on_press(super::close));
