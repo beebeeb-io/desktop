@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::frames::files::source::{ActionError, AppChoice};
 
 /// At most this many apps in the submenu.
-#[cfg(test)]
+#[cfg(any(test, windows))]
 pub(crate) const MAX_APPS: usize = 8;
 
 /// The extension Windows is asked about, as it takes it: ".docx", lower case. `None`: the name has none.

@@ -202,7 +202,7 @@ impl<C: CredentialStores> GlobalSource for EngineGlobalSource<C> {
 
 /// The banner's two fields for `view`. Offline only while an engine runs and said so, with the time of its last
 /// finished check ("This list is from today at 09:12"); before its first one the status line says it alone.
-#[cfg(test)]
+#[cfg(any(test, windows))]
 pub fn global_status(view: &SyncView, now: chrono::DateTime<chrono::Local>) -> GlobalStatus {
     global_status_with(view, FirstList::Here, None, now)
 }
