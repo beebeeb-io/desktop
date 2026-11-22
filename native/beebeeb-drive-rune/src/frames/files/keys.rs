@@ -16,7 +16,7 @@
 //! | Ctrl+Z, Ctrl+D | Undo the move to Trash; Duplicate |
 //! | Menu, Shift+F10 | the file menu, at the selected row |
 //! | Ctrl+Shift+N, Ctrl+N, Ctrl+O | New folder, New file, Upload files (nothing in a folder that takes no additions) |
-//! | Ctrl+1..5 | Files, Shared, Photos, Backups, Trash; Ctrl+6, Ctrl+7 Sync history (DW-1301), Available offline (DW-0715); Ctrl+, Settings (DW-0701) |
+//! | Ctrl+, | Settings (DW-0701); Ctrl+1..7 are the window's (`shell::host::shell_keys`, RC2-8) |
 //! | Alt+Shift+P | the details panel |
 //! | Alt+Left, Backspace; Alt+Right | back; forward |
 //! | Ctrl+F | Search names |
@@ -28,7 +28,6 @@ use crate::State;
 use crate::ui::file_list::ROW_H;
 use crate::ui::keys::SEARCH_KEY;
 use crate::ui::menu;
-use crate::ui::sidebar::SidebarSection;
 use rune::{Key, KeyEvent, Tx};
 
 fn menu_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
@@ -124,6 +123,20 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return true;
     }
+    // Enter on New or Sort opens (closes) its menu, as Space does: Rune leaves Return on a button to the app (RC2-8).
+    if ev.key == Key::Enter && ev.mods == rune::Mods::default() {
+        let kind = match tx.focused() {
+            Some("new-btn") if s.can_add() => Some(super::MenuKind::New),
+            Some("sort-btn") => Some(super::MenuKind::Sort),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            if !tx.key_repeat() {
+                s.toggle_menu(kind);
+            }
+            return true;
+        }
+    }
     if s.actions.menu.is_some() {
         return menu_key(s, ev, tx);
     }
@@ -143,12 +156,6 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             }
             'n' => s.intent(Intent::Frame("DW-1521")),
             'o' => s.intent(Intent::Frame("DW-0415")),
-            '1'..='5' => match SidebarSection::all().get(c as usize - '1' as usize) {
-                Some(&section) => s.sidebar_section = section,
-                None => return false,
-            },
-            '6' => s.intent(Intent::Frame("DW-1301")),
-            '7' => s.intent(Intent::Frame("DW-0715")),
             ',' => s.intent(Intent::Frame("DW-0701")),
             _ => return list_key(s, ev, tx),
         }
