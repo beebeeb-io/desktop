@@ -34,6 +34,7 @@ use rune::{Color, Cx, El, Key, KeyEvent, Shadow, TextStyle, Tx, col, el, row};
 use super::guide_marks;
 use crate::State;
 use crate::shell::app::{GateState, Screen, Section};
+use crate::theme::scale::{self, space};
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::kit;
@@ -66,7 +67,7 @@ pub const SKIP_KEY: &str = "coach-skip";
 pub const TIP_2_ROWS: usize = 10;
 
 /// `.t-body`: a tip's words.
-const TIP: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+const TIP: TextStyle = scale::text::READ;
 /// `.t-cap.font-mono`: "1 of 5".
 const COUNTER: TextStyle = type_::KBD;
 
@@ -473,10 +474,10 @@ fn card(width: f32, name: &str, t: &Theme) -> El {
         .label(name)
         .w(width)
         .pt(14.0)
-        .px(14.0)
+        .px(space::S14)
         .pb(12.0)
-        .gap(10.0)
-        .radius(12.0)
+        .gap(space::S10)
+        .radius(scale::radius::DIALOG)
         .fill(t.card)
         .box_shadow(kit::drop(16.0, 44.0, Color::BLACK.alpha(0.26)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -487,7 +488,7 @@ fn card(width: f32, name: &str, t: &Theme) -> El {
 /// A tip's card: the words, the five dots, "n of 5", Skip (not on the last) and Next or Done.
 fn tip_card(n: u8, arrow_at: Arrow, t: &Theme) -> El {
     let last = n == 5;
-    let mut dots = row().key("coach-dots").gap(6.0).a11y_hidden();
+    let mut dots = row().key("coach-dots").gap(space::S6).a11y_hidden();
     for i in 0..5u8 {
         let on = i + 1 == n;
         dots = dots.child(
@@ -500,7 +501,7 @@ fn tip_card(n: u8, arrow_at: Arrow, t: &Theme) -> El {
     }
     let mut foot = row()
         .items_center()
-        .gap(8.0)
+        .gap(space::S8)
         .child(dots)
         .child(kit::label(
             "coach-counter",
@@ -628,7 +629,7 @@ fn at(s: &mut State, step: Step) {
 }
 
 /// The six board frames of the guide, for `frames::scenes`.
-pub const FRAMES: &[(&str, fn(&mut State))] = &[
+pub const FRAMES: &[crate::frames::signin::Scene<State>] = &[
     // The board's desktop holds the window as DW-0401 draws it (a file selected, its details).
     ("DW-0380", |s| at(s, Step::Tray)),
     ("DW-0301", |s| on_files(s, Step::Tip(1))),

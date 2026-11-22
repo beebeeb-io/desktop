@@ -18,6 +18,7 @@ use super::view_steps::{escape_first, open};
 use super::{Intent, Ui, icons};
 use crate::State;
 use crate::theme::icons::{DOC_GENERIC, FILES};
+use crate::theme::scale::space;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
 use crate::ui::au_entry::{self, WORD_WIDTH, type_entry};
@@ -68,10 +69,10 @@ fn phrase_grid(ui: &Ui, t: &Theme) -> El {
         .role("list")
         .label("Recovery phrase")
         .w_full()
-        .gap(6.0);
+        .gap(space::S6);
     let mut boxes = boxes.into_iter().peekable();
     while boxes.peek().is_some() {
-        grid = grid.child(row().gap(6.0).children(boxes.by_ref().take(3).collect::<Vec<_>>()));
+        grid = grid.child(row().gap(space::S6).children(boxes.by_ref().take(3).collect::<Vec<_>>()));
     }
     grid
 }
@@ -107,7 +108,7 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             false,
             t,
         ))
-        .child(row().w_full().gap(10.0).center_y().child(copy).child(save).child(print))
+        .child(row().w_full().gap(space::S10).center_y().child(copy).child(save).child(print))
         .child(
             ck::checkbox(k, ui.phrase_saved(), "I have saved my recovery phrase offline.", false, t)
                 .on_press_tx(cact(Ui::toggle_saved)),
@@ -173,7 +174,7 @@ pub fn confirm(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         ));
     }
     let suggestions = ui.suggestions();
-    let mut offered = row().gap(10.0).center_y();
+    let mut offered = row().gap(space::S10).center_y();
     if !suggestions.is_empty() {
         offered = offered.child(kit::label(
             "suggest-label",

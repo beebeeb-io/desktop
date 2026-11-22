@@ -66,7 +66,7 @@ fn click(rt: &mut Runtime<State>, key: &str) {
     rt.frame(0.0);
     // DW-0380's "Got it" is in the tray tip's own window: what that window tells the main one.
     if key == NEXT_KEY && rt.state.guide.step == Some(Step::Tray) {
-        rt.update(|s, tx| host::on_tray_tip_dismissed(s, tx));
+        rt.update(host::on_tray_tip_dismissed);
         rt.frame(0.0);
         rt.settle_all();
         rt.frame(0.0);
@@ -149,7 +149,7 @@ fn tray_tip_step_draws_no_card_in_the_main_window() {
 
 /// The tray tip's "Got it" or Esc, as its window tells the main one (`host::on_tray_tip_dismissed`).
 fn tray_tip_dismissed(rt: &mut Runtime<State>) {
-    rt.update(|s, tx| host::on_tray_tip_dismissed(s, tx));
+    rt.update(host::on_tray_tip_dismissed);
     rt.frame(0.0);
 }
 

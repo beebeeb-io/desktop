@@ -25,6 +25,7 @@ use crate::shell::app::{Event, GateState, Screen};
 use crate::shell::host;
 use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::{self, space};
 use crate::theme::tokens::{self, Theme};
 use crate::ui::button::{ButtonState, Size, Variant, button as ui_button, keys};
 use crate::ui::settings_dialog::DIALOG_TITLE;
@@ -34,8 +35,6 @@ use crate::ui::toolbar::{self, Closed};
 use crate::ui::{caption, kit};
 use rune::{Align, Cx, El, Icon, TextStyle, col, el, row};
 
-/// The action each button names, for tests and the log.
-pub const OPEN_PLANS: &str = "open-plans";
 pub const CHECK_PLAN: &str = "check-plan";
 pub const SIGN_OUT: &str = "sign-out";
 /// The lock screen's second button, shown once Windows Hello could not answer.
@@ -45,7 +44,7 @@ pub const USE_PASSWORD_KEY: &str = "gate-btn-1";
 pub const COVER_SIGN_IN_KEY: &str = "cover-sign-in";
 
 /// `.t-sub`: 12px on 15px.
-const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+const SUB: TextStyle = scale::text::SUB;
 /// The no-plan column is 380 wide (`max-width: 380px`).
 const NO_PLAN_W: f32 = 380.0;
 
@@ -72,7 +71,7 @@ pub const KEYSTORE: Frame = Frame {
 };
 
 /// The board's frames of this file: the id, and what shows it on a fresh `State`.
-pub const FRAMES: &[(&str, fn(&mut State))] = &[
+pub const FRAMES: &[crate::frames::signin::Scene<State>] = &[
     ("DW-0009", |s| {
         host::dispatch(s, Event::Gate(GateState::Locked));
     }),
@@ -191,11 +190,11 @@ fn on_key(s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
 /// answer, when it was not a yes; "Use your password" shows with it, never before (the board's frame has one
 /// button).
 fn locked(said: Option<super::lock::Said>, t: &Theme) -> El {
-    let mut block = col().key("gate").items_center().gap(8.0);
+    let mut block = col().key("gate").items_center().gap(space::S8);
     for child in head(&ic::PADLOCK, "Beebeeb is locked", "Unlock to see your files.", false, t) {
         block = block.child(child);
     }
-    let mut actions = row().key("gate-actions").mt(8.0).gap(8.0).child(
+    let mut actions = row().key("gate-actions").mt(8.0).gap(space::S8).child(
         button(
             super::lock::UNLOCK_KEY,
             "Unlock",
@@ -227,7 +226,7 @@ fn locked(said: Option<super::lock::Said>, t: &Theme) -> El {
 /// The cover whose look failed: the lock screen's look with the sign-in path in place of an Unlock that would ask
 /// nothing (the engine's lock is open). The press closes the engine's lock; its own password screen takes the window.
 fn cover_sign_in(t: &Theme) -> El {
-    let mut block = col().key("gate").items_center().gap(8.0);
+    let mut block = col().key("gate").items_center().gap(space::S8);
     for child in head(
         &ic::PADLOCK,
         "Beebeeb is locked",
@@ -238,7 +237,7 @@ fn cover_sign_in(t: &Theme) -> El {
         block = block.child(child);
     }
     block.child(
-        row().key("gate-actions").mt(8.0).gap(8.0).child(
+        row().key("gate-actions").mt(8.0).gap(space::S8).child(
             button(
                 COVER_SIGN_IN_KEY,
                 "Sign in",
@@ -256,7 +255,7 @@ fn cover_sign_in(t: &Theme) -> El {
 
 /// DW-0014: where to get a plan (only on the website), Check again, Sign out.
 fn no_plan(t: &Theme) -> El {
-    let mut block = col().key("gate").w(NO_PLAN_W).items_center().gap(8.0);
+    let mut block = col().key("gate").w(NO_PLAN_W).items_center().gap(space::S8);
     for child in head(
         &ic::DATABASE,
         "Choose a plan",
@@ -271,7 +270,7 @@ fn no_plan(t: &Theme) -> El {
         col()
             .key("gate-actions")
             .w_full()
-            .gap(8.0)
+            .gap(space::S8)
             .mt(12.0)
             .child(
                 wide(

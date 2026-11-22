@@ -121,7 +121,7 @@ fn every_step_has_one_caption_bar_and_no_menu_bar() {
         let menus = rt
             .elements()
             .iter()
-            .filter(|e| !e.exiting && matches!(&*e.role, "menubar" | "menu" | "menuitem"))
+            .filter(|e| !e.exiting && matches!(e.role, "menubar" | "menu" | "menuitem"))
             .count();
         assert_eq!(menus, 0, "{frame}: no menu bar");
         // The caption is the first thing in the window and as wide as it.
@@ -549,7 +549,7 @@ fn an_answered_switch_draws_what_the_answer_says_not_what_was_asked() {
         done: false,
         now: None,
     });
-    assert_eq!(ui.answered(Switch::Notifications), Some(Answered::NotKnown));
+    assert_eq!(ui.answered(Switch::Notifications), Some(Answered::Unknown));
     // The next answer for the same switch replaces the last: made, so nothing is left to say.
     ui.take_in(Outcome {
         switch: Switch::OpenAtLogin,
@@ -560,7 +560,7 @@ fn an_answered_switch_draws_what_the_answer_says_not_what_was_asked() {
     assert_eq!(ui.answered(Switch::OpenAtLogin), None);
     assert_eq!(
         ui.answered(Switch::Notifications),
-        Some(Answered::NotKnown),
+        Some(Answered::Unknown),
         "the other one stands"
     );
     // Made, and what is set could not be read back: it was made (the value that was asked for stands).

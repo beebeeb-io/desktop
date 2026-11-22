@@ -174,7 +174,7 @@ pub enum Answered {
     /// The change did not happen, and what the switch is now is known (`results` holds it).
     NotChanged,
     /// The change did not happen, and what the switch is now is not known.
-    NotKnown,
+    Unknown,
 }
 
 /// Step 1 between "Add a passkey" and its answer. The add runs while Windows' passkey dialog is open, off the
@@ -269,7 +269,7 @@ fn decode(png_bytes: &[u8]) -> Pixels {
     let rgba: Vec<u8> = match (info.color_type, info.bit_depth) {
         (png::ColorType::Rgba, png::BitDepth::Eight) => bytes.to_vec(),
         (png::ColorType::Rgb, png::BitDepth::Eight) => {
-            bytes.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect()
+            bytes.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect()
         }
         _ => return pixels,
     };
@@ -439,7 +439,7 @@ impl Ui {
         match (outcome.done, outcome.now) {
             // Made (when what is set could not be read back, the value that was asked for stands).
             (true, _) => {}
-            (false, None) => self.answered.push((outcome.switch, Answered::NotKnown)),
+            (false, None) => self.answered.push((outcome.switch, Answered::Unknown)),
             (false, Some(_)) => self.answered.push((outcome.switch, Answered::NotChanged)),
         }
     }
@@ -989,7 +989,7 @@ pub fn render_scene(name: &str) -> Option<Ui> {
 }
 
 /// The names [`render_scene`] knows, for the shell's list of scenes.
-pub const RENDER_SCENES: &[(&str, fn(&mut State))] = &[
+pub const RENDER_SCENES: &[crate::frames::signin::Scene<State>] = &[
     ("first-run-not-yet", |s| set_render_scene(s, "first-run-not-yet")),
     ("first-run-folder", |s| set_render_scene(s, "first-run-folder")),
     ("first-run-folder-refused", |s| {
@@ -1005,7 +1005,7 @@ fn set_render_scene(s: &mut State, name: &str) {
 }
 
 /// Every board frame of the first run, for `frames::scenes`.
-pub const FRAMES: &[(&str, fn(&mut State))] = &[
+pub const FRAMES: &[crate::frames::signin::Scene<State>] = &[
     ("DW-0201", |s| set_scene(s, "DW-0201")),
     ("DW-0202", |s| set_scene(s, "DW-0202")),
     ("DW-0203", |s| set_scene(s, "DW-0203")),
