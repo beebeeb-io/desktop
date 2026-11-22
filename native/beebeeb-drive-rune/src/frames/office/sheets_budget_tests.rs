@@ -5,7 +5,7 @@
 //! still catch an accidental per-cell cost in the frame; the best of several runs is taken so a busy machine does not
 //! fail it.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::*;
 use crate::frames::office::docs::live_tests::{find, live_runtime};
@@ -34,12 +34,41 @@ fn full() -> SheetView {
     view
 }
 
+/// The calling thread's CPU time (not wall time: a loaded rig stretches the wall clock, not the work). Where the
+/// OS clock is not bound here, the wall clock stands in.
+#[cfg(all(unix, target_pointer_width = "64", any(target_os = "linux", target_os = "macos")))]
+fn cpu_now() -> Duration {
+    #[repr(C)]
+    struct Timespec {
+        sec: i64,
+        nsec: i64,
+    }
+    unsafe extern "C" {
+        fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+    }
+    #[cfg(target_os = "linux")]
+    const THREAD_CPU: i32 = 3;
+    #[cfg(target_os = "macos")]
+    const THREAD_CPU: i32 = 16;
+    let mut ts = Timespec { sec: 0, nsec: 0 };
+    // SAFETY: `ts` is a valid out-pointer of the C `timespec` layout on 64-bit Linux and macOS.
+    let rc = unsafe { clock_gettime(THREAD_CPU, &mut ts) };
+    assert_eq!(rc, 0, "the thread CPU clock");
+    Duration::new(ts.sec as u64, ts.nsec as u32)
+}
+
+#[cfg(not(all(unix, target_pointer_width = "64", any(target_os = "linux", target_os = "macos"))))]
+fn cpu_now() -> Duration {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed()
+}
+
 fn best(runs: usize, mut f: impl FnMut()) -> Duration {
     (0..runs)
         .map(|_| {
-            let t = Instant::now();
+            let t = cpu_now();
             f();
-            t.elapsed()
+            cpu_now() - t
         })
         .min()
         .expect("a run")

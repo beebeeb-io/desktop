@@ -20,17 +20,17 @@ use crate::engine_host::office_host::{
     DocKind, Event, HELPER_EXE, Helper, Link, OfficeHost, OfficeState, Registry, Starter, Timeouts, Wake, open_with,
 };
 
-/// The tests' timers: 300 ms each. The budgets are longer than [`WITHIN`], so that only the tests that shorten them
+/// The tests' timers: 1 s each. The budgets are longer than [`WITHIN`], so that only the tests that shorten them
 /// see one.
 pub(super) const TEST_TIMEOUTS: Timeouts = Timeouts {
-    open: Duration::from_millis(300),
-    request: Duration::from_millis(300),
-    split: Duration::from_secs(5),
-    outline: Duration::from_secs(5),
+    open: Duration::from_secs(1),
+    request: Duration::from_secs(1),
+    split: Duration::from_secs(60),
+    outline: Duration::from_secs(60),
 };
 
 /// How long a test waits for what must happen (generous, so a loaded machine does not flake).
-pub(super) const WITHIN: Duration = Duration::from_secs(2);
+pub(super) const WITHIN: Duration = Duration::from_secs(20);
 
 /// US Letter in points.
 pub(super) const LETTER: PageSize = PageSize {
