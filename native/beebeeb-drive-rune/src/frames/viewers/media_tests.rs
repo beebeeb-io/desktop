@@ -919,7 +919,7 @@ fn home_and_end_go_to_the_first_and_last_photo_of_the_strip() {
 /// The zoom group keeps its 1px gap between the three tools (the board's `gap-px`), 2px padding.
 #[test]
 fn media_look_zoom_group_gap_is_one_pixel() {
-    let rt = scene(board::PDF_FIND);
+    let rt = scene("DW-1506");
     let group = info(&rt, "zoom-group").rect;
     let tools: f32 = ["tool-0", "tool-1", "tool-2"].iter().map(|k| info(&rt, k).rect[2]).sum();
     assert_eq!(group[2], tools + 2.0 * 2.0 + 2.0 * 1.0, "padding 2 each side, gap 1 twice");
