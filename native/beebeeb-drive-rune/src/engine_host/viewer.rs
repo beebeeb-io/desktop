@@ -807,7 +807,8 @@ fn open_pdf(bytes: zeroize::Zeroizing<Vec<u8>>, size: &str, cancel: &AtomicBool)
             }),
             Some(session),
         ),
-        Err(viewer_pdf::NotOpened::Stopped) => (Body::Failed, None),
+        // The helper, not the file and not its decryption: said as that (RC2-3).
+        Err(viewer_pdf::NotOpened::Stopped) => (Body::Stopped(Stopped::HelperStopped), None),
         Err(why) => (
             Body::NotPreviewable(match why {
                 viewer_pdf::NotOpened::Locked => NoPreview::PdfLocked,
@@ -864,7 +865,11 @@ fn body_of(error: OpenFileError) -> Option<Body> {
         // Refused to this account (403), and a version that kept changing: named, never "not decrypted".
         OpenFileError::NoAccess => Body::Stopped(Stopped::NoAccess),
         OpenFileError::ChangedWhileOpening => Body::Stopped(Stopped::Changed),
-        OpenFileError::Failed => Body::Failed,
+        OpenFileError::Failed => {
+            // The kind only: never the name or the file's id.
+            tracing::warn!("viewer open failed: the file could not be read or decrypted");
+            Body::Failed
+        }
     })
 }
 
@@ -1063,7 +1068,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                         content.origin = origin;
                         (Ok((session, content)), document)
                     }))
-                    .unwrap_or((Err(OpenFileError::Failed), None));
+                    .unwrap_or_else(|_| {
+                        tracing::warn!("viewer open failed: worker panic");
+                        (Err(OpenFileError::Failed), None)
+                    });
                 // Nobody waits for the content any more (the file was closed, its session moved on, Cancel): it is
                 // dropped here, its text overwritten, and never queued. What is sent says only "cancelled".
                 let answer = if cancel.load(Ordering::SeqCst) {
@@ -1207,9 +1215,9 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
             }
             // The helper that draws the PDF's pages stopped: nothing more comes of this opening. Try again opens anew.
             Err(_) if opening.pages.as_ref().is_some_and(Pages::take_stopped) => {
-                log("viewer: the PDF renderer stopped");
+                tracing::warn!("viewer: the helper stopped after the file was opened");
                 opening.pages = None;
-                Some(Body::Failed)
+                Some(Body::Stopped(Stopped::HelperStopped))
             }
             // A page of the open PDF came back: the same document again, so the view is drawn with the page.
             Err(_) if opening.pages.as_ref().is_some_and(Pages::take_in) => opening

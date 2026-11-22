@@ -1187,3 +1187,24 @@ fn a_real_confined_helper_renders_page_one() {
 
 /// A named rule from two sizes to one.
 type Case = (&'static str, fn(u32, u32) -> u32);
+
+/// RC2-3: a PDF's helper answers `Opened` (pages), as a document's does. The worker took that answer for Word and
+/// slides only, so every PDF ended as `Stop::Protocol` and its helper was killed before a page was asked.
+#[test]
+fn viewer_pdf_kind_opens_as_pages_and_its_helper_is_not_killed() {
+    let registry = Registry::new();
+    let sizes = [A4, A4, A4];
+    let (mut host, log, _) = open_fake(Fake::new(move |link| serve(link, &sizes)), &registry, DocKind::Pdf);
+    let mut events = Vec::new();
+    assert!(until_open(&mut host, &mut events), "no answer within 2 s");
+    assert_eq!(
+        &host.state(),
+        &OfficeState::Pages {
+            pages: 3,
+            sizes: sizes.to_vec()
+        }
+    );
+    assert_eq!(log.kills(), 0, "the helper stays for the pages");
+    assert!(host.request_page(0, scale_100(), None).is_some(), "page 1 can be asked");
+    assert!(pump_for(&mut host, &mut events, WITHIN, |_, events| pages_of(events) == 1), "{:?}", host.state());
+}

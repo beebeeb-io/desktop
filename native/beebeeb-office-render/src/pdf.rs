@@ -377,4 +377,21 @@ mod tests {
         let over: Vec<(u32, u32, &str)> = vec![(10, 10, ""); MAX_PAGES as usize + 1];
         assert_eq!(open(&pdf_of(&over)).err(), Some(ErrorCode::TooLarge));
     }
+
+    /// RC2-3: the two kinds of PDF that did not open on the Windows test machine, as files (the app's fixtures).
+    #[test]
+    fn pdf_the_two_rc2_fixtures_open_with_their_page_counts() {
+        let files: [(&[u8], u32); 2] = [
+            (include_bytes!("../../beebeeb-drive-rune/tests/fixtures/pdf/text-3-pages.pdf"), 3),
+            (include_bytes!("../../beebeeb-drive-rune/tests/fixtures/pdf/minimal-1-page.pdf"), 1),
+        ];
+        for (bytes, pages) in files {
+            match open(bytes).expect("opens").opened() {
+                Opening::Pages(opened) => assert_eq!((opened.pages, opened.sizes.len() as u32), (pages, pages)),
+                Opening::Sheets(_) => panic!("a PDF opens as pages"),
+            }
+        }
+        // Cut short: damaged, said as that.
+        assert_eq!(open(&files[0].0[..64]).err(), Some(ErrorCode::Damaged));
+    }
 }

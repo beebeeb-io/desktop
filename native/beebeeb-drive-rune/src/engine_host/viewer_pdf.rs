@@ -7,7 +7,7 @@
 //!   size (the helper's checked sizes; the host refuses a raster past the protocol's limits). An answer has passed
 //!   the host's checks before it gets here. `missing_content` is the page's "lacks text" ([`Rendered::lacks_text`]).
 //! - A helper that ends (a crash on a hostile file, a timeout, a failed check) ends only itself: the worker says
-//!   "stopped" once and returns, the window shows Failed with Try again (a new open, a new helper).
+//!   "stopped" once and returns, the window says the helper stopped, with Try again (a new open, a new helper).
 //! - A lock or a sign-out ends the helper twice over: the host's own registry (`office_host::end_session`) kills
 //!   every helper of the process, and this worker drops its host as soon as it sees `cancel` (at most
 //!   [`IDLE_WAIT`] later), with the bytes kept for find.
@@ -292,9 +292,23 @@ impl Session {
                 OfficeState::NoPreview(_) => return Err(NotOpened::NoRenderer),
                 // Over a limit of the helper's contract is not a page count to name: said as not readable here.
                 OfficeState::CannotOpen(CannotOpen::Damaged | CannotOpen::TooLarge) | OfficeState::Sheets { .. } => {
+                    tracing::warn!("viewer open failed: the helper could not read the file");
                     return Err(NotOpened::Unreadable);
                 }
-                OfficeState::Stopped { .. } | OfficeState::Closed(_) => return Err(NotOpened::Stopped),
+                OfficeState::Stopped { why, .. } => {
+                    // One line a failure, the kind only (RC2-3: every PDF failed here and the log said nothing).
+                    match why {
+                        office_host::Stop::Exited => tracing::warn!("viewer open failed: the helper exited"),
+                        office_host::Stop::TimedOut => tracing::warn!("viewer open failed: the helper timed out"),
+                        office_host::Stop::Protocol => {
+                            tracing::warn!("viewer open failed: the helper answer failed a check");
+                        }
+                        office_host::Stop::Failed => tracing::warn!("viewer open failed: the helper could not start"),
+                    }
+                    return Err(NotOpened::Stopped);
+                }
+                // A lock or a sign-out, not a failure.
+                OfficeState::Closed(_) => return Err(NotOpened::Stopped),
             };
             return match pages {
                 0 => Err(NotOpened::Unreadable),

@@ -167,6 +167,9 @@ pub enum Stopped {
     NoAccess,
     /// The file changed while it was opening, each time it was read. Trying again may work.
     Changed,
+    /// The confined helper that draws the file stopped (a crash, no answer in time, an answer that failed a check, or
+    /// it could not be started). Nothing was wrong with the download or the decryption. Trying again starts a new one.
+    HelperStopped,
 }
 
 impl Stopped {
@@ -179,6 +182,7 @@ impl Stopped {
                 | Stopped::NotNow
                 | Stopped::CopyNotReadable
                 | Stopped::Changed
+                | Stopped::HelperStopped
                 | Stopped::NothingSynced
                 | Stopped::NotThisAccounts
         )
