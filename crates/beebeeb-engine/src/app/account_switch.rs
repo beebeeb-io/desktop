@@ -113,7 +113,14 @@ impl<C: CredentialStores> Engine<C> {
                     GUARDED_FILE => Some(super::SyncStartRefused::UnsentFileOfAnotherAccount),
                     // Only where the person's answer can finish the switch, and only when something of theirs is
                     // there to answer for: any other refusal of the removal stays the plain one.
-                    ITEMS_STAY | ITS_CHANGES_STAY | ITS_FOLDERS_STAY
+                    ITEMS_STAY
+                        if discard_offered_on_this_os()
+                            && left_by_a_person(&data.db, sync_root, port, true).is_ok_and(|left| !left.is_empty()) =>
+                    {
+                        Some(super::SyncStartRefused::LeftoverFilesOfAnotherAccount)
+                    }
+                    // RC2-5: its changes are items in the folder; what is there is the person's to keep or discard.
+                    ITS_CHANGES_STAY | ITS_FOLDERS_STAY
                         if discard_offered_on_this_os()
                             && in_the_way(&data.db, sync_root, port).is_ok_and(|left| !left.is_empty()) =>
                     {
