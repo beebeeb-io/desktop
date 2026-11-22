@@ -651,6 +651,8 @@ mod sync;
 mod system_role;
 // dc-168: the server's `has_thumbnail` of a row.
 mod thumbnail_flag;
+// dc-136b: a row whose newest server name could not be read.
+mod name_unreadable;
 mod test_hooks;
 // Task 2409: the changes "Not sent" counts, one row each.
 mod unsent;

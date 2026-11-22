@@ -450,10 +450,19 @@ pub(super) fn apply_metadata_file_row(
     // P3-2 (task 2445): the typed return distinguishes blocked from named.
     // A blocked record keeps the path empty so the row retries its name on
     // the next sync with the right key; it is never stored as the path.
+    // dc-136b: a name the server sent that does not decrypt (an old client, a wrong key, a damaged blob) never
+    // becomes a path. The leaf stays empty, so the row keeps its last good path below, and the row is marked.
+    let mut name_unreadable = false;
     let leaf = match stored {
         crate::owner_keys::StoredName::Blocked => String::new(),
         crate::owner_keys::StoredName::Name(name) => name,
-        crate::owner_keys::StoredName::None => resolve_relative_path(f, file_id, master_key),
+        crate::owner_keys::StoredName::None => match f["name_encrypted"].as_str() {
+            Some(name_encrypted) if !name_decrypts(f, existing.as_ref(), file_id, name_encrypted, master_key) => {
+                name_unreadable = true;
+                String::new()
+            }
+            _ => resolve_relative_path(f, file_id, master_key),
+        },
     };
     // Compose the nested path. An empty leaf means the name didn't decrypt;
     // keep it empty so the placeholder seeder skips the row (and retries next
@@ -568,6 +577,7 @@ pub(super) fn apply_metadata_file_row(
         contract.last_sync_at = now;
     })?;
     apply_system_role_field(db, file_id, f)?;
+    record_name_readability(db, file_id, name_unreadable, &entry.path)?;
     // Task 1640 (review F1): a move changes no byte, but the candidate is never promoted at the
     // new place: it becomes mixed, its version kept.
     if moved {
@@ -584,6 +594,50 @@ pub(super) fn apply_metadata_file_row(
         db.put_unknown_orphan(&entry.path, file_id, true)?;
     }
     Ok(Some(entry))
+}
+
+/// dc-136b: whether a row's `name_encrypted` decrypts under the master key. A file's name must be an encrypted
+/// envelope (core's `decrypt_file_metadata`, task 1908): a plaintext blob is refused, never read as the name. A
+/// folder keeps core's legacy reader, which accepts an old client's plaintext folder name.
+fn name_decrypts(
+    f: &serde_json::Value,
+    existing: Option<&FileEntry>,
+    file_id: &str,
+    name_encrypted: &str,
+    master_key: &[u8; 32],
+) -> bool {
+    let is_folder = f["is_folder"].as_bool().unwrap_or(false)
+        || f["kind"].as_str() == Some("folder")
+        || f["type"].as_str() == Some("folder")
+        || existing.is_some_and(FileEntry::is_dir);
+    let mk = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
+    let name = if is_folder {
+        beebeeb_core::encrypt::decrypt_name(&mk, file_id, name_encrypted)
+    } else {
+        beebeeb_core::encrypt::decrypt_file_metadata(&mk, file_id, name_encrypted).map(|meta| meta.name)
+    };
+    name.is_ok_and(|name| !name.trim().is_empty())
+}
+
+/// dc-136b: store whether the row's newest server name could be read. The first time a name is unreadable the
+/// row is marked (the window shows "name could not be read") and a re-snapshot is asked for, so the real name is
+/// read again from the server's list; a later list whose name decrypts (the keys changed, another client fixed
+/// the name) clears the mark. An unchanged mark asks nothing, so a name that stays unreadable is no loop.
+fn record_name_readability(db: &StateDb, file_id: &str, unreadable: bool, path: &str) -> Result<(), EngineError> {
+    if unreadable {
+        if db.set_name_unreadable(file_id, true)? {
+            // Zero-knowledge: the id only, never the blob nor the kept name.
+            tracing::warn!(
+                file_id = %file_id,
+                category = "name_unreadable",
+                "the server's name for this item could not be decrypted; its last readable name is kept"
+            );
+            db.request_resnapshot()?;
+        }
+    } else if !path.is_empty() && db.set_name_unreadable(file_id, false)? {
+        tracing::info!(file_id = %file_id, "the name of this item can be read again");
+    }
+    Ok(())
 }
 
 /// LD-0113 (spec §5.4): a server row's `system_role` (`"backups_root"` or `null`) into

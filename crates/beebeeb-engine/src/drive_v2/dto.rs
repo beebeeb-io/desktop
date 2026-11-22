@@ -58,6 +58,10 @@ pub struct DriveItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
     pub has_thumbnail: bool,
+    /// dc-136b: the newest name the server sent for this item could not be decrypted; `name` is the last readable
+    /// one. Filled where the listing reads the state DB; `None` (left out of the JSON) otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_unreadable: Option<bool>,
     /// The row's place in the Backups tree (LD-0113), for the native window. Not part of the JSON the web view
     /// reads. Filled by `model::children_of`; `Outside` from every other constructor.
     #[serde(skip)]
