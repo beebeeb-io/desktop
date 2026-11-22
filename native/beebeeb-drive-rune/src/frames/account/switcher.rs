@@ -12,8 +12,8 @@
 //! call runs on a thread of its own, never the window's; the engine wakes the window when it is done. Nothing of an
 //! account (email, id) is logged.
 
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use crate::State;
 use crate::theme::tokens::{self, Theme, radius, type_};
@@ -89,6 +89,10 @@ fn refresh() {
 
 /// The pill's press: open (reading the list) or close.
 pub fn toggle(_s: &mut State) {
+    toggle_open();
+}
+
+fn toggle_open() {
     let open = !OPEN.load(Ordering::SeqCst);
     OPEN.store(open, Ordering::SeqCst);
     say(None);
@@ -99,6 +103,56 @@ pub fn toggle(_s: &mut State) {
 
 fn close() {
     OPEN.store(false, Ordering::SeqCst);
+}
+
+/// The pill's key and the last item's: `rune` sends Return on a button and the arrows outside a group to the app.
+const PILL: &str = "account-pill";
+const ADD: &str = "switcher-add";
+
+/// The switcher's keys (RC2-8), heard by the shell before any frame: Enter on the pill opens or closes the list, as
+/// Space does; Down on the pill goes to the list's first item, Up to its last ("Add another account", the item next
+/// to the pill); Escape closes the list and gives the keyboard back to the pill. Inside the list the arrows are its
+/// focus group's.
+pub fn key(ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
+    use rune::Key;
+    if switcher().is_none() || ev.mods != rune::Mods::default() {
+        return false;
+    }
+    let focused = tx.focused();
+    let on_pill = focused == Some(PILL);
+    let in_list = focused.is_some_and(|key| key.starts_with("switcher-"));
+    match ev.key {
+        Key::Enter if on_pill => {
+            if !tx.key_repeat() {
+                toggle_open();
+            }
+            true
+        }
+        Key::Up | Key::Down if on_pill && is_open() => {
+            let to = if ev.key == Key::Up {
+                ADD.to_string()
+            } else {
+                first_item()
+            };
+            tx.focus(to, true);
+            true
+        }
+        Key::Escape if is_open() && (on_pill || in_list) => {
+            close();
+            say(None);
+            tx.return_focus(PILL, true);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The first item the keyboard can be on: the first account that is not the current one, else "Add another account".
+fn first_item() -> String {
+    listed()
+        .iter()
+        .position(|account| !account.current)
+        .map_or_else(|| ADD.to_string(), |i| format!("switcher-account-{i}"))
 }
 
 /// One engine call on its own thread; one at a time. A refusal is shown in the list; the list is read again after.
@@ -141,7 +195,11 @@ fn sign_out(id: String) {
 }
 
 fn initials(email: &str) -> String {
-    email.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_default()
+    email
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default()
 }
 
 /// The list, drawn above the account row while it is open (`None` while closed, or with no switcher installed).
@@ -156,13 +214,19 @@ pub fn panel(t: &Theme) -> Option<El> {
         .key("switcher")
         .role("menu")
         .label("Accounts on this PC")
+        // One Tab stop whose items the arrows walk, to "Add another account" (RC2-8).
+        .focus_group()
         .gap(crate::theme::scale::space::S2)
         .px(crate::theme::scale::space::S4)
         .py(crate::theme::scale::space::S4)
         .radius(radius::CONTROL)
         .fill(t.card)
         .border(kit::HAIR, t.separator)
-        .child(kit::label("switcher-head", "Accounts on this PC", type_::CAPTION, t.text_tertiary).px(crate::theme::scale::space::S6).py(crate::theme::scale::space::S2));
+        .child(
+            kit::label("switcher-head", "Accounts on this PC", type_::CAPTION, t.text_tertiary)
+                .px(crate::theme::scale::space::S6)
+                .py(crate::theme::scale::space::S2),
+        );
     for (i, account) in listed().into_iter().enumerate() {
         let key = format!("switcher-account-{i}");
         let mut line = row()
@@ -193,7 +257,12 @@ pub fn panel(t: &Theme) -> Option<El> {
                     .min_w(0.0),
             );
         if account.current {
-            line = line.child(kit::label(format!("{key}-current"), "Current", type_::CAPTION, t.text_tertiary));
+            line = line.child(kit::label(
+                format!("{key}-current"),
+                "Current",
+                type_::CAPTION,
+                t.text_tertiary,
+            ));
         } else {
             let id = account.id.clone();
             line = line
@@ -222,7 +291,7 @@ pub fn panel(t: &Theme) -> Option<El> {
     }
     list = list.child(
         row()
-            .key("switcher-add")
+            .key(ADD)
             .role("menuitem")
             .label("Add another account")
             .px(crate::theme::scale::space::S6)
@@ -233,10 +302,19 @@ pub fn panel(t: &Theme) -> Option<El> {
             .focusable(!busy)
             .disabled(busy)
             .on_press(|_s: &mut State| add_another())
-            .child(kit::label("switcher-add-label", "Add another account", type_::BODY_SM, t.text)),
+            .child(kit::label(
+                "switcher-add-label",
+                "Add another account",
+                type_::BODY_SM,
+                t.text,
+            )),
     );
     if let Some(words) = said() {
-        list = list.child(kit::label("switcher-said", words, type_::CAPTION, t.text_secondary).px(crate::theme::scale::space::S6).wrap());
+        list = list.child(
+            kit::label("switcher-said", words, type_::CAPTION, t.text_secondary)
+                .px(crate::theme::scale::space::S6)
+                .wrap(),
+        );
     }
     Some(list)
 }
