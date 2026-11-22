@@ -284,6 +284,7 @@ const CONSUMERS: &[(&str, &str, usize)] = &[
     ("sync_root_owner.rs", "cloud_files_provider_name", 1),
     ("windows_cf/registration.rs", "cloud_files_provider_guid", 1),
     ("windows_cf/registration.rs", "cloud_files_provider_name", 2),
+    ("windows_cf/registration_teardown.rs", "cloud_files_provider_name", 1),
     ("windows_cf/status_ui.rs", "status_ui_class_id", 1),
     ("windows_cf/thumbnail_provider.rs", "thumbnail_provider_class_id", 1),
 ];
