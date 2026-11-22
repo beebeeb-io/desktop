@@ -89,7 +89,7 @@ pub fn tools(ui: &Ui, t: &Theme) -> Vec<El> {
         .role("group")
         .label("Zoom")
         .padding(scale::space::S2)
-        .gap(scale::space::S2)
+        .gap(1.0)
         .radius(scale::radius::TILE)
         .fill(t.field)
         .box_shadow(kit::ring_inset(t.separator))
@@ -179,7 +179,7 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
         .pl(9.0)
         .pr(6.0)
         .center_y()
-        .radius(crate::theme::tokens::radius::CONTROL)
+        .radius(8.0)
         .fill(t.card)
         // The focused field: Amber's ring at 30 %, the deep Amber line inside.
         .box_shadow(kit::ring(3.0, t.accent.alpha(0.3)))
