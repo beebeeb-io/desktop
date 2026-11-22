@@ -90,6 +90,7 @@ fn photo(tile: El) -> El {
 }
 
 /// A tile `d` points across (`.mk-ftile`). Keys: `<key>-tile` and `<icon_key>`.
+#[allow(clippy::too_many_arguments)]
 pub fn tile(key: &str, icon_key: String, name: &str, kind: Kind, d: f32, r: f32, glyph: f32, t: &Theme) -> El {
     let tile = el()
         .key(format!("{key}-tile"))
@@ -119,7 +120,7 @@ pub fn header(c: &Columns, t: &Theme) -> El {
         .h(28.0)
         .w_full()
         .mt(4.0)
-        .px(20.0)
+        .px(crate::theme::scale::space::S20)
         .gap(GAP)
         .center_y()
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
@@ -173,7 +174,7 @@ pub fn table_row(i: usize, r: &Row, selected: bool, c: &Columns, t: &Theme) -> E
         .grow(1.0)
         .min_w(0.0)
         .center_y()
-        .gap(8.0)
+        .gap(crate::theme::scale::space::S8)
         .child(tile(&k, format!("{k}-icon"), &r.name, r.kind, 22.0, 6.0, 14.0, t))
         .child(
             kit::label(format!("{k}-name"), r.name.clone(), type_::LIST_ITEM, t.text)
@@ -191,7 +192,7 @@ pub fn table_row(i: usize, r: &Row, selected: bool, c: &Columns, t: &Theme) -> E
             .w(c.extra_w)
             .min_w(0.0)
             .center_y()
-            .gap(6.0)
+            .gap(crate::theme::scale::space::S6)
             .child(kit::avatar(
                 format!("{k}-from-avatar"),
                 initials,
@@ -216,7 +217,7 @@ pub fn table_row(i: usize, r: &Row, selected: bool, c: &Columns, t: &Theme) -> E
         .label(&r.name)
         .h(30.0)
         .w_full()
-        .px(14.0)
+        .px(crate::theme::scale::space::S14)
         .gap(GAP)
         .center_y()
         .radius(radius::CONTROL)
@@ -249,8 +250,8 @@ pub fn rows(name: &str, rows: Vec<El>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .py(4.0)
-        .px(6.0)
+        .py(crate::theme::scale::space::S4)
+        .px(crate::theme::scale::space::S6)
         .scroll(rune::ScrollSpec { stick_bottom: false })
         .children(rows)
 }

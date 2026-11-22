@@ -1,9 +1,9 @@
 //! Buttons (`.kit-btn`), worded segments (`.kit-seg`) and pills (`.kit-pill`).
 
-use super::{green_text, red_text, style};
-use crate::theme::tokens::{Theme, radius, type_};
+use super::style;
+use crate::theme::tokens::Theme;
 use crate::ui::kit;
-use rune::{Color, El, Icon, el, row};
+use rune::{El, Icon, el, row};
 
 /// A key's words part: lower case letters and digits, one `-` for every run of anything else
 /// ("Invite someone…" is `invite-someone`). The one copy the group's controls and dialogs key by.
@@ -94,8 +94,8 @@ pub fn segments(n: usize, name: &str, tabs: &[(&'static str, bool)], t: &Theme, 
         .role("tablist")
         .label(name)
         .focus_group()
-        .padding(2.0)
-        .radius(10.0)
+        .padding(crate::theme::scale::space::S2)
+        .radius(crate::theme::tokens::radius::LG)
         .fill(t.field)
         .box_shadow(kit::ring_inset(t.separator));
     for (i, (words, on)) in tabs.iter().enumerate() {

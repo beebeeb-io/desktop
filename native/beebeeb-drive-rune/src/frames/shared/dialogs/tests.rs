@@ -59,7 +59,8 @@ fn plain(key: Key) -> KeyEvent {
 
 #[test]
 fn each_dialog_and_its_controls_are_named_as_the_board_names_them() {
-    let frames: [(fn(&mut State), &str, &str, &str); 9] = [
+    type Frame = (fn(&mut State), &'static str, &'static str, &'static str);
+    let frames: [Frame; 9] = [
         (scenes::dw_0504, "dlg", "dialog", "New request"),
         (scenes::dw_0511, "dlg", "dialog", "People"),
         (scenes::dw_0512, "dlg", "dialog", "Jonas Meier"),

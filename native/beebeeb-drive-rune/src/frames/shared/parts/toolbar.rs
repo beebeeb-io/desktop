@@ -61,7 +61,7 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
     let (back, forward) = crate::frames::history(s);
     let title = col()
         .key("folder-info")
-        .px(4.0)
+        .px(crate::theme::scale::space::S4)
         .min_w(0.0)
         .child(kit::label("folder-title", bar.title, type_::TITLE, t.text).truncate())
         .child(kit::label("item-count", bar.sub, type_::TITLE_SUB, t.text_tertiary));
@@ -89,7 +89,7 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
                 },
             ),
             title,
-            slot: Some(row().key("toolbar-slot").center_y().gap(8.0).children(bar.slot)),
+            slot: Some(row().key("toolbar-slot").center_y().gap(crate::theme::scale::space::S8).children(bar.slot)),
             slot_sep: bar.slot_sep,
             // List or grid does not apply to these sections: the board draws the switch dimmed, neither side chosen.
             view: View::NotHere,
