@@ -13,11 +13,12 @@ use super::SortBy;
 use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::scale;
+use crate::theme::tokens::{Theme, type_};
 use crate::ui::file_list::{COLUMNS, PcState, ROW_H, file_tile, format_date, pc_glyph, shared_cell};
 use crate::ui::file_row::{self, RowLook};
 use crate::ui::kit;
-use rune::{Align, Color, Cx, El, PointerPress, Tx, col, el, row};
+use rune::{Align, Cx, El, PointerPress, Tx, col, el};
 
 const COL_DATE_W: f32 = 132.0;
 const COL_SIZE_W: f32 = 84.0;
@@ -42,8 +43,8 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .py(4.0)
-        .px(6.0)
+        .py(scale::space::S4)
+        .px(scale::space::S6)
         .scroll(rune::ScrollSpec { stick_bottom: false })
         // Where it is scrolled to, for the read after a check (`reread.rs`: the rows in view stay where they are).
         .on_scroll_offset({
@@ -236,6 +237,7 @@ pub fn column_headers(sort: super::Sort, t: &Theme) -> El {
 /// "Two versions" where a date stands (`.mk-row` with `modSans`): 12/400 on a 14.5 pt line.
 pub(super) const TWO_VERSIONS: rune::TextStyle = rune::TextStyle::new(12.0, 400.0).lh(14.5);
 
+#[allow(dead_code)] // kept for the ratchet family and fixtures
 pub fn file_row(
     i: usize,
     item: &DriveItem,
@@ -249,6 +251,7 @@ pub fn file_row(
 }
 
 /// [`file_row`], with the tile to draw in place of the kind's own (a fixture's picture).
+#[allow(dead_code)]
 pub fn file_row_with(
     i: usize,
     item: &DriveItem,
@@ -376,7 +379,7 @@ fn file_row_full(
             col()
                 .key(format!("{k}-upload"))
                 .w(COL_DATE_W + COL_GAP + COL_SIZE_W)
-                .gap(4.0)
+                .gap(scale::space::S4)
                 .child(
                     kit::label(
                         format!("{k}-upload-words"),
@@ -430,10 +433,23 @@ fn file_row_full(
     cells.push(shared_cell(&k, item, meta, surface, t));
     cells.push(pc);
     let tile = tile.unwrap_or_else(|| file_tile(&k, item, t));
-    let look = RowLook { selected, ..RowLook::default() };
+    let look = RowLook {
+        selected,
+        ..RowLook::default()
+    };
     let shown = if marks_has_field { "" } else { item.name.as_str() };
     // The list's one Tab stop is the table (`rows`): a row takes no focus of its own.
-    file_row::row_with(&k, &row_name(item, &date, &size_text), tile, shown, marks, cells, look, t).focusable(false)
+    file_row::row_with(
+        &k,
+        &row_name(item, &date, &size_text),
+        tile,
+        shown,
+        marks,
+        cells,
+        look,
+        t,
+    )
+    .focusable(false)
 }
 
 /// What the PC column says of a row whose place on this PC is another item's (`case_place`, the engine's mark): its

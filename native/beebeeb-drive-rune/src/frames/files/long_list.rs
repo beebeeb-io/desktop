@@ -18,11 +18,13 @@ use super::source::BoardDrive;
 use crate::State;
 use crate::frames::global::grid::ThumbSource;
 use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary};
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::Theme;
 use crate::ui::{global_icons, grid_tiles, kit};
 use rune::{Color, El, Tx, el};
 
+#[cfg(test)]
 pub use crate::ui::file_row::{NAME_MAX, shortened};
+
 
 /// A file's size in the list: one decimal under 10 ("4.0 MB"), and no ".0" from 10 up ("112 MB").
 pub fn size_words(bytes: i64) -> String {
@@ -109,7 +111,7 @@ pub fn picture_tile(s: &State, k: &str, item: &DriveItem, t: &Theme) -> Option<E
     let mut tile = grid_tiles::sample(
         el().key(format!("{k}-tile"))
             .size(22.0, 22.0)
-            .radius(6.0)
+            .radius(crate::theme::tokens::radius::MD)
             .clip_rounded(6.0)
             .center(),
         sample,

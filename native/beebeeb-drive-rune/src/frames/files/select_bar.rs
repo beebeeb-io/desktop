@@ -4,6 +4,7 @@
 use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, pane, preview};
 use crate::ui::{button, kit};
@@ -77,8 +78,8 @@ pub fn bar(s: &State, t: &Theme) -> Option<El> {
             .label("Selection")
             .w_full()
             .h(BAR_H)
-            .px(16.0)
-            .gap(8.0)
+            .px(scale::space::S16)
+            .gap(scale::space::S8)
             .center_y()
             .fill(t.paper2)
             .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
@@ -130,8 +131,8 @@ fn page(key: &str, first: usize, lines: usize, t: &Theme) -> El {
         .radius(radius::SM)
         .fill(t.white)
         .box_shadow(kit::drop(2.0, 10.0, t.shadow_page))
-        .py(12.0)
-        .px(10.0)
+        .py(scale::space::S12)
+        .px(scale::space::S10)
         .gap(5.0)
         .child(
             el().key(format!("preview-line-{first}"))
@@ -169,7 +170,7 @@ fn fact(key: &'static str, label: &'static str, value: String, t: &Theme) -> El 
         .role("listitem")
         .label(format!("{label}: {value}"))
         .w_full()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .child(kit::label(key, label, type_::BODY, t.text_tertiary).w(92.0))
         .child(
             kit::label(format!("{key}-value"), value, type_::BODY, t.text)
@@ -203,14 +204,9 @@ pub fn panel(items: &[&DriveItem], t: &Theme) -> El {
                         mono: true,
                         ..Span::default()
                     };
-                    kit::label(
-                        "detail-kind",
-                        size,
-                        TextStyle::new(11.0, 500.0).lh(14.0),
-                        t.text_tertiary,
-                    )
-                    .spans(vec![mono])
-                    .mt(2.0)
+                    kit::label("detail-kind", size, type_::CAPTION, t.text_tertiary)
+                        .spans(vec![mono])
+                        .mt(2.0)
                 }),
         )
         .child(encrypted_badge(t))
@@ -218,7 +214,7 @@ pub fn panel(items: &[&DriveItem], t: &Theme) -> El {
             col()
                 .key("detail-meta")
                 .role("list")
-                .gap(6.0)
+                .gap(scale::space::S6)
                 .child(fact("detail-selected", "Selected", names, t))
                 .child(fact(
                     "detail-on-this-pc",

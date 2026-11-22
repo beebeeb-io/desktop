@@ -181,6 +181,7 @@ pub enum Call {
     Duplicate(Vec<String>),
     KeepOffline(Vec<String>, bool),
     CopyLink(Vec<String>),
+    #[allow(dead_code)]
     Open(Vec<String>),
     ShowInFileExplorer(Vec<String>),
     /// Into the folder with this id (`None`: the root).
@@ -307,6 +308,7 @@ pub trait FilesSource: Send + 'static {
     /// accepted: the link arrives as `Change::Link` and the WINDOW copies it (only a handler's `Tx` can).
     fn copy_link(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
     /// Open these files in their apps (downloaded and decrypted on this PC first).
+    #[allow(dead_code)]
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
     fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
     /// Upload these files of this PC into the folder with this id (`None`: the root).
@@ -850,6 +852,7 @@ impl FilesSource for FilesFixture {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
         self.refuse(Action::Open, items)?;
         self.record(Call::Open(ids(items)));
