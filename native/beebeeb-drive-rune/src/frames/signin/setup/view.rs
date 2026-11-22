@@ -2,7 +2,7 @@
 //! kit (`ui::au`). Every string is the board's; every measurement is its computed CSS.
 
 use rune::tok::Family;
-use rune::{Color, Cx, El, Span, TextStyle, col, el, row};
+use rune::{Color, Cx, El, TextStyle, col, el, row};
 
 use super::source::{Explorer, LockAfter, PreviewFormat, PreviewSize, Switch};
 use super::{
@@ -10,6 +10,7 @@ use super::{
 };
 use crate::State;
 use crate::frames::signin::icons as signin_icons;
+use crate::theme::scale::{self, space};
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone, type_au};
 use crate::ui::setup::{self, SegInk, SegSize, Status, StepState};
@@ -20,11 +21,11 @@ use crate::ui::{kit, settings_list};
 const PRODUCT: &str = "Drive";
 
 /// `.t-sub` at 500 and its mono twin: the sample's size in the preview card.
-const SUB_MEDIUM: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
-const SUB_MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
+const SUB_MEDIUM: TextStyle = scale::text::SUB_STRONG;
+const SUB_MONO: TextStyle = scale::text::MONO;
 const SUB_MONO_MEDIUM: TextStyle = TextStyle::new(12.0, 500.0).family(Family::Mono).lh(15.0);
 /// `.wn-fdlg-ni`: File Explorer's own 13px.
-const NAV: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+const NAV: TextStyle = scale::text::READ;
 /// `.t-cap.font-mono`: a weight under a size in the compare view.
 const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
 
@@ -136,7 +137,7 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
 
 /// `.au-actions`: the buttons at the foot of a column, 6 apart, 6 below the column's gap.
 pub(super) fn actions() -> El {
-    col().key("au-actions").w_full().gap(6.0).mt(6.0)
+    col().key("au-actions").w_full().gap(space::S6).mt(6.0)
 }
 
 pub(super) fn primary(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to: fn(&mut Ui)) -> El {
@@ -313,10 +314,10 @@ fn preview_card(ui: &Ui, t: &Theme) -> El {
             ui.original_weight()
         ))
         .w_full()
-        .padding(12.0)
-        .gap(12.0)
+        .padding(space::S12)
+        .gap(space::S12)
         .center_y()
-        .radius(10.0)
+        .radius(scale::radius::PANEL)
         .fill(t.card)
         .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -329,7 +330,7 @@ fn preview_card(ui: &Ui, t: &Theme) -> El {
                     "Your photo"
                 })
                 .size(70.0, 52.0)
-                .radius(6.0)
+                .radius(tokens::radius::MD)
                 .pixels(original),
         )
         .child(words)
@@ -509,14 +510,14 @@ fn explorer_added(k: &mut Keys, t: &Theme) -> El {
         .role("image")
         .label("File Explorer's navigation pane: Home, Gallery, Beebeeb (selected), Desktop, Documents")
         .w(220.0)
-        .padding(8.0)
-        .gap(2.0)
-        .radius(10.0)
+        .padding(space::S8)
+        .gap(space::S2)
+        .radius(scale::radius::PANEL)
         .fill(os.card)
         .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
         .box_shadow(kit::ring(kit::HAIR, t.separator));
     for (i, (name, icon)) in places.iter().enumerate() {
-        let mut ni = row().h(28.0).px(10.0).gap(9.0).center_y().radius(4.0);
+        let mut ni = row().h(28.0).px(space::S10).gap(space::S9).center_y().radius(tokens::radius::SM);
         ni = match icon {
             Some(icon) => ni.child(kit::glyph(format!("nav-{i}-icon"), icon, 15.0, os.icon)),
             // The b as Windows shows it in the pane: one colour, the letter cut out of its plate.
@@ -656,7 +657,7 @@ fn notifications(k: &mut Keys, t: &Theme) -> El {
             t,
         ))
         .child(
-            el().key("tile-at").a11y_hidden().w_full().py(16.0).center().child(
+            el().key("tile-at").a11y_hidden().w_full().py(space::S16).center().child(
                 el().key("tile")
                     .size(64.0, 64.0)
                     .radius(18.0)
@@ -709,7 +710,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     };
     let backup = match ui.answered(Switch::Backup) {
         Some(Answered::Waiting) => "Saving\u{2026}".to_string(),
-        Some(Answered::NotKnown | Answered::NotChanged) => "Not changed".to_string(),
+        Some(Answered::Unknown | Answered::NotChanged) => "Not changed".to_string(),
         _ if r.backup.is_empty() => "Off".to_string(),
         _ => r.backup.join(", "),
     };
@@ -718,7 +719,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let switch = |switch: Switch, on: bool| match ui.answered(switch) {
         Some(Answered::NotAsked) => "Not set here",
         Some(Answered::Waiting) => "Saving\u{2026}",
-        Some(Answered::NotKnown) => "Not changed",
+        Some(Answered::Unknown) => "Not changed",
         Some(Answered::NotChanged) | None => on_off(on),
     };
     // The passkey's answer may still be out (step 1 was left while Windows' dialog or Beebeeb was answering): no value
@@ -737,7 +738,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             match ui.answered(Switch::Previews) {
                 Some(Answered::NotAsked) => "Not set here".into(),
                 Some(Answered::Waiting) => "Saving\u{2026}".into(),
-                Some(Answered::NotKnown | Answered::NotChanged) => "Not changed".into(),
+                Some(Answered::Unknown | Answered::NotChanged) => "Not changed".into(),
                 None => ui.preview_name(),
             },
             Setting::Previews,
@@ -792,7 +793,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let unchanged = |names: [(Switch, &'static str); 3]| -> Vec<&'static str> {
         names
             .into_iter()
-            .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))
+            .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::Unknown)))
             .map(|(_, name)| name)
             .collect()
     };
@@ -803,7 +804,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     ]);
     let lock_kept: Vec<&str> = [(Switch::AppLock, "app lock"), (Switch::LockAfter, "lock delay")]
         .into_iter()
-        .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))
+        .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::Unknown)))
         .map(|(_, name)| name)
         .collect();
     let note = |key: &'static str, k: &mut Keys, words: String| {
@@ -864,9 +865,9 @@ fn stage(t: &Theme) -> Color {
 fn tag(key: &str, words: &str) -> El {
     el().key(format!("{key}-box"))
         .h(18.0)
-        .px(8.0)
+        .px(space::S8)
         .center()
-        .radius(4.0)
+        .radius(tokens::radius::SM)
         .fill(Color::BLACK.alpha(0.5))
         .child(kit::label(key.to_string(), words, type_::CAPTION, Color::WHITE))
 }
@@ -879,7 +880,7 @@ fn photo(ui: &Ui, compare: Compare, t: &Theme) -> El {
         Some(weight) => format!("{} \u{b7} {weight}", ui.preview_name()),
         None => ui.preview_name(),
     };
-    let frame = |key: &str| el().key(key.to_string()).size(w, h).radius(4.0);
+    let frame = |key: &str| el().key(key.to_string()).size(w, h).radius(tokens::radius::SM);
     match compare.mode {
         CompareMode::Wipe => {
             let x = (compare.wipe * w).round();
@@ -923,14 +924,14 @@ fn photo(ui: &Ui, compare: Compare, t: &Theme) -> El {
                     .role("image")
                     .label(name.to_string())
                     .size(half * w / h, half)
-                    .radius(4.0)
+                    .radius(tokens::radius::SM)
                     .pixels(pixels)
                     .child(el().absolute(12.0, 12.0).child(tag(key, words)))
             };
             col()
                 .key("cmp-photo")
                 .size(w, h)
-                .gap(10.0)
+                .gap(space::S10)
                 .items_center()
                 .child(one("cmp-tag-0", original, &original_tag, "The original"))
                 .child(one("cmp-tag-1", preview, &preview_tag, "The preview"))
@@ -978,7 +979,7 @@ fn option(j: usize, label: &str, weight: Option<String>, on: bool, t: &Theme) ->
             + rune::text::advance(label, type_::HEAD)
                 .max(weight.as_deref().map_or(0.0, |w| rune::text::advance(w, CAP_MONO))))
         .h(43.0)
-        .py(6.0)
+        .py(space::S6)
         .items_center()
         .radius(8.0)
         .focusable(true)
@@ -1002,8 +1003,8 @@ fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
         .key("cmp-head")
         .w_full()
         .h(48.0)
-        .px(16.0)
-        .gap(12.0)
+        .px(space::S16)
+        .gap(space::S12)
         .center_y()
         .child(
             setup::small_button("cmp-done", "Done", t)
@@ -1038,7 +1039,7 @@ fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
         .key("cmp-foot")
         .w_full()
         .pb(16.0)
-        .gap(24.0)
+        .gap(space::S24)
         .center()
         .role("group")
         .label("Preview size and format");

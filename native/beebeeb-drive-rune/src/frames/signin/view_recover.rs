@@ -10,6 +10,7 @@ use super::view::{GENERIC_FAILURE, actions};
 use super::view_steps::{escape_first, open, primary, then, word_grid};
 use super::{EMAIL_KEY, PASSWORD_KEY, Ui, act, icons};
 use crate::State;
+use crate::theme::scale::space;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, FieldSpec, FieldState, Keys, Tone};
 use crate::ui::au_entry::{self, FocusedSpec};
@@ -135,7 +136,7 @@ fn strength(key: &str, ui: &Ui, t: &Theme) -> El {
         2 => t.text_tertiary,
         _ => t.green,
     };
-    let mut bars = row().grow(1.0).gap(4.0).center_y();
+    let mut bars = row().grow(1.0).gap(space::S4).center_y();
     for i in 0..4 {
         bars = bars.child(
             el().key(format!("{key}-strength-{i}"))
@@ -150,7 +151,7 @@ fn strength(key: &str, ui: &Ui, t: &Theme) -> El {
         .role("status")
         .h(17.0)
         .mx(2.0)
-        .gap(10.0)
+        .gap(space::S10)
         .center_y()
         .child(bars);
     if let Some(verdict) = verdict {

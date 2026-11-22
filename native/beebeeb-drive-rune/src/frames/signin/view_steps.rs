@@ -9,6 +9,7 @@ use super::steps::{BACKUP_DIGITS, BACKUP_KEY, CODE_DIGITS, CODE_KEY, Pictured, W
 use super::view::{GENERIC_FAILURE, actions, back, back_as};
 use super::{PASSWORD_KEY, Ui, act, icons, lock};
 use crate::State;
+use crate::theme::scale::space;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
 use crate::ui::au_entry::{self, Caret, CaretAt, DigitsState, FocusedSpec, WordState, WordStep};
@@ -199,7 +200,7 @@ pub fn two_factor(ui: &Ui, backup: bool, k: &mut Keys, t: &Theme) -> El {
     } else {
         ButtonState::Disabled
     };
-    debug_assert!(BACKUP_DIGITS > CODE_DIGITS);
+    const { assert!(BACKUP_DIGITS > CODE_DIGITS) };
     c.child(centered(other))
         .child(actions(6.0).child(primary(k, label, None, state, Ui::verify_code, t)))
 }
@@ -305,14 +306,14 @@ pub(super) fn word_grid(ui: &Ui, t: &Theme) -> El {
         .role("group")
         .label("Recovery phrase")
         .w_full()
-        .gap(6.0);
+        .gap(space::S6);
     for line in 0..4 {
         let boxes = line * 3..line * 3 + 3;
         let h = boxes
             .clone()
             .map(|i| au_entry::word_height(!ui.words[i].text.is_empty(), state_of(i)))
             .fold(0.0, f32::max);
-        let mut r = row().gap(6.0);
+        let mut r = row().gap(space::S6);
         for i in boxes {
             let input = au_entry::word_input(&ui.words[i], WORD_KEYS[i], i, not_a_word == Some(i), t)
                 .on_edit(edit_access(move |s: &mut State| &mut open(s).words[i]))

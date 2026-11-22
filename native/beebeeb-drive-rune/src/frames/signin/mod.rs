@@ -1062,9 +1062,12 @@ fn phrase(words: &[&str]) -> Ui {
     ui
 }
 
+/// One board frame or scene: its id, and what shows it on a fresh state.
+pub type Scene<S> = (&'static str, fn(&mut S));
+
 /// The frames of this group whose scenes live here (`frames::scenes`); DW-A01 to DW-A22 are
 /// named in `shell::SCENES`.
-pub const FRAMES: &[(&str, fn(&mut State))] = &[
+pub const FRAMES: &[Scene<State>] = &[
     ("DW-A23", |s| set_scene(s, "DW-A23")),
     ("DW-A24", |s| set_scene(s, "DW-A24")),
     ("DW-A25", |s| set_scene(s, "DW-A25")),

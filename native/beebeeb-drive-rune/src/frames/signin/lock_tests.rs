@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::source::{
     CodeKind, GateState as SourceGate, HelloOutcome, NextAfterSignIn, ScreenPasswordOutcome, SharedSession,
-    SignInEvent, SignInProblem, SignInSource, TwoFactorProblem,
+    SignInEvent, SignInSource, TwoFactorProblem,
 };
 use super::{PASSWORD_KEY, Ui, lock};
 use crate::State;

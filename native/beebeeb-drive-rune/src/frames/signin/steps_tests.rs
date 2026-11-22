@@ -477,7 +477,7 @@ fn after_a_passkey_the_vault_password_is_asked_with_focus_in_its_field() {
     assert_eq!(info(&rt, "field-0-msg").role, "alert");
     assert!(ui(&mut rt).take_intents().is_empty(), "nothing was unlocked");
     assert_eq!(focused(&rt).as_deref(), Some(PASSWORD_KEY));
-    press(&mut rt, Key::Text("x".repeat(board::PASSWORD_LEN - 5).into()));
+    press(&mut rt, Key::Text("x".repeat(board::PASSWORD_LEN - 5)));
     press(&mut rt, Key::Enter);
     assert_eq!(ui(&mut rt).take_intents(), vec![Intent::Next(NextAfterSignIn::Drive)]);
     assert!(ui(&mut rt).password.text.is_empty());

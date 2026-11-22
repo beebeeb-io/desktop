@@ -9,6 +9,7 @@ use super::{
     view_recovery, view_steps,
 };
 use crate::State;
+use crate::theme::scale::space;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, FieldSpec, FieldState, Keys, Tone, type_au};
 use crate::ui::kit;
@@ -83,7 +84,7 @@ fn way_out(link: El, ui: &Ui, to: fn(&mut Ui)) -> El {
 
 /// `.au-actions`: the buttons at the foot of a column, 6 apart, `top` below the column's gap.
 pub(super) fn actions(top: f32) -> El {
-    col().key("au-actions").w_full().gap(6.0).mt(top)
+    col().key("au-actions").w_full().gap(space::S6).mt(top)
 }
 
 pub(super) fn back(t: &Theme) -> El {
@@ -170,7 +171,7 @@ fn problem_message(problem: SignInProblem) -> Option<String> {
 fn continue_card(session: &SharedSession, ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let (key, card) = au::card(k, (14.0, 14.0), 12.0, t);
     let who = row()
-        .gap(10.0)
+        .gap(space::S10)
         .center_y()
         .child(au::avatar(
             &format!("{key}-avatar"),
@@ -429,7 +430,7 @@ fn continue_as(ui: &Ui, failure: Option<HelloFailure>, k: &mut Keys, t: &Theme) 
                 .key("who")
                 .w_full()
                 .h(28.0)
-                .gap(10.0)
+                .gap(space::S10)
                 .center()
                 .child(au::avatar("who-avatar", "who-initials", &session.initials, 28.0, 250.0, t.surface, t))
                 .child(kit::label("who-email", session.email.clone(), type_::KBD, t.text_tertiary)),
@@ -514,7 +515,7 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
             t,
         ));
     }
-    let mut stack = col().key("au-stack").w_full().gap(8.0).items_center();
+    let mut stack = col().key("au-stack").w_full().gap(space::S8).items_center();
     if let Some(request) = ui.request() {
         let tile = el()
             .key("qr")
@@ -540,7 +541,7 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
         row().child(crate::ui::pill::pill("status-pill", words, crate::ui::pill::Tone::Neutral, false, t))
     } else {
         row()
-            .gap(10.0)
+            .gap(space::S10)
             .center_y()
             .child(au::ring(
                 "status-ring",

@@ -11,6 +11,7 @@
 
 /// What is known about the signed-in account and the guide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)] // `NotKnown` is matched by `engine_host`, outside this area
 pub enum Known {
     /// The account finished or skipped the guide on this PC.
     Done,
@@ -53,16 +54,12 @@ pub struct FixtureMarks {
 
 impl FixtureMarks {
     /// `account` has done the guide.
+    #[cfg(test)]
     pub fn done_for(account: &str) -> Self {
         Self {
             done: vec![account.to_string()],
             asked: None,
         }
-    }
-
-    #[cfg(test)]
-    pub fn is_done(&self, account: &str) -> bool {
-        self.done.iter().any(|a| a == account)
     }
 }
 

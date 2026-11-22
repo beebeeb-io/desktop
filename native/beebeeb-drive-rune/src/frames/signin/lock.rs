@@ -322,7 +322,7 @@ pub fn wait_words(wait_ms: u64) -> &'static str {
 
 /// Scenes of the lock's states the board has no frame for (core's contract, section 7: "no frame yet"), for a
 /// render to look at: `--scene LOCK-...`. Fixture data only; none has a golden, so none is gated.
-pub const SCENES: &[(&str, fn(&mut crate::State))] = &[
+pub const SCENES: &[crate::frames::signin::Scene<crate::State>] = &[
     ("LOCK-hello-unavailable", |s| lock_scene(s, false, false)),
     ("LOCK-screen-password", |s| lock_scene(s, false, true)),
     ("LOCK-vault-closed", |s| lock_scene(s, true, false)),
