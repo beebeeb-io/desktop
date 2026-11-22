@@ -64,7 +64,7 @@ fn hydrate_dest_is_allowed_covers_the_containment_matrix() {
     );
 }
 
-/// Task 1670 round 4 (Codex P2 on PR #75): the pure predicate
+/// the pure predicate
 /// `hydrate_file` uses to decide whether a just-written destination is a
 /// macOS Finder handoff staging file (never registered as durable cache)
 /// versus a real cache copy (registered, as always). Uses a throwaway
@@ -92,7 +92,7 @@ fn is_macos_finder_handoff_staging_path_detects_dest_under_hydrate_dir() {
     );
 }
 
-/// Task 1670 round 4: exercises the REAL [`record_hydration_cache_state`]
+/// exercises the REAL [`record_hydration_cache_state`]
 /// — the exact function [`EngineBridge::hydrate_file`] calls — end to
 /// end against a real `StateDb`: a macOS-hydrate-dir-shaped destination
 /// gets NO `cache_path`/`cache_bytes` after "hydration" (a plain on-disk
@@ -141,7 +141,7 @@ fn record_hydration_cache_state_skips_mark_cached_under_the_hydrate_dir() {
     );
 }
 
-/// Task 1670 round 4: the same function, but `dest_path` is OUTSIDE the
+/// the same function, but `dest_path` is OUTSIDE the
 /// hydrate dir — `mark_cached` must still run exactly as before this
 /// round, and the file must still be counted in the storage summary.
 /// Regression guard for the ordinary (non-macOS-Finder) hydration path,

@@ -121,7 +121,7 @@ impl EngineBridge {
         // `_this_device` form pins segment 2 to THIS machine's sanitized device
         // name (the only value the mirror writes), so a user's own
         // `Backup/<other>/<CatalogName>/…` file is never mis-tagged + wrongly
-        // purged (review fix).
+        // purged .
         let backup_source_key = target_path
             .as_deref()
             .and_then(crate::known_folder::backup_source_key_for_this_device);

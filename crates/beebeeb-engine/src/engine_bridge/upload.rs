@@ -110,7 +110,7 @@ impl EngineBridge {
                 .as_deref()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
                 .and_then(|metadata| metadata["content_type"].as_str().map(str::to_string));
-            // Decision (lane, 2026-11-13): chunk format v2 adds one step before this landing. A
+            // chunk format v2 adds one step before this landing. A
             // completion whose name the server was not yet seen to hold (the first attempt failed
             // between `complete` and that check) asks the server first, because a version whose
             // commitment is not in the file's name opens on no device. Once held it is remembered,
@@ -570,7 +570,7 @@ impl EngineBridge {
         // The item's key and CURRENT record (the completed upload's commitment included): a queued
         // successor's name is sealed again with them.
         let landing_material =
-            owned_key_and_record(&self.db, master_key, server_file_id.as_str()).map_err(EngineError::from)?;
+            owned_key_and_record(&self.db, master_key, server_file_id.as_str())?;
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
                 op_id: &op.op_id,
@@ -631,8 +631,7 @@ impl EngineBridge {
         if let Some(path) = payload_path.as_deref() {
             // Task 1700: post-complete thumbnail work never fails the upload, but its
             // failure is surfaced on the outcome so a red run names the real error.
-            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id.as_str())
-                .map_err(EngineError::from)?
+            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id.as_str())?
                 .0;
             match self
                 .finish_completed_upload(
@@ -938,11 +937,9 @@ impl EngineBridge {
         // convention, so no network call is made.
         if let Ok(crate::owner_keys::StoredName::Name(name)) =
             crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())
-        {
-            if crate::owner_keys::safe_display_name(&name) {
+            && crate::owner_keys::safe_display_name(&name) {
                 return name;
             }
-        }
         if let Ok(row) = self.api.get_file(request_id).await
             && let Ok(keys) = self.request_row_keys(&row).await
             && crate::owner_keys::safe_display_name(&keys.name.name)

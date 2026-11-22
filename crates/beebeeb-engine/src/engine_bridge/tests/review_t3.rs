@@ -350,7 +350,7 @@ async fn review_p1_1_a_malformed_envelope_keeps_the_fact_and_refuses_the_write()
     assert!(other.readable, "the other rows in the same pass still prepare");
     // A write through the ordinary owned-key seam refuses it.
     let err = match crate::engine_bridge::meta::owned_metadata_for_name(
-        &bridge.db(),
+        bridge.db(),
         &[7u8; 32],
         REQUEST,
         "changed.txt",
@@ -450,12 +450,12 @@ async fn review_p1_1_a_never_seen_malformed_row_is_blocked_and_has_no_write_key(
         let seams = [
             (
                 "content key",
-                owned_key_and_pin(&bridge.db(), &[7u8; 32], row_id).map(|_| ()),
+                owned_key_and_pin(bridge.db(), &[7u8; 32], row_id).map(|_| ()),
             ),
             (
                 "name",
                 crate::engine_bridge::meta::owned_metadata_for_name(
-                    &bridge.db(),
+                    bridge.db(),
                     &[7u8; 32],
                     row_id,
                     "edited.txt",
@@ -466,7 +466,7 @@ async fn review_p1_1_a_never_seen_malformed_row_is_blocked_and_has_no_write_key(
             (
                 "rename",
                 crate::engine_bridge::meta::owned_metadata_for_rename(
-                    &bridge.db(),
+                    bridge.db(),
                     &[7u8; 32],
                     row_id,
                     "edited.txt",
@@ -608,13 +608,13 @@ async fn review_p2_2_an_unresolvable_envelope_row_never_becomes_an_owner_row() {
     assert!(record.blocked_fingerprint.is_some(), "it is blocked, not an owner row");
     assert!(!record.request_row, "core never resolved it");
     // No derived write key: a local edit cannot be sealed as a version under it.
-    let err = match owned_key_and_pin(&bridge.db(), &[7u8; 32], ROW) {
+    let err = match owned_key_and_pin(bridge.db(), &[7u8; 32], ROW) {
         Ok(_) => panic!("an unresolved envelope row has no write key"),
         Err(err) => err,
     };
     assert!(err.to_string().contains("item key is unavailable"), "{err}");
     let err =
-        match crate::engine_bridge::meta::owned_metadata_for_name(&bridge.db(), &[7u8; 32], ROW, "edited.txt", None) {
+        match crate::engine_bridge::meta::owned_metadata_for_name(bridge.db(), &[7u8; 32], ROW, "edited.txt", None) {
             Ok(_) => panic!("a local edit of an unresolved row is not sealed under the derived key"),
             Err(err) => err,
         };
@@ -741,7 +741,7 @@ async fn review_p3_1_an_unresolvable_envelope_never_clears_the_fact() {
     assert!(bridge.is_request_row(ROW), "the in-memory view keeps it too");
     // P1-1: a blocked request row is not writable, not even by a rename.
     let error =
-        match crate::engine_bridge::meta::owned_metadata_for_rename(&bridge.db(), &[7u8; 32], ROW, "renamed.txt", None)
+        match crate::engine_bridge::meta::owned_metadata_for_rename(bridge.db(), &[7u8; 32], ROW, "renamed.txt", None)
         {
             Ok(_) => panic!("a blocked request row refuses a rename"),
             Err(error) => error.to_string(),
@@ -762,7 +762,7 @@ fn review_p2_1_a_server_planted_non_canonical_row_has_no_derived_write_key() {
     std::fs::create_dir_all(&sync_root).unwrap();
     let bridge = test_bridge(&dir.path().join("state.db"));
     seed_bridge_row(&bridge, "not-a-uuid", "planted.txt", None, FileStatus::Local, 4);
-    let err = match owned_key_and_pin(&bridge.db(), &[7u8; 32], "not-a-uuid") {
+    let err = match owned_key_and_pin(bridge.db(), &[7u8; 32], "not-a-uuid") {
         Ok(_) => panic!("a server-planted non-canonical row must have no write key"),
         Err(err) => err,
     };
@@ -1048,14 +1048,14 @@ fn review_p3_5_a_request_row_has_no_content_key() {
         .unwrap();
     let key = bridge.api().master_key();
 
-    let error = match owned_metadata_for_name(&bridge.db(), key, request, "renamed.txt", None) {
+    let error = match owned_metadata_for_name(bridge.db(), key, request, "renamed.txt", None) {
         Ok(_) => panic!("a request row has no content key"),
         Err(error) => format!("{error}"),
     };
     assert!(error.contains("request row"), "{error}");
 
     // The rename entry point still resolves it: the string-derived key, never C.
-    let sealed = owned_metadata_for_rename(&bridge.db(), key, request, "renamed.txt", None).unwrap();
+    let sealed = owned_metadata_for_rename(bridge.db(), key, request, "renamed.txt", None).unwrap();
     let renamed = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&derived, &sealed).unwrap();
     assert_eq!(renamed.name, "renamed.txt");
 }

@@ -18,7 +18,7 @@ impl EngineBridge {
     /// `EngineRunner` flips on `abort()`, so this bridge (and every clone of
     /// it handed to the IPC socket server / Windows upload watcher) observes
     /// the stop request the instant it's set, not just at the next tick
-    /// boundary (task 1538 Codex P1).
+    /// boundary.
     pub fn new_with_stop_flag(
         identity: &'static crate::identity::EngineIdentity,
         db: Arc<StateDb>,
@@ -174,7 +174,7 @@ impl EngineBridge {
             file_name: name,
             rel_path,
             bytes: i64::try_from(bytes).unwrap_or(i64::MAX),
-            occurred_at: now_secs() as i64,
+            occurred_at: now_secs(),
         };
         if let Err(e) = self.db.record_transfer_activity(input) {
             tracing::debug!(error = %e, "could not record transfer activity (best-effort)");
@@ -364,7 +364,7 @@ impl EngineBridge {
         let mut due = DueOperations::new(self.db.list_due_operations(now)?);
 
         while let Some(op) = due.next(&self.db, now)? {
-            // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): stop draining
+            // stop draining
             // the queue the instant a caller asks this engine to stop,
             // rather than finishing every due operation first. `abort()`'s
             // graceful window is bounded (3s) before it force-terminates the

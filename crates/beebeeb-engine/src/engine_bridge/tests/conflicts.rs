@@ -3,7 +3,7 @@
 use super::*;
 #[tokio::test]
 async fn test_conflict_content_preview_local_bounded_read_reports_too_large_with_accurate_size() {
-    // Codex round 2, finding 1's local half: a local file over the cap
+    // a local file over the cap
     // must report "too large" with the REAL size (from `fs::metadata`,
     // not from reading the whole file — `local_content_preview` never
     // calls `std::fs::read` on an oversized file).
@@ -55,7 +55,7 @@ async fn test_conflict_content_preview_local_bounded_read_reports_too_large_with
 
 #[tokio::test]
 async fn test_conflict_content_preview_determines_textness_from_the_file_path_not_a_caller_flag() {
-    // Codex round 2, finding 3: `conflict_content_preview` no longer
+    // `conflict_content_preview` no longer
     // takes an `is_text` parameter at all — the daemon decides from the
     // row's own `path` via `is_text_file`. This is exactly the bug:
     // VersionCenter's `open_conflict_window` call always hardcoded

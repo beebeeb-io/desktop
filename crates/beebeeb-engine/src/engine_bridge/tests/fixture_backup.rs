@@ -1,5 +1,4 @@
 const ALICE: (&str, &str) = ("u-a", "a@beebeeb.io");
-const BOB: (&str, &str) = ("u-b", "b@beebeeb.io");
 
 fn identity(who: (&str, &str)) -> crate::account_binding::Identity {
     crate::account_binding::Identity::new(Some(who.0), Some(who.1))

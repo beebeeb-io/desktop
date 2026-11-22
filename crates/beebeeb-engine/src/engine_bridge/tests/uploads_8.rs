@@ -700,10 +700,10 @@ fn closed_port() -> u16 {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        if let Err(e) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-            if e.kind() == std::io::ErrorKind::ConnectionRefused {
-                return port;
-            }
+        if let Err(e) = std::net::TcpStream::connect(("127.0.0.1", port))
+            && e.kind() == std::io::ErrorKind::ConnectionRefused
+        {
+            return port;
         }
     }
 }

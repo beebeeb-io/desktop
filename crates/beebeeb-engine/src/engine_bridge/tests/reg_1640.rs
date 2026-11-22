@@ -199,7 +199,7 @@ async fn regression_2271_several_rows_with_content_at_one_path_are_never_guessed
     .await;
     assert!(!dispatched, "no row is guessed");
     assert_eq!(queued(), 0, "nothing sent: no edit of a guessed row, no new file");
-    // Lead ruling P2 (contract §7): file ids and the row count, never the path (log lines can leave the PC in the
+    // file ids and the row count, never the path (log lines can leave the PC in the
     // support bundle).
     assert!(
         logs.contains(a) && logs.contains(b) && logs.contains("rows=2"),
@@ -483,7 +483,7 @@ async fn regression_1640_an_edit_of_a_nested_file_lands_in_its_folder() {
 #[test]
 fn regression_1640_sync_folder_content_decides_from_the_agreed_content() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let path = dir.path().join("notes.txt");
     std::fs::write(&path, b"agreed").unwrap();
     db.upsert_file(&FileEntry {
@@ -582,7 +582,7 @@ pub(super) fn regression_1640_edited_file_in_a_folder_in(db: &StateDb, sync_root
 }
 
 pub(super) fn regression_1640_edited_file_in_a_folder(dir: &Path) -> (StateDb, PathBuf) {
-    let db = StateDb::open(&dir.join("state.db")).unwrap();
+    let db = StateDb::open(dir.join("state.db")).unwrap();
     let sync_root = dir.join("sync-root");
     regression_1640_edited_file_in_a_folder_in(&db, &sync_root);
     (db, sync_root)
@@ -1296,7 +1296,7 @@ async fn regression_1640_a_landing_that_cannot_hash_the_sent_copy_is_never_agree
 #[test]
 fn regression_1640_a_range_fetch_candidate_merges_by_version() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     db.upsert_file(&FileEntry {
         file_id: "f97d7f90-511b-52b5-9303-7201b53df85f".into(),
         path: "notes.txt".into(),
@@ -1382,7 +1382,7 @@ fn regression_1640_a_range_fetch_candidate_merges_by_version() {
 #[test]
 fn regression_1640_a_file_of_unknown_content_stays_unknown_through_fetches() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let path = dir.path().join("notes.txt");
     std::fs::write(&path, b"part of an old version, part of version two").unwrap();
     db.upsert_file(&FileEntry {
@@ -1433,7 +1433,7 @@ fn regression_1640_a_file_of_unknown_content_stays_unknown_through_fetches() {
 #[tokio::test]
 async fn regression_1640_dehydrating_or_moving_a_file_keeps_what_it_held() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let local = |id: &str| FileEntry {
         file_id: id.into(),
         path: format!("{id}.txt"),

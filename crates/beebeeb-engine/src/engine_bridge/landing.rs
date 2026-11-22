@@ -330,7 +330,7 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
     Ok(entries)
 }
 
-/// Task 1670 round 4 (Codex P2 on PR #75, review thread on `runner.rs:1044`):
+/// Why this exists:
 /// `true` when `dest_path` is a macOS Finder `fetchContents` HANDOFF staging
 /// file — i.e. it lives inside `hydrate_dir`, never a durable local cache
 /// copy. `hydrate_dir` is a parameter (never

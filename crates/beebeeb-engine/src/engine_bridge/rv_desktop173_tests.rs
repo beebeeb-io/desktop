@@ -77,8 +77,7 @@ fn rv173_custody_404_cannot_downgrade_to_replayed_unbound_child() {
             .insert(format!("/api/v1/shared-folders/{ROOT}"), (status, b"{}".to_vec()));
         let error = runtime()
             .block_on(bridge.shared_folder_material(&root))
-            .err()
-            .expect("durable custody cannot downgrade");
+            .expect_err("durable custody cannot downgrade");
         assert_eq!(error.to_string(), "This folder's keys are unavailable");
         assert!(
             runtime()

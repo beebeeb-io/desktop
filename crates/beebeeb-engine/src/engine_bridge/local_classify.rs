@@ -121,7 +121,7 @@ impl EngineBridge {
         match self.row_judging_bytes_at(&rel, path) {
             Ok(RowAtPath::One(existing)) => return self.classify_tracked_edit(path, existing, file_name, rel),
             Ok(RowAtPath::Ambiguous { file_ids, rows }) => {
-                // Lead ruling P2 (2271 contract §7): file ids and the row count, never the path.
+                // file ids and the row count, never the path.
                 tracing::warn!(
                     ?file_ids,
                     rows,
@@ -238,8 +238,8 @@ impl EngineBridge {
         if rows.len() < 2 {
             // Task 2230: a lone `Trashing` row answers only for the file it records; bytes of
             // another size or hash are a file re-created at the path before the trash landed.
-            if let Some(row) = rows.first() {
-                if row.status == FileStatus::Trashing && !row.is_dir() {
+            if let Some(row) = rows.first()
+                && row.status == FileStatus::Trashing && !row.is_dir() {
                     let recreated = match std::fs::metadata(path) {
                         Ok(m) if m.len() as i64 != row.size_bytes => true,
                         Ok(_) => match &row.content_hash {
@@ -258,7 +258,6 @@ impl EngineBridge {
                         return Ok(RowAtPath::None);
                     }
                 }
-            }
             return Ok(rows.pop().map_or(RowAtPath::None, RowAtPath::One));
         }
         let mut recorded = Vec::new();

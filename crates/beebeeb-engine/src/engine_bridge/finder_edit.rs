@@ -204,7 +204,7 @@ impl EngineBridge {
             .db
             .enqueue_local_rename(&op, &file_id, new_path, target.parent_id.as_deref())?
         {
-            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed).into()),
+            crate::state_db::FinderEnqueue::AcceptsClosed => Err(anyhow::Error::new(AcceptsClosed)),
             crate::state_db::FinderEnqueue::Queued => Ok(FinderWriteOutcome::Queued {
                 op_id: op.op_id,
                 file_id: Some(file_id),
@@ -222,7 +222,7 @@ impl EngineBridge {
         target: &FinderWriteTarget,
         guard: crate::backup_protect::DriveGuard,
     ) -> Result<Option<(String, Option<FileContractState>)>, EngineError> {
-        // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
+        // see `queue_finder_create`'s identical guard.
         if self.is_stopping() {
             return Err(anyhow::anyhow!("engine is stopping; refusing to enqueue a new local write").into());
         }
@@ -429,7 +429,7 @@ impl EngineBridge {
         {
             let (file_id, presented) = self.resolve_provisional(&requested_id, "modify")?;
             if self.db.get_file(&file_id)?.is_none() {
-                return Err(anyhow::Error::new(UnknownItem { requested_id }).into());
+                return Err(anyhow::Error::new(UnknownItem { requested_id }));
             }
             target.file_id = Some(file_id);
             present_as = presented;
@@ -484,20 +484,19 @@ impl EngineBridge {
             crate::state_db::AcceptOutcome::UnknownItem => {
                 return Err(anyhow::Error::new(UnknownItem {
                     requested_id: present_as.unwrap_or(file_id),
-                })
-                .into());
+                }));
             }
-            crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone).into()),
-            crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed).into()),
+            crate::state_db::AcceptOutcome::CopyGone => return Err(anyhow::Error::new(StagedCopyGone)),
+            crate::state_db::AcceptOutcome::AcceptsClosed => return Err(anyhow::Error::new(AcceptsClosed)),
             // §7.2: refused; the staged copy is dropped with `prepared`, and nothing was queued.
-            crate::state_db::AcceptOutcome::InTrash => return Err(anyhow::Error::new(ItemInTrash).into()),
+            crate::state_db::AcceptOutcome::InTrash => return Err(anyhow::Error::new(ItemInTrash)),
             // Delta 3 of desktop#432: after a queued write it may not follow; nothing was queued.
             crate::state_db::AcceptOutcome::BehindAnotherWrite => {
-                return Err(anyhow::Error::new(BehindAnotherWrite).into());
+                return Err(anyhow::Error::new(BehindAnotherWrite));
             }
             // A modify retires no parked write (task 2190's "Keep both" is a create).
             crate::state_db::AcceptOutcome::ParkedMoved | crate::state_db::AcceptOutcome::QueuedRetiring { .. } => {
-                return Err(anyhow::anyhow!("a modify retires no parked write").into());
+                return Err(anyhow::anyhow!("a modify retires no parked write"));
             }
         };
         prepared.staged.retain();
@@ -545,9 +544,9 @@ impl EngineBridge {
         base_version_identifier: Option<String>,
         guard: crate::backup_protect::DriveGuard,
     ) -> anyhow::Result<FinderWriteOutcome> {
-        // Task 1538 Codex P1 — see `queue_finder_create`'s identical guard.
+        // see `queue_finder_create`'s identical guard.
         if self.is_stopping() {
-            return Err(anyhow::anyhow!("engine is stopping; refusing to enqueue a new local write").into());
+            return Err(anyhow::anyhow!("engine is stopping; refusing to enqueue a new local write"));
         }
         // §7.2 (m-6): a provisional id whose create landed reaches the server file only when
         // the delete's base is that file's held token, the token the create's reply named.
@@ -569,7 +568,7 @@ impl EngineBridge {
                 message: "the item is already gone from Beebeeb".to_string(),
             });
         }
-        // Task 1698 (trash ruling): an UNKNOWN item is an idempotent success
+        // an UNKNOWN item is an idempotent success
         // ("unknown items report success") — the item may have been deleted
         // remotely already, or the replica converged past it. Queueing a
         // doomed server call would retry a guaranteed 404 for hours.
@@ -594,7 +593,7 @@ impl EngineBridge {
                 beebeeb_core::backup::Mutation::Trash,
             )
         {
-            return Err(anyhow::Error::new(crate::backup_protect::DriveChangeRefused { message }).into());
+            return Err(anyhow::Error::new(crate::backup_protect::DriveChangeRefused { message }));
         }
         let mut payload = serde_json::json!({
             "operation": Op::Trash.as_str(),
@@ -616,9 +615,9 @@ impl EngineBridge {
                 None,
             )
             .map_err(land_error_to_anyhow)?;
-        // Task 1698: park the row `Trashing` AFTER a successful enqueue, so
+        // park the row `Trashing` AFTER a successful enqueue, so
         // the change feed immediately presents the item under the trash
-        // container (ruling step 2) while the server trash converges. A
+        // container (trash step 2) while the server trash converges. A
         // failed enqueue leaves the row untouched (nothing hidden without a
         // queued op). Idempotent for the watcher path, which parks first.
         if let Some(entry) = self.db.get_file(file_id)?

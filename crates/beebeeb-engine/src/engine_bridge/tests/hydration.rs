@@ -60,7 +60,7 @@ fn hydrate_file_range_falls_back_when_chunk_size_absent_even_if_size_and_count_p
     handle.join().unwrap();
 }
 
-/// R4 (task 1834 fix round 2), and the move of the macOS staging root (spec §8.4): the directories the
+/// R4 , and the move of the macOS staging root (spec §8.4): the directories the
 /// account reset and the sign-out purge sweep are exactly the places the engine stages into now and staged
 /// into before. On macOS: the data root, then the cache root and the temp root that earlier builds used.
 /// Elsewhere: the cache root and its temp fallback. The one `default_finder_staging_root()` picks is always
@@ -297,7 +297,7 @@ fn test_metadata_modify_does_not_queue_content_version() {
 fn test_delete_maps_to_trash_operation() {
     let dir = tempfile::tempdir().unwrap();
     let bridge = test_bridge(&dir.path().join("state.db"));
-    // Task 1698: an UNKNOWN item is now an idempotent Ignored (ruling:
+    // an UNKNOWN item is now an idempotent Ignored (ruling:
     // "unknown items report success") — a delete needs a real row.
     seed_bridge_entry(
         &bridge,

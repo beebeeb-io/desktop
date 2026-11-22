@@ -332,13 +332,11 @@ pub(super) fn shared_name_from_metadata(
     item_kind: &ItemKind,
     file_key: Option<&beebeeb_core::kdf::FileKey>,
 ) -> String {
-    if let (Some(key), Some(name_encrypted)) = (file_key, f["name_encrypted"].as_str()) {
-        if let Some(name) = decrypt_shared_name_with_key(key, name_encrypted) {
-            if let Some(leaf) = safe_shared_leaf_name(&name) {
+    if let (Some(key), Some(name_encrypted)) = (file_key, f["name_encrypted"].as_str())
+        && let Some(name) = decrypt_shared_name_with_key(key, name_encrypted)
+            && let Some(leaf) = safe_shared_leaf_name(&name) {
                 return leaf;
             }
-        }
-    }
 
     shared_placeholder_name(item_kind).to_string()
 }
@@ -423,6 +421,8 @@ pub(super) fn apply_shared_context(metadata: &mut serde_json::Value, contract: O
     metadata["uploaded_by"] = serde_json::json!("authenticated_desktop_user");
 }
 
+// Mirrors the server row plus its ownership context; callers pass each part from a different place.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_metadata_file_row(
     db: &StateDb,
     f: &serde_json::Value,

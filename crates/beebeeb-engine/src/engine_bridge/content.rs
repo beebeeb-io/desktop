@@ -220,9 +220,9 @@ pub(super) fn cached_sha256_file_hex_at(
     path: &Path,
     now: std::time::SystemTime,
 ) -> std::io::Result<String> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<(String, PathBuf), (ContentFingerprint, std::time::SystemTime, String)>>,
-    > = std::sync::OnceLock::new();
+    type CacheEntry = (ContentFingerprint, std::time::SystemTime, String);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<(String, PathBuf), CacheEntry>>> =
+        std::sync::OnceLock::new();
     let fingerprint = ContentFingerprint::of;
     let before = fingerprint(path)?;
     let cache = CACHE.get_or_init(Default::default);

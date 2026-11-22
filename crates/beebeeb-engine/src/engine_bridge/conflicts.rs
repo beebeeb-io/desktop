@@ -52,7 +52,7 @@ impl EngineBridge {
             .get_file(file_id)?
             .ok_or_else(|| anyhow::anyhow!("no state.db row for {file_id}"))?;
         if entry.is_dir() {
-            return Err(anyhow::anyhow!("Keep Mine upload requires a file row: {file_id}").into());
+            return Err(anyhow::anyhow!("Keep Mine upload requires a file row: {file_id}"));
         }
 
         let shared_contract = self.ensure_item_allows_shared_write(file_id, "keep mine")?;
@@ -118,11 +118,11 @@ impl EngineBridge {
         {
             Ok(OpDone::Remove { release } | OpDone::Removed { release }) => release,
             // Only a backup op is dropped; Keep Mine's op is a sync-folder upload.
-            Ok(OpDone::Dropped) => return Err(anyhow::anyhow!("Keep Mine upload was dropped").into()),
+            Ok(OpDone::Dropped) => return Err(anyhow::anyhow!("Keep Mine upload was dropped")),
             Err(e) => {
                 // One-shot op (never queued): nothing will resume its session.
                 self.abandon_upload_after_give_up(&op).await;
-                return Err(anyhow::anyhow!("Keep Mine upload failed: {e}").into());
+                return Err(anyhow::anyhow!("Keep Mine upload failed: {e}"));
             }
         };
         // macOS: the upload leaves its staged copy for the caller to release. This op
@@ -260,7 +260,7 @@ impl EngineBridge {
     /// ("Content from this device…" / "Content from other device…"), which
     /// its own doc-comment admitted was fake for every conflict.
     ///
-    /// Task 1546 Codex round 2, finding 3: textness is decided HERE, from
+    /// textness is decided HERE, from
     /// the file's own path via [`is_text_file`], never taken from a
     /// caller-supplied flag — the VersionCenter-initiated open always passed
     /// a hardcoded `isText: false` (only the daemon's auto-open path derived
@@ -453,7 +453,7 @@ impl EngineBridge {
                         file_id: Some(new_id), ..
                     } => (ParkedResolution::KeptBoth { file_id: new_id, name }, released),
                     other => {
-                        return Err(anyhow::anyhow!("the copy could not be queued as a new file: {other:?}").into());
+                        return Err(anyhow::anyhow!("the copy could not be queued as a new file: {other:?}"));
                     }
                 }
             }
@@ -466,8 +466,7 @@ impl EngineBridge {
         Ok(done)
     }
 
-    /// Local half of [`Self::conflict_content_preview`] (task 1546 Codex
-    /// round 2, finding 1): stats the file to learn its size WITHOUT reading
+    /// Local half of [`Self::conflict_content_preview`] (task 1546): stats the file to learn its size WITHOUT reading
     /// it, and only reads bytes at all when a text preview applies AND the
     /// file is within [`CONFLICT_PREVIEW_TEXT_MAX_BYTES`] — bounded to one
     /// byte past the cap via [`std::io::Read::take`] so a race where the
@@ -552,8 +551,7 @@ impl EngineBridge {
         }
     }
 
-    /// Remote half of [`Self::conflict_content_preview`] (task 1546 Codex
-    /// round 2, finding 1): fetches file metadata — one small JSON response —
+    /// Remote half of [`Self::conflict_content_preview`] (task 1546): fetches file metadata — one small JSON response —
     /// to learn the remote size BEFORE deciding whether to download
     /// anything. [`Self::do_hydrate_with_meta`] (which downloads and
     /// decrypts every chunk) is called only when BOTH a text preview applies

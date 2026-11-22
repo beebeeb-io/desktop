@@ -131,7 +131,7 @@ async fn test_process_due_operations_completes_pin_marker_and_invalidates_file()
     assert!(bridge.db.list_due_operations(999).unwrap().is_empty());
 }
 
-/// Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): once the bridge's
+/// once the bridge's
 /// stop flag is set, `process_due_operations` must not execute ANY due
 /// operation — not "finish the current batch, then stop next tick".
 /// Uses `PinTree` (the cheapest op kind: `execute_operation` returns
@@ -207,7 +207,7 @@ async fn test_process_due_operations_stops_immediately_once_engine_is_stopping()
     );
 }
 
-/// Task 1538 Codex P1 — the watcher (Windows upload watcher AND the
+/// the watcher (Windows upload watcher AND the
 /// macOS/Linux File Provider IPC handler both call these directly) must
 /// not be able to slip a fresh write into the queue once the engine has
 /// been asked to stop, or sign-out's purge could run BEFORE the write

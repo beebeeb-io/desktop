@@ -181,6 +181,8 @@ pub(super) fn prepare_thumbnail_uploads_with_pin(
                 }
             };
         let plaintext = Zeroizing::new(output.data);
+        // The legacy sealer is the format this path still writes; the new-item sealers are a later migration.
+        #[allow(deprecated)]
         let encrypted = Zeroizing::new(
             beebeeb_core::encrypt::encrypt_thumbnail_for(file_key, &plaintext, pin).map_err(|e| {
                 MediaError::EncryptThumbnail {

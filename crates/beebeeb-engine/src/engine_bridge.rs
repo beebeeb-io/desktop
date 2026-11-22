@@ -17,6 +17,10 @@
 //! normalization accepts the existing raw and JSON envelopes without decrypting them.
 //! ChunkDecryptor is the public facade over core StreamOpener; finish gates whole-file
 //! publication. Indexed range reads authenticate frame zero before calling open_chunk.
+// Platform-gated and integration-test helpers are not all reached by the test-support and unit-test builds.
+// Test fixtures seal with the old sealers on purpose: they pin the on-disk format those still write.
+#![cfg_attr(any(test, feature = "test-support"), allow(deprecated))]
+#![cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
@@ -56,8 +60,7 @@ pub struct EngineBridge {
     /// runner hands in the board the popover snapshot reads; a one-shot bridge
     /// keeps a private one nobody reads.
     transfers: Arc<crate::transfer_progress::TransferBoard>,
-    /// Cooperative stop signal (task 1538 Codex P1, PR #49 lib.rs:1087
-    /// thread). `false` for the lifetime of a normal bridge. Flipped `true`
+    /// Cooperative stop signal: `false` for the lifetime of a normal bridge. Flipped `true`
     /// by [`crate::runner::EngineRunner::abort`] BEFORE it even sends the
     /// tick-loop's cancel oneshot, so [`Self::process_due_operations`]
     /// (checked before every queued operation) and
@@ -494,8 +497,6 @@ pub use types::{LocalEntry, NON_UUID, OpDone, PrunedEntry, RENAME_SETTLE_SECS, S
 pub use types::RemovedKind;
 #[cfg(all(any(test, feature = "test-support"), target_os = "windows"))]
 pub(crate) use types::engine_remove;
-#[cfg_attr(not(any(target_os = "windows", test, feature = "test-support")), allow(unused_imports))]
-pub(crate) use types::content_seq_for_wipe;
 
 // The native app's open file: the whole file in memory, nothing recorded (`app::viewer_api`).
 mod open_in_memory;

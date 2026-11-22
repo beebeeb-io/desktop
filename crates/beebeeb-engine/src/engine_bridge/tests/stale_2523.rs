@@ -1,6 +1,6 @@
 //! Task 2523: another device's version reaches the copy on this PC (F1); a hydrate never writes over a held edit
 //! (F3); a viewer save leaves no stale copy that an edit cannot be sent from (F2). The trace's two "wanted" tests
-//! (lane tracestale, 2026-11-15) are here as real tests. The Linux half of F1 runs on Linux; the Windows half is the
+//! are here as real tests. The Linux half of F1 runs on Linux; the Windows half is the
 //! native test in `windows_cf/ld0105_native_tests.rs` and the order's unit test in `engine_bridge/stale_copies.rs`.
 
 use super::reg_1640::regression_1640_synced_file;

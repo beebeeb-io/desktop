@@ -26,7 +26,7 @@ fn tick1697_apply_sync_op_collects_the_applied_create_id() {
 
 #[test]
 fn tick1697_apply_sync_op_collects_remote_delete_subtree_ids() {
-    // FLIPPED BY TASK 1698 (trash ruling — full sync): a server-side trash
+    // FLIPPED (trash semantics: full sync): a server-side trash
     // of a folder no longer removes rows — it flips the folder AND its
     // descendants to `Trashing` (the macOS trash view mirrors the server
     // trash), reporting both ids so the replica moves the subtree into the
@@ -188,7 +188,7 @@ fn audit_1244_double_trash_restore_cycle_keeps_resnapshot_for_final_restore() {
         apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
     }
 
-    // Task 1698: the trash no longer removes the row — it flips it
+    // the trash no longer removes the row — it flips it
     // `Trashing` (trash view) and the restore flips it straight back
     // (`CloudOnly`). Two fast trash+restore cycles converge to
     // CloudOnly with the resnapshot still requested.
@@ -615,7 +615,7 @@ async fn test_sync_tick_snapshot_window_does_not_resurrect_trashing_row() {
 
 #[tokio::test]
 async fn test_sync_tick_snapshot_absent_keeps_trashing_row_trash_view() {
-    // task 0802 — FLIPPED BY TASK 1698 (trash ruling, full sync): once the
+    // FLIPPED (trash semantics: full sync): once the
     // trash propagates the file is ABSENT from the snapshot — and it STAYS
     // absent forever, because the snapshot never lists trashed files. The
     // op-less `Trashing` row is now the macOS TRASH VIEW: prune_absent
@@ -1068,7 +1068,7 @@ async fn test_sync_tick_trash_then_restore_keeps_row_via_resnapshot() {
 
     sync_tick(&bridge, dir.path()).await.unwrap(); // bootstrap
     sync_tick(&bridge, dir.path()).await.unwrap(); // ops: trash + restore
-    // Task 1698: the trash put the row in the TRASH VIEW (`Trashing`) and
+    // the trash put the row in the TRASH VIEW (`Trashing`) and
     // the restore flipped it straight back out (`CloudOnly`) — the row
     // never disappeared; a re-snapshot is still pending to refresh its
     // authoritative metadata.

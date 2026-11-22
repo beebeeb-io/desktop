@@ -305,11 +305,10 @@ impl EngineBridge {
         for cache in removed {
             removed_shared_file_ids.push(cache.file_id);
             if let Some(path) = cache.cache_path {
-                if let Err(e) = std::fs::remove_file(&path) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
+                if let Err(e) = std::fs::remove_file(&path)
+                    && e.kind() != std::io::ErrorKind::NotFound {
                         tracing::warn!(path = %path, error = %e, "failed to remove revoked shared cache file");
                     }
-                }
                 removed_cache_paths.push(path);
             }
         }

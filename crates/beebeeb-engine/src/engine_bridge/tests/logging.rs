@@ -577,7 +577,7 @@ async fn real_api_region_choice_upload_lands_in_the_chosen_country() {
     let dir = tempfile::tempdir().unwrap();
     let bridge = EngineBridge::new(
         &crate::identity::TEST,
-        Arc::new(StateDb::open(&dir.path().join("state.db")).unwrap()),
+        Arc::new(StateDb::open(dir.path().join("state.db")).unwrap()),
         api.clone(),
     );
 
