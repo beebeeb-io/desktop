@@ -173,3 +173,172 @@ impl<C: CredentialStores> Apply for EngineApply<C> {
         }
     }
 }
+
+/// An update while sync runs (uploads and a hydration are tasks of the engine's one runner): the installer starts
+/// only after the runner's stop is confirmed, and when it does not start, the sync that was stopped is asked back.
+#[cfg(test)]
+mod active_work_tests {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use beebeeb_engine::identity::TEST;
+    use beebeeb_engine::signin::memory_store::MemoryCredentials;
+    use beebeeb_updater::testkit::{self, FakeClock, FakeHttp, MemStore, Publish, TestKey};
+    use beebeeb_updater::{Channel, Config, Event, Failure, Intent, State, Updater};
+
+    use beebeeb_engine::app::EngineConfig;
+    use beebeeb_engine::host::ChannelHost;
+    use beebeeb_engine::runner::EngineRunner;
+    use beebeeb_engine::sync_view::Start;
+
+    use super::*;
+
+    fn engine() -> Arc<Engine<MemoryCredentials>> {
+        let (host, _messages) = ChannelHost::new(|| {});
+        let config = EngineConfig {
+            account_id: "updates-apply-active-work".into(),
+            state_dir: crate::engine_host::tests::process_state_dir(),
+            api_base: "http://127.0.0.1:9".to_string(),
+        };
+        let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens");
+        engine.restore();
+        Arc::new(engine)
+    }
+
+    /// A running runner whose task ends when aborted (the slot's task stands for uploads and a hydration).
+    fn hold_running_stoppable(engine: &Engine<MemoryCredentials>) -> tokio::runtime::Runtime {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("a runtime for the slot's task");
+        let task = runtime.spawn(std::future::pending::<()>());
+        let account = engine.accounts().active_account().expect("the account");
+        *account.engine.try_lock().expect("the engine slot is free") = Some(EngineRunner::for_test_with_task(task));
+        engine.set_view_for_test(|view| view.start = Start::Running);
+        runtime
+    }
+
+    fn pressed() -> Arc<Presence> {
+        let presence = Presence::open();
+        assert!(presence.press());
+        presence
+    }
+
+    type Machine = Updater<FakeHttp, FakeClock, MemStore, EngineApply<MemoryCredentials>>;
+
+    fn settle(updater: &mut Machine, event: Event) -> State {
+        let mut state = updater.step(event).clone();
+        for _ in 0..100_000 {
+            if !matches!(
+                state,
+                State::Checking { .. } | State::Rechecking { .. } | State::Downloading { .. } | State::Verifying { .. }
+            ) {
+                return state;
+            }
+            state = updater.step(Event::Tick).clone();
+        }
+        panic!("the updater did not settle");
+    }
+
+    fn ready(
+        dir: &tempfile::TempDir,
+        apply: EngineApply<MemoryCredentials>,
+    ) -> Machine {
+        let key = TestKey::generate();
+        let mut http = FakeHttp::default();
+        Publish::new(Channel::Stable, "0.9.1", testkit::artifact_bytes(300_000)).serve(&mut http, &key);
+        let config = Config {
+            trust: testkit::trust(&key),
+            base_url: testkit::BASE.to_string(),
+            installed: testkit::version("0.9.0"),
+            staging_dir: dir.path().to_path_buf(),
+        };
+        let mut updater = Updater::new(config, http, FakeClock(Cell::new(testkit::NOW)), MemStore::default(), apply);
+        let check = Event::Check {
+            channel: Channel::Stable,
+            intent: Intent::Background,
+        };
+        assert!(matches!(settle(&mut updater, check), State::Available { .. }));
+        assert!(matches!(
+            settle(&mut updater, Event::Download),
+            State::ReadyToRestart { .. }
+        ));
+        updater
+    }
+
+    /// The installer's start sees the runner stopped (its uploads and hydration ended with it, the queue in
+    /// `state.db` stays); a start that fails asks sync back, once.
+    #[test]
+    fn the_installer_never_starts_over_a_running_runner_and_a_failed_start_asks_sync_back() {
+        for starts in [true, false] {
+            let engine = engine();
+            let _running = hold_running_stoppable(&engine);
+            let sync_back = SyncBack::default();
+            let syncing_at_start = Arc::new(Mutex::new(Vec::new()));
+            let (seen, watched) = (syncing_at_start.clone(), engine.clone());
+            let start: StartInstaller = Box::new(move |_, _| {
+                seen.lock().unwrap().push(watched.is_syncing());
+                starts
+            });
+            let apply = EngineApply::starting_with(engine.clone(), &TEST, sync_back.clone(), pressed(), start);
+            let dir = tempfile::tempdir().unwrap();
+            let mut updater = ready(&dir, apply);
+            assert!(engine.is_syncing());
+            let after = updater.step(Event::Apply).clone();
+            assert_eq!(*syncing_at_start.lock().unwrap(), [false], "the runner had stopped");
+            assert!(!engine.is_syncing());
+            if starts {
+                assert!(matches!(after, State::Restarting { .. }));
+                assert!(!sync_back.take(), "the installer replaces this program: no sync back");
+            } else {
+                assert!(matches!(
+                    after,
+                    State::Failed {
+                        failure: Failure::InstallerDidNotStart,
+                        ..
+                    }
+                ));
+                assert!(sync_back.take(), "sync that the hand-off stopped is asked back");
+            }
+        }
+    }
+
+    /// The person locked Beebeeb during the stop (seconds with uploads running): no installer, the stopped sync
+    /// is asked back, the download is kept.
+    #[test]
+    fn a_lock_during_the_stop_starts_no_installer_and_asks_sync_back() {
+        let engine = engine();
+        let _running = hold_running_stoppable(&engine);
+        let still_here = Arc::new(AtomicBool::new(true));
+        let presence = Presence::from_fns(
+            {
+                let here = still_here.clone();
+                move || (Some(beebeeb_engine::account::SessionGeneration::for_test(1)), here.load(Ordering::SeqCst))
+            },
+            || 0,
+            || false,
+        );
+        assert!(presence.press());
+        let sync_back = SyncBack::default();
+        let flip = still_here.clone();
+        let watched = engine.clone();
+        // The lock closes when the runner has stopped.
+        let start: StartInstaller = Box::new(|_, _| panic!("no installer starts after a lock"));
+        let apply = EngineApply::starting_with(engine.clone(), &TEST, sync_back.clone(), presence, start);
+        let dir = tempfile::tempdir().unwrap();
+        let mut updater = ready(&dir, apply);
+        let closer = std::thread::spawn(move || {
+            while watched.is_syncing() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            flip.store(false, Ordering::SeqCst);
+        });
+        let after = updater.step(Event::Apply).clone();
+        closer.join().unwrap();
+        assert!(matches!(after, State::Failed { failure: Failure::InstallerDidNotStart, .. }));
+        assert!(sync_back.take());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the download is kept");
+    }
+}
