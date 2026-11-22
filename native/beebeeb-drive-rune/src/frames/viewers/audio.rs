@@ -304,7 +304,7 @@ fn queue(doc: &AudioDoc, t: &Theme) -> El {
                 t.text_tertiary,
             )
             .w_full()
-            .px(scale::space::S12)
+            .px(13.0)
             .mb(6.0),
         );
     // `.kit-list-body`: the rows in one outlined box, a hairline between them.

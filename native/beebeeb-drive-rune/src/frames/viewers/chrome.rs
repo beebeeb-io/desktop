@@ -86,7 +86,7 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
                 .role("image")
                 .label("Not saved")
                 .size(7.0, 7.0)
-                .radius(crate::theme::tokens::radius::SM)
+                .radius(3.5)
                 .fill(t.text),
         );
     }
