@@ -286,6 +286,21 @@ fn shifted(view: &SheetView, from: Cell, dr: i64, dc: i64) -> Cell {
     }
 }
 
+/// The cell cursor moved by (`dr`, `dc`) cells and shown in a grid of `room` points of cells: the current cell moves and
+/// is the whole selection, or (`extend`) it stays and the selection's far corner moves. The cell the keyboard is on after
+/// it (the far corner). The editor's keys do the same through `go`; this is the move alone, for a workbook nobody edits.
+pub fn step(view: &mut SheetView, dr: i64, dc: i64, extend: bool, room: (f32, f32)) -> Cell {
+    let from = if extend { head(view) } else { view.current };
+    let to = shifted(view, from, dr, dc);
+    if extend {
+        select(view, view.current, to);
+    } else {
+        select(view, to, to);
+    }
+    reveal(view, to, room);
+    to
+}
+
 /// Whether a held cell has words or a formula.
 fn filled(c: &sheets::CellText) -> bool {
     !c.text.is_empty() || c.formula.is_some()

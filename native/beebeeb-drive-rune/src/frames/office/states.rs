@@ -503,6 +503,10 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, body: &StateBody) -> El {
     let t = tokens::theme(cx.system_dark());
     let title = s.identity.main_window_title();
     let state = body.state;
+    // The F6 stops in the order the window reads: the sidebar, the toolbar, the status line (a state's middle has no
+    // control of its own to stop on, or one Tab reaches from the toolbar).
+    let side_bar = sidebar::sidebar(s, &t);
+    super::order(false, false, false, false);
     let middle = if state.is_failure() {
         col()
             .key("stage")
@@ -534,10 +538,10 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, body: &StateBody) -> El {
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(viewers::office::toolbar(s, ui, false, &t))
+        .child(super::band(viewers::office::toolbar(s, ui, false, &t), super::PANE_TOOLBAR))
         .children(state.is_opening().then(|| viewer_bar(&t)))
         .child(middle)
-        .child(status_bar(state, left, &t));
+        .child(super::band(status_bar(state, left, &t), super::PANE_STATUS));
     col()
         .key("window")
         .role("window")
@@ -552,7 +556,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, body: &StateBody) -> El {
                     .key("body")
                     .w_full()
                     .h_full()
-                    .child(sidebar::sidebar(s, &t))
+                    .child(side_bar)
                     .child(main),
             ),
         )

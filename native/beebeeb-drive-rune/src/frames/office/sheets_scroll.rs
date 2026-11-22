@@ -34,8 +34,55 @@ pub fn follow(view: &SheetView, tx: &mut Tx) {
     tx.scroll_to_x(ACROSS, view.top_left.col as f32 * COL_Q);
 }
 
-/// The sheet's keys ([`scroll_key`]), with the viewports following. `true`: taken.
+thread_local! {
+    /// The points of cells the last frame's grid had, for a key between frames (a workbook nobody edits; the editor's
+    /// surface keeps its own).
+    static ROOM: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((800.0, 600.0)) };
+}
+
+/// The frame drew a grid with `room` points of cells.
+pub fn set_room(room: (f32, f32)) {
+    ROOM.with(|r| r.set(room));
+}
+
+/// The key of a cell's element in the grid.
+pub fn cell_key(cell: Cell) -> String {
+    format!("sh-cell-{}-{}", cell.row, cell.col)
+}
+
+/// An arrow in a workbook nobody edits moves the cell cursor by one cell, never past the sheet (Shift: the current
+/// cell stays and the selection grows or shrinks from it). The sheet scrolls to show the cell, the viewports follow,
+/// and the keyboard's focus goes to the cell with its ring. `true`: taken (an arrow with no Ctrl, Alt or Cmd).
+pub fn cursor_key_tx(view: &mut SheetView, key: &Key, m: &Mods, tx: &mut Tx) -> bool {
+    if m.ctrl || m.alt || m.cmd {
+        return false;
+    }
+    let (dr, dc) = match key {
+        Key::Up => (-1, 0),
+        Key::Down => (1, 0),
+        Key::Left => (0, -1),
+        Key::Right => (0, 1),
+        _ => return false,
+    };
+    let before = view.current;
+    let to = crate::frames::office::edit::sheet::step(view, dr, dc, m.shift, ROOM.with(std::cell::Cell::get));
+    if view.current != before {
+        // The host's words were the old cell's: the formula bar shows the new cell's own.
+        view.formula.clear();
+    }
+    follow(view, tx);
+    tx.focus(cell_key(to), true);
+    true
+}
+
+/// The sheet's keys, with the viewports following: with the keyboard on a cell, or nowhere, an arrow moves the cell
+/// cursor ([`cursor_key_tx`]); every other key, and an arrow while a control elsewhere has the keyboard, moves what is
+/// in view ([`scroll_key`]). `true`: taken.
 pub fn scroll_key_tx(view: &mut SheetView, key: &Key, m: &Mods, tx: &mut Tx) -> bool {
+    let on_grid = tx.focused().is_none_or(|key| key.starts_with("sh-cell-"));
+    if on_grid && cursor_key_tx(view, key, m, tx) {
+        return true;
+    }
     if !scroll_key(view, key, m) {
         return false;
     }

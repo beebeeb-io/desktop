@@ -537,8 +537,8 @@ mod live_ribbon {
     use crate::frames::viewers;
     use crate::frames::viewers::source::EditAnswer;
 
-    type Ops = Rc<RefCell<Vec<EditOp>>>;
-    type Answers = Rc<RefCell<Vec<EditAnswer>>>;
+    pub type Ops = Rc<RefCell<Vec<EditOp>>>;
+    pub type Answers = Rc<RefCell<Vec<EditAnswer>>>;
 
     /// A live-looking document whose editor records every op it is given and answers what the test queued.
     struct Editing {
@@ -612,7 +612,7 @@ mod live_ribbon {
     }
 
     /// The agreement open for editing: the editor's state is on, the source records.
-    fn editing(takes: bool) -> (Runtime<State>, Ops, Answers) {
+    pub fn editing(takes: bool) -> (Runtime<State>, Ops, Answers) {
         let (ops, answers) = (Ops::default(), Answers::default());
         let mut state = init();
         let source = Editing {
@@ -1029,5 +1029,257 @@ mod edit_guarded {
     fn edit_guarded_none_draws_no_notice() {
         let (rt, _) = deck(Vec::new(), Some("PowerPoint"));
         assert!(!has(&rt, "banner"));
+    }
+}
+
+/// The office windows on the keyboard alone (dc-125b): F6 walks the panes, a dialog hands focus back to what opened
+/// it, and the arrows move the cell cursor of a workbook with focus on the cell.
+mod keys {
+    use super::*;
+    use crate::frames::office::sheets::{Cell, SheetView, sheets_fixture};
+    use crate::frames::office::{PANE_DOCUMENT, PANE_RIBBON, PANE_SIDE, PANE_STATUS, PANE_TOOLBAR};
+
+    const SIDEBAR: &str = "sidebar";
+
+    fn shift() -> Mods {
+        Mods {
+            shift: true,
+            ..Mods::default()
+        }
+    }
+
+    fn f6(rt: &mut Runtime<State>, back: bool) {
+        press_with(rt, Key::Function(6), if back { shift() } else { Mods::default() });
+        rt.settle_all();
+        rt.frame(0.0);
+    }
+
+    /// The pane the keyboard is in: the one of `panes` the focused element is, or is inside.
+    fn pane_of(rt: &Runtime<State>, panes: &[&'static str]) -> Option<&'static str> {
+        let all = rt.elements();
+        let mut at = all.iter().position(|e| e.focused);
+        while let Some(i) = at {
+            if let Some(pane) = panes.iter().copied().find(|pane| all[i].key.as_deref() == Some(pane)) {
+                return Some(pane);
+            }
+            at = all[i].parent;
+        }
+        None
+    }
+
+    /// A board frame of the office viewers, by the scene that shows it.
+    fn viewer(frame: &str) -> Runtime<State> {
+        let mut state = init();
+        match frame {
+            "DW-1507" => crate::frames::office::docs::scene_docx(&mut state),
+            "DW-1509" => crate::frames::office::slides::scene_deck(&mut state),
+            _ => set_scene(&mut state, frame),
+        }
+        runtime_of(state, false)
+    }
+
+    /// F6 from nothing goes once around `panes` in order and wraps; Shift+F6 goes back around.
+    fn walks(rt: &mut Runtime<State>, panes: &[&'static str], what: &str) {
+        for pane in panes {
+            assert!(has(rt, pane), "{what}: {pane} is an F6 stop");
+        }
+        let mut seen = Vec::new();
+        for _ in 0..=panes.len() {
+            f6(rt, false);
+            seen.push(pane_of(rt, panes));
+        }
+        let mut want: Vec<Option<&str>> = panes.iter().copied().map(Some).collect();
+        want.push(Some(panes[0]));
+        assert_eq!(seen, want, "{what}: F6 walks the panes and wraps (focus ends on {:?})", focused(rt));
+        f6(rt, true);
+        assert_eq!(pane_of(rt, panes), panes.last().copied(), "{what}: Shift+F6 wraps back to the last pane");
+        f6(rt, true);
+        assert_eq!(pane_of(rt, panes), Some(panes[panes.len() - 2]), "{what}: Shift+F6 goes back one more");
+        assert!(rt.elements().into_iter().any(|e| e.focused && e.focus_visible), "{what}: with the ring");
+    }
+
+    #[test]
+    fn office_f6_walks_the_panes_of_a_document_being_edited() {
+        let (mut rt, ops, _answers) = live_ribbon::editing(true);
+        let panes = [SIDEBAR, PANE_TOOLBAR, PANE_RIBBON, PANE_SIDE, PANE_DOCUMENT, PANE_STATUS];
+        walks(&mut rt, &panes, "a document being edited");
+        assert!(ops.borrow().is_empty(), "F6 edited nothing: {:?}", ops.borrow());
+    }
+
+    #[test]
+    fn office_f6_walks_the_panes_of_each_viewer() {
+        // The read-only viewers have no ribbon: the toolbar, the panel left of the file (the outline, the filmstrip),
+        // the file, the status line.
+        for frame in ["DW-1507", "DW-1509"] {
+            let mut rt = viewer(frame);
+            walks(&mut rt, &[SIDEBAR, PANE_TOOLBAR, PANE_SIDE, PANE_DOCUMENT, PANE_STATUS], frame);
+        }
+        let mut rt = viewer("DW-1508");
+        walks(&mut rt, &[SIDEBAR, PANE_TOOLBAR, PANE_DOCUMENT, PANE_STATUS], "DW-1508");
+    }
+
+    /// The control labelled `label`, by its key.
+    fn labelled(rt: &Runtime<State>, label: &str) -> String {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some(label) && e.focusable && !e.exiting)
+            .and_then(|e| e.key)
+            .unwrap_or_else(|| panic!("no control labelled {label}"))
+    }
+
+    #[test]
+    fn office_about_hands_focus_back_to_the_status_lines_about_in_each_viewer() {
+        for frame in ["DW-1507", "DW-1508", "DW-1509"] {
+            let mut rt = viewer(frame);
+            let about = labelled(&rt, "About this viewer");
+            operate(&mut rt, &about);
+            assert!(matches!(ui(&rt).office.over, Some(Over::Licence)), "{frame}: About asked for the card");
+            assert!(has(&rt, "scrim"), "{frame}: the card is drawn");
+            assert_ne!(focused(&rt).as_deref(), Some(about.as_str()), "{frame}: the card took the keyboard");
+            press(&mut rt, Key::Escape);
+            rt.settle_all();
+            rt.frame(0.0);
+            assert!(ui(&rt).office.over.is_none(), "{frame}: Esc closed the card");
+            assert!(on_a_file(&rt), "{frame}: Esc closed the card, not the file");
+            assert_eq!(focused(&rt).as_deref(), Some(about.as_str()), "{frame}: focus is back on About");
+        }
+    }
+
+    #[test]
+    fn office_the_command_search_hands_focus_back_to_the_ribbons_search() {
+        let (mut rt, _ops, _answers) = live_ribbon::editing(true);
+        operate(&mut rt, "rib-find");
+        assert!(matches!(ui(&rt).office.over, Some(Over::Palette(_))));
+        press(&mut rt, Key::Escape);
+        rt.settle_all();
+        rt.frame(0.0);
+        assert!(ui(&rt).office.over.is_none(), "Esc closed the search");
+        assert_eq!(focused(&rt).as_deref(), Some("rib-find"), "focus is back on the ribbon's search");
+    }
+
+    #[test]
+    fn office_a_ribbon_menu_hands_focus_back_to_its_tool() {
+        let (mut rt, ops, _answers) = live_ribbon::editing(true);
+        // Esc: nothing picked, the Style button has the keyboard again.
+        operate(&mut rt, "rp-0");
+        assert!(has(&rt, "rib-menu"), "the menu hangs under the Style button");
+        press(&mut rt, Key::Escape);
+        rt.settle_all();
+        rt.frame(0.0);
+        assert!(!has(&rt, "rib-menu"), "Esc closed the menu");
+        assert!(on_a_file(&rt), "Esc closed the menu, not the file");
+        assert_eq!(focused(&rt).as_deref(), Some("rp-0"), "focus is back on the Style button");
+        assert!(ops.borrow().is_empty());
+        // A pick goes on in the document: the page has the keyboard, never nothing.
+        press(&mut rt, Key::Text(" ".into()));
+        assert!(has(&rt, "rib-menu"), "Space opens it again from the button");
+        press(&mut rt, Key::Down);
+        press(&mut rt, Key::Enter);
+        rt.settle_all();
+        rt.frame(0.0);
+        assert!(!has(&rt, "rib-menu"));
+        assert_eq!(ops.borrow().len(), 1, "one style was sent");
+        assert_eq!(
+            focused(&rt).as_deref(),
+            Some(crate::frames::office::edit::word::SURFACE),
+            "after a pick the page has the keyboard"
+        );
+    }
+
+    /// A workbook in a renderer that nobody edits: the board's sheet, 40 rows by 12 columns.
+    fn workbook() -> (Runtime<State>, SheetView) {
+        let mut view = sheets_fixture::board();
+        view.col_widths = vec![80.0; 12];
+        view.row_heights = vec![24.0; 40];
+        view.extent = (40, 12);
+        view.selection = None;
+        view.current = Cell { row: 1, col: 1 };
+        let (mut rt, _log) = crate::frames::office::docs::live_tests::live_runtime(Body::Sheet(view.clone()), 1.0, None);
+        rt.on_key = Some(crate::shell::host::on_key);
+        rt.frame(0.0);
+        (rt, view)
+    }
+
+    fn sheet(rt: &Runtime<State>) -> &SheetView {
+        match &ui(rt).file.body {
+            Body::Sheet(view) => view,
+            _ => panic!("not a workbook"),
+        }
+    }
+
+    fn arrow(rt: &mut Runtime<State>, key: Key, mods: Mods) {
+        press_with(rt, key, mods);
+        rt.settle_all();
+        rt.frame(0.0);
+    }
+
+    #[test]
+    fn office_arrows_move_the_cell_cursor_of_a_workbook_and_focus_follows() {
+        let (mut rt, _) = workbook();
+        assert!(!has(&rt, "edit-sheet-grid"), "nobody edits this workbook");
+        // Tab reaches the grid: its one stop is the current cell.
+        let stops = tab_stops(&mut rt);
+        assert!(stops.contains(&"sh-cell-1-1".to_string()), "the current cell is a Tab stop: {stops:?}");
+        assert_eq!(stops.iter().filter(|k| k.starts_with("sh-cell-")).count(), 1, "one stop for the grid: {stops:?}");
+        for _ in 0..80 {
+            if focused(&rt).as_deref() == Some("sh-cell-1-1") {
+                break;
+            }
+            press(&mut rt, Key::Tab);
+        }
+        arrow(&mut rt, Key::Down, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 2, col: 1 }, "Down: B3");
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-2-1"), "focus is on B3");
+        arrow(&mut rt, Key::Right, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 2, col: 2 }, "Right: C3");
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-2-2"));
+        arrow(&mut rt, Key::Up, Mods::default());
+        arrow(&mut rt, Key::Left, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 1, col: 1 }, "Up and Left: B2 again");
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-1-1"));
+        assert_eq!(sheet(&rt).selection, None, "a move selects one cell");
+        assert_eq!(words(&rt, "sh-cellbox-text"), "B2", "the cell box names the cell");
+        // The edge holds.
+        arrow(&mut rt, Key::Left, Mods::default());
+        arrow(&mut rt, Key::Left, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 1, col: 0 });
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-1-0"));
+    }
+
+    #[test]
+    fn office_shift_arrows_extend_the_selection_from_the_cell_cursor() {
+        let (mut rt, _) = workbook();
+        // No Tab first: the arrows take the grid from nowhere.
+        arrow(&mut rt, Key::Down, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 2, col: 1 });
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-2-1"), "the first arrow puts focus on the cell");
+        arrow(&mut rt, Key::Down, shift());
+        arrow(&mut rt, Key::Down, shift());
+        arrow(&mut rt, Key::Right, shift());
+        let view = sheet(&rt);
+        assert_eq!(view.current, Cell { row: 2, col: 1 }, "the cursor stays where the range began");
+        assert_eq!(
+            view.selection,
+            Some((Cell { row: 2, col: 1 }, Cell { row: 4, col: 2 })),
+            "B3:C5"
+        );
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-4-2"), "focus is on the far corner");
+        // A plain arrow leaves the range for one cell, from the cursor.
+        arrow(&mut rt, Key::Right, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 2, col: 2 });
+        assert_eq!(sheet(&rt).selection, None);
+    }
+
+    #[test]
+    fn office_an_arrow_past_the_view_scrolls_the_workbook_to_the_cell() {
+        let (mut rt, _) = workbook();
+        arrow(&mut rt, Key::Down, Mods::default());
+        for _ in 0..36 {
+            arrow(&mut rt, Key::Down, Mods::default());
+        }
+        let view = sheet(&rt);
+        assert_eq!(view.current, Cell { row: 38, col: 1 });
+        assert!(view.top_left.row > 0, "the view followed the cell: {:?}", view.top_left);
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-38-1"), "the cell is drawn and has the keyboard");
     }
 }
