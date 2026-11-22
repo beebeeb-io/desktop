@@ -70,6 +70,8 @@ pub struct State {
     pub(crate) this_pc: crate::frames::this_pc::Ui,
     /// Backups, a section of settings (`frames::backups`).
     pub(crate) backups: crate::frames::backups::BackupsUi,
+    /// The crash record a previous run left, until Send a report or Dismiss (`shell::crash_notice`).
+    pub(crate) crash: Option<crate::log_file::crash::CrashRecord>,
 }
 
 /// The state headless renders and tests start from: the fixture engine, nothing wired.
@@ -143,6 +145,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         signin: crate::frames::signin::start(),
         viewer: Default::default(),
         tray: None,
+        crash: None,
         shortcuts: Default::default(),
         setup: None,
         setup_source: None,

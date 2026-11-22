@@ -384,6 +384,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let behind = crate::frames::viewers::unsaved_guard::over(s, cx, behind); // the unsaved-changes question of a quit
     let behind = crate::frames::signin::setup::guide::over(s, cx, behind); // the first-time guide's tip, over the frame
     let behind = crate::frames::account::late::over(s, cx, behind); // a late password answer, said wherever the person is
+    let behind = super::crash_notice::over(s, cx, behind); // the last run crashed: Send a report or Dismiss
     let (Some(dialog), Some(dialog_group)) = (s.shell.app.dialog(), dialog_group_for(&s.shell.app)) else {
         return behind;
     };

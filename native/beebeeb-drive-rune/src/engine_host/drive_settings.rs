@@ -316,8 +316,8 @@ enum Ask {
     /// Repair, and turn off, Beebeeb in File Explorer.
     Repair,
     TurnOff,
-    /// Save the support bundle and hand it to the OS.
-    Export,
+    /// Save the support bundle (with a crash record attached, when there is one) and hand it to the OS.
+    Export(Option<crate::log_file::crash::CrashRecord>),
 }
 
 /// One job: what is asked, for whose account, under which engine session (as the window's thread read it when it
@@ -779,8 +779,16 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
                 refuse(refused.words());
             }
         }
-        Ask::Export => match engine.export_bundle(session) {
+        Ask::Export(crash) => match engine.export_bundle(session) {
             Ok(saved) => {
+                // The crash record goes into the saved bundle; its file is deleted only once it is in there.
+                if let Some(record) = crash {
+                    if crate::log_file::crash::attach_to_bundle(&saved.path, &record) {
+                        record.clear();
+                    } else {
+                        log("settings: the crash record was not saved with the report");
+                    }
+                }
                 let shown = (os.reveal)(&saved.path);
                 let draft = (os.open_draft)(&tools::draft_for(&saved.file_name));
                 if !shown {
@@ -1212,7 +1220,11 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     /// Save the bundle (queue counts, an error code, the last error message, all redacted by the engine), show it
     /// in File Explorer and open a draft to support. Called once per press, never by showing a page.
     fn export_bundle(&mut self) {
-        self.change(Ask::Export);
+        self.change(Ask::Export(None));
+    }
+
+    fn export_bundle_with_crash(&mut self, record: crate::log_file::crash::CrashRecord) {
+        self.change(Ask::Export(Some(record)));
     }
 
     /// The banner's "Show in File Explorer": the saved file of this account's last export, shown by the OS.

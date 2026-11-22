@@ -296,6 +296,11 @@ pub trait DriveSettings {
     /// - `Bundle::Failed`'s reason is shown on the page as given: it must be a fixed sentence
     ///   or a redacted one, never an OS error with a path in it.
     fn export_bundle(&mut self) {}
+    /// [`Self::export_bundle`] with a crash record attached (`shell::crash_notice`'s Send a report): a source that
+    /// saves a bundle puts the record into it and deletes the record file once saved. Default: the bundle alone.
+    fn export_bundle_with_crash(&mut self, _record: crate::log_file::crash::CrashRecord) {
+        self.export_bundle();
+    }
     /// "Show in File Explorer" on the banner (w17-settings-places): show the file of the last `Bundle::Saved`.
     /// `false`: there is none, or it could not be shown.
     fn reveal_bundle(&mut self) -> bool {
