@@ -335,16 +335,13 @@ pub fn on_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
     }
 }
 
-/// The toolbar's "Search names" field: the window's one text field that is not over the deck.
-const SEARCH_FIELD: &str = "search-input";
-
 /// The deck's chords when the stage does not have the keyboard: a filmstrip row has it (a click on a thumbnail leaves
 /// it there), a button of the ribbon, or nothing. Ctrl+M, Ctrl+D, Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y act on the deck as
 /// they do on the stage. Not while Present is on, nor while something is over the deck (the command search, a
-/// question, the slide menu), nor from the search field.
+/// question, the slide menu): the window has no text field but theirs.
 pub fn window_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
     let m = ev.mods;
-    if !(m.cmd || m.ctrl) || m.alt || tx.focused() == Some(SEARCH_FIELD) {
+    if !(m.cmd || m.ctrl) || m.alt {
         return false;
     }
     let Some(l) = live(s) else { return false };

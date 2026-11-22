@@ -243,6 +243,8 @@ impl DeckBody {
             Key::Text(t) if plain && t == " " && self.presenting => self.next(),
             Key::Function(5) if !self.presenting => self.present(),
             Key::Enter if (m.ctrl || m.cmd) && !self.presenting => self.present(),
+            // Present draws nothing over the slide: Ctrl+K is taken and opens no command search behind it.
+            Key::Command('k') if self.presenting => {}
             _ => return false,
         }
         true

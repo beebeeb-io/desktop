@@ -631,8 +631,10 @@ fn office_slides_edit_keys_duplicate_and_delete_the_current_slide() {
 // routing (the focused element, its ancestors, the window's `on_key`), as a key pressed on the installed build does.
 // ---------------------------------------------------------------------------
 
-/// [`editing`] with the shell's poll, which takes the viewer's intents (a palette command is one).
+/// [`editing`] with the shell's poll, which takes the viewer's intents (a palette command is one) and moves the
+/// keyboard where a press asked for it, as in the running app.
 fn editing_polled() -> (Runtime<State>, Rc<RefCell<Log>>) {
+    crate::shell::intents::poll_drains_for_this_test();
     let (mut rt, log) = editing();
     rt.poll = Some(crate::shell::host::poll);
     rt.frame(0.0);
@@ -797,25 +799,35 @@ fn office_slides_window_keys_work_with_the_keyboard_nowhere_and_on_a_ribbon_butt
 }
 
 #[test]
-fn office_slides_window_keys_are_not_the_decks_under_the_palette_in_the_search_field_or_with_text_in_hand() {
+fn office_slides_window_keys_are_not_the_decks_under_the_palette_or_with_text_in_hand() {
     let (mut rt, log) = editing_polled();
     click_thumbnail(&mut rt, &log, 1);
-    // Under the command search: its field's keys, never the deck's.
+    // Under the command search: its field's keys, never the deck's. The arrows move its mark, not the stage.
     key(&mut rt, Key::Command('k'), ctrl());
     key(&mut rt, Key::Command('d'), ctrl());
     key(&mut rt, Key::Command('m'), ctrl());
+    plain(&mut rt, Key::Down);
     assert!(log.borrow().edits.is_empty(), "{:?}", log.borrow().edits);
     assert_eq!(deck(&mut rt), (1, 3));
+    assert!(find(&rt, "pal").is_some(), "the search is still open");
     plain(&mut rt, Key::Escape);
-    // In "Search names": Ctrl+D and Ctrl+M are not the deck's.
-    click_in(&mut rt, "search-input", 0.5, 0.5);
-    assert_eq!(focused(&rt).as_deref(), Some("search-input"));
-    key(&mut rt, Key::Command('d'), ctrl());
-    key(&mut rt, Key::Command('m'), ctrl());
-    assert!(log.borrow().edits.is_empty(), "{:?}", log.borrow().edits);
+    assert!(find(&rt, "pal").is_none());
     // A shape's text in hand: Ctrl+D copies no slide.
     with_caret(&mut rt, &log);
     key(&mut rt, Key::Command('d'), ctrl());
+    assert!(log.borrow().edits.is_empty(), "{:?}", log.borrow().edits);
+    assert_eq!(deck(&mut rt), (1, 3));
+}
+
+#[test]
+fn office_slides_window_keys_present_opens_no_command_search_and_changes_no_deck() {
+    let (mut rt, log) = editing_polled();
+    rt.update(|s, _| viewers::deck_mut(s).expect("a deck").present());
+    rt.frame(0.0);
+    key(&mut rt, Key::Command('k'), ctrl());
+    key(&mut rt, Key::Command('d'), ctrl());
+    key(&mut rt, Key::Command('z'), ctrl());
+    assert!(palette_query(&mut rt).is_none(), "no search opens behind the slide");
     assert!(log.borrow().edits.is_empty(), "{:?}", log.borrow().edits);
     assert_eq!(deck(&mut rt), (1, 3));
 }

@@ -111,7 +111,9 @@ pub fn office_try_again(s: &mut State) {
 /// The deck's keys (Present's arrows, Space, Esc; F5 and Ctrl+Enter in the window). `true`: taken. A document's and a
 /// workbook's keys move their scroll viewport with `tx` too.
 pub(super) fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    if deck_mut(s).is_some_and(|deck| deck.on_key(&ev.key, &ev.mods)) {
+    // Something is open over the deck (the command search, a question): the arrows are its, not the deck's.
+    let covered = super::ui(s).is_some_and(|ui| ui.office.over.is_some());
+    if !covered && deck_mut(s).is_some_and(|deck| deck.on_key(&ev.key, &ev.mods)) {
         return true;
     }
     // A deck being edited: its chords (Ctrl+D, Ctrl+Z, ...) when the stage does not have the keyboard.
