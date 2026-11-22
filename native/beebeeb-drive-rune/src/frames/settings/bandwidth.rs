@@ -181,10 +181,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         ));
         list += 1;
     }
-    if matches!(crop, Crop::Whole | Crop::FromDevices) {
-        if ui.drive.shows(Control::SpeedTest) {
-            children.push(speed_test(list, &bw.test, t));
-        }
+    if matches!(crop, Crop::Whole | Crop::FromDevices) && ui.drive.shows(Control::SpeedTest) {
+        children.push(speed_test(list, &bw.test, t));
     }
     let overlay = [Direction::Upload, Direction::Download]
         .into_iter()

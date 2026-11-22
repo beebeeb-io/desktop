@@ -184,7 +184,8 @@ fn report_problem(crash: Option<&crate::log_file::crash::CrashRecord>, t: &Theme
         }
         lists::item(l, i, &it, t)
     };
-    let mut body = vec![dialogs::para_rich(0, WORDS, &[at..at + ADDRESS.len()], t)];
+    let address = at..at + ADDRESS.len();
+    let mut body = vec![dialogs::para_rich(0, WORDS, std::slice::from_ref(&address), t)];
     if let Some(record) = crash {
         let text = crate::shell::crash_notice::attached_text(record);
         body.push(lists::list(

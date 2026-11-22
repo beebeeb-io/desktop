@@ -669,6 +669,7 @@ impl DriveSettings for BoardDrive {
 pub struct UnwiredDrive(BoardDrive);
 
 impl UnwiredDrive {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self(BoardDrive::new())
     }

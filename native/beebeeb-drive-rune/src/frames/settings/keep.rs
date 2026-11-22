@@ -19,7 +19,6 @@ use crate::ui::kit;
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::view_state::{ViewState, try_again, view_state};
-use rune::tok::Family;
 use rune::{Align, El, TextStyle, col, el, row};
 
 use super::{Dialog, SettingsUi};
@@ -237,10 +236,10 @@ pub fn open(ui: &mut SettingsUi) {
 /// load", or before the source had answered) becomes the draft at the first press: what the
 /// person sees is what they change.
 fn adopted(ui: &mut SettingsUi) -> &mut KeepDraft {
-    if ui.more.keep.base.is_empty() {
-        if let Keep::Ready { folders, total_mb } = ui.drive.keep() {
-            ui.more.keep = KeepDraft::of(folders, total_mb);
-        }
+    if ui.more.keep.base.is_empty()
+        && let Keep::Ready { folders, total_mb } = ui.drive.keep()
+    {
+        ui.more.keep = KeepDraft::of(folders, total_mb);
     }
     &mut ui.more.keep
 }

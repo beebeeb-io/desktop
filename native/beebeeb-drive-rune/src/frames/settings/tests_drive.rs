@@ -242,6 +242,7 @@ fn sync_switches_turn_by_keyboard_and_are_never_amber() {
     );
     let amber = crate::theme::tokens::theme(false).accent;
     // No "Show sync status on files" row: the engine cannot switch Explorer's status.
+    #[allow(clippy::single_element_loop)]
     for (switch, read) in [(
         "item-1-1-switch",
         (|d: &dyn DriveSettings| d.sync().open_at_login) as fn(&dyn DriveSettings) -> bool,

@@ -16,7 +16,6 @@ use crate::ui::settings_list::{self as lists, Item};
 use crate::ui::settings_notice::NOTE;
 use crate::ui::settings_shell as shell;
 use crate::ui::view_state::{ViewState, view_state};
-use rune::tok::Family;
 use rune::{El, Shape, Span, canvas, el, rich, row};
 
 use super::drive::Control;

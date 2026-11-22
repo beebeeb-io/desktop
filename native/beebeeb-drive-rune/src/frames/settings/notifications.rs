@@ -107,11 +107,6 @@ pub fn said_over(ui: &SettingsUi, standing: Option<&'static str>, t: &Theme) -> 
     }
 }
 
-/// "Try again" in a pane's own card (Recent notifications that could not be read): asks Beebeeb again.
-pub fn try_again(index: usize, t: &Theme) -> El {
-    controls::button(index, "Try again", None, Emphasis::Plain, t).on_press(ask_again)
-}
-
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let n = ui.source.notifications();
     let mut children = vec![shell::heading("Notifications", None, t)];
@@ -214,7 +209,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 };
                 let key = format!("item-{list}-{i}");
                 let mut switch = crate::ui::switch::switch_sized(
-                    &format!("{}-switch", &key),
+                    &format!("{}-switch", key),
                     "",
                     on,
                     true,

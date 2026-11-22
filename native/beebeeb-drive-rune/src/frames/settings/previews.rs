@@ -24,7 +24,7 @@ use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell::{self as shell, SUB};
 use crate::ui::setup::{self, SegInk, SegSize};
 use crate::ui::view_state::{ViewState, try_again, view_state};
-use rune::{Color, El, Family, Pixels, Span, TextStyle, col, el, rich, row};
+use rune::{Color, El, Pixels, Span, TextStyle, col, el, rich, row};
 
 pub use crate::frames::signin::setup::source::{PreviewFormat, PreviewSize};
 pub use crate::frames::signin::setup::{Compare, CompareMode};
@@ -105,6 +105,7 @@ pub fn name(size: PreviewSize, format: PreviewFormat) -> String {
 
 /// What the source answers for this pane.
 #[derive(Clone, PartialEq, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum PhotoPreviews {
     /// Nothing answers yet (the default of `DriveSettings::photo_previews`): no value is drawn.
     Unavailable,
@@ -202,9 +203,12 @@ fn decode_rgba(png_bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let bytes = &buf[..info.buffer_size()];
     let rgba: Vec<u8> = match (info.color_type, info.bit_depth) {
         (png::ColorType::Rgba, png::BitDepth::Eight) => bytes.to_vec(),
-        (png::ColorType::Rgb, png::BitDepth::Eight) => {
-            bytes.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect()
-        }
+        (png::ColorType::Rgb, png::BitDepth::Eight) => bytes
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
         _ => return None,
     };
     Some((info.width, info.height, rgba))
