@@ -1682,6 +1682,6 @@ pub mod identity_at;
 // The placeholder pass (task 2240, LD-0113), in its own file under the size ratchet.
 mod populate;
 use populate::populate_placeholders;
-pub use populate::restore_placeholders;
+pub use populate::{EarlyPasses, restore_placeholders};
 
 pub mod upload_finalization;

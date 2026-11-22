@@ -18,8 +18,11 @@ pub const PULL_BATCH_ROWS: usize = 1_000;
 /// The connection, behind a lock one thread may take more than once.
 pub(crate) struct ConnLock {
     /// The holding thread and how many times it holds the lock.
-    owner: Mutex<(Option<ThreadId>, usize)>,
+    /// (holder, depth, threads waiting, times a waiting thread took it): dc-164 needs the last two.
+    owner: Mutex<(Option<ThreadId>, usize, usize, u64)>,
     freed: Condvar,
+    /// dc-164: a waiting thread took the lock.
+    taken: Condvar,
     conn: RefCell<Connection>,
 }
 
@@ -30,8 +33,9 @@ unsafe impl Sync for ConnLock {}
 impl ConnLock {
     pub(crate) fn new(conn: Connection) -> Self {
         Self {
-            owner: Mutex::new((None, 0)),
+            owner: Mutex::new((None, 0, 0, 0)),
             freed: Condvar::new(),
+            taken: Condvar::new(),
             conn: RefCell::new(conn),
         }
     }
@@ -46,7 +50,17 @@ impl ConnLock {
                     owner.0 = Some(me);
                     break;
                 }
-                Some(_) => owner = self.freed.wait(owner).unwrap_or_else(std::sync::PoisonError::into_inner),
+                Some(_) => {
+                    owner.2 += 1;
+                    owner = self.freed.wait(owner).unwrap_or_else(std::sync::PoisonError::into_inner);
+                    owner.2 -= 1;
+                    if owner.0.is_none() {
+                        owner.0 = Some(me);
+                        owner.3 += 1;
+                        self.taken.notify_all();
+                        break;
+                    }
+                }
             }
         }
         owner.1 += 1;
@@ -60,6 +74,23 @@ impl ConnLock {
             drop(owner);
             self.freed.notify_one();
         }
+    }
+
+    /// dc-164: called with the lock free (between two batches): when another thread waits for it, let one take it
+    /// before this thread takes it again. A batch thread otherwise takes it back before the woken thread runs, and
+    /// every other reader (the early placeholder passes, the status line) waits for the whole pull. Bounded: after
+    /// 100 ms it goes on regardless.
+    fn let_one_in(&self) {
+        let owner = self.owner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owner.2 == 0 || owner.0.is_some() {
+            return;
+        }
+        let seen = owner.3;
+        let _ = self
+            .taken
+            .wait_timeout_while(owner, std::time::Duration::from_millis(100), |o| o.3 == seen && o.2 > 0)
+            .map(|_| ())
+            .unwrap_or_else(|p| drop(p.into_inner()));
     }
 
     /// The connection, as `Mutex::lock` gave it (never poisoned). A thread that already holds a
@@ -213,6 +244,7 @@ impl<'a> WriteBatch<'a> {
         if self.rows % self.every == 0 {
             self.commit()?;
             between(self.rows);
+            self.lock.let_one_in();
             self.begin()?;
         }
         Ok(())

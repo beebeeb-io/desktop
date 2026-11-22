@@ -229,3 +229,94 @@ pub(in crate::windows_cf) fn mint(
     tracing::debug!(file_id = %file_id, is_dir, "cloud placeholder created");
     Ok(true)
 }
+
+/// dc-164: one placeholder of a [`mint_batch`] call.
+pub(in crate::windows_cf) struct MintSpec<'a> {
+    pub file_id: &'a str,
+    pub name: &'a str,
+    pub size_bytes: i64,
+    pub modified_at: i64,
+    pub is_dir: bool,
+    pub read_only: bool,
+}
+
+/// dc-164: [`mint`] for many placeholders in ONE folder, in one `CfCreatePlaceholders` call (it takes an array; one
+/// call per row was 41,510 calls for 41,510 rows, task dc-086). One result per spec, in order, as [`mint`] gives it:
+/// `Ok(true)` created, `Ok(false)` already there, `Err` this entry failed. An entry Windows did not reach (the call
+/// failed before it) reads as failed, never as created: each entry's result starts as `E_PENDING`.
+pub(in crate::windows_cf) fn mint_batch(parent_dir: &std::path::Path, specs: &[MintSpec<'_>]) -> Vec<anyhow::Result<bool>> {
+    const ALREADY_EXISTS: windows::core::HRESULT = windows::core::HRESULT(0x800700B7u32 as i32);
+    const NOT_REACHED: windows::core::HRESULT = windows::core::HRESULT(0x8000000Au32 as i32); // E_PENDING
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let parent_wide: Vec<u16> = parent_dir
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // The buffers every entry points into; they outlive the call below.
+    let names: Vec<Vec<u16>> = specs
+        .iter()
+        .map(|s| s.name.encode_utf16().chain(std::iter::once(0)).collect())
+        .collect();
+    let mut entries: Vec<CF_PLACEHOLDER_CREATE_INFO> = specs
+        .iter()
+        .zip(&names)
+        .map(|(s, name_wide)| {
+            // As in `mint`: a folder is a fully populated directory placeholder, a file a hydrate-on-open stub.
+            let attributes = if s.is_dir {
+                FILE_ATTRIBUTE_DIRECTORY.0
+            } else if s.read_only {
+                FILE_ATTRIBUTE_READONLY.0
+            } else {
+                FILE_ATTRIBUTE_NORMAL.0
+            };
+            let mut flags = CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC;
+            if s.is_dir {
+                flags |= CF_PLACEHOLDER_CREATE_FLAG_DISABLE_ON_DEMAND_POPULATION;
+            }
+            let ticks = unix_to_filetime(s.modified_at);
+            CF_PLACEHOLDER_CREATE_INFO {
+                RelativeFileName: PCWSTR(name_wide.as_ptr()),
+                FsMetadata: CF_FS_METADATA {
+                    BasicInfo: FILE_BASIC_INFO {
+                        FileAttributes: attributes,
+                        CreationTime: ticks,
+                        LastWriteTime: ticks,
+                        ChangeTime: ticks,
+                        ..Default::default()
+                    },
+                    FileSize: if s.is_dir { 0 } else { s.size_bytes },
+                },
+                FileIdentity: s.file_id.as_ptr() as *const _,
+                FileIdentityLength: s.file_id.len() as u32,
+                Flags: flags,
+                Result: NOT_REACHED,
+                CreateUsn: 0,
+            }
+        })
+        .collect();
+    // SAFETY: every pointer in `entries` points into `parent_wide`, `names` or the specs' `file_id`s, all of which
+    // outlive the call; `CfCreatePlaceholders` copies what it needs and keeps no pointer. Without
+    // `CF_CREATE_FLAG_STOP_ON_ERROR` it goes on past a failed entry and writes each entry's own result, which decides
+    // below: the call's own error only says that some entry failed (an "already exists" one included).
+    let call = unsafe { CfCreatePlaceholders(PCWSTR(parent_wide.as_ptr()), &mut entries, CF_CREATE_FLAG_NONE, None) };
+    entries
+        .iter()
+        .zip(specs)
+        .map(|(entry, spec)| match entry.Result {
+            ALREADY_EXISTS => Ok(false),
+            NOT_REACHED => Err(match &call {
+                Err(e) => anyhow::anyhow!("CfCreatePlaceholders: {e}"),
+                Ok(()) => anyhow::anyhow!("CfCreatePlaceholders: entry not reached"),
+            }),
+            r if r.is_err() => Err(anyhow::anyhow!("CfCreatePlaceholders entry: {r:?}")),
+            _ => {
+                // Zero-knowledge: the file id and kind only, never the plaintext name or path.
+                tracing::debug!(file_id = %spec.file_id, is_dir = spec.is_dir, "cloud placeholder created");
+                Ok(true)
+            }
+        })
+        .collect()
+}
