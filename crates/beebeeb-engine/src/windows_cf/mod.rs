@@ -56,6 +56,8 @@ pub mod poison;
 pub mod mark_of_web;
 // Task 2523: a copy behind the current version, emptied in the measured order and given the new size.
 pub mod stale_copy;
+// dc-103c: a placeholder holding ranges of a version the server moved past, emptied so the next open fetches the new one.
+pub mod stale_ranges;
 // LD-0105 W2: the streaming fetch (range sessions, cancel, open completion, W3's decline).
 pub mod streaming;
 // LD-0105 S0: a fetch's byte progress reported to Cloud Files.

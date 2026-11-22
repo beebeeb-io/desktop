@@ -109,6 +109,8 @@ impl EngineBridge {
             };
             self.refresh_stale_copy(&copy, &place, &mut pass)?;
         }
+        #[cfg(target_os = "windows")]
+        self.wipe_stale_ranges(sync_root, &mut pass)?;
         if pass != StaleCopyPass::default() {
             tracing::info!(
                 queued = pass.queued.len(),
@@ -120,6 +122,31 @@ impl EngineBridge {
             );
         }
         Ok(pass)
+    }
+
+    /// dc-103c (design 1640 "Not done" (b)): placeholders holding only RANGES of a version the pull moved past have no
+    /// agreed content, so the rule above never names them, and their next session continued the older version. They
+    /// are emptied (`windows_cf::stale_ranges`) so the next open fetches the current version; within the same budget.
+    #[cfg(target_os = "windows")]
+    fn wipe_stale_ranges(&self, sync_root: &Path, pass: &mut StaleCopyPass) -> Result<(), EngineError> {
+        use crate::windows_cf::stale_ranges::Wiped;
+        for stale in self.db.list_stale_ranges(STALE_COPIES_READ_PER_PASS)? {
+            if pass.queued.len() + pass.emptied.len() >= STALE_COPIES_PER_PASS {
+                pass.later += 1;
+                continue;
+            }
+            let Ok(place) = local_file_path_under_sync_root(sync_root, &stale.path) else {
+                pass.later += 1;
+                continue;
+            };
+            match crate::windows_cf::stale_ranges::wipe(&self.db, &stale, &place) {
+                Wiped::Emptied => pass.emptied.push(stale.file_id),
+                // A placeholder that holds nothing needs no wipe (populate gives it the current identity).
+                Wiped::Later("empty") => {}
+                Wiped::Later(_) => pass.later += 1,
+            }
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]
