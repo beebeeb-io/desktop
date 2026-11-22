@@ -310,10 +310,19 @@ impl Ui {
         true
     }
 
-    /// Cancel and Esc: back to the document, still not saved.
+    /// Cancel and Esc: back to the document, still not saved. The keyboard goes back where the keys were pressed:
+    /// the page's caret, the sheet's current cell, the slide (RC2-11), never the ribbon's search. The About card
+    /// hands it back to the status line's About itself (its `focus_return`).
     pub fn office_close_over(&mut self) {
-        self.office.over = None;
-        self.focus = Some("rib-find");
+        let was = self.office.over.take();
+        if !matches!(was, Some(Over::Licence)) {
+            self.office_focus_document();
+        }
+    }
+
+    /// The open document takes the keyboard on the next poll: the page, the grid or the slide.
+    fn office_focus_document(&mut self) {
+        self.focus = Some(doc_key(&self.file.name));
     }
 
     /// Ctrl+K, or a press on the ribbon's search (both are the editor's frame's only: [`on_key`],
@@ -382,6 +391,8 @@ impl Ui {
         let stage = self.stage();
         let run = palette::resolve_at(edit.map(|e| e.kind), stage, &group.title, &command.name, edit.and_then(|e| e.marks.as_ref()));
         self.office.over = None;
+        // What the command does happens in the document, so the keyboard goes back there (a dialog it opens takes it).
+        self.office_focus_document();
         match run {
             Run::File(name) => self.intent(Intent::OpenInDrive(name)),
             Run::Op(op) if live => self.office_edit(op),
@@ -488,6 +499,7 @@ impl Ui {
         match word_insert::table_op(&form.rows.text, &form.cols.text) {
             Ok(op) => {
                 self.office.over = None;
+                self.office_focus_document();
                 self.office_edit(op);
             }
             Err((which, words)) => {
@@ -503,6 +515,7 @@ impl Ui {
         match word_insert::link_op(&form.text.text, &form.url.text) {
             Ok(op) => {
                 self.office.over = None;
+                self.office_focus_document();
                 self.office_edit(op);
             }
             Err((which, words)) => {

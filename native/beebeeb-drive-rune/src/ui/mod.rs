@@ -27,6 +27,7 @@ pub mod list_keys;
 pub mod load_strip;
 pub mod menu;
 pub mod pill;
+pub mod region;
 pub mod settings_card;
 pub mod settings_controls;
 pub mod settings_dialog;

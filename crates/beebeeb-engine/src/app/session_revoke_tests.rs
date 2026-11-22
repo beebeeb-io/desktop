@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{REVOKE_BOUND, pay_owed, revoke, revoke_detached, revoke_owing};
+use super::{REVOKE_BOUND, RETRY_FIRST, pay_owed, revoke, revoke_detached, revoke_owing};
 use crate::keychain::owed_revocations::{MemoryOwed, OwedRevocations};
 use crate::account::SessionTransition;
 use crate::app::{Engine, EngineConfig};
@@ -82,6 +82,11 @@ impl TestServer {
     /// [`Server::NeverAnswers`] stay open for the whole test and are never reset.
     fn start(behaviour: Server, store: Option<StoreProbe>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        Self::start_on(listener, behaviour, store)
+    }
+
+    /// As [`Self::start`], on a listener the test bound itself (a port that was down and is back).
+    fn start_on(listener: TcpListener, behaviour: Server, store: Option<StoreProbe>) -> Self {
         let base = format!("http://{}", listener.local_addr().expect("its address"));
         let heard: Arc<Mutex<Vec<Heard>>> = Arc::default();
         let accepted: Arc<AtomicUsize> = Arc::default();
@@ -631,4 +636,119 @@ fn the_network_coming_back_pays_the_owed_list_once() {
     host.event(status_event(State::Idle));
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(server.heard.lock().unwrap().len(), 1, "one pay per return");
+}
+
+// ── RC2-15c: an owed revocation is retried with no engine running (the app on the sign-in screen) ──
+
+/// A loopback address nothing listens on yet, which a later [`TestServer::start_on`] can take.
+fn a_port_that_is_down() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    listener.local_addr().expect("its address")
+}
+
+/// A sign-out's revoke with the server down, no engine: the server comes back on the same address and hears the
+/// logout once within the first backoff, the list is empty after, and nothing more is asked. M (no retry in
+/// `revoke_detached`): the server hears nothing, red.
+#[test]
+fn owed_revoke_is_paid_once_when_the_server_comes_back_without_an_engine() {
+    let addr = a_port_that_is_down();
+    let base = format!("http://{addr}");
+    let (_memory, owed) = owed_list();
+    let token = invented_token();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    {
+        let _enter = runtime.enter();
+        revoke_detached(client_for(&base), base.clone(), token.clone(), owed.clone());
+    }
+    // The first try found nobody: still owed.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(owed_tokens(&owed), vec![token.clone()]);
+
+    let listener = TcpListener::bind(addr).expect("the same address, back");
+    let server = TestServer::start_on(listener, Server::Answers(200), None);
+    let heard = server.heard_within(RETRY_FIRST + Duration::from_secs(5));
+    assert_eq!(heard.len(), 1, "the retry reached the server within the first backoff");
+    assert!(heard[0].request_line.starts_with("POST /api/v1/auth/logout "));
+    assert_eq!(heard[0].bearer.as_deref(), Some(token.as_str()));
+    assert!(
+        eventually(Duration::from_secs(5), || owed.owed().is_empty()),
+        "the answer settled it"
+    );
+    // Past the next backoff (10 s): the retry stopped once paid.
+    std::thread::sleep(RETRY_FIRST * 2 + Duration::from_secs(1));
+    assert_eq!(server.heard.lock().unwrap().len(), 1, "one logout per session");
+    // A next start pays nothing: the list is empty.
+    run(pay_owed(&client_for(&base), &base, &owed));
+    assert_eq!(server.heard.lock().unwrap().len(), 1, "not again at the next start");
+}
+
+/// The retry stops when someone else paid first (the next start, the network coming back): the server hears that
+/// one logout and no retry. M (the retry not checking the list): a second request, red.
+#[test]
+fn owed_revoke_retry_stops_when_another_path_paid_it() {
+    let addr = a_port_that_is_down();
+    let base = format!("http://{addr}");
+    let (_memory, owed) = owed_list();
+    let token = invented_token();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    {
+        let _enter = runtime.enter();
+        revoke_detached(client_for(&base), base.clone(), token.clone(), owed.clone());
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    let listener = TcpListener::bind(addr).expect("the same address, back");
+    let server = TestServer::start_on(listener, Server::Answers(200), None);
+    // The start pays it before the first retry is due.
+    run(pay_owed(&client_for(&base), &base, &owed));
+    assert_eq!(server.heard_within(Duration::from_secs(2)).len(), 1);
+    assert!(owed.owed().is_empty());
+    std::thread::sleep(RETRY_FIRST + Duration::from_secs(2));
+    assert_eq!(
+        server.heard.lock().unwrap().len(),
+        1,
+        "the retry saw it paid and asked nothing"
+    );
+}
+
+/// A server that stays down keeps the token owed, and the retry ends with its runtime (the process). No request
+/// leaves after the runtime is gone.
+#[test]
+fn owed_revoke_stays_owed_while_the_server_stays_down() {
+    let server = TestServer::start(Server::Answers(503), None);
+    let (_memory, owed) = owed_list();
+    let token = invented_token();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    {
+        let _enter = runtime.enter();
+        revoke_detached(
+            client_for(&server.base),
+            server.base.clone(),
+            token.clone(),
+            owed.clone(),
+        );
+    }
+    // The first try, then one retry after the first backoff: both a 503, so still owed.
+    assert!(eventually(RETRY_FIRST + Duration::from_secs(5), || server
+        .heard
+        .lock()
+        .unwrap()
+        .len()
+        >= 2));
+    assert_eq!(owed_tokens(&owed), vec![token]);
+    drop(runtime);
+    let asked = server.heard.lock().unwrap().len();
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(server.heard.lock().unwrap().len(), asked);
 }

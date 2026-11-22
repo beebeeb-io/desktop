@@ -32,8 +32,8 @@ pub mod protected_fixture;
 pub mod rename;
 pub mod reread;
 pub mod reset;
-pub mod reveal;
 pub mod retry;
+pub mod reveal;
 mod row_facts;
 pub mod scenes_waveb;
 pub mod select_bar;
@@ -497,8 +497,27 @@ impl State {
         self.actions.open_with.line = None;
     }
 
-    /// Close the menu and give the keyboard back to the list.
+    /// Close the menu (Escape, a click outside) and give the keyboard back to where it came from: New and Sort to
+    /// their button (RC2-8), the file menus to the list.
     pub fn close_menu_tx(&mut self, tx: &mut Tx) {
+        let button = match self.actions.menu.map(|open| open.kind) {
+            Some(MenuKind::New) => Some("new-btn"),
+            Some(MenuKind::Sort) => Some("sort-btn"),
+            _ => None,
+        };
+        self.close_menu();
+        match button {
+            // The menu's trigger, as a web menu's close does; its ring when the keyboard closed it.
+            Some(button) => {
+                let ring = tx.by_keys();
+                tx.return_focus(button, ring);
+            }
+            None => tx.focus("rows", false),
+        }
+    }
+
+    /// Close the menu after a pick: the keyboard goes to the list, where what was picked acts.
+    fn close_menu_picked(&mut self, tx: &mut Tx) {
         self.close_menu();
         tx.focus("rows", false);
     }
@@ -966,7 +985,7 @@ impl State {
         }
         // Sort's choices keep the menu open, as a menu of ticks does; everything else closes it.
         if open.kind != MenuKind::Sort {
-            self.close_menu_tx(tx);
+            self.close_menu_picked(tx);
         }
         let sort = self.actions.sort;
         match id {
@@ -1145,7 +1164,12 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
         s.show_detail_pane = false;
         let names: Vec<&str> = s.listing.items.iter().map(|i| i.name.as_str()).collect();
         let original = s.listing.items[6].clone();
-        if s.actions.source.duplicate(std::slice::from_ref(&original), &names).is_ok() && s.take_changes().0 {
+        if s.actions
+            .source
+            .duplicate(std::slice::from_ref(&original), &names)
+            .is_ok()
+            && s.take_changes().0
+        {
             s.open_rename(7);
             let mut edit = rune::TextEdit::new(original.name.clone());
             edit.set_caret(names::stem_len(&original.name, false));

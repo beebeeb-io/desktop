@@ -129,7 +129,8 @@ fn a_second_account_starts_clean_and_never_sees_the_first_ones_names() {
     nothing_of_a_left(&pc);
 }
 
-/// A queued change of A's needs A's answer: nothing is removed, B stays refused, every row and file as it was.
+/// A queued change of A's that is no item in the folder (a rename) needs A's answer: nothing is removed, B stays
+/// refused, every row and file as it was. (A queued edit or new file is the person's to keep aside: RC2-5.)
 #[test]
 fn a_queued_change_of_the_first_account_keeps_the_refusal_and_deletes_nothing() {
     let pc = Pc::new();
@@ -137,7 +138,7 @@ fn a_queued_change_of_the_first_account_keeps_the_refusal_and_deletes_nothing() 
     pc.db()
         .enqueue_operation(&PendingOperation {
             base_version: Some(3),
-            ..queued("op-edit", OperationKind::UploadVersion, IDS[0], None)
+            ..queued("op-rename", OperationKind::RenameFile, IDS[0], None)
         })
         .unwrap();
     let (contents, files) = (pc.contents(), listing(&pc.root()));

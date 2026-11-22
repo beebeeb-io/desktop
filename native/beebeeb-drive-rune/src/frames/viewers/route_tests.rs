@@ -557,15 +557,16 @@ fn a_pdf_that_cannot_be_read_has_its_own_words_and_says_decrypted_only_when_it_w
         route_to_file(&mut rt);
         drawn(&rt)
     };
-    // Downloaded and decrypted: it says so, and speaks of a PDF (not of text or a picture).
+    // Downloaded whole: it speaks of a PDF (not of text or a picture), and no word of it blames decrypting (RC2-3).
     let words = said(NoPreview::PdfUnreadable, None);
-    assert!(words.contains("Can't show this PDF"), "{words}");
+    assert!(words.contains("Can't read this PDF"), "{words}");
     assert!(
-        words.contains("It was decrypted on this PC, but this app can't read it"),
+        words.contains("It arrived whole from Beebeeb, but this app can't read it"),
         "{words}"
     );
     assert!(words.contains("damaged or cut short, or protected in a way"), "{words}");
-    assert!(words.contains(states::DECRYPTED_NOT_KEPT), "{words}");
+    assert!(words.contains(states::PDF_NOT_KEPT), "{words}");
+    assert!(!words.to_lowercase().contains("decrypt"), "{words}");
     for wrong in ["UTF-8", "a picture"] {
         assert!(!words.contains(wrong), "{wrong}: {words}");
     }

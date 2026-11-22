@@ -35,21 +35,28 @@
 ; flyout and thumbnail handlers), then keeps downloaded files as plain files ("Keep downloaded files" ticked, the
 ; default, and always in a silent uninstall) or removes the folder (unticked). Engine:
 ; windows_cf::registration_teardown. An update (/UPDATE) changes nothing here. A failure leaves the uninstall going.
+; RC2-7: with "delete … the saved sign-in" ticked, the same run also deletes the saved sign-in (session tokens, wrapped
+; keys, account emails, parked sessions): every Credential Manager entry named "<credential service>/…" of THIS
+; identity only (engine keychain::forget_sign_in; io.beebeeb.app never matches io.beebeeb.app.test, nor the reverse).
 !macro BB_UNINSTALL_SYNC_FOLDER exe
   ${If} $UpdateMode <> 1
   ${AndIf} ${FileExists} "${exe}"
+    StrCpy $1 ""
+    ${If} $DeleteAppDataCheckboxState = 1
+      StrCpy $1 " forget-sign-in"
+    ${EndIf}
     ${If} $KeepFilesCheckboxState = ${BST_CHECKED}
-      ExecWait '"${exe}" --uninstall-sync-folder keep' $0
+      ExecWait '"${exe}" --uninstall-sync-folder keep$1' $0
     ${Else}
-      ExecWait '"${exe}" --uninstall-sync-folder remove' $0
+      ExecWait '"${exe}" --uninstall-sync-folder remove$1' $0
     ${EndIf}
     DetailPrint "Beebeeb folder teardown: exit $0"
   ${EndIf}
 !macroend
 
 ; Beebeeb: an uninstall (not an update) also removes downloaded update installers. They are a cache.
-; The identity's own names (engine identity.rs): the folder name under the config, data, cache and temp dirs, and the
-; credential service. Only THIS identity's: the test build never touches the real app's, nor the other way round.
+; The identity's own names (engine identity.rs): the folder name under the config, data, cache and temp dirs.
+; Only THIS identity's: the test build never touches the real app's, nor the other way round.
 !if "${BUNDLEID}" == "io.beebeeb.app"
   !define BB_FOLDER "beebeeb"
 !else
@@ -72,10 +79,7 @@
       ; staging inside the install folder
       RMDir /r "$INSTDIR\finder-writes"
       RMDir "$INSTDIR"
-      ; the saved sign-in (session token, wrapped key, account email): Credential Manager entries named
-      ; "<bundle identifier>/..." (the trailing slash keeps io.beebeeb.app from matching io.beebeeb.app.test)
-      nsExec::Exec 'powershell -NoProfile -NonInteractive -Command "cmdkey /list | ForEach-Object { if ($$_ -match $\'Target:\s+(?:LegacyGeneric:target=)?(${BUNDLEID}/\S+)$\') { cmdkey /delete:$$Matches[1] } }"'
-      Pop $0
+      ; the saved sign-in went earlier, while the app was still here (BB_UNINSTALL_SYNC_FOLDER ... forget-sign-in)
     ${Else}
       ; not ticked: say exactly what stays (silent uninstall shows nothing and never deletes data)
       MessageBox MB_OK|MB_ICONINFORMATION|MB_SETFOREGROUND "$(uninstallKeepsData)" /SD IDOK

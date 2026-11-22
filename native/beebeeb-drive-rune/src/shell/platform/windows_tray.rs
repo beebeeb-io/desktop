@@ -567,8 +567,14 @@ fn handle(hwnd: HWND, context: &Context, message: u32, w: WPARAM, l: LPARAM) -> 
             refresh(hwnd, context);
             Some(0)
         }
-        // The taskbar's mode, the scale or the displays changed: the icon may need redrawing.
+        // The taskbar's mode, the scale or the displays changed: the icon may need redrawing. A contrast theme
+        // went on or off: the palette (`tokens::theme`) is re-read first, so the icon and every frame take it, and
+        // the app's view re-runs. `Presence(true)` is the event the app takes as "nothing to do" (the icon is
+        // there): its handler's update re-runs the main window's view, which is all a palette change needs.
         WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
+            if message == WM_SETTINGCHANGE && super::windows::on_setting_change() {
+                context.send(TrayEvent::Presence(true));
+            }
             refresh(hwnd, context);
             None
         }

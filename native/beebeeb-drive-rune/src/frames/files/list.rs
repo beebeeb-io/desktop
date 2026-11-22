@@ -15,7 +15,7 @@ use crate::source::DriveItem;
 use crate::theme::icons;
 use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
-use crate::ui::file_list::{COLUMNS, PcState, ROW_H, file_tile, format_date, pc_glyph, shared_cell};
+use crate::ui::file_list::{Fit, PcState, ROW_H, file_tile, format_date, pc_glyph, shared_cell};
 use crate::ui::file_row::{self, RowLook};
 use crate::ui::kit;
 use rune::{Align, Cx, El, PointerPress, Tx, col, el};
@@ -26,9 +26,11 @@ const COL_PC_W: f32 = 34.0;
 const COL_GAP: f32 = 12.0;
 
 /// The rows, virtualised. Keys as `ui::file_list`: `rows`, `file-list`, `row-<i>` and its parts.
-pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
+pub fn rows(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     let count = s.listing.items.len();
     let t = *t;
+    // The columns this list has room for, by its own width (`ui::file_list::Fit`).
+    let fit = Fit::of_list(cx);
     let mut table = col()
         .key("rows")
         .role("table")
@@ -116,7 +118,7 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                                     let k = format!("row-{shown}");
                                     let tile = super::long_list::picture_tile(s, &k, item, &t);
                                     let lit = s.is_selected(i) || dropping;
-                                    file_row_full(shown, item, lit, date, field, tile, uploading, downloading, &t)
+                                    file_row_full(shown, item, lit, date, field, tile, uploading, downloading, fit, &t)
                                 }
                             };
                             if dropping {
@@ -202,7 +204,7 @@ pub fn row_name(item: &DriveItem, date: &str, size: &str) -> String {
 /// The column headers (`.mk-cols`), as `ui::file_list::column_headers` draws them, and each one
 /// sorts: a click sorts by that column, a second click reverses the order (DW-0404). The arrow
 /// stands beside the column the list is sorted by. Shared and PC are not sort keys.
-pub fn column_headers(sort: super::Sort, t: &Theme) -> El {
+pub fn column_headers(sort: super::Sort, fit: Fit, t: &Theme) -> El {
     // Ascending: A to Z, oldest first, smallest first.
     let by = |i: usize| match i {
         0 => Some(SortBy::Name),
@@ -222,7 +224,7 @@ pub fn column_headers(sort: super::Sort, t: &Theme) -> El {
             (i, ascending)
         });
     file_row::header_with(
-        &COLUMNS,
+        &fit.columns(),
         sorted,
         |i, cell| match by(i) {
             Some(by) => cell.focusable(true).on_press(move |s: &mut State| s.sort_by_column(by)),
@@ -247,7 +249,7 @@ pub fn file_row(
     uploading: Option<super::uploads::UploadState>,
     t: &Theme,
 ) -> El {
-    file_row_full(i, item, selected, date, renaming, None, uploading, None, t)
+    file_row_full(i, item, selected, date, renaming, None, uploading, None, Fit::ALL, t)
 }
 
 /// [`file_row`], with the tile to draw in place of the kind's own (a fixture's picture).
@@ -261,7 +263,7 @@ pub fn file_row_with(
     tile: Option<El>,
     t: &Theme,
 ) -> El {
-    file_row_full(i, item, selected, date, renaming, tile, None, None, t)
+    file_row_full(i, item, selected, date, renaming, tile, None, None, Fit::ALL, t)
 }
 
 /// The row with everything it can show: `tile` in place of the kind's own, and `uploading`,
@@ -276,6 +278,7 @@ fn file_row_full(
     tile: Option<El>,
     uploading: Option<super::uploads::UploadState>,
     downloading: Option<super::keeping::Download>,
+    fit: Fit,
     t: &Theme,
 ) -> El {
     let k = format!("row-{i}");
@@ -430,8 +433,12 @@ fn file_row_full(
             );
         }
     }
-    cells.push(shared_cell(&k, item, meta, surface, t));
-    cells.push(pc);
+    if fit.shared {
+        cells.push(shared_cell(&k, item, meta, surface, t));
+    }
+    if fit.pc {
+        cells.push(pc);
+    }
     let tile = tile.unwrap_or_else(|| file_tile(&k, item, t));
     let look = RowLook {
         selected,

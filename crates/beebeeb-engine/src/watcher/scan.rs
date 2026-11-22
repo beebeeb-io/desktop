@@ -420,7 +420,9 @@ fn backup_keys_changed(bridge: &EngineBridge, memo: &ScanMemo) -> bool {
 
 /// dc-166: visit each of `paths` (sorted, so a folder comes before what is in it): a folder is
 /// scaffolded and walked, a file handed to `on_file`; a path gone, outside the root or engine-internal
-/// is passed over (deletes ride the Cloud Files callbacks).
+/// is passed over (deletes ride the Cloud Files callbacks). RC2-1: the sync root itself named means
+/// "something in its top level" (a journal record with no name whose file is gone): its top-level files
+/// are handed over from one listing, and no folder is walked for it.
 pub(super) fn visit_paths(
     sync_root: &std::path::Path,
     paths: &std::collections::BTreeSet<PathBuf>,
@@ -428,6 +430,7 @@ pub(super) fn visit_paths(
     on_file: &mut dyn FnMut(&std::path::Path, &DiskStamp),
 ) {
     let mut walked: Option<&std::path::Path> = None;
+    let mut top_level_listed = false;
     for path in paths {
         if walked.is_some_and(|dir| path.starts_with(dir)) {
             continue;
@@ -435,7 +438,14 @@ pub(super) fn visit_paths(
         let Ok(rel) = path.strip_prefix(sync_root) else {
             continue;
         };
-        if rel.as_os_str().is_empty() || crate::engine_bridge::path_is_engine_internal(sync_root, path) {
+        if rel.as_os_str().is_empty() {
+            if !top_level_listed {
+                top_level_listed = true;
+                list_top_level(sync_root, on_file);
+            }
+            continue;
+        }
+        if crate::engine_bridge::path_is_engine_internal(sync_root, path) {
             continue;
         }
         if path
@@ -458,8 +468,28 @@ pub(super) fn visit_paths(
             walk_dir(sync_root, path, rel.components().count(), on_dir, on_file);
             walked = Some(path);
         } else if ft.is_file() {
+            // The root sorts before everything in it: its listing handed this file over already.
+            if top_level_listed && path.parent() == Some(sync_root) {
+                continue;
+            }
             // Named, so something happened to it: the one place a file is opened for its stamp.
             on_file(path, &DiskStamp::of_path(path, &meta));
+        }
+    }
+}
+
+/// RC2-1: the regular files directly in the sync root, each with its listing's stamp (no file is opened;
+/// one the scan found settled and unchanged is skipped by its memo). Folders are left alone: a new or
+/// changed one is named by its own journal record.
+fn list_top_level(sync_root: &std::path::Path, on_file: &mut dyn FnMut(&std::path::Path, &DiskStamp)) {
+    let Ok(entries) = list_dir(sync_root) else {
+        tracing::debug!("enumeration scan: top-level listing failed");
+        return;
+    };
+    for entry in entries {
+        let path = sync_root.join(&entry.name);
+        if entry.kind == ListedKind::File && !crate::engine_bridge::path_is_engine_internal(sync_root, &path) {
+            on_file(&path, &entry.stamp);
         }
     }
 }

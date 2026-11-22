@@ -27,10 +27,11 @@ mod windows;
 mod windows_control;
 #[cfg(windows)]
 mod windows_contrast;
-/// The Windows contrast theme's colours, when one is on.
+/// The Windows contrast theme's colours, when one is on (read now; `theme::contrast` keeps the answer).
 #[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))] // tests never read the desktop's theme
 pub(crate) fn contrast_colors() -> Option<crate::theme::contrast::SystemColors> {
-    windows_contrast::current()
+    windows_contrast::read()
 }
 #[cfg(windows)]
 mod windows_folder;

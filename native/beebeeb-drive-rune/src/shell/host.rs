@@ -18,8 +18,8 @@ use super::flyout_window::FlyoutState;
 use super::instance::{self, Forwarded};
 use super::platform::{self, Platform, PlatformError, TrayEvent, TrayHandler, TrayIcon};
 use super::surfaces::WindowKind;
-use super::tray_tip_window::{self, TipState};
 use super::tray::{EngineState, LeftClick, MenuAction, TrayInputs, TrayModel, tray_model};
+use super::tray_tip_window::{self, TipState};
 use super::window_state::{self, Observed, SavedWindows};
 use super::{registry, surfaces};
 use crate::State;
@@ -1091,7 +1091,7 @@ pub fn try_sync_again(s: &mut State) {
 
 /// The shell's own keys, then the current frame's (DW-1232, DW-1233: Windows' words).
 ///
-/// Alt+Left / Alt+Right: back and forward. Ctrl+,: Settings. Ctrl+/: the shortcuts list.
+/// Alt+Left / Alt+Right: back and forward. Ctrl+,: Settings. Ctrl+/: the shortcuts list. Ctrl+1…7: the sections.
 /// Esc: closes the front-most thing. Everything else goes to the frame.
 ///
 /// A build with the `feedback` feature gives the live feedback mode the key first: its two
@@ -1123,8 +1123,14 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if crate::frames::signin::setup::guide::on_key(s, ev, tx) {
         return true;
     }
+    // The account switcher at the sidebar's foot: Enter on its pill, the arrows into it, Esc out (RC2-8).
+    if crate::frames::account::switcher::key(ev, tx) {
+        return true;
+    }
     // Esc on a presentation that is on leaves Present, not the file.
-    if matches!(ev.key, Key::Escape) && (crate::frames::viewers::leave_present(s) || crate::frames::viewers::close_find(s)) {
+    if matches!(ev.key, Key::Escape)
+        && (crate::frames::viewers::leave_present(s) || crate::frames::viewers::close_find(s))
+    {
         return true;
     }
     let event = match ev.key {
@@ -1132,15 +1138,27 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Right if plain_alt && !searching => Some(Event::Forward),
         Key::Command(',') if plain_cmd => Some(Event::OpenSettings(SettingsPane::General)),
         Key::Command('/') if slash_cmd => Some(Event::OpenDialog(Dialog::Shortcuts)),
+        // Ctrl+1…7: the sidebar's sections, from every section, Settings and Account included (RC2-8).
+        // A dialog, a name being typed in a row, an open menu or a message in front keeps them (they are modal).
+        Key::Command(c @ '1'..='7') if plain_cmd && !files_modal(s) => {
+            Some(Event::Navigate(Route::section(Section::ALL[c as usize - '1' as usize])))
+        }
         Key::Escape => Some(Event::Escape),
         _ => None,
     };
     if let Some(event) = event {
         let escape = event == Event::Escape;
+        let section = matches!(event, Event::Navigate(_));
         match dispatch(s, event) {
             // Esc with nothing of the shell's to close belongs to the frame (a selection, a menu).
             Outcome::Unchanged | Outcome::Refused if escape => {}
-            _ => return true,
+            outcome => {
+                // A section press is the person going somewhere else: Search over the window ends, as for the sidebar.
+                if section && outcome == Outcome::Changed {
+                    crate::frames::files::reset::end_search(s);
+                }
+                return true;
+            }
         }
     }
     // F6 / Shift+F6 from outside every pane: the first / last pane (a pane moves on itself).
@@ -1156,6 +1174,12 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Some(keys) => keys(s, ev, tx),
         None => false,
     }
+}
+
+/// Something modal of the Files window is in front: its dialog, a name typed in a row, an open menu, a message.
+fn files_modal(s: &State) -> bool {
+    let a = &s.actions;
+    a.dialog.is_some() || a.rename.is_some() || a.menu.is_some() || a.protected.alert.is_some()
 }
 
 /// The tray tip's window shows while the guide is on its first step, and only then.
@@ -1343,3 +1367,7 @@ pub fn on_open_url(s: &mut State, url: &str, _tx: &mut Tx) {
 #[cfg(test)]
 #[path = "host_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "host_tests_rc2_keys.rs"]
+mod rc2_keys_tests;
