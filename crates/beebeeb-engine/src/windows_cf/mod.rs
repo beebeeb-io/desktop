@@ -1244,10 +1244,10 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
 /// No-op (logs at debug) until [`seed_placeholders`] has stashed the bridge;
 /// the runner only calls this on ticks that run after the bridge is built, so
 /// in practice the bridge is always present here.
-pub fn refresh_placeholders(sync_root: &std::path::Path) {
+pub fn refresh_placeholders(sync_root: &std::path::Path) -> populate::PopulateStats {
     let Some(bridge) = bridge() else {
         tracing::debug!("refresh_placeholders called before bridge was set; skipping");
-        return;
+        return populate::PopulateStats::default();
     };
     // Task 2240 slice 2: what the refresh costs, measured every tick before anyone optimises it.
     // Counts and milliseconds only, never a path.
@@ -1268,6 +1268,7 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
         elapsed_ms = s.elapsed_ms,
         "placeholder refresh"
     );
+    s
 }
 
 /// w36: the tick's memo of placed rows ([`populate::PlacedMemo`]); it resets itself for another sync root.
@@ -1314,12 +1315,16 @@ fn placed_memo() -> std::sync::MutexGuard<'static, populate::PlacedMemo> {
 ///
 /// Never logs a path or filename — only counts and milliseconds.
 #[cfg(target_os = "windows")]
-pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
+pub fn reconcile_placeholder_state(sync_root: &std::path::Path) -> crate::os_state_reconcile::ReconcilePlan {
     let Some(bridge) = bridge() else {
         tracing::debug!("reconcile_placeholder_state called before bridge was set; skipping");
-        return;
+        return crate::os_state_reconcile::ReconcilePlan {
+            deltas: Vec::new(),
+            counts: Default::default(),
+            next_cursor: 0,
+        };
     };
-    reconcile_placeholder_state_with(bridge.db(), sync_root, &RECONCILE_CURSOR);
+    reconcile_placeholder_state_with(bridge.db(), sync_root, &RECONCILE_CURSOR)
 }
 
 /// Where the next tick's sentinel window starts. Only the sync tick touches it.
@@ -1687,6 +1692,6 @@ pub mod identity_at;
 // The placeholder pass (task 2240, LD-0113), in its own file under the size ratchet.
 mod populate;
 use populate::populate_placeholders;
-pub use populate::{EarlyPasses, restore_placeholders};
+pub use populate::{EarlyPasses, PopulateStats, placeholder_passes, restore_placeholders};
 
 pub mod upload_finalization;

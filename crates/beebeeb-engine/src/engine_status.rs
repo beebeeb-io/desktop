@@ -28,6 +28,10 @@
 //! - `last_tick_ok_at`: unix seconds of the last tick that returned `Ok` AND in
 //!   which no request failed at the link level. `null` until there is one. Never
 //!   faked: the popover's "Last checked 2 min ago" tooltip is dropped when null.
+//! - `changes`: RC2-6b, how many ticks of this engine run changed what the windows list (items applied, a queued
+//!   operation finished, a conflict, a native pin or "Free up space" reconciled). `last_tick_ok_at` moves on every
+//!   check; this moves only on one that changed something, so a window reads its lists again only then (on a large
+//!   idle account the re-reads after every check were 16 MB of state.db every 30 s). `null` off the tracker.
 //! - `reason`: a stable machine `code` and an optional mono `detail` (at most 30
 //!   characters). Present for `offline` and `error`.
 //!
@@ -165,6 +169,8 @@ pub struct StatusPayload {
     pub error: Option<String>,
     pub activity: Option<Activity>,
     pub last_tick_ok_at: Option<i64>,
+    /// RC2-6b: the ticks that changed something (see the module docs); `None` off the tracker.
+    pub changes: Option<u64>,
     pub reason: Option<Reason>,
 }
 
@@ -179,6 +185,7 @@ impl StatusPayload {
             "bytes_total": self.activity.map(|a| a.bytes_total),
             "bytes_done": self.activity.map(|a| a.bytes_done),
             "last_tick_ok_at": self.last_tick_ok_at,
+            "changes": self.changes,
             "reason": self.reason.as_ref().map(|r| json!({ "code": r.code, "detail": r.detail })),
         })
     }
@@ -210,6 +217,7 @@ pub fn plain_status(state: &str, sync_root: Option<String>, error: Option<&str>)
         error: error.map(str::to_string),
         activity: None,
         last_tick_ok_at: None,
+        changes: None,
         reason,
     }
 }
@@ -343,6 +351,8 @@ struct Inner {
     error: Option<String>,
     reason: Option<Reason>,
     last_tick_ok_at: Option<i64>,
+    /// RC2-6b: ticks of this tracker that changed something ([`StatusTracker::note_change`]).
+    changes: u64,
     /// `true` once the pulse has reported `syncing`, so it knows to report the
     /// way back to `idle` (and only then).
     showing_syncing: bool,
@@ -369,6 +379,7 @@ impl StatusTracker {
                 error: None,
                 reason: None,
                 last_tick_ok_at: None,
+                changes: 0,
                 showing_syncing: false,
                 legacy_state: "running",
             }),
@@ -383,8 +394,15 @@ impl StatusTracker {
             error: inner.error.clone(),
             activity,
             last_tick_ok_at: inner.last_tick_ok_at,
+            changes: Some(inner.changes),
             reason: inner.reason.clone(),
         }
+    }
+
+    /// RC2-6b: this tick changed what the windows list; the next payload carries the bumped count.
+    pub fn note_change(&self) {
+        let mut inner = self.inner.lock().expect("status tracker poisoned");
+        inner.changes = inner.changes.wrapping_add(1);
     }
 
     /// The engine has started (`running`): nothing is known yet.
@@ -521,6 +539,9 @@ pub struct EngineStatusView {
     pub bytes_total: Option<u64>,
     pub bytes_done: Option<u64>,
     pub last_tick_ok_at: Option<i64>,
+    /// RC2-6b: the engine's count of ticks that changed something (`changes`); a new one is when a window reads its
+    /// lists again.
+    pub changes: Option<u64>,
     pub reason_code: Option<String>,
     pub reason_detail: Option<String>,
     /// The engine's startup check of the files on this PC while it runs (0.8.15, see [`STARTUP_CHECK_KEY`]).
@@ -575,6 +596,10 @@ impl EngineStatusView {
         // about checks.
         if let Some(at) = payload.get("last_tick_ok_at") {
             self.last_tick_ok_at = at.as_i64();
+        }
+        // Like `last_tick_ok_at`: absent only on the pause toggle's bare `{state}`.
+        if let Some(changes) = payload.get("changes") {
+            self.changes = changes.as_u64();
         }
         let reason = payload.get("reason").filter(|r| r.is_object());
         self.reason_code = reason

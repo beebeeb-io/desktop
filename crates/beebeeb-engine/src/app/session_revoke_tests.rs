@@ -599,6 +599,7 @@ fn status_event(state: crate::engine_status::State) -> crate::host::EngineEvent 
             error: None,
             activity: None,
             last_tick_ok_at: None,
+            changes: None,
             reason: None,
         },
         startup_guard: Default::default(),

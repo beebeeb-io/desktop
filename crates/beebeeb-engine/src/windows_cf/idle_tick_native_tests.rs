@@ -292,3 +292,48 @@ fn names_of(dir: &std::path::Path) -> Vec<String> {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect()
 }
+
+/// RC2-6b: the tick skips its two placeholder passes while its journal feed names nothing under the root. That holds
+/// only if (1) a native pin, unpin and "Free up space" each leave a journal record under the root (the passes then
+/// run and reconcile them), and (2) what an idle tick itself does to an in-sync file (the stamp pass's size-and-time
+/// look, its in-sync read, the reconcile's listing and direct read) leaves none, so the gate can close at all.
+#[test]
+fn rc2_6b_native_pin_and_free_up_name_the_root_and_idle_reads_do_not() {
+    use crate::watcher::Changes;
+    let r = Root::new();
+    let dir = r.root.join("dir");
+    std::fs::create_dir(&dir).unwrap();
+    let file = dir.join("held.bin");
+    std::fs::write(&file, vec![7u8; 64 * 1024]).unwrap();
+    placeholders::convert_to_in_sync_placeholder(&file, "held").unwrap();
+    let mut feed = crate::watcher::change_feed::open(&r.root);
+    // Drain what making the file wrote; a journal that cannot be read here says so instead of passing.
+    let first = feed.take();
+    assert_ne!(first, Changes::Unknown, "no change journal on this volume");
+    let named = |changes: Changes, what: &str| match changes {
+        Changes::Paths(paths) => assert!(
+            paths.iter().any(|p| p.starts_with(&r.root)),
+            "{what}: named only {paths:?}"
+        ),
+        other => panic!("{what} left no record under the root: {other:?}"),
+    };
+
+    // (2) An idle tick's reads of an in-sync file.
+    for _ in 0..3 {
+        let _ = std::fs::metadata(&file).unwrap().modified();
+        assert_eq!(placeholders::placeholder_in_sync(&file), Some(true));
+        placeholders::list_dir_attributes(&dir).unwrap();
+        placeholders::read_os_placeholder_state(&file).unwrap();
+        std::fs::read_dir(&r.root).unwrap().for_each(drop);
+    }
+    assert_eq!(feed.take(), Changes::Nothing, "an idle tick's own reads named the root");
+
+    // (1) The native changes Explorer makes.
+    placeholders::set_pin_state(&file, true, false).unwrap();
+    named(feed.take(), "a pin");
+    placeholders::set_pin_state(&file, false, false).unwrap();
+    named(feed.take(), "an unpin");
+    assert!(placeholders::dehydrate_placeholder(&file).unwrap() > 0, "nothing was freed");
+    named(feed.take(), "a free up space");
+    assert_eq!(feed.take(), Changes::Nothing);
+}
