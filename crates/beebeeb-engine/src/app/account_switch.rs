@@ -61,6 +61,10 @@ use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 const GUARDED_FILE: &str = "guarded file";
 /// The reason the OS removed nothing from the folder.
 const ITEMS_STAY: &str = "the folder's items stay";
+/// RC2-5: the previous account's waiting work is items in the folder (new files, edits) a person answers for.
+const ITS_CHANGES_STAY: &str = "its changes stay in the folder";
+/// RC2-5: the previous account's waiting work is new folders, and nothing of it holds a file.
+const ITS_FOLDERS_STAY: &str = "its new folders stay";
 
 impl<C: CredentialStores> Engine<C> {
     /// Step 7's part: see the module. A no-op unless `data` is recorded as another account's by user id. Best effort in
@@ -84,11 +88,12 @@ impl<C: CredentialStores> Engine<C> {
         }
         let previous = owner.as_ref()?;
         let mut removed = self.remove_the_previous_account(data, previous, sync_root, port);
-        // dc-175: folders no row names that hold no file a person left are nothing to keep: the empty ones go (only
-        // `remove_dir`, so a folder still holding anything stays) and the removal is asked once more.
-        if removed == Err(ITEMS_STAY)
+        // dc-175, RC2-5: folders that hold no file a person left are nothing to keep: folders no row names, and the
+        // new folders it queued while sync was paused. The empty ones go (only `remove_dir`, so a folder still holding
+        // anything stays) and the removal is asked once more.
+        if (removed == Err(ITEMS_STAY) || removed == Err(ITS_FOLDERS_STAY))
             && discard_offered_on_this_os()
-            && let Ok(left) = left_by_a_person(&data.db, sync_root, port, false)
+            && let Ok(left) = in_the_way(&data.db, sync_root, port)
             && left.files.is_empty()
             && !left.folders.is_empty()
         {
@@ -108,9 +113,9 @@ impl<C: CredentialStores> Engine<C> {
                     GUARDED_FILE => Some(super::SyncStartRefused::UnsentFileOfAnotherAccount),
                     // Only where the person's answer can finish the switch, and only when something of theirs is
                     // there to answer for: any other refusal of the removal stays the plain one.
-                    ITEMS_STAY
+                    ITEMS_STAY | ITS_CHANGES_STAY | ITS_FOLDERS_STAY
                         if discard_offered_on_this_os()
-                            && left_by_a_person(&data.db, sync_root, port, true).is_ok_and(|left| !left.is_empty()) =>
+                            && in_the_way(&data.db, sync_root, port).is_ok_and(|left| !left.is_empty()) =>
                     {
                         Some(super::SyncStartRefused::LeftoverFilesOfAnotherAccount)
                     }
@@ -128,8 +133,23 @@ impl<C: CredentialStores> Engine<C> {
         port: &dyn SyncRootPort,
     ) -> Result<(), &'static str> {
         let db = &data.db;
+        let mut unasked = Vec::new();
         if let Some(kind) = db.work_waiting_for_a_person().map_err(|_| "unreadable")? {
-            return Err(kind);
+            // RC2-5: work whose every byte is an item in the folder is settled once a person's answer took those
+            // items out (keep aside, discard) or they hold nothing: what is still there with bytes refuses.
+            let settled = discard_offered_on_this_os()
+                .then(|| its_changes(db, sync_root, port))
+                .transpose()
+                .map_err(|_| "unreadable")?
+                .flatten();
+            let Some(changes) = settled else { return Err(kind) };
+            if !changes.files.is_empty() {
+                return Err(ITS_CHANGES_STAY);
+            }
+            if !changes.folders.is_empty() {
+                return Err(ITS_FOLDERS_STAY);
+            }
+            unasked = changes.gone;
         }
         // A file of unknown content keeps B out only while its item in the folder may hold bytes (an edit of A's
         // nobody sent). With none on this PC there is nothing a person could lose: the row goes with the others.
@@ -137,7 +157,6 @@ impl<C: CredentialStores> Engine<C> {
         // w29: an item that is there and holds no bytes (a cloud placeholder nothing was fetched into) is a synced
         // item like any other: the removal deletes it after proving that, holding it. Only a path with no item at all
         // is `unasked`: whatever is found there later was made since and refuses the switch.
-        let mut unasked = Vec::new();
         for path in &guarded {
             let nothing_there = matches!(
                 sync_root.join(path.trim_start_matches('/')).symlink_metadata(),
@@ -158,6 +177,11 @@ impl<C: CredentialStores> Engine<C> {
         let purge = db.purge_all_local_state().map_err(|_| "the rows stay")?;
         for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {
             let path = Path::new(path);
+            // RC2-5: a queued change's payload may be its item in the sync folder: the person answered for those
+            // (or they hold nothing), and this never deletes in the folder.
+            if path.starts_with(sync_root) {
+                continue;
+            }
             if !crate::is_disposable_cache_path(self.identity, path) {
                 return Err("a cached file is not ours to delete");
             }
@@ -523,9 +547,10 @@ fn left_by_a_person(
 /// that may hold bytes it never sent, in the database's order (`remove_the_previous_account`'s guarded check), then
 /// what a person left ([`left_by_a_person`]). Other work of its refuses: that needs its account.
 fn in_the_way(db: &StateDb, sync_root: &Path, port: &dyn SyncRootPort) -> Result<Left, DiscardRefused> {
-    if db.work_waiting_for_a_person().map_err(|_| DiscardRefused::Unreadable)?.is_some() {
-        return Err(DiscardRefused::OtherWork);
-    }
+    let changes = match db.work_waiting_for_a_person().map_err(|_| DiscardRefused::Unreadable)? {
+        None => Changes::default(),
+        Some(_) => its_changes(db, sync_root, port)?.ok_or(DiscardRefused::OtherWork)?,
+    };
     let guarded = db.guarded_paths().map_err(|_| DiscardRefused::Unreadable)?;
     let mut files: Vec<String> = guarded
         .into_iter()
@@ -534,10 +559,56 @@ fn in_the_way(db: &StateDb, sync_root: &Path, port: &dyn SyncRootPort) -> Result
             there.is_ok_and(|item| item.is_file()) && port.may_hold_bytes(sync_root, path)
         })
         .collect();
+    let listed = |files: &[String], path: &str| files.iter().any(|unsent| unsent.trim_start_matches('/') == path);
+    for path in changes.files {
+        if !listed(&files, &path) {
+            files.push(path);
+        }
+    }
     let mut left = left_by_a_person(db, sync_root, port, false)?;
-    left.files.retain(|path| !files.iter().any(|unsent| unsent.trim_start_matches('/') == path));
+    left.files.retain(|path| !listed(&files, path));
     files.append(&mut left.files);
-    Ok(Left { files, folders: left.folders })
+    let mut folders = left.folders;
+    folders.extend(changes.folders);
+    // A folder before what is in it (a prefix sorts first), each once: `take_out` removes them the deepest first.
+    folders.sort();
+    folders.dedup();
+    Ok(Left { files, folders })
+}
+
+/// RC2-5: the items of the previous account's waiting work ([`StateDb::work_in_the_folder`]), by path under the
+/// folder (`/` between names): the files there that may hold bytes, the folders there, and the paths with no item
+/// (answered for, or never made: whatever is found there later was made since, `remove_synced_items`' `unasked`).
+/// A file there with no bytes on this PC is a placeholder like any synced one: the removal proves and deletes it.
+#[derive(Debug, Default)]
+struct Changes {
+    files: Vec<String>,
+    folders: Vec<String>,
+    gone: Vec<String>,
+}
+
+/// See [`Changes`]. `None` when other work of the previous account waits (that needs its account). Only reads.
+fn its_changes(db: &StateDb, sync_root: &Path, port: &dyn SyncRootPort) -> Result<Option<Changes>, DiscardRefused> {
+    let Some(items) = db.work_in_the_folder().map_err(|_| DiscardRefused::Unreadable)? else {
+        return Ok(None);
+    };
+    let mut changes = Changes::default();
+    for path in items {
+        let path = path.trim_start_matches('/').to_string();
+        if path.is_empty() {
+            continue;
+        }
+        match item_at(sync_root, &path).symlink_metadata() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => changes.gone.push(path),
+            Err(_) => return Err(DiscardRefused::Unreadable),
+            Ok(item) if item.is_dir() => changes.folders.push(path),
+            Ok(item) if item.is_file() && port.may_hold_bytes(sync_root, &path) => changes.files.push(path),
+            Ok(item) if item.is_file() => (),
+            // A link or anything else is never followed nor copied: it keeps the switch out.
+            Ok(_) => return Ok(None),
+        }
+    }
+    Ok(Some(changes))
 }
 
 /// Whether every source and its copy hold the same bytes now.
@@ -767,6 +838,17 @@ pub enum SwitchRefused {
 }
 
 impl SwitchRefused {
+    /// The refusal's name for a log line, in words the log writes as they are.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::NotOnThisPc => "not on this pc",
+            Self::UnsavedEdits => "unsaved edits",
+            Self::EngineStillRunning => "engine still running",
+            Self::CurrentUnknown => "current unknown",
+            Self::Store => "store",
+        }
+    }
+
     /// One line a person reads.
     pub fn words(self) -> &'static str {
         match self {
@@ -822,6 +904,9 @@ impl<C: CredentialStores> Engine<C> {
             let _step = self.session_ending_step().await;
             self.leave_current_session().await
         });
+        if let Err(why) = result {
+            tracing::warn!(kind = why.kind(), "account switch: another account was not added");
+        }
         self.publish();
         result
     }
@@ -830,6 +915,12 @@ impl<C: CredentialStores> Engine<C> {
     /// with its own key (no twelve words). The gate the window shows next. The caller starts sync afterwards (the
     /// start clears the previous account's local data; an unsent file of it is offered "Discard and switch").
     pub fn switch_account(&self, user_id: &str) -> Result<GateState, SwitchRefused> {
+        self.switch_to_parked(user_id).inspect_err(|why| {
+            tracing::warn!(kind = why.kind(), "account switch: refused");
+        })
+    }
+
+    fn switch_to_parked(&self, user_id: &str) -> Result<GateState, SwitchRefused> {
         let target = self.parked_store(user_id).ok_or(SwitchRefused::NotOnThisPc)?;
         if !matches!(target.load_session_token(), Ok(Some(_))) {
             return Err(SwitchRefused::NotOnThisPc);

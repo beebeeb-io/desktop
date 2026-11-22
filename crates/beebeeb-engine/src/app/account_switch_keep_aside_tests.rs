@@ -219,7 +219,8 @@ fn nothing_left_means_nothing_is_moved() {
     assert_eq!(pc.db().owner().unwrap(), Some(other()));
 }
 
-/// Other work of A's (a queued change) needs A: the refusal stays the plain one and keep aside moves nothing.
+/// Other work of A's (a queued rename: nothing of it is an item a person could keep) needs A: the refusal stays the
+/// plain one and keep aside moves nothing.
 #[test]
 fn a_queued_change_of_the_previous_account_is_not_kept_aside() {
     let pc = Pc::new();
@@ -227,7 +228,7 @@ fn a_queued_change_of_the_previous_account_is_not_kept_aside() {
     pc.db()
         .enqueue_operation(&PendingOperation {
             base_version: Some(3),
-            ..queued("op-rc-b", OperationKind::UploadVersion, IDS[0], None)
+            ..queued("op-rc-b", OperationKind::RenameFile, IDS[0], None)
         })
         .unwrap();
     let port = AsidePort::new();
@@ -256,4 +257,171 @@ fn empty_folders_the_previous_account_left_do_not_stop_the_switch() {
     assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
     assert_eq!(listing(&pc.root()), Vec::<String>::new());
     assert!(!aside(&pc).exists(), "nothing was kept aside: there was nothing to keep");
+}
+
+// ---- RC2-5 (VM 401, rc2/o3, o4): what the previous account made or changed while sync was paused ----
+
+const NEW_OF_A: &str = "New of A.txt";
+
+/// A made `path` while sync was paused: a row of its own (never on the server, `uploading`) and its queued change.
+fn queued_while_paused(pc: &Pc, id: &str, path: &str, folder: bool) {
+    let db = pc.db();
+    row(&db, id, path, folder, 0);
+    let kind = if folder {
+        OperationKind::CreateFolder
+    } else {
+        OperationKind::UploadFile
+    };
+    db.enqueue_operation(&queued(&format!("op-{id}"), kind, id, None))
+        .unwrap();
+    drop(db);
+    if !folder {
+        rusqlite::Connection::open(pc.state_db())
+            .unwrap()
+            .execute("UPDATE files SET status = 'uploading' WHERE file_id = ?1", [id])
+            .unwrap();
+    }
+    let at = pc.root().join(path);
+    if folder {
+        std::fs::create_dir_all(at).unwrap();
+    } else {
+        std::fs::write(at, b"made by A while paused").unwrap();
+    }
+}
+
+/// (a) rc2/o3 RC-b: a new file A made while sync was paused (its upload queued), with an empty folder beside it, is
+/// refused with the choice, not the plain `OtherAccountsData`; nothing moved before the answer; "Keep them aside"
+/// then moves it byte for byte and the switch completes; asked again, the discard is offered for the same file.
+#[test]
+fn account_switch_rc2_a_new_file_made_while_paused_offers_keep_aside_and_discard() {
+    let pc = Pc::new();
+    a_signed_out(&pc, false);
+    queued_while_paused(&pc, IDS[1], NEW_OF_A, false);
+    std::fs::create_dir_all(pc.root().join("Empty of A")).unwrap();
+    let port = AsidePort::new();
+    let files = listing(&pc.root());
+
+    assert_eq!(
+        pc.engine.start_sync_with(pc.root(), &port),
+        Err(SyncStartRefused::LeftoverFilesOfAnotherAccount)
+    );
+    assert_eq!(listing(&pc.root()), files, "nothing moves before the person chose");
+    assert_eq!(pc.db().owner().unwrap(), Some(a()));
+    let ask = pc.engine.discard_and_switch_ask_with(&pc.root(), &port).unwrap();
+    assert_eq!(
+        ask.names,
+        vec![NEW_OF_A.to_string()],
+        "the discard is offered for the same file"
+    );
+
+    let done = pc.engine.keep_aside_and_switch_with(pc.root(), &port).unwrap();
+
+    assert_eq!(done.kept, 1);
+    assert_eq!(
+        std::fs::read(aside(&pc).join(NEW_OF_A)).unwrap(),
+        b"made by A while paused"
+    );
+    assert_eq!(
+        done.start,
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }),
+        "past the binding"
+    );
+    assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
+    assert_eq!(listing(&pc.root()), Vec::<String>::new());
+}
+
+/// (a), the other answer (and 111's way on): "Discard and switch" keeps a copy of the new file and of an edit A
+/// queued while paused, then the switch completes.
+#[test]
+fn account_switch_rc2_discard_takes_a_new_file_and_a_queued_edit_and_switches() {
+    let pc = Pc::new();
+    a_signed_out(&pc, false);
+    queued_while_paused(&pc, IDS[1], NEW_OF_A, false);
+    std::fs::write(pc.root().join(SYNCED), b"edited by A").unwrap();
+    pc.db()
+        .enqueue_operation(&PendingOperation {
+            base_version: Some(3),
+            ..queued("op-edit", OperationKind::UploadVersion, IDS[0], None)
+        })
+        .unwrap();
+    let port = AsidePort::new();
+    assert_eq!(
+        pc.engine.start_sync_with(pc.root(), &port),
+        Err(SyncStartRefused::LeftoverFilesOfAnotherAccount)
+    );
+    let ask = pc.engine.discard_and_switch_ask_with(&pc.root(), &port).unwrap();
+    assert_eq!(ask.files, 2);
+
+    let done = pc.engine.discard_and_switch_with(&ask, pc.root(), &port).unwrap();
+
+    assert_eq!(done.kept, 2);
+    assert_eq!(
+        done.start,
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
+    assert_eq!(pc.db().owner().unwrap(), Some(other()));
+    assert_eq!(listing(&pc.root()), Vec::<String>::new());
+}
+
+/// (b) rc2/o4 175: only empty folders A made while sync was paused (each queued, so a row names it) are left. They
+/// are nothing to keep: the start removes them and the switch completes, with no refusal for a person to answer.
+#[test]
+fn account_switch_rc2_only_empty_folders_queued_while_paused_do_not_stop_the_switch() {
+    let pc = Pc::new();
+    a_signed_out(&pc, false);
+    queued_while_paused(&pc, IDS[1], "Empty B", true);
+    queued_while_paused(&pc, IDS[2], "Empty B two", true);
+    std::fs::create_dir_all(pc.root().join("Empty B/Deeper")).unwrap();
+    let port = AsidePort::new();
+
+    let start = pc.engine.start_sync_with(pc.root(), &port);
+
+    assert_eq!(
+        start,
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }),
+        "past the binding"
+    );
+    assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
+    assert_eq!(listing(&pc.root()), Vec::<String>::new());
+    assert!(
+        !aside(&pc).exists(),
+        "nothing was kept aside: there was nothing to keep"
+    );
+}
+
+/// (c) rc2/o3-attempt1: after a rebuilt state.db every file of unknown content is held for review ("held edit").
+/// Adding another account is then refused with the choice, not the plain refusal, and keeping them aside completes
+/// the switch with every byte.
+#[test]
+fn account_switch_rc2_held_edits_of_a_rebuilt_state_db_offer_the_choice() {
+    let pc = Pc::new();
+    a_signed_out(&pc, false);
+    rusqlite::Connection::open(pc.state_db())
+        .unwrap()
+        .execute(
+            "INSERT INTO held_edits (file_id, reason, fingerprint, detected_at) VALUES (?1, 'content_unknown', 'f', 1)",
+            [IDS[0]],
+        )
+        .unwrap();
+    let port = AsidePort::new();
+
+    assert_eq!(
+        pc.engine.start_sync_with(pc.root(), &port),
+        Err(SyncStartRefused::LeftoverFilesOfAnotherAccount)
+    );
+    assert_eq!(
+        std::fs::read(pc.root().join(SYNCED)).unwrap(),
+        b"ten bytes!",
+        "nothing moved unasked"
+    );
+
+    let done = pc.engine.keep_aside_and_switch_with(pc.root(), &port).unwrap();
+
+    assert_eq!(done.kept, 1);
+    assert_eq!(std::fs::read(aside(&pc).join(SYNCED)).unwrap(), b"ten bytes!");
+    assert_eq!(
+        done.start,
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
+    assert_eq!(pc.db().owner().unwrap(), Some(other()));
 }
