@@ -208,7 +208,12 @@ impl<C: CredentialStores> Engine<C> {
             })
             .map_err(from_call);
         // Whatever was read before is not the setting now: the next look reads it again.
-        SETTING_READ.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let mine = (session, self.config.account_id.clone(), self.config.api_base.clone());
+        let mut read = SETTING_READ.lock().unwrap_or_else(PoisonError::into_inner);
+        if read.as_ref().is_some_and(|(at, ..)| *at == mine) {
+            read.take();
+        }
+        drop(read);
         set
     }
 
