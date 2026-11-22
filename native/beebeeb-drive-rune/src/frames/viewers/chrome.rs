@@ -10,6 +10,7 @@ use rune::{Cx, El, col, el, row};
 use super::source::OpenFile;
 use super::{Ui, icons};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::{caption, focus, sidebar, status_bar, toolbar};
 
@@ -76,7 +77,7 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
         .min_w(0.0)
         .shrink()
         .center_y()
-        .gap(6.0)
+        .gap(scale::space::S6)
         .child(crate::ui::file_icon::file_icon("viewer-title-icon", icon, 16.0, t))
         .child(toolbar::title_block(&file.name, Some(&facts), t).shrink());
     if head.unsaved {
@@ -85,7 +86,7 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
                 .role("image")
                 .label("Not saved")
                 .size(7.0, 7.0)
-                .radius(3.5)
+                .radius(crate::theme::tokens::radius::SM)
                 .fill(t.text),
         );
     }
@@ -98,7 +99,7 @@ pub fn toolbar(_s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> E
     // The file's own controls and "more" sit 6 apart (`.flex.items-center.gap-1.5`).
     // One Tab stop (`ui::toolbar::roving`): Tab enters it once, Left/Right/Home/End move inside it.
     let file_tools = toolbar::roving(
-        row().key("file-tools").center_y().gap(6.0).children(tools).child(more),
+        row().key("file-tools").center_y().gap(scale::space::S6).children(tools).child(more),
         "File tools",
     );
     toolbar::file_bar(
@@ -214,6 +215,7 @@ pub(super) fn origin_status(origin: super::source::Origin, shows_content: bool, 
 }
 
 /// The window with an open file in its content area: `body` between the toolbar and the status line.
+#[allow(clippy::too_many_arguments)]
 pub fn window(
     s: &State,
     cx: &mut Cx<State>,

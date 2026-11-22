@@ -7,6 +7,7 @@ use rune::{El, Span, col, row};
 use super::source::OpenFile;
 use super::{Intent, ui};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::{detail_pane, kit};
@@ -52,7 +53,7 @@ pub fn panel_with(file: &OpenFile, offline_known: bool, reduced_quality: bool, t
         // The size is a figure: mono, as every size is.
         kind = kind.spans(vec![Span::new(kind_line.len() - d.size.len(), kind_line.len()).mono()]);
     }
-    let mut meta = col().key("detail-meta").role("list").gap(6.0);
+    let mut meta = col().key("detail-meta").role("list").gap(scale::space::S6);
     for (label, value, mono) in &d.facts {
         meta = meta.child(fact_row(fact_key(label), label, value, *mono, t));
     }
@@ -104,7 +105,7 @@ pub fn panel_with(file: &OpenFile, offline_known: bool, reduced_quality: bool, t
     pane.child(
         row()
             .key("detail-actions")
-            .gap(8.0)
+            .gap(scale::space::S8)
             .child(
                 detail_pane::action_button("share", "Share\u{2026}", &icons::SHARE, t).on_press(intent(Intent::Share)),
             )
@@ -130,7 +131,7 @@ fn fact_row(key: &'static str, label: &'static str, value: &str, mono: bool, t: 
         .role("listitem")
         .label(format!("{label}: {value}"))
         .w_full()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .child(kit::label(key, label, type_::BODY, t.text_tertiary).w(92.0))
         .child(
             kit::label(format!("{key}-value"), value, text_style, t.text)
@@ -176,8 +177,8 @@ fn switch_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
         .checked(on)
         .w_full()
         .min_h(40.0)
-        .px(10.0)
-        .gap(8.0)
+        .px(scale::space::S10)
+        .gap(scale::space::S8)
         .center_y()
         .radius(radius::LG)
         .fill(t.card)
@@ -190,7 +191,7 @@ fn switch_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
                 .key(format!("{key}-text"))
                 .grow(1.0)
                 .min_w(0.0)
-                .gap(1.0)
+                .gap(scale::space::S2)
                 .child(kit::label(format!("{key}-label"), title, type_::ITEM_TITLE, t.text).truncate())
                 .child(kit::label(format!("{key}-detail"), sub, type_::BODY.lh(15.0), t.text_tertiary).truncate()),
         )

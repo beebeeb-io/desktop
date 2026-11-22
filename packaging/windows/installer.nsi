@@ -34,6 +34,7 @@ ManifestDPIAwareness PerMonitorV2
 !include MUI2.nsh
 !include FileFunc.nsh
 !include x64.nsh
+!include WinVer.nsh
 !include WordFunc.nsh
 !include "utils.nsh"
 !include "Win\COM.nsh"
@@ -71,6 +72,9 @@ ${StrLoc}
 !define MANUFACTURER "beebeeb"
 ; The oldest installed version this installer upgrades: the bridge release (utils.nsh, RefuseBelowBridge).
 !define MINUPGRADEFROM "0.8.25"
+; The oldest Windows build the app runs on (Windows 10 2004). The Cloud Files drive needs the progressive
+; hydration policy; the engine tests pass on 11 23H2 (22631); older builds are untested. .onInit refuses below it.
+!define MINWINBUILD 19041
 !define INSTALLMODE "currentUser"
 !define ARCH "x64"
 !define ALLOWDOWNGRADES "true"
@@ -516,6 +520,12 @@ FunctionEnd
 !include "English.nsh"
 
 Function .onInit
+  ${IfNot} ${AtLeastBuild} ${MINWINBUILD}
+    MessageBox MB_OK|MB_ICONSTOP "Beebeeb needs Windows 10 version 2004 (build ${MINWINBUILD}) or newer, or Windows 11. This PC runs an older Windows, so the installer will stop. Update Windows, then run this installer again." /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
     StrCpy $PassiveMode 1

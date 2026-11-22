@@ -274,6 +274,9 @@ impl StateDb {
         // every row of an older database and on a row no listing or op has flagged yet (not known). Forward only.
         ensure_column(conn, "files", "has_thumbnail", "INTEGER")?;
         ensure_column(conn, "files", "has_thumbnail_version", "INTEGER")?;
+        // dc-136b: 1 while the last name the server sent for a row did not decrypt (the row keeps its last good
+        // path); NULL/0 otherwise. Only `set_name_unreadable` writes it.
+        ensure_column(conn, "files", "name_unreadable", "INTEGER")?;
         conn.execute_batch(
             "
             -- LD-0113: the Windows delete/rename callbacks ask for the Backups root on every delete; a

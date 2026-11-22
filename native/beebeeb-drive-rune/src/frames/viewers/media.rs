@@ -320,10 +320,10 @@ impl Ui {
             Body::Video(_) => !live.unwrap_or(false),
             _ => return,
         };
-        if self.source.play(&self.file.id, on) {
-            if let Body::Audio(doc) = &mut self.file.body {
-                doc.playing = on;
-            }
+        if self.source.play(&self.file.id, on)
+            && let Body::Audio(doc) = &mut self.file.body
+        {
+            doc.playing = on;
         }
     }
 

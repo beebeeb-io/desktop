@@ -9,6 +9,7 @@ use rune::{Color, El, col, el, row};
 use super::source::{Conflict, Keep};
 use super::{icons, style, ui};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::button::{ButtonState, Size, Variant, button as ui_button, keys};
 use crate::ui::dialog::{self, Dialog, Foot, Head};
@@ -139,14 +140,14 @@ pub fn unsaved(file_name: &str, t: &Theme) -> El {
         .key("dlg-head")
         .w_full()
         .pt(20.0)
-        .px(24.0)
+        .px(scale::space::S24)
         .pb(16.0)
-        .gap(14.0)
+        .gap(scale::space::S14)
         .items_start()
         .child(
             el().key("dlg-tile")
                 .size(36.0, 36.0)
-                .radius(10.0)
+                .radius(scale::radius::PANEL)
                 .fill(style::tile_neutral(t))
                 .center()
                 .child(kit::glyph("dlg-icon", &icons::EDIT, 18.0, t.text_secondary)),
@@ -156,7 +157,7 @@ pub fn unsaved(file_name: &str, t: &Theme) -> El {
                 .key("dlg-words")
                 .grow(1.0)
                 .min_w(0.0)
-                .gap(6.0)
+                .gap(scale::space::S6)
                 .child(
                     kit::label("dlg-title", "You have unsaved changes", DIALOG_TITLE, t.text)
                         .role("heading")
@@ -182,7 +183,7 @@ pub fn unsaved(file_name: &str, t: &Theme) -> El {
     let buttons = row()
         .key("dlg-buttons")
         .w_full()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .child(
             button(0, labels[0].0, labels[0].1, t)
                 .w(widths[0])
@@ -228,9 +229,9 @@ fn side(index: usize, icon: &'static rune::Icon, title: &str, sub: &str, t: &The
         .key(key.clone())
         // Two of them share the dialog's 492 with 12 between.
         .w(240.0)
-        .padding(12.0)
-        .gap(8.0)
-        .radius(10.0)
+        .padding(scale::space::S12)
+        .gap(scale::space::S8)
+        .radius(scale::radius::PANEL)
         .fill(t.card)
         .box_shadow(kit::ring(kit::HAIR, t.separator))
         .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
@@ -238,7 +239,7 @@ fn side(index: usize, icon: &'static rune::Icon, title: &str, sub: &str, t: &The
             row()
                 .key(format!("{key}-head"))
                 .center_y()
-                .gap(8.0)
+                .gap(scale::space::S8)
                 .child(kit::glyph(format!("{key}-icon"), icon, 15.0, t.text))
                 .child(kit::label(format!("{key}-title"), title, type_::HEAD, t.text)),
         )
@@ -268,9 +269,9 @@ pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El 
         .key("dlg-head")
         .w_full()
         .pt(20.0)
-        .px(24.0)
+        .px(scale::space::S24)
         .pb(4.0)
-        .gap(3.0)
+        .gap(scale::space::S4)
         .child(
             kit::label("dlg-title", "Two versions", DIALOG_TITLE, t.text)
                 .role("heading")
@@ -282,7 +283,7 @@ pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El 
         row()
                 .key("dlg-sides")
                 .w_full()
-                .gap(12.0)
+                .gap(scale::space::S12)
                 .child(side(
                     0,
                     &icons::LAPTOP,
@@ -315,7 +316,7 @@ pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El 
     let buttons = col()
         .key("dlg-buttons")
         .w_full()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .child(
             button(0, "Keep both", Look::Primary, t)
                 .w_full()

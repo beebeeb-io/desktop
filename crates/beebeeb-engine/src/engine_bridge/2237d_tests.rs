@@ -1,4 +1,4 @@
-//! Tests: range and whole-file opens of the 2237d engine-bridge fixture.
+// Tests: range and whole-file opens of the 2237d engine-bridge fixture.
 
 include!("tests/fixture_2237d.rs");
 #[test]

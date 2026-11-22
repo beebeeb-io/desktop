@@ -7,7 +7,6 @@
 //! Photos viewer's stage. The stage's size goes to the player in device pixels (`PlayerHandle::set_view_size`).
 //! A source that hands no player draws what a kind without a viewer draws, and nothing is downloaded.
 
-use beebeeb_media_protocol::Codec;
 use rune::tok::Family;
 use rune::{Color, El, SurfaceFit, TextStyle, col, el, row};
 
@@ -16,6 +15,7 @@ use super::kinds::clock;
 use super::source::{Body, NoPreview};
 use super::{Intent, Ui, media_icons, refusal_text, states, style};
 use crate::State;
+use crate::theme::scale;
 use crate::media::player::{NoSound, PlayState, PlayerHandle, Refusal};
 use crate::theme::tokens::Theme;
 use crate::ui::button::{ButtonState, Size, Variant, button, keys};
@@ -47,6 +47,7 @@ pub fn refusal_words(why: &Refusal) -> String {
 }
 
 /// [`refusal_words`] for a given state of `MEDIA_SYSTEM_DECODER_ON`.
+#[cfg(test)]
 pub fn refusal_words_with(system_decoder_on: bool, why: &Refusal) -> String {
     refusal_text::text_with(system_decoder_on, why).sentence
 }
@@ -61,7 +62,7 @@ pub fn no_sound_words(why: NoSound) -> String {
 pub fn no_sound_line(prefix: &'static str, why: NoSound, ink: Color, t: &Theme) -> El {
     row()
         .key(format!("{prefix}-no-sound"))
-        .gap(12.0)
+        .gap(scale::space::S12)
         .center_y()
         .child(kit::label(
             format!("{prefix}-no-sound-words"),
@@ -80,18 +81,17 @@ pub fn no_sound_line(prefix: &'static str, why: NoSound, ink: Color, t: &Theme) 
         )
 }
 
-fn codec_name(codec: Codec) -> &'static str {
-    codec.name().unwrap_or("this")
-}
-
+#[cfg(test)]
 pub use super::refusal_text::{OPEN_DEFAULT, OPEN_ELSEWHERE};
 
 /// The button's words for a refusal, as shipped.
+#[cfg(test)]
 pub fn refusal_action(why: &Refusal) -> &'static str {
     refusal_text::text(why).action
 }
 
 /// [`refusal_action`] for a given state of the switch.
+#[cfg(test)]
 pub fn refusal_action_with(system_decoder_on: bool, why: &Refusal) -> &'static str {
     refusal_text::text_with(system_decoder_on, why).action
 }
@@ -106,7 +106,7 @@ pub fn refused_for(why: &Refusal, t: &Theme) -> El {
 /// extension (`refusal_text::Text::link`).
 fn refused_with(words: &str, action: &'static str, store: Option<&'static str>, t: &Theme) -> El {
     // A refusal is final for this file here: it offers the other app, never "Try again".
-    let mut buttons = row().key("refused-actions").gap(8.0).child(
+    let mut buttons = row().key("refused-actions").gap(scale::space::S8).child(
         button(keys("refused-open"), action, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(
             |s: &mut State| {
                 if let Some(ui) = super::ui(s) {
@@ -242,7 +242,7 @@ pub fn toggle(handle: &PlayerHandle) {
 /// Where a press or drag at `x` on a scrubber `w` wide lands in a file `length_ms` long. `None`: the length is not
 /// known yet or the scrubber has no width, so there is nowhere to go.
 pub fn seek_target(length_ms: u64, x: f32, w: f32) -> Option<u64> {
-    if length_ms == 0 || !(w > 0.0) || x.is_nan() {
+    if length_ms == 0 || w.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) || x.is_nan() {
         return None;
     }
     let part = f64::from((x / w).clamp(0.0, 1.0));
@@ -356,8 +356,8 @@ fn bar_with(
         .key(format!("{prefix}-bar"))
         .w_full()
         .h(46.0)
-        .px(16.0)
-        .gap(12.0)
+        .px(scale::space::S16)
+        .gap(scale::space::S12)
         .center_y()
         .child(
             kit::glyph(

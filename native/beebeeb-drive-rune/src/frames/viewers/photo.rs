@@ -9,6 +9,7 @@ use super::chrome::{Dot, Status};
 use super::source::{OpenFile, PhotoDoc, Picture};
 use super::{Intent, Ui, details, media, media_icons};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::{kit, pill};
 
@@ -52,7 +53,7 @@ fn action(i: usize, name: &'static str, icon: &'static Icon) -> El {
         .role("button")
         .label(name)
         .size(width, 36.0)
-        .radius(4.0)
+        .radius(crate::theme::tokens::radius::SM)
         .focusable(true)
         .focus_ring(2.0, 2.0, Color::WHITE)
         .cursor(rune::Cursor::Pointer)
@@ -71,7 +72,7 @@ fn picture(ui: &Ui, file: &OpenFile, width: f32, height: f32) -> El {
         .role("image")
         .label(file.name.clone())
         .size(width, height)
-        .radius(4.0);
+        .radius(crate::theme::tokens::radius::SM);
     match ui.source.picture(&file.id, Picture::Photo) {
         Some(pixels) => photo.pixels_fit(&pixels, SurfaceFit::Fit),
         None => photo.fill(plain()),
@@ -95,8 +96,8 @@ pub fn body(ui: &Ui, doc: &PhotoDoc, t: &Theme) -> El {
         .label("Photos of this folder")
         .focus_group()
         .w_full()
-        .gap(4.0)
-        .py(8.0)
+        .gap(scale::space::S4)
+        .py(scale::space::S8)
         .center();
     for (i, item) in doc.strip.iter().enumerate() {
         let id = item.id.clone();
@@ -106,7 +107,7 @@ pub fn body(ui: &Ui, doc: &PhotoDoc, t: &Theme) -> El {
             .label(item.name.clone())
             .checked(item.current)
             .size(if item.current { 52.0 } else { 36.0 }, 52.0)
-            .radius(3.0)
+            .radius(crate::theme::tokens::radius::SM)
             .focusable(true)
             .cursor(rune::Cursor::Pointer)
             .on_press(move |s: &mut State| {

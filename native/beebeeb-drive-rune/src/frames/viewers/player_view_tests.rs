@@ -262,7 +262,7 @@ impl super::super::source::ViewerSource for OneVideo {
 }
 
 /// 9. Space on a video opened from Files is the viewer's (it reaches the source's Play, which opens the video for the
-/// press's session), and another key is not.
+///    press's session), and another key is not.
 #[test]
 fn space_on_a_files_video_toggles_its_player() {
     use std::sync::atomic::Ordering;
@@ -297,7 +297,7 @@ fn space_on_a_files_video_toggles_its_player() {
 }
 
 /// 10. Space is play when paused and pause when playing, whichever way the bar's button or the key asks; nothing
-/// before the player has a state (a fake source's `None` never reaches `play` or `pause`).
+///     before the player has a state (a fake source's `None` never reaches `play` or `pause`).
 #[test]
 fn space_on_a_video_is_play_then_pause() {
     let mut s = state(1_000, 10_000);
@@ -309,7 +309,7 @@ fn space_on_a_video_is_play_then_pause() {
 }
 
 /// 11. Esc on a video opened from Files: the shell's Esc leaves the route, the viewer sync closes the file, and the
-/// source (which owns the player's stop) is dropped with it.
+///     source (which owns the player's stop) is dropped with it.
 #[test]
 fn esc_on_a_files_video_closes_it_and_stops_the_player() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -448,7 +448,7 @@ fn media_a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app(
         .filter_map(|e| e.text)
         .collect();
     assert!(texts.iter().any(|text| text == OPEN_DEFAULT), "the button: {texts:?}");
-    assert!(texts.iter().any(|text| *text == words), "the words: {texts:?}");
+    assert!(texts.contains(&words), "the words: {texts:?}");
     assert!(
         !texts.iter().any(|text| text.contains("another app")),
         "one button, the default app's: {texts:?}"
