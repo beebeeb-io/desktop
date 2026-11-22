@@ -363,7 +363,7 @@ pub fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
         // A workbook's tabs: never on a deck's row.
         Tab::Data | Tab::Formulas => Vec::new(),
     };
-    let mut rib = vo::ribbon_of(ui, unsaved, tools, t).focus_group();
+    let mut rib = vo::ribbon_of(ui, unsaved, super::word_ribbon::tool_group(tools), t);
     if ui.office.ribbon.open == Some(Pop::Font) && ui.office.tab == Tab::Home {
         rib = rib.child(
             menu::menu(
