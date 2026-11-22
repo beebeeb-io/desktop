@@ -168,6 +168,39 @@ fn operate(rt: &mut Runtime<State>, key: &str) {
     press(rt, Key::Text(" ".into()));
 }
 
+/// A control of the file's own toolbar (`file-tools`): its words, its tabs, its icon buttons and "more".
+fn in_file_tools(key: &str) -> bool {
+    ["seg-", "tool-", "tb-btn-", "tb-"].iter().any(|p| key.starts_with(p)) || key == "more-btn"
+}
+
+/// The file's toolbar is ONE Tab stop (`ui::toolbar::roving`): Tab into it once, then Home and Right to `key`.
+fn tool_to(rt: &mut Runtime<State>, key: &str) {
+    for _ in 0..30 {
+        if focused(rt).as_deref() == Some(super::EDITOR_KEY) {
+            press(rt, Key::Escape);
+        }
+        if focused(rt).as_deref().is_some_and(in_file_tools) {
+            break;
+        }
+        press(rt, Key::Tab);
+    }
+    assert!(focused(rt).as_deref().is_some_and(in_file_tools), "Tab never entered the toolbar");
+    press(rt, Key::Home);
+    for _ in 0..12 {
+        if focused(rt).as_deref() == Some(key) {
+            return;
+        }
+        press(rt, Key::Right);
+    }
+    panic!("the arrows never reached {key} in the toolbar; focus is on {:?}", focused(rt));
+}
+
+/// [`tool_to`], then Space.
+fn operate_tool(rt: &mut Runtime<State>, key: &str) {
+    tool_to(rt, key);
+    press(rt, Key::Text(" ".into()));
+}
+
 fn intents(rt: &mut Runtime<State>) -> Vec<Intent> {
     rt.state.viewer.ui.as_mut().expect("a file is open").take_intents()
 }
@@ -316,12 +349,12 @@ fn code_has_wrap_copy_and_edit_and_each_works_from_the_keyboard() {
     assert!(!has(&rt, "ln-18"));
 
     assert!(!rt.state.viewer.ui.as_ref().unwrap().wrap);
-    operate(&mut rt, "seg-0");
+    operate_tool(&mut rt, "seg-0");
     assert!(rt.state.viewer.ui.as_ref().unwrap().wrap, "Wrap is chosen");
-    operate(&mut rt, "seg-1");
+    operate_tool(&mut rt, "seg-1");
     assert!(!rt.state.viewer.ui.as_ref().unwrap().wrap, "No wrap is chosen");
 
-    operate(&mut rt, "tb-btn-0");
+    operate_tool(&mut rt, "tb-btn-0");
     assert!(
         rt.state.viewer.ui.as_ref().unwrap().editor.is_some(),
         "Edit opens the editor"
@@ -447,11 +480,11 @@ fn a_note_is_read_rendered_or_as_source_and_its_links_and_panel_work_from_the_ke
     operate(&mut rt, &key);
     assert_eq!(intents(&mut rt), [Intent::OpenInDrive("Service agreement.docx".into())]);
     // Source shows the text; Rendered brings the note back.
-    operate(&mut rt, "seg-1");
+    operate_tool(&mut rt, "seg-1");
     assert!(viewer(&rt).md_source);
     assert_eq!(info(&rt, "ln-11").text.as_deref(), Some("12"));
     assert!(!has(&rt, "md-h1"));
-    operate(&mut rt, "seg-0");
+    operate_tool(&mut rt, "seg-0");
     assert!(has(&rt, "md-h1"));
     // The details panel: Alt+Shift+P, then the switch and the two actions.
     assert!(!has(&rt, "detail-pane"));
@@ -908,7 +941,7 @@ fn a_text_over_the_limit_is_read_only_with_one_way_out() {
         info(&rt, "tb-btn-0").label.as_deref(),
         Some("Open in another app\u{2026}")
     );
-    operate(&mut rt, "tb-btn-0");
+    operate_tool(&mut rt, "tb-btn-0");
     assert_eq!(intents(&mut rt), [Intent::OpenInAnotherApp]);
     press_with(
         &mut rt,
@@ -952,9 +985,63 @@ fn the_folder_controls_that_do_nothing_for_a_file_cannot_be_operated() {
     for dead in ["view-list", "view-grid", "sort-btn", "forward"] {
         assert!(!stops.iter().any(|k| k == dead), "{dead} takes no focus: {stops:?}");
     }
-    for live in ["back", "more-btn", "panel-toggle-btn", "state-btn-0"] {
+    for live in ["back", "panel-toggle-btn", "state-btn-0"] {
         assert!(stops.iter().any(|k| k == live), "{live} is reached by Tab: {stops:?}");
     }
+    // The file's own toolbar is one Tab stop; "more" is reached inside it by the arrows.
+    let tools: std::collections::HashSet<&String> = stops.iter().filter(|k| in_file_tools(k)).collect();
+    assert_eq!(tools.len(), 1, "Tab enters the file's toolbar once: {stops:?}");
+    tool_to(&mut rt, "more-btn");
+}
+
+/// Tab enters the file's toolbar once and leaves it at the next stop; Left/Right/Home/End move inside it.
+#[test]
+fn the_file_toolbar_is_one_tab_stop_and_the_arrows_move_inside_it() {
+    let mut rt = runtime("DW-1512");
+    tool_to(&mut rt, "seg-0");
+    press(&mut rt, Key::End);
+    assert_eq!(focused(&rt).as_deref(), Some("more-btn"), "End: the last control");
+    press(&mut rt, Key::Home);
+    assert_eq!(focused(&rt).as_deref(), Some("seg-0"), "Home: the first control");
+    press(&mut rt, Key::Right);
+    assert_eq!(focused(&rt).as_deref(), Some("seg-1"));
+    press(&mut rt, Key::Left);
+    assert_eq!(focused(&rt).as_deref(), Some("seg-0"));
+    press(&mut rt, Key::Tab);
+    let after = focused(&rt).unwrap_or_default();
+    assert!(!in_file_tools(&after), "Tab leaves the toolbar at once: {after}");
+    assert_eq!(info(&rt, "file-tools").role, "toolbar");
+    assert_eq!(info(&rt, "file-tools").label.as_deref(), Some("File tools"));
+}
+
+/// F6 cycles the viewer's panes: the toolbar, the file, the details panel (`ui::focus::pane`).
+#[test]
+fn f6_cycles_the_toolbar_the_file_and_the_details_panel() {
+    // The archive: its list is the body's Tab stop.
+    let (mut rt, _) = recording(board::ZIP);
+    press_with(
+        &mut rt,
+        Key::Text("P".into()),
+        Mods {
+            alt: true,
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    assert!(viewer(&rt).show_details);
+    for pane in [super::chrome::PANE_TOOLBAR, super::chrome::PANE_BODY, super::chrome::PANE_DETAILS] {
+        assert!(has(&rt, pane), "{pane} is an F6 stop");
+    }
+    tab_to(&mut rt, "back");
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        press(&mut rt, Key::Function(6));
+        seen.push(focused(&rt));
+    }
+    assert!(seen.iter().all(Option::is_some), "each F6 lands on a control: {seen:?}");
+    assert_eq!(seen.iter().collect::<std::collections::HashSet<_>>().len(), 3, "three panes: {seen:?}");
+    press(&mut rt, Key::Function(6));
+    assert_eq!(focused(&rt), Some("back".to_string()), "and around to the toolbar's first stop");
 }
 
 #[test]
@@ -1084,7 +1171,7 @@ fn wrap_breaks_a_long_lines_text_at_the_windows_width_and_no_wrap_keeps_it_on_on
     let text = info(&rt, "run-0-0").rect;
     assert!(text[0] + text[2] > window_right, "No wrap: the line runs past the edge");
     assert_eq!(text[3], 21.0, "No wrap: one row");
-    operate(&mut rt, "seg-0");
+    operate_tool(&mut rt, "seg-0");
     // Rune moves a keyed element to its new place over a few frames: read it at rest.
     rt.settle_all();
     rt.frame(0.0);
@@ -1109,7 +1196,7 @@ fn wrap_breaks_a_long_lines_text_at_the_windows_width_and_no_wrap_keeps_it_on_on
     assert_eq!(next[3], 21.0, "a short line stays one row");
     assert_eq!(next[1], row[1] + row[3], "the next line starts under the wrapped one");
     assert_eq!(info(&rt, "run-1-w0").text.as_deref(), Some("import"));
-    operate(&mut rt, "seg-1");
+    operate_tool(&mut rt, "seg-1");
     assert_eq!(info(&rt, "run-0-0").rect[3], 21.0, "No wrap again");
 }
 
@@ -1144,7 +1231,7 @@ fn the_preview_bar_has_no_files_view_buttons() {
 #[test]
 fn the_text_edit_bar_has_no_files_view_buttons() {
     let mut rt = runtime("DW-1512");
-    operate(&mut rt, "tb-btn-0");
+    operate_tool(&mut rt, "tb-btn-0");
     assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some());
     assert_file_bar(&rt, "text edit", &["back", "tb-btn-0", "show-in-folder", "panel-toggle-btn"]);
 }
@@ -1208,4 +1295,28 @@ fn enter_on_the_leaving_question_presses_save() {
     press(&mut rt, Key::Enter);
     assert_eq!(viewer(&rt).file.version, 4, "Enter saved");
     assert!(viewer(&rt).dialog.is_none());
+}
+
+/// A question whose opener can go away (`ui::dialog::modal_back`, task 159): Keep editing gives the keyboard back to
+/// the editor; Discard changes takes the editor away, and focus lands in the toolbar, never nowhere.
+#[test]
+fn focus_after_the_unsaved_question_goes_to_the_editor_or_else_the_toolbar() {
+    let (mut rt, _) = note(false, false);
+    edit_and_type(&mut rt);
+    operate(&mut rt, "back");
+    assert_eq!(viewer(&rt).dialog, Some(Dialog::Unsaved));
+    operate(&mut rt, "dlg-btn-2");
+    rt.settle_all();
+    rt.frame(0.0);
+    assert_eq!(focused(&rt).as_deref(), Some(super::EDITOR_KEY), "Keep editing: back in the editor");
+    operate(&mut rt, "back");
+    operate(&mut rt, "dlg-btn-1");
+    rt.settle_all();
+    rt.frame(0.0);
+    assert!(viewer(&rt).editor.is_none());
+    let at = focused(&rt).expect("focus lands somewhere");
+    assert!(
+        at == "back" || in_file_tools(&at) || at == "panel-toggle-btn" || at == "show-in-folder",
+        "Discard: focus is in the toolbar, on {at}"
+    );
 }

@@ -7,6 +7,13 @@ use rune::{Key, KeyEvent, TextEdit};
 use super::source::{Body, Entry, Match, OpenFile};
 use super::{Intent, Ui};
 use crate::State;
+use crate::media::player::PlayerHandle;
+use crate::ui::list_keys::{ListAction, ListCursor, ListKeys, on_list_key};
+
+/// How far Up / Down move the volume of a recording or a video, in percent.
+pub const VOLUME_STEP: i32 = 10;
+/// How many rows Page Up / Page Down move in the archive's list.
+pub const ARCHIVE_PAGE: usize = 10;
 
 /// The zoom steps of a PDF, in percent.
 pub const ZOOMS: [u32; 8] = [50, 75, 100, 125, 150, 200, 300, 400];
@@ -43,6 +50,8 @@ pub struct Media {
     /// The archive's folder on screen ("" is the top, else it ends in "/"), and the selected row.
     pub dir: String,
     pub entry: Option<usize>,
+    /// The archive list's keyboard (`ui::list_keys`): its type-ahead buffer; its focus follows `entry`.
+    pub list: ListCursor,
 }
 
 impl Media {
@@ -256,17 +265,6 @@ impl Ui {
         }
     }
 
-    pub fn move_entry(&mut self, delta: isize) {
-        let count = self.entries().len();
-        if count == 0 {
-            return;
-        }
-        self.media.entry = Some(match self.media.entry {
-            Some(i) => i.saturating_add_signed(delta).min(count - 1),
-            None => 0,
-        });
-    }
-
     /// Enter or a double press on a row: a folder's list comes on screen. A file inside an
     /// archive cannot be opened here (the banner says so): nothing happens.
     pub fn enter_entry(&mut self, row: usize) -> bool {
@@ -381,6 +379,101 @@ pub fn step(s: &mut State, delta: isize) -> bool {
     switch_to(s, &id)
 }
 
+/// The volume in percent, on the 10 % steps (0 to 100).
+pub fn volume_percent(player: &PlayerHandle) -> i32 {
+    (player.volume() * 100.0).round() as i32
+}
+
+/// Up / Down on a recording or a video: one step of the volume, stopping at 0 and 100 %. A volume change while muted
+/// is heard: the sound comes back at the new volume. What the toast says.
+pub fn step_volume(player: &PlayerHandle, steps: i32) -> String {
+    let at = volume_percent(player);
+    // Back on the grid first (a volume set elsewhere), then the step.
+    let snapped = (at as f32 / VOLUME_STEP as f32).round() as i32 * VOLUME_STEP;
+    let to = (snapped + steps * VOLUME_STEP).clamp(0, 100);
+    player.set_volume(to as f32 / 100.0);
+    if player.muted() {
+        player.set_muted(false);
+    }
+    format!("Volume {to} %")
+}
+
+/// M on a recording or a video: muted, or the sound back at its volume. What the toast says.
+pub fn toggle_mute(player: &PlayerHandle) -> &'static str {
+    let muted = !player.muted();
+    player.set_muted(muted);
+    if muted { "Muted" } else { "Sound on" }
+}
+
+/// Home / End on a photo: the strip's first / last photo.
+pub fn jump(s: &mut State, last: bool) -> bool {
+    let Some(id) = s.viewer.ui.as_ref().and_then(|ui| match &ui.file.body {
+        Body::Photo(doc) => {
+            let to = if last { doc.strip.last() } else { doc.strip.first() };
+            to.map(|item| (item.id.clone(), item.current))
+        }
+        _ => None,
+    }) else {
+        return false;
+    };
+    match id {
+        // Already there: the key is still the strip's.
+        (_, true) => true,
+        (id, false) => switch_to(s, &id),
+    }
+}
+
+/// A monotonic clock for the archive list's type-ahead.
+fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+/// The keys of the archive's list on the one list model (`ui::list_keys`): Up/Down, Home/End, PageUp/PageDown,
+/// Enter (a folder's list), Alt+Up (one folder up) and type-ahead on the entries' names. A read-only, single-select
+/// list: Shift/Ctrl moves are plain moves, Space, F2 and Delete are not its keys, and no entry has a menu.
+fn archive_key(ui: &mut Ui, ev: &KeyEvent, now: u64) -> bool {
+    let m = &ev.mods;
+    let ctrl = m.ctrl || m.cmd;
+    let ours = match &ev.key {
+        Key::Up => true,
+        Key::Down | Key::Home | Key::End | Key::PageUp | Key::PageDown => !m.alt,
+        Key::Enter => !m.alt && !ctrl && !m.shift,
+        // Printable text types ahead (AltGr, Ctrl+Alt, still types); Space is not this list's.
+        Key::Text(t) => t != " " && ctrl == m.alt,
+        _ => false,
+    };
+    if !ours {
+        return false;
+    }
+    let names: Vec<String> = ui
+        .entries()
+        .iter()
+        .map(|e| e.path.trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string())
+        .collect();
+    let keys = ListKeys {
+        len: names.len(),
+        page: ARCHIVE_PAGE,
+        multi: false,
+    };
+    ui.media.list.focus = ui.media.entry;
+    ui.media.list.anchor = ui.media.entry;
+    let mut cursor = std::mem::take(&mut ui.media.list);
+    let action = on_list_key(ev, &keys, &mut cursor, now, |i| names[i].clone());
+    ui.media.list = cursor;
+    match action {
+        ListAction::Move { to, .. } => {
+            ui.media.entry = Some(to);
+            true
+        }
+        ListAction::Open(row) => ui.enter_entry(row),
+        ListAction::Parent => ui.archive_up(),
+        // Typed text with no match is still the list's: it went to the type-ahead buffer.
+        ListAction::None => matches!(ev.key, Key::Text(_)),
+        ListAction::Toggle(_) | ListAction::Rename(_) | ListAction::Delete | ListAction::Menu(_) => false,
+    }
+}
+
 /// The keys of these viewers. `true`: the key was theirs.
 pub fn on_key(s: &mut State, ev: &KeyEvent) -> bool {
     let Some(ui) = s.viewer.ui.as_mut() else { return false };
@@ -390,9 +483,31 @@ pub fn on_key(s: &mut State, ev: &KeyEvent) -> bool {
     let m = &ev.mods;
     let plain = !m.alt && !m.shift && !m.cmd && !m.ctrl;
     let ctrl = (m.cmd || m.ctrl) && !m.alt && !m.shift;
+    if matches!(ui.file.body, Body::Archive(_)) && archive_key(ui, ev, now_ms()) {
+        return true;
+    }
     match (&ui.file.body, &ev.key) {
         (Body::Photo(_), Key::Left) if plain => step(s, -1),
         (Body::Photo(_), Key::Right) if plain => step(s, 1),
+        (Body::Photo(_), Key::Home) if plain => jump(s, false),
+        (Body::Photo(_), Key::End) if plain => jump(s, true),
+        // Up / Down: the volume in 10 % steps; M: mute. Each change is said in the toast (a polite live region).
+        (Body::Audio(_) | Body::Video(_), Key::Up | Key::Down) if plain => match ui.source.player() {
+            Some(handle) => {
+                ui.toast = Some(step_volume(&handle, if ev.key == Key::Up { 1 } else { -1 }));
+                true
+            }
+            None => false,
+        },
+        (Body::Audio(_) | Body::Video(_), Key::Text(key)) if plain && key.eq_ignore_ascii_case("m") => {
+            match ui.source.player() {
+                Some(handle) => {
+                    ui.toast = Some(toggle_mute(&handle).to_string());
+                    true
+                }
+                None => false,
+            }
+        }
         // Left / Right seek 5 s in a recording or a video (Ctrl+Left / Right: the neighbouring recording).
         (Body::Audio(_) | Body::Video(_), Key::Left | Key::Right) if plain => {
             let delta = if ev.key == Key::Left { -1 } else { 1 };
@@ -455,34 +570,6 @@ pub fn on_key(s: &mut State, ev: &KeyEvent) -> bool {
             ui.move_cell(rows, columns);
             true
         }
-        (Body::Archive(_), Key::Up) if plain => {
-            ui.move_entry(-1);
-            true
-        }
-        (Body::Archive(_), Key::Down) if plain => {
-            ui.move_entry(1);
-            true
-        }
-        (Body::Archive(_), Key::Home) if plain => {
-            ui.media.entry = Some(0);
-            true
-        }
-        (Body::Archive(_), Key::End) if plain => {
-            ui.media.entry = ui.entries().len().checked_sub(1);
-            true
-        }
-        (Body::Archive(_), Key::PageUp) if plain => {
-            ui.move_entry(-10);
-            true
-        }
-        (Body::Archive(_), Key::PageDown) if plain => {
-            ui.move_entry(10);
-            true
-        }
-        (Body::Archive(_), Key::Enter) if plain => match ui.media.entry {
-            Some(row) => ui.enter_entry(row),
-            None => false,
-        },
         (Body::Archive(_), Key::Backspace) if plain => ui.archive_up(),
         _ => false,
     }

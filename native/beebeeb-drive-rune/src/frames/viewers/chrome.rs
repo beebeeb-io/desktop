@@ -11,7 +11,33 @@ use super::source::OpenFile;
 use super::{Ui, icons};
 use crate::State;
 use crate::theme::tokens::Theme;
-use crate::ui::{caption, sidebar, status_bar, toolbar};
+use crate::ui::{caption, focus, sidebar, status_bar, toolbar};
+
+/// The F6 stops of an open file's window: the toolbar, the file itself, the details panel.
+pub const PANE_TOOLBAR: &str = "pane-toolbar";
+pub const PANE_BODY: &str = "pane-body";
+pub const PANE_DETAILS: &str = "pane-details";
+
+/// F (no modifier) on a video: the window goes full screen, or comes back. The window's own key handler (it
+/// holds the transaction `media::on_key` is not given); Esc stays the shell's, which closes the viewer.
+pub(super) fn full_screen_key(s: &State, ev: &rune::KeyEvent) -> bool {
+    let m = &ev.mods;
+    let plain = !m.alt && !m.shift && !m.cmd && !m.ctrl;
+    plain
+        && matches!(&ev.key, rune::Key::Text(k) if k.eq_ignore_ascii_case("f"))
+        && s.viewer
+            .ui
+            .as_ref()
+            .is_some_and(|ui| ui.editor.is_none() && ui.dialog.is_none() && matches!(ui.file.body, super::source::Body::Video(_)))
+}
+
+fn window_keys(s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
+    if full_screen_key(s, ev) {
+        tx.toggle_full_screen();
+        return true;
+    }
+    false
+}
 
 /// The status line's dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +96,11 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
 pub fn toolbar(_s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El {
     let more = toolbar::tool("more-btn", "More actions", &icons::MORE, t);
     // The file's own controls and "more" sit 6 apart (`.flex.items-center.gap-1.5`).
-    let file_tools = row().key("file-tools").role("toolbar").label("File tools").center_y().gap(6.0).children(tools).child(more);
+    // One Tab stop (`ui::toolbar::roving`): Tab enters it once, Left/Right/Home/End move inside it.
+    let file_tools = toolbar::roving(
+        row().key("file-tools").center_y().gap(6.0).children(tools).child(more),
+        "File tools",
+    );
     toolbar::file_bar(
         toolbar::Bar {
             name: ui.file.name.clone(),
@@ -204,21 +234,30 @@ pub fn window(
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar(s, ui, &head, tools, t));
+        // The toolbar, the body and the details panel are F6 stops (`ui::focus::pane`).
+        .child(focus::pane(col().w_full().child(toolbar(s, ui, &head, tools, t)), PANE_TOOLBAR));
     if let Some(banner) = banner {
         main = main.child(banner);
     }
     let main = main
         .child({
-            let mut content = row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(body);
+            let mut content = row()
+                .key("viewer-row")
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(focus::pane(row().grow(1.0).min_w(0.0).h_full().child(body), PANE_BODY));
             if ui.show_details {
                 let reduced_quality =
                     super::details::is_reduced(ui.source.player().and_then(|h| h.state_of(&ui.file.id)).as_ref());
-                content = content.child(super::details::panel_with(
-                    &ui.file,
-                    ui.knows_offline(),
-                    reduced_quality,
-                    t,
+                content = content.child(focus::pane(
+                    col().h_full().child(super::details::panel_with(
+                        &ui.file,
+                        ui.knows_offline(),
+                        reduced_quality,
+                        t,
+                    )),
+                    PANE_DETAILS,
                 ));
             }
             content
@@ -229,6 +268,7 @@ pub fn window(
         .key("window")
         .role("window")
         .label(s.identity.main_window_title())
+        .on_key(window_keys)
         .w_full()
         .h_full()
         .fill(t.bg)
