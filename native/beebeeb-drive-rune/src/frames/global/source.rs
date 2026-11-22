@@ -59,7 +59,7 @@ pub fn size_words(bytes: u64) -> String {
     for (unit, size) in UNITS {
         if bytes >= size {
             let tenths = bytes.saturating_mul(10) / size;
-            return if tenths % 10 == 0 || tenths >= 100 {
+            return if tenths.is_multiple_of(10) || tenths >= 100 {
                 format!("{} {unit}", tenths / 10)
             } else {
                 format!("{}.{} {unit}", tenths / 10, tenths % 10)

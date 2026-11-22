@@ -324,6 +324,7 @@ impl SearchSource for Unwired {
 
 /// Where `query` stands in `name` (any case): the byte range to set in bold, as the board marks
 /// the match (`mark`, weight 700). `None`: the name does not hold it (or the query is empty).
+#[cfg(test)]
 pub fn matched(name: &str, query: &str) -> Option<(usize, usize)> {
     let query = query.trim();
     if query.is_empty() {
