@@ -619,7 +619,7 @@ fn devices(list: usize, devices: &[Device], t: &Theme) -> El {
             .child(state_pill(i, d.state, t))
         })
         .collect();
-    super::list(
+    lists::roving_list(
         list,
         Some("Your devices right now"),
         rows,
@@ -652,7 +652,10 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, metered_control: bool
                 menu_at: MENU_AT,
             })
             .role(Role::PopUp);
-        lists::item(list, index, &item, t).on_press(move |s: &mut State| s.settings.toggle_menu(kind))
+        super::menu_keys(
+            lists::item(list, index, &item, t).on_press(move |s: &mut State| s.settings.toggle_menu(kind)),
+            kind,
+        )
     };
     let on = bw.sync_on_metered;
     let metered = Item::new(Some(&ic::WIFI), "Sync on metered connections")
@@ -679,7 +682,7 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, metered_control: bool
             t,
         ));
     }
-    super::list(
+    lists::list(
         list,
         Some("Limits"),
         rows,
@@ -790,7 +793,7 @@ fn speed_test(list: usize, test: &SpeedTest, t: &Theme) -> El {
             t,
         ))),
     }
-    super::list(list, Some("Speed test"), rows, Some(foot), t)
+    lists::list(list, Some("Speed test"), rows, Some(foot), t)
 }
 
 /// A limit's menu, when it is the open one (DW-0785d): No limit, a rule, then the presets.

@@ -70,7 +70,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 .on_press(move |s: &mut State| s.settings.ask(Intent::Copy(copy_text.clone()))),
         );
 
-    let versions = super::list(
+    let versions = lists::list(
         0,
         None,
         vec![
@@ -110,7 +110,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             vec![check_now],
             t,
         ),
-        lists::item(
+        super::menu_keys(
+lists::item(
             1,
             1,
             &Item::new(Some(&ic::SYNC), "Release channel")
@@ -123,7 +124,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 .role(Role::PopUp),
             t,
         )
-        .on_press(|s: &mut State| s.settings.toggle_menu(MenuKind::Channel)),
+        .on_press(|s: &mut State| s.settings.toggle_menu(MenuKind::Channel)), MenuKind::Channel),
     ];
     // The release notes open only where the source has notes to show (in the app: a newer version on offer). Where
     // they do not, no row points to them: a link that opens nothing is a dead control (design note in FRAMES.md).
@@ -156,7 +157,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             .on_press(|s: &mut State| super::go(s, "DW-0789b")),
         );
     }
-    let updates = super::list(
+    let updates = lists::list(
         1,
         Some("Updates"),
         update_rows,
@@ -171,7 +172,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         }
         lists::item(l, i, &it, t).on_press(move |s: &mut State| s.settings.ask(Intent::Web(page)))
     };
-    let open_source = super::list(
+    let open_source = lists::roving_list(
         2,
         Some("Open source"),
         vec![
@@ -183,7 +184,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         Some(SOURCE_LINE),
         t,
     );
-    let more = super::list(
+    let more = lists::roving_list(
         3,
         Some("More"),
         vec![

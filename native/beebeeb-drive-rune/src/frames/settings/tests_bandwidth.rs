@@ -74,14 +74,8 @@ fn click(rt: &mut Runtime<State>, key: &str) {
 
 /// Tab to the control keyed `target`, and press it with Enter.
 fn press(rt: &mut Runtime<State>, target: &str) {
-    for _ in 0..80 {
-        if find(rt, target).is_some_and(|e| e.focused) {
-            key(rt, Key::Enter);
-            return;
-        }
-        key(rt, Key::Tab);
-    }
-    panic!("Tab never reaches {target}");
+    super::tests_keys::tab_to(rt, target);
+    key(rt, Key::Enter);
 }
 
 /// Let `seconds` pass on the window's clock (the shell's poll runs at the start of each frame).
@@ -619,14 +613,12 @@ fn every_control_of_the_pane_takes_the_keyboard_once() {
         pane,
         [
             "device-0",
-            "device-1",
-            "device-2",
             "item-1-0",
             "item-1-1",
             "item-1-2-switch",
             "btn-0"
         ],
-        "the Tab order of Bandwidth: top to bottom, nothing twice"
+        "the Tab order of Bandwidth: top to bottom, the devices one stop, nothing twice"
     );
 }
 

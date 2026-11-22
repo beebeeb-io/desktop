@@ -85,21 +85,20 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 .on_press(move |s: &mut State| s.settings.choose_location(i))
         })
         .collect();
-    children.push(super::list(
+    children.push(lists::roving_list(
         0,
         Some("Store new files in"),
         rows,
         Some("Existing files stay where they are. Only new files use the location you choose."),
         t,
-    )
-    .focus_group());
+    ));
 
     if !chosen.default {
         let title = format!("Only store in {}", chosen.name);
         let on = l.only_here;
         let switch = crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-0"), "", on, true, crate::ui::button::Size::Md, t).label(&title)
             .on_press(move |s: &mut State| s.settings.source.set_only_here(!on));
-        children.push(super::list(
+        children.push(lists::list(
             1,
             Some(&format!("If {} can't take a new file", chosen.name)),
             vec![lists::item_with(
