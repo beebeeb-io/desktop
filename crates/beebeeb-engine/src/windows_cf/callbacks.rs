@@ -327,19 +327,62 @@ pub unsafe extern "system" fn fetch_data_callback(
     // file downloading waits for that download instead of starting its own, and a download that just
     // finished is served again for a short while ([`share::join_or_lead`]); the first fetch to
     // transfer it sends the WHOLE file, so the reader's next reads find their bytes on disk.
+    //
+    // Drive-complete 169: a file larger than a download kept for reuse is streamed instead
+    // ([`crate::engine_bridge::EngineBridge::stream_whole_file`]): chunk by chunk, each decrypted chunk transferred at its
+    // offset and wiped before the next is fetched, so a multi-GB file costs a few chunks of memory. Its
+    // real size is checked before the first byte goes out. A fetch that joins a streamed download (its
+    // bytes are not kept) reads just its own range ([`crate::engine_bridge::EngineBridge::hydrate_file_range`]).
     let role = share::join_or_lead(&file_id);
     let meter = role.shared().meter.clone();
     // LD-0105 U1: the fetch's named "Downloading" row (tray, Activity), following the same meter; it
     // ends with `finished()` once the whole file is transferred, and every other exit below marks it failed.
     let row = bridge.whole_fetch_row(&file_id, u64::try_from(file_size).unwrap_or(0));
+    let cancelled = || bridge.is_revoked() || bridge.is_stopping();
+    let streams = u64::try_from(file_size).is_ok_and(|size| size > share::REUSE_MAX_BYTES as u64);
     let buf = handle.block_on(async {
         let fetch = async {
             match &role {
+                share::Role::Lead(lead) if streams => {
+                    let sink = |offset: u64, piece: &[u8]| {
+                        // SAFETY: the keys come from this live callback; `piece` outlives the calls.
+                        unsafe { transfer_piece(connection_key, transfer_key, request_key, piece, offset as i64, &cancelled) }
+                            .map_err(|e| anyhow::anyhow!("CfExecute(TRANSFER_DATA) of a streamed piece failed: {e}"))
+                    };
+                    match bridge
+                        .stream_whole_file(&file_id, file_size as u64, Some(&*meter), sink)
+                        .await
+                    {
+                        Ok(Some(Ok(fetched))) => lead.finish_streamed(fetched).map(Got::Whole),
+                        Ok(Some(Err(true_size))) => {
+                            lead.publish(Err(anyhow::Error::new(StreamSizeMismatch(true_size as i64)))).map(Got::Whole)
+                        }
+                        // No chunk layout to stream by: the buffered download.
+                        Ok(None) => lead
+                            .finish(bridge.hydrate_file_to_memory_metered(&file_id, Some(&*meter)).await)
+                            .map(Got::Whole),
+                        Err(e) => lead.publish(Err(e)).map(Got::Whole),
+                    }
+                }
                 share::Role::Lead(lead) => {
                     let result = bridge.hydrate_file_to_memory_metered(&file_id, Some(&*meter)).await;
-                    lead.finish(result)
+                    lead.finish(result).map(Got::Whole)
                 }
-                share::Role::Join(shared) => shared.wait().await,
+                share::Role::Join(shared) => {
+                    let done = shared.wait().await?;
+                    if !done.streamed {
+                        return Ok(Got::Whole(done));
+                    }
+                    let offset = u64::try_from(required_offset).unwrap_or(0);
+                    let length = u64::try_from(required_length).unwrap_or(0);
+                    match bridge.hydrate_file_range(&file_id, offset, length).await? {
+                        Some(range) => Ok(Got::Range {
+                            start: range.range_start_bytes,
+                            data: range.data,
+                        }),
+                        None => Err(anyhow::anyhow!("the streamed file's range could not be planned")),
+                    }
+                }
             }
         };
         tokio::select! {
@@ -356,8 +399,63 @@ pub unsafe extern "system" fn fetch_data_callback(
     // A lead cut off above (lock, stall) tells its joiners when this drops.
     drop(role);
     let downloaded = match buf {
-        Ok(b) => b,
+        Ok(Got::Whole(b)) => b,
+        Ok(Got::Range { start, data }) => {
+            // A fetch that joined a streamed download: its own range, read on its own.
+            let sent = if bridge.is_revoked() || bridge.is_stopping() {
+                None
+            } else {
+                // SAFETY: the keys come from this live callback; `data` outlives the calls.
+                unsafe {
+                    transfer_piece(
+                        connection_key,
+                        transfer_key,
+                        request_key,
+                        &data,
+                        start as i64,
+                        &cancelled,
+                    )
+                }
+                .ok()
+            };
+            drop(data);
+            // The range read set the row Downloading; the lead's stream already put the whole file there.
+            let _ = bridge.db().set_status_if(
+                &file_id,
+                crate::state_db::FileStatus::Downloading,
+                crate::state_db::FileStatus::Local,
+            );
+            if sent.is_some() {
+                row.finished();
+            } else {
+                unsafe {
+                    fail_transfer(
+                        connection_key,
+                        transfer_key,
+                        request_key,
+                        required_offset,
+                        required_length,
+                    )
+                };
+            }
+            return;
+        }
         Err(e) => {
+            if let Some(StreamSizeMismatch(true_size)) = e.downcast_ref::<StreamSizeMismatch>() {
+                // Found before any byte went out: fail this fetch, then resize (task 0783, Tier-1).
+                tracing::warn!(file_id = %file_id, plaintext_len = true_size, file_size, "streamed refetch: placeholder size is not the file's; resolving");
+                unsafe {
+                    fail_transfer(
+                        connection_key,
+                        transfer_key,
+                        request_key,
+                        required_offset,
+                        required_length,
+                    )
+                };
+                unsafe { resolve_size_mismatch(info, &*bridge, &file_id, *true_size) };
+                return;
+            }
             // Do NOT log the error's inner content at info+ if it could carry
             // decrypted bytes; hydrate_file_to_memory errors are status strings only.
             tracing::warn!(file_id = %file_id, error = %e, "hydrate_file_to_memory failed for Cloud Files callback");
@@ -419,7 +517,11 @@ pub unsafe extern "system" fn fetch_data_callback(
     //   rather than a green check on a file that won't open. The failed
     //   transfer (below) already surfaces an error on this open.
     let buf: &[u8] = &downloaded.bytes;
-    if let SizeDecision::ResolveTo { corrected_size } = decide_size_action(buf.len() as i64, file_size) {
+    // A streamed download had its size checked before its first byte, and is in the placeholder already.
+    let streamed = downloaded.streamed;
+    if streamed {
+        tracing::debug!(file_id = %file_id, file_size, "streamed the whole file into the placeholder");
+    } else if let SizeDecision::ResolveTo { corrected_size } = decide_size_action(buf.len() as i64, file_size) {
         tracing::warn!(
             file_id = %file_id,
             plaintext_len = buf.len(),
@@ -453,17 +555,20 @@ pub unsafe extern "system" fn fetch_data_callback(
 
     // Splice the required range back into the placeholder. `buf` is kept alive
     // here so the data is valid for every CfExecute call inside transfer_range.
-    let cancelled = || bridge.is_revoked() || bridge.is_stopping();
-    let transfer_ok = unsafe {
-        transfer_range(
-            connection_key,
-            transfer_key,
-            request_key,
-            buf,
-            cancelled,
-            required_offset,
-            required_length,
-        )
+    let transfer_ok = if streamed {
+        Ok(())
+    } else {
+        unsafe {
+            transfer_range(
+                connection_key,
+                transfer_key,
+                request_key,
+                buf,
+                cancelled,
+                required_offset,
+                required_length,
+            )
+        }
     };
 
     match transfer_ok {
@@ -475,7 +580,7 @@ pub unsafe extern "system" fn fetch_data_callback(
             // reader's next reads then find their bytes on disk instead of each firing a fetch
             // that downloads the file again. Best-effort: a refused extra range only means the
             // file is not known to be whole, so it is not marked in sync.
-            let rest_ok = rest_ranges(required_offset, required_length, buf.len() as i64)
+            let rest_ok = streamed || rest_ranges(required_offset, required_length, buf.len() as i64)
                 .into_iter()
                 .flatten()
                 .all(|(offset, length)| {
@@ -496,7 +601,7 @@ pub unsafe extern "system" fn fetch_data_callback(
             // range; marking the file fully in-sync after a partial
             // transfer would be a lie and could suppress later fetches.
             // A failure here doesn't undo the transfer, so we only log.
-            let whole_file = rest_ok && buf.len() as i64 == file_size;
+            let whole_file = rest_ok && (streamed || buf.len() as i64 == file_size);
             if whole_file {
                 // Task 1640 (review F1): every byte on disk is this fetch's version now, so they
                 // become the agreed content; only now, after the transfer, never before (a
@@ -552,6 +657,68 @@ fn rest_ranges(offset: i64, length: i64, len: i64) -> [Option<(i64, i64)>; 2] {
     ]
 }
 
+/// Drive-complete 169: what a whole-file fetch got: the shared download, or (joining a streamed one)
+/// its own range, `data` starting at file offset `start`.
+enum Got {
+    Whole(std::sync::Arc<share::Downloaded>),
+    Range {
+        start: u64,
+        data: zeroize::Zeroizing<Vec<u8>>,
+    },
+}
+
+/// Drive-complete 169: a streamed refetch found the placeholder's size is not the file's (the
+/// authenticated length), before any byte went out.
+#[derive(Debug)]
+struct StreamSizeMismatch(i64);
+
+impl std::fmt::Display for StreamSizeMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the file is {} bytes, not the placeholder's size", self.0)
+    }
+}
+
+impl std::error::Error for StreamSizeMismatch {}
+
+/// Drive-complete 169: transfer `piece`, the file's bytes from `offset` on, in [`TRANSFER_CHUNK`]
+/// steps. `offset` is a chunk boundary (a multiple of the page, [`crate::engine_bridge::EngineBridge::stream_whole_file`]),
+/// so every step but the file's last is page-aligned.
+///
+/// SAFETY: the keys come from a live `CF_CALLBACK_INFO`; `piece` outlives every `CfExecute`.
+unsafe fn transfer_piece(
+    connection_key: CF_CONNECTION_KEY,
+    transfer_key: i64,
+    request_key: i64,
+    piece: &[u8],
+    offset: i64,
+    cancelled: &dyn Fn() -> bool,
+) -> windows::core::Result<()> {
+    let mut done = 0usize;
+    while done < piece.len() {
+        if cancelled() {
+            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                0x800704C7u32 as i32,
+            )));
+        }
+        let len = (piece.len() - done).min(TRANSFER_CHUNK as usize);
+        // SAFETY: `done + len <= piece.len()`.
+        let ptr = unsafe { piece.as_ptr().add(done) } as *const core::ffi::c_void;
+        unsafe {
+            transfer_one(
+                connection_key,
+                transfer_key,
+                request_key,
+                ptr,
+                offset + done as i64,
+                len as i64,
+                STATUS_SUCCESS,
+            )
+        }?;
+        done += len;
+    }
+    Ok(())
+}
+
 /// LD-0110: one whole-file download per file, shared by the fetches that need it while it runs and
 /// for [`REUSE_SECS`] after. Without it, a reader of a cloud-only file (robocopy, a ZIP reader) whose
 /// every read fires its own fetch downloaded the whole version again for each read.
@@ -574,12 +741,18 @@ mod share {
         pub(super) bytes: zeroize::Zeroizing<Vec<u8>>,
         pub(super) version: Option<FetchedVersion>,
         ticket: Mutex<Option<FetchTicket>>,
+        /// Drive-complete 169: streamed into the placeholder as it came (`bytes` is empty); a fetch
+        /// that joins it reads its own range.
+        pub(super) streamed: bool,
     }
 
     impl Downloaded {
         /// The download's ticket, for the one fetch that transfers the whole file; `None` after.
         pub(super) fn take_ticket(&self) -> Option<FetchTicket> {
-            self.ticket.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+            self.ticket
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
         }
     }
 
@@ -617,11 +790,15 @@ mod share {
 
         /// Whether a new fetch may be served this download: finished well, and recently.
         fn reusable(&self, now: Instant) -> bool {
-            let finished = *self.finished_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let finished = *self
+                .finished_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             match finished {
                 None => true, // still downloading: join it
                 Some(at) => {
-                    matches!(&*self.outcome.borrow(), Some(Ok(_))) && now.duration_since(at) < Duration::from_secs(REUSE_SECS)
+                    matches!(&*self.outcome.borrow(), Some(Ok(_)))
+                        && now.duration_since(at) < Duration::from_secs(REUSE_SECS)
                 }
             }
         }
@@ -665,17 +842,31 @@ mod share {
                     bytes: fetched.bytes,
                     version: fetched.version,
                     ticket: Mutex::new(Some(fetched.ticket)),
+                    streamed: false,
                 })
             }))
+        }
+
+        /// [`Self::finish`] for a download streamed into the placeholder (drive-complete 169).
+        pub(super) fn finish_streamed(&self, fetched: FetchedBytes) -> anyhow::Result<Arc<Downloaded>> {
+            self.publish(Ok(Arc::new(Downloaded {
+                bytes: fetched.bytes,
+                version: fetched.version,
+                ticket: Mutex::new(Some(fetched.ticket)),
+                streamed: true,
+            })))
         }
 
         /// [`Self::finish`] once the result is a [`Downloaded`].
         pub(super) fn publish(&self, result: anyhow::Result<Arc<Downloaded>>) -> anyhow::Result<Arc<Downloaded>> {
             let keep = matches!(&result, Ok(done) if done.bytes.len() <= REUSE_MAX_BYTES);
-            self.settle(match &result {
-                Ok(done) => Ok(done.clone()),
-                Err(e) => Err(e.to_string()),
-            }, keep);
+            self.settle(
+                match &result {
+                    Ok(done) => Ok(done.clone()),
+                    Err(e) => Err(e.to_string()),
+                },
+                keep,
+            );
             result
         }
 
@@ -683,7 +874,11 @@ mod share {
             if self.finished.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
-            *self.shared.finished_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+            *self
+                .shared
+                .finished_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
             self.shared.outcome.send_replace(Some(outcome));
             if !keep {
                 let mut map = downloads();
@@ -729,6 +924,7 @@ mod share {
             bytes: zeroize::Zeroizing::new(bytes),
             version: None,
             ticket: Mutex::new(None),
+            streamed: false,
         })
     }
 }
@@ -1685,7 +1881,10 @@ mod dc116_tests {
     fn rest_ranges_cover_everything_outside_the_required_range() {
         let mib = TRANSFER_CHUNK;
         // A read in the middle: the tail, then the head.
-        assert_eq!(rest_ranges(mib, mib, 4 * mib), [Some((2 * mib, 2 * mib)), Some((0, mib))]);
+        assert_eq!(
+            rest_ranges(mib, mib, 4 * mib),
+            [Some((2 * mib, 2 * mib)), Some((0, mib))]
+        );
         // The whole file asked for: nothing left.
         assert_eq!(rest_ranges(0, 4 * mib, 4 * mib), [None, None]);
         // The last page, running past EOF: the head only.
@@ -1698,29 +1897,50 @@ mod dc116_tests {
     /// served it; a download cut off leaves the place free and fails the fetches waiting on it.
     #[test]
     fn concurrent_and_back_to_back_fetches_share_one_download() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         share::forget_all();
         let id = "dc116-share-a";
-        let share::Role::Lead(lead) = share::join_or_lead(id) else { panic!("the first fetch leads") };
-        let share::Role::Join(joiner) = share::join_or_lead(id) else { panic!("a second fetch joins") };
+        let share::Role::Lead(lead) = share::join_or_lead(id) else {
+            panic!("the first fetch leads")
+        };
+        let share::Role::Join(joiner) = share::join_or_lead(id) else {
+            panic!("a second fetch joins")
+        };
         lead.publish(Ok(share::downloaded(vec![7; 100]))).unwrap();
         assert_eq!(rt.block_on(joiner.wait()).unwrap().bytes.len(), 100);
         // Back to back, within the reuse window: served again, no new download.
-        let share::Role::Join(again) = share::join_or_lead(id) else { panic!("a finished download is reused") };
+        let share::Role::Join(again) = share::join_or_lead(id) else {
+            panic!("a finished download is reused")
+        };
         assert_eq!(rt.block_on(again.wait()).unwrap().bytes[0], 7);
         drop(lead);
 
         let id = "dc116-share-b";
-        let share::Role::Lead(lead) = share::join_or_lead(id) else { panic!("the first fetch leads") };
-        let share::Role::Join(joiner) = share::join_or_lead(id) else { panic!("a second fetch joins") };
+        let share::Role::Lead(lead) = share::join_or_lead(id) else {
+            panic!("the first fetch leads")
+        };
+        let share::Role::Join(joiner) = share::join_or_lead(id) else {
+            panic!("a second fetch joins")
+        };
         drop(lead); // cut off (a lock, a stall)
         assert!(rt.block_on(joiner.wait()).is_err());
-        assert!(matches!(share::join_or_lead(id), share::Role::Lead(_)), "the next fetch downloads again");
+        assert!(
+            matches!(share::join_or_lead(id), share::Role::Lead(_)),
+            "the next fetch downloads again"
+        );
 
         let id = "dc116-share-c";
-        let share::Role::Lead(lead) = share::join_or_lead(id) else { panic!("the first fetch leads") };
+        let share::Role::Lead(lead) = share::join_or_lead(id) else {
+            panic!("the first fetch leads")
+        };
         assert!(lead.publish(Err(anyhow::anyhow!("network"))).is_err());
-        assert!(matches!(share::join_or_lead(id), share::Role::Lead(_)), "a failed download is not reused");
+        assert!(
+            matches!(share::join_or_lead(id), share::Role::Lead(_)),
+            "a failed download is not reused"
+        );
         share::forget_all();
     }
 
@@ -1731,7 +1951,10 @@ mod dc116_tests {
         let id = "dc116-pending";
         assert_eq!(pending_resize(id), None);
         assert!(add_pending_resize(id, 5408));
-        assert!(!add_pending_resize(id, 5408), "a second mismatch starts no second retry loop");
+        assert!(
+            !add_pending_resize(id, 5408),
+            "a second mismatch starts no second retry loop"
+        );
         assert_eq!(pending_resize(id), Some(5408));
         pending_resizes().remove(id);
         assert_eq!(pending_resize(id), None);
