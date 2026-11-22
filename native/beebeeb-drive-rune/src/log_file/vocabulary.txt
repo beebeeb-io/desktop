@@ -785,7 +785,6 @@ reaches
 reactivation
 read
 read-only
-read_dir
 read_ms
 readable
 reader
