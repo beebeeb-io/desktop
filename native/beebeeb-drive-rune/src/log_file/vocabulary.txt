@@ -64,6 +64,7 @@ approved
 archived_legacy_state_dir
 are
 as
+aside
 asked
 asked_ms
 asking
@@ -187,6 +188,7 @@ column
 com
 comes
 commit
+commits
 committed
 compare
 complete
@@ -516,6 +518,7 @@ list
 list_by_status
 listed
 listening
+listing
 live
 load
 local
@@ -526,6 +529,8 @@ locally-renamed
 lock
 locked
 longer
+longest_ms
+longest_rows
 looked
 lookup
 loop
@@ -978,6 +983,7 @@ starts
 startup
 stat
 state
+state_db
 state_dir
 status
 status-flyout
