@@ -171,6 +171,38 @@ mod reconcile_then_resume_tests {
         }
     }
 
+    /// dc-136d: an unlock (a sign-in's resume ask, also how a rotated key arrives) asks for the server's list again
+    /// when a name is marked unreadable; a later tick nobody asked for does not.
+    #[tokio::test]
+    async fn name_unreadable_rows_are_retried_after_an_unlock() {
+        let pc = Pc::new();
+        pc.row("n", None, "notes.txt", false, 3);
+        assert!(pc.bridge.db().set_name_unreadable("n", true).unwrap());
+        let resume = ResumeTicket::default();
+        let mut reconciled = true;
+        pc.tick(&resume, &mut reconciled).await;
+        assert_eq!(pc.bridge.db().peek_resnapshot_request().unwrap(), None, "no unlock, no list");
+
+        resume.asked.store(1, SeqCst);
+        pc.tick(&resume, &mut reconciled).await;
+        assert!(
+            pc.bridge.db().peek_resnapshot_request().unwrap().is_some(),
+            "the unlock asks for the list again, so the marked name is read with the new key"
+        );
+    }
+
+    /// dc-136d: with no name marked unreadable, an unlock asks for nothing extra.
+    #[tokio::test]
+    async fn name_unreadable_none_marked_an_unlock_asks_nothing() {
+        let pc = Pc::new();
+        pc.row("n", None, "notes.txt", false, 3);
+        let resume = ResumeTicket::default();
+        resume.asked.store(1, SeqCst);
+        let mut reconciled = false;
+        pc.tick(&resume, &mut reconciled).await;
+        assert_eq!(pc.bridge.db().peek_resnapshot_request().unwrap(), None);
+    }
+
     /// D11, I6: a later tick resumes only when a sign-in asked, and then after the pass: the ghost is folded into
     /// its twin first, so its child resumes under the server folder. An ask is served once.
     #[tokio::test]

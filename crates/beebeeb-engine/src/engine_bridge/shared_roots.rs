@@ -226,8 +226,11 @@ impl EngineBridge {
         let roots = shared_roots_from_invite_response(&body);
         let active_shared_root_ids: Vec<String> = roots.iter().map(|root| root.file_id.clone()).collect();
         let now = now_secs();
+        // dc-136d: a share accepted since the last refresh (a root this PC has no row for yet) brings a key.
+        let mut accepted = false;
 
         for root in &roots {
+            accepted |= self.db.get_file(&root.file_id)?.is_none();
             let mut folder_material = None;
             if root.is_folder && !root.claimed {
                 match self.shared_folder_material(root).await {
@@ -297,6 +300,11 @@ impl EngineBridge {
                     "shared folder child refresh failed"
                 );
             }
+        }
+
+        // dc-136d: the names no key opened are tried again once the accepted share's key is here. Best effort.
+        if accepted && let Err(error) = self.db.retry_unreadable_names() {
+            tracing::warn!(%error, "could not ask to read the unreadable names again after a share was accepted");
         }
 
         let removed = self.db.purge_revoked_shared_content(&active_shared_root_ids)?;

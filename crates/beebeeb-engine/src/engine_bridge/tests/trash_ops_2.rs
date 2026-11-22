@@ -339,6 +339,51 @@ async fn the_shared_root_refresh_writes_its_row_with_its_namespace() {
     drop(server.finish());
 }
 
+/// dc-136d: a share accepted since the last refresh (a shared root new to this PC) asks for the server's list
+/// again while a name is marked unreadable; a refresh that brings no new share does not.
+#[tokio::test]
+async fn name_unreadable_rows_are_retried_after_a_share_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = VersionedServerMock::start();
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [111u8; 32]);
+    bridge
+        .db
+        .test_execute(
+            "INSERT INTO files (file_id, path, status, item_kind, current_version, size_bytes, remote_updated_at)
+             VALUES ('n', 'notes.txt', 'synced', 'file', 3, 0, 0)",
+        )
+        .unwrap();
+    assert!(bridge.db.set_name_unreadable("n", true).unwrap());
+
+    bridge.refresh_shared_roots().await.unwrap();
+    assert_eq!(bridge.db.peek_resnapshot_request().unwrap(), None, "no share, no list");
+
+    server.state.lock().unwrap().incoming_invites = Some(serde_json::json!({
+        "invites": [{
+            "status": "approved",
+            "id": "invite-1",
+            "file_id": "shared-file",
+            "is_folder_share": false,
+            "size_bytes": 3
+        }]
+    }));
+    bridge.refresh_shared_roots().await.unwrap();
+    let asked = bridge
+        .db
+        .peek_resnapshot_request()
+        .unwrap()
+        .expect("the accepted share asks for the list again");
+
+    assert!(bridge.db.clear_resnapshot_request(asked).unwrap());
+    bridge.refresh_shared_roots().await.unwrap();
+    assert_eq!(
+        bridge.db.peek_resnapshot_request().unwrap(),
+        None,
+        "a share already here asks nothing"
+    );
+    drop(server.finish());
+}
+
 /// w24: an accepted invite still in the "claimed" state (no sealed key yet) is listed under Shared with the
 /// "Opening shared folder…" placeholder, and becomes the real row when the key arrives.
 #[cfg(unix)]

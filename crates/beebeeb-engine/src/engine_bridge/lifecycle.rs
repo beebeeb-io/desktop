@@ -272,6 +272,11 @@ impl EngineBridge {
         };
         if resume_owed {
             resume.done.fetch_max(asked, Ordering::SeqCst);
+            // dc-136d: a sign-in or an unlock put a key in memory (also a rotated one, which reaches this PC only
+            // this way): the names no earlier key opened are tried again. Best effort: a failure keeps the marks.
+            if let Err(error) = self.db.retry_unreadable_names() {
+                tracing::warn!(%error, "could not ask to read the unreadable names again after the unlock");
+            }
         }
         resume.pass_served.fetch_max(wanted, Ordering::SeqCst);
         *reconciled = true;
