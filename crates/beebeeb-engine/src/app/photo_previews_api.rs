@@ -383,8 +383,9 @@ impl<C: CredentialStores> Engine<C> {
 
     /// A thumbnail this PC made (the local thumbnail cache, 079/095) of the owner's photo `file_id` at `version`, sent
     /// to the server once, sealed with core's thumbnail recipe, so web and phone show it and no device makes it again.
-    /// `server_404`: the caller's fetch of the server's thumbnail answered "none" (noted in the cache entry; only an
-    /// entry so noted is ever sent). Respects the account's preview setting (read now), the metered-network and
+    /// `server_404`: the caller's fetch of the server's thumbnail answered "none" (noted in the cache entry). An entry
+    /// is sent when so noted or when the row's stored `has_thumbnail` (dc-168) says the server has none at `version`,
+    /// and never when that flag says it has one (unless the caller's 404 is fresh). Respects the account's preview setting (read now), the metered-network and
     /// battery-saver hold, and a paused sync; every send asks the session again. Called by the host right after it kept
     /// or looked up a thumbnail it made because the server had none. WORKER call: the network.
     pub fn upload_made_thumbnail_for(
@@ -406,7 +407,19 @@ impl<C: CredentialStores> Engine<C> {
         }) else {
             return MadeUpload::SessionMoved;
         };
-        let Some(entry) = entry.filter(|entry| entry.server_404 && !entry.uploaded) else {
+        // dc-168: what the server's listing and ops said of this file's thumbnail at `version` (`files.has_thumbnail`).
+        // A thumbnail the server has is never sent again; one it said it has not is sent without a 404 first. Not
+        // known (an older row, another version): the cache entry's 404 decides, as before. A 404 the caller saw just
+        // now is newer than the row and wins.
+        let server_has = match self.local_state() {
+            Ok(state) if state.session() == session => {
+                state.with(|db| db.server_has_thumbnail(file_id, version).ok().flatten()).ok().flatten()
+            }
+            _ => None,
+        };
+        let Some(entry) = entry.filter(|entry| {
+            !entry.uploaded && (server_404 || server_has.map_or(entry.server_404, |has| !has))
+        }) else {
             return MadeUpload::NothingToSend;
         };
         if self.is_paused() {

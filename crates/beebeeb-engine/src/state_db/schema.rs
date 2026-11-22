@@ -270,6 +270,10 @@ impl StateDb {
         // LD-0113 (spec §5.4): the server's `system_role` of a row (`backups_root` or NULL). Additive and
         // nullable; only `set_system_role` writes it, from the listing's field or the `folder_system_role` op.
         ensure_column(conn, "files", "system_role", "TEXT")?;
+        // dc-168: the server's `has_thumbnail` of a row (1/0) and the `current_version` it was stored at; NULL on
+        // every row of an older database and on a row no listing or op has flagged yet (not known). Forward only.
+        ensure_column(conn, "files", "has_thumbnail", "INTEGER")?;
+        ensure_column(conn, "files", "has_thumbnail_version", "INTEGER")?;
         conn.execute_batch(
             "
             -- LD-0113: the Windows delete/rename callbacks ask for the Backups root on every delete; a
