@@ -94,16 +94,16 @@ impl DroppedPart {
     pub fn notice(self) -> &'static str {
         match self {
             DroppedPart::SpeakerNotes => {
-                "This deck has speaker notes; editing here would drop them. Open in PowerPoint to edit."
+                "This deck has speaker notes; editing here would drop them. Open it in another app to edit."
             }
             DroppedPart::ActiveX => {
-                "This file has form controls; editing here would drop them. Open in Microsoft Office to edit."
+                "This file has form controls; editing here would drop them. Open it in another app to edit."
             }
             DroppedPart::Ink => {
-                "This file has ink drawings; editing here would drop them. Open in Microsoft Office to edit."
+                "This file has ink drawings; editing here would drop them. Open it in another app to edit."
             }
             DroppedPart::Other => {
-                "This file has parts this editor could not check, so editing here might drop them. Open in Microsoft Office to edit."
+                "This file has parts this editor could not check, so editing here might drop them. Open it in another app to edit."
             }
         }
     }
