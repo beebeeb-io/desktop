@@ -62,7 +62,7 @@ fn what_goes(f: &Form, t: &Theme) -> El {
                 t,
             ),
             fm::steps(1, 4, "What goes", t),
-            super::numbered_list(
+            crate::ui::settings_list::list(
                 0,
                 Some("What gets deleted"),
                 vec![

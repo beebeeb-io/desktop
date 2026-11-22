@@ -1223,3 +1223,94 @@ fn every_settings_pane_draws_the_same_sidebar() {
         assert!(selected.len() <= 1, "{frame} selects {selected:?}");
     }
 }
+
+fn focused(rt: &Runtime<State>) -> Option<String> {
+    rt.elements().into_iter().find(|e| e.focused && !e.exiting).and_then(|e| e.key)
+}
+
+/// Sign-in on the Security page is a list of rows that each open a page: one Tab stop, the arrows, Home, End,
+/// Page Up and Page Down rove, and typing jumps to the row whose name starts so.
+#[test]
+fn a_list_of_rows_that_open_pages_roves_and_jumps_by_typing() {
+    let mut rt = runtime("DW-S01");
+    let stops = tab_stops(&mut rt);
+    assert_eq!(
+        stops.iter().filter(|k| k.starts_with("item-0-")).count(),
+        1,
+        "one Tab stop for the list: {stops:?}"
+    );
+    tab_to(&mut rt, "item-0-0");
+    key(&mut rt, Key::Down);
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-1"));
+    key(&mut rt, Key::End);
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-2"));
+    key(&mut rt, Key::Home);
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-0"));
+    key(&mut rt, Key::PageDown);
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-2"));
+    key(&mut rt, Key::PageUp);
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-0"));
+    key(&mut rt, Key::Text("t".into()));
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-1"), "Two-factor authentication");
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.pane, Pane::TwoFactor);
+}
+
+/// Delete on a device's row asks exactly what its Sign out button asks.
+#[test]
+fn delete_on_a_device_row_asks_the_same_confirm_as_its_button() {
+    let mut rt = runtime("DW-A55");
+    tab_to(&mut rt, "btn-0");
+    key(&mut rt, Key::Enter);
+    let by_button = (rt.state.account.dialog.clone(), says(&rt, "dlg-title"), name(&rt, "btn-3"));
+    key(&mut rt, Key::Escape);
+    assert_eq!(rt.state.account.dialog, None);
+    tab_to(&mut rt, "btn-0");
+    key(&mut rt, Key::Delete);
+    assert_eq!(
+        (rt.state.account.dialog.clone(), says(&rt, "dlg-title"), name(&rt, "btn-3")),
+        by_button
+    );
+    assert_eq!(by_button.0, Some(Dialog::SignOutDevice("dev-iphone".into())));
+    // Esc: nothing signed out. F2 and the Menu key do nothing on a device row (it has no rename and no menu).
+    key(&mut rt, Key::Escape);
+    assert_eq!(source(&rt).sessions().len(), 4);
+    tab_to(&mut rt, "btn-0");
+    key(&mut rt, Key::Function(2));
+    key(&mut rt, Key::ContextMenu);
+    assert_eq!(rt.state.account.dialog, None);
+}
+
+/// Signing a device out removes its row, and the confirm's opener with it: focus lands in the list (the next
+/// device's Sign out), never nowhere.
+#[test]
+fn focus_lands_on_the_list_after_a_sign_out_removes_the_row() {
+    let mut rt = runtime("DW-A55");
+    tab_to(&mut rt, "btn-0");
+    key(&mut rt, Key::Delete);
+    tab_to(&mut rt, "btn-3");
+    assert_eq!(name(&rt, "btn-3"), "Sign out Anna's iPhone, destructive");
+    key(&mut rt, Key::Text(" ".into()));
+    assert_eq!(rt.state.account.dialog, None);
+    assert_eq!(source(&rt).sessions().len(), 3, "the iPhone is signed out");
+    assert_eq!(focused(&rt).as_deref(), Some("btn-0"));
+    assert_eq!(name(&rt, "btn-0"), "Sign out Studio-PC (bb)", "the next device's row");
+}
+
+/// A passkey's row: Delete asks to remove it, F2 renames it, the Menu key opens its menu.
+#[test]
+fn a_passkey_row_takes_delete_f2_and_the_menu_key() {
+    let mut rt = runtime("DW-A73");
+    tab_to(&mut rt, "item-0-0-more");
+    key(&mut rt, Key::Delete);
+    assert!(matches!(rt.state.account.dialog, Some(Dialog::RemovePasskey(_))));
+    key(&mut rt, Key::Escape);
+    tab_to(&mut rt, "item-0-0-more");
+    key(&mut rt, Key::ContextMenu);
+    assert!(matches!(rt.state.account.dialog, Some(Dialog::PasskeyMenu(_))));
+    key(&mut rt, Key::Escape);
+    tab_to(&mut rt, "item-0-0-more");
+    key(&mut rt, Key::Function(2));
+    assert_eq!(rt.state.account.dialog, None);
+    assert!(rt.state.account.form.renaming.is_some(), "F2 renames");
+}

@@ -87,16 +87,20 @@ fn leads(
     Some(set::item(list, index, &it.link(true), Vec::new(), t).on_press(move |s: &mut State| super::go(s, frame)))
 }
 
-/// A list of the rows that are drawn; none drawn, no list.
+/// A list of the rows that are drawn; none drawn, no list. `roving`: every row is the control (it opens a
+/// page or a confirm), so the list is one Tab stop with the arrows and type-to-jump (`settings_list::roving_list`);
+/// a list with a switch or a text row in it stays a plain list.
 fn list_of(
     list: usize,
     head: Option<&str>,
     rows: Vec<Option<El>>,
     foot: Option<&str>,
+    roving: bool,
     t: &Theme,
 ) -> Option<El> {
     let rows: Vec<El> = rows.into_iter().flatten().collect();
-    (!rows.is_empty()).then(|| super::numbered_list(list, head, rows, foot, t))
+    let build = if roving { lists::roving_list } else { lists::list };
+    (!rows.is_empty()).then(|| build(list, head, rows, foot, t))
 }
 
 /// The factors, when there is a score to say: known and not empty.
@@ -266,6 +270,7 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> Opti
             leads(0, 2, passkeys, passkeys_ok, "DW-A73", source, t),
         ],
         None,
+        true,
         t,
     )
 }
@@ -381,6 +386,7 @@ fn devices(facts: &SecurityFacts, source: &dyn AccountSource, hide_capture: bool
             Some(capture_row(hide_capture, t)),
         ],
         None,
+        false,
         t,
     )
 }
@@ -426,7 +432,7 @@ fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> Opt
             rows
         }
     };
-    list_of(2, Some("Recent sign-in activity"), rows, None, t)
+    list_of(2, Some("Recent sign-in activity"), rows, None, false, t)
 }
 
 /// The two destructive rows open a confirm over the page; neither touches other devices. A row is drawn only
@@ -467,6 +473,7 @@ fn sign_out(facts: &SecurityFacts, t: &Theme) -> Option<El> {
         } else {
             "Signing out of Drive signs out Drive on this PC only."
         }),
+        true,
         t,
     )
 }
@@ -489,6 +496,7 @@ fn delete(source: &dyn AccountSource, t: &Theme) -> Option<El> {
         vec![leads(4, 0, it, State_::None, frame, source, t)],
         // How long it can be undone is Beebeeb's: the date is shown once it is scheduled.
         Some("After you confirm by email you can still undo it for a time. After that it cannot be undone."),
+        true,
         t,
     )
 }

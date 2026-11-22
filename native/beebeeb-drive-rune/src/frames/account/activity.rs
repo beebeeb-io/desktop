@@ -52,7 +52,8 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     });
     let mut children = vec![
         set::heading("Sign-in activity", sub, None, t),
-        super::numbered_list(
+        // The row that opens the web page is the list's one control; the row with the switch is text around it.
+        (if fixed_on { crate::ui::settings_list::roving_list } else { crate::ui::settings_list::list })(
             0,
             None,
             vec![if fixed_on {
@@ -112,7 +113,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
                         )
                     })
                     .collect();
-                children.push(super::numbered_list(
+                children.push(crate::ui::settings_list::list(
                     p + 1,
                     Some(title),
                     rows,
