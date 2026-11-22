@@ -53,4 +53,6 @@ pub(super) const MAX_NEW_UPLOADS_PER_SCAN: usize = 256;
 /// The listing misses bytes rewritten with the old size and modification time on Windows, and a
 /// file still open for writing; this bounds both. The full pass compares the bytes by a fingerprint
 /// a restored time cannot fool ([`crate::engine_bridge::ContentFingerprint`], task 2232).
-pub(super) const FULL_RECHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// dc-174: hourly; at 41.5k files the 10-minute walk alone averaged ~323 file ops/s. A journal gap or
+/// overflow ([`super::Changes::Unknown`]) and a resume from sleep walk at once, without waiting for it.
+pub(super) const FULL_RECHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
