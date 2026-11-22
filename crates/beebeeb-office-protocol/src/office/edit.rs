@@ -94,16 +94,16 @@ impl DroppedPart {
     pub fn notice(self) -> &'static str {
         match self {
             DroppedPart::SpeakerNotes => {
-                "This deck has speaker notes; editing here would drop them. Open in PowerPoint to edit."
+                "This deck has speaker notes; editing here would drop them. Open it in another app to edit."
             }
             DroppedPart::ActiveX => {
-                "This file has form controls; editing here would drop them. Open in Microsoft Office to edit."
+                "This file has form controls; editing here would drop them. Open it in another app to edit."
             }
             DroppedPart::Ink => {
-                "This file has ink drawings; editing here would drop them. Open in Microsoft Office to edit."
+                "This file has ink drawings; editing here would drop them. Open it in another app to edit."
             }
             DroppedPart::Other => {
-                "This file has parts this editor could not check, so editing here might drop them. Open in Microsoft Office to edit."
+                "This file has parts this editor could not check, so editing here might drop them. Open it in another app to edit."
             }
         }
     }
@@ -1174,7 +1174,12 @@ mod guarded_tests {
     #[test]
     fn edit_guarded_notice_names_the_kind_honestly() {
         let notes = DroppedPart::SpeakerNotes.notice();
-        assert!(notes.contains("speaker notes") && notes.contains("drop") && notes.contains("PowerPoint"), "{notes}");
+        assert!(notes.contains("speaker notes") && notes.contains("drop") && notes.contains("another app"), "{notes}");
+        // The button names the default app, or "another app" when none is known: the notice names no app of its
+        // own, so the two never disagree (RC1 008c).
+        for kind in [DroppedPart::SpeakerNotes, DroppedPart::ActiveX, DroppedPart::Ink, DroppedPart::Other] {
+            assert!(!kind.notice().contains("PowerPoint") && !kind.notice().contains("Microsoft"), "{kind:?}");
+        }
         assert!(DroppedPart::ActiveX.notice().contains("controls"));
         assert!(DroppedPart::Ink.notice().contains("ink"));
         assert!(!DroppedPart::Other.notice().is_empty());

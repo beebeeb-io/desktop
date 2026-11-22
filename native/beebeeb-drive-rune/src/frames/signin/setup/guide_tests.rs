@@ -449,6 +449,51 @@ fn the_guide_is_done_once_per_account() {
     }
 }
 
+/// The first run is once per PC, the guide once per account (RC1, 156): a second account's sign-up on a PC that
+/// already had its first run opens the window straight on Ready, and the tray tip still shows, once.
+#[test]
+fn a_sign_in_without_a_first_run_starts_the_guide_for_a_new_account() {
+    let (engine, mut rt) = on_engine();
+    // A window that starts signed in asks nothing by itself (the account is not new here).
+    tick(&mut rt);
+    tick(&mut rt);
+    assert_eq!(rt.state.guide.step, None, "no sign-in, no guide");
+
+    engine.set_gate(GateState::SignedOut);
+    tick(&mut rt);
+    engine.set_account("user-b");
+    engine.set_gate(GateState::Ready);
+    tick(&mut rt);
+    tick(&mut rt);
+    assert_eq!(rt.state.shell.app.account(), Some("user-b"));
+    assert_eq!(
+        rt.state.guide.step,
+        Some(Step::Tray),
+        "the new account gets the tray tip"
+    );
+    click(&mut rt, NEXT_KEY);
+    tick(&mut rt);
+    press(&mut rt, Key::Escape);
+    assert_eq!(rt.state.guide.step, None);
+
+    // Signed out and in again: done for that account.
+    engine.set_gate(GateState::SignedOut);
+    tick(&mut rt);
+    engine.set_gate(GateState::Ready);
+    tick(&mut rt);
+    tick(&mut rt);
+    assert_eq!(rt.state.guide.step, None, "and not again");
+
+    // A lock and an unlock is not a sign-in: nothing is asked.
+    engine.set_account("user-c");
+    engine.set_gate(GateState::Locked);
+    tick(&mut rt);
+    engine.set_gate(GateState::Ready);
+    tick(&mut rt);
+    tick(&mut rt);
+    assert_eq!(rt.state.guide.step, None, "an unlock starts no guide");
+}
+
 /// An answer is for the account it was asked for: asked under one account and taken in under another, there is
 /// none (so nothing starts); asked and taken in under the same account, there is.
 #[test]

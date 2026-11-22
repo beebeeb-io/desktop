@@ -122,6 +122,10 @@ pub struct Guide {
     /// Where that guide was, for its account: the step, and the row tip 2 points at. Kept until the mark's
     /// answer is taken in (a "not done" resumes there) or the account is gone; never another account's.
     resume_at: Option<(String, Step, Option<usize>)>,
+    /// The window was signed out since the last time the gate opened, and no first run came in between: the next
+    /// Ready is a sign-in or a sign-up on a PC whose first run was already done (it is once per PC, the guide once
+    /// per account), so that Ready asks for the account's mark itself (RC1: a second account's sign-up got no tip).
+    from_signed_out: bool,
 }
 
 /// The row tip 2 points at: the file that was selected when the guide started (the board points
@@ -280,6 +284,17 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let open = s.shell.app.gate() == GateState::Ready;
     // The first run's own flag, not its `Intent::OpenDrive`: that intent stays for the shell.
     let mut ask = s.setup.as_mut().is_some_and(super::Ui::just_finished);
+    // A sign-in or sign-up that opens the window without a first run (this PC had one already): the account's
+    // mark is asked for too. A first run asks at its own end ("Open my Beebeeb"), so it takes the latch.
+    match s.shell.app.gate() {
+        GateState::SignedOut => s.guide.from_signed_out = true,
+        GateState::FirstRun => s.guide.from_signed_out = false,
+        GateState::Ready if s.guide.from_signed_out => {
+            s.guide.from_signed_out = false;
+            ask |= account.is_some() && s.guide.step.is_none();
+        }
+        _ => {}
+    }
     // Locked again before the mark's answer came (an answer made under the session before is never taken in): the
     // next unlock of the same account asks again.
     if s.shell.app.gate() == GateState::Locked && s.guide.resume_for.is_none() {
@@ -345,6 +360,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
                     shown: false,
                     resume_for: None,
                     resume_at: None,
+                    from_signed_out: false,
                 };
             }
         }

@@ -15,9 +15,10 @@ use beebeeb_office_sandbox::Profile;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    ANSWER_WAIT_MS, AUDIO_PARTS_PER_SECOND, AudioFactory, BATCH_MAX, Clock, Cmd, DEFAULT_FRAME_MS, HELD_FRAMES,
-    LinkFactory, MAX_DURATION_MS, MediaBytes, MediaItem, MediaOpener, NOW_PLAYING_EVERY_MS, NoSound, OPEN_WAIT_MS,
-    Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK, Waker, lock,
+    ANSWER_WAIT_MS, AUDIO_PARTS_PER_SECOND, AudioFactory, BATCH_MAX, Clock, Cmd, DEFAULT_FRAME_MS,
+    FIRST_ANSWER_WAIT_MS, HELD_FRAMES, LinkFactory, MAX_DURATION_MS, MediaBytes, MediaItem, MediaOpener,
+    NOW_PLAYING_EVERY_MS, NoSound, OPEN_WAIT_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK,
+    Waker, lock,
 };
 use crate::media::os_controls::{NowPlaying, OsButton};
 use crate::media::refusal_log::{self, Broke};
@@ -143,6 +144,9 @@ pub(super) struct Worker {
     opened: Option<Opened>,
     /// `Opened` is due by this wall-clock time.
     opened_by: Option<u64>,
+    /// The helper sent a frame or PCM: until then its first answer gets [`FIRST_ANSWER_WAIT_MS`], a decoder that
+    /// starts cold (Windows' system decoder on a slow PC) may take longer than the steady [`ANSWER_WAIT_MS`].
+    answered: bool,
     frame_ms: u64,
     /// The sound device's rate and channels; `None`: no sound (no audio track, no device for a video, a track that
     /// does not play here, or a device that went away).
@@ -205,6 +209,7 @@ impl Worker {
             len: 0,
             opened: None,
             opened_by: None,
+            answered: false,
             frame_ms: DEFAULT_FRAME_MS,
             out: None,
             device_lost: false,
@@ -363,6 +368,7 @@ impl Worker {
         self.want_video = None;
         self.want_audio = None;
         self.opened_by = None;
+        self.answered = false;
         self.profile = profile;
         self.start_helper()
     }
@@ -451,12 +457,18 @@ impl Worker {
                 Ok(())
             }
             FromHelper::Opened(opened) => self.on_opened(opened),
-            FromHelper::Frame { pts_ms, w, h, rgba } => self.on_frame(pts_ms, w, h, rgba),
+            FromHelper::Frame { pts_ms, w, h, rgba } => {
+                self.answered = true;
+                self.on_frame(pts_ms, w, h, rgba)
+            }
             FromHelper::Audio {
                 pts_ms,
                 channels,
                 samples,
-            } => self.on_audio(pts_ms, channels, samples),
+            } => {
+                self.answered = true;
+                self.on_audio(pts_ms, channels, samples)
+            }
             FromHelper::Tags(tags) => self.on_tags(tags),
             FromHelper::Ended => {
                 if self.opened.is_none() {
@@ -754,6 +766,15 @@ impl Worker {
         Ok(())
     }
 
+    /// How long the helper has for the answer asked now: longer for its first one.
+    fn answer_wait(&self) -> u64 {
+        if self.answered {
+            ANSWER_WAIT_MS
+        } else {
+            FIRST_ANSWER_WAIT_MS
+        }
+    }
+
     /// Asks for the next frame and the next PCM, one of each at a time.
     fn ask(&mut self) -> Result<(), Exit> {
         let Some(opened) = self.opened else {
@@ -771,7 +792,7 @@ impl Worker {
                 self.want_video = Some(VideoWant {
                     w,
                     h,
-                    by: self.clock.now_ms().saturating_add(ANSWER_WAIT_MS),
+                    by: self.clock.now_ms().saturating_add(self.answer_wait()),
                     stale: false,
                 });
             }
@@ -785,7 +806,7 @@ impl Worker {
             self.want_audio = Some(AudioWant {
                 channels,
                 frames,
-                by: self.clock.now_ms().saturating_add(ANSWER_WAIT_MS),
+                by: self.clock.now_ms().saturating_add(self.answer_wait()),
                 stale: false,
             });
         }
