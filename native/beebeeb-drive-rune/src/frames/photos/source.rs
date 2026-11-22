@@ -365,7 +365,7 @@ fn decode(file: &[u8]) -> Pixels {
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf[..count * 4].to_vec(),
         png::ColorType::Rgb => buf[..count * 3]
-            .chunks_exact(3)
+            .as_chunks::<3>().0.iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
         other => panic!("a bundled sample photo is RGB or RGBA, not {other:?}"),
@@ -763,7 +763,7 @@ impl PhotosSource for LargePhotos {
 
 /// The source of a build that ships before the engine lane has wired Photos: it answers
 /// nothing, and the view draws the shell's "not built yet" frame instead of sample photos.
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub struct Unwired;
 
 impl PhotosSource for Unwired {

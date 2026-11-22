@@ -128,7 +128,7 @@ pub enum Dialog {
     Share(ShareDraft),
     Details,
     /// Rename: the name dialog of an open photo's menu (`route_items::rename`).
-    Rename(route_items::rename::Draft),
+    Rename(Box<route_items::rename::Draft>),
 }
 
 /// Which rendition of an open photo shows.

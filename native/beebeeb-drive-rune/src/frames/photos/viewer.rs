@@ -1,6 +1,7 @@
 //! One photo open (DW-0605 to DW-0611): the top bar's two renditions and ⋯, the photo on the
 //! dark stage, the strip, and Share · Offline · Details · Trash.
 
+use crate::theme::scale::space;
 use rune::{Color, El, SurfaceFit, col, el, row};
 
 use super::chrome::{self, Bar, rgb, style};
@@ -19,7 +20,7 @@ fn tab(i: usize, words: String, on: bool, t: &Theme) -> El {
         .label(words.clone())
         .checked(on)
         .h(24.0)
-        .px(10.0)
+        .px(space::S10)
         .radius(8.0)
         .center()
         .focusable(true)
@@ -42,7 +43,7 @@ fn tab(i: usize, words: String, on: bool, t: &Theme) -> El {
 
 pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
     let original = ui.viewer.as_ref().map_or(Original::Preview, |v| v.original);
-    let mut middle = row().key("ph-tools").gap(6.0).center_y();
+    let mut middle = row().key("ph-tools").gap(space::S6).center_y();
     // A video has one rendition: it streams (DW-0611).
     if viewing.kind == Kind::Photo {
         let whole = megabytes(viewing.original_bytes, true);
@@ -56,7 +57,7 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
                 .role("tablist")
                 .focus_group()
                 .label("Rendition")
-                .padding(2.0)
+                .padding(space::S2)
                 .radius(10.0)
                 .fill(t.field)
                 .box_shadow(kit::ring_inset(t.separator))
@@ -128,8 +129,8 @@ fn player(ui: &Ui, viewing: &Viewing, seconds: u32, t: &Theme) -> El {
         .key("ph-player")
         .pin(Some(24.0), None, Some(24.0), Some(20.0))
         .h(46.0)
-        .px(16.0)
-        .gap(12.0)
+        .px(space::S16)
+        .gap(space::S12)
         .center_y()
         .radius(12.0)
         .fill(Color::BLACK.alpha(0.45))
@@ -289,9 +290,9 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
                 .role("status")
                 .label(words)
                 .w_full()
-                .px(20.0)
-                .py(8.0)
-                .gap(12.0)
+                .px(space::S20)
+                .py(space::S8)
+                .gap(space::S12)
                 .center_y()
                 .child(kit::label("ph-viewer-notice-words", words, style::SUB, white.alpha(0.75)))
                 .child(
@@ -354,8 +355,8 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         .role("list")
         .label("Photos nearby")
         .w_full()
-        .gap(4.0)
-        .py(8.0)
+        .gap(space::S4)
+        .py(space::S8)
         .center();
     for (i, item) in viewing.strip.iter().enumerate() {
         let id = item.id;
@@ -388,7 +389,7 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
             .role("button")
             .label(name)
             .items_center()
-            .gap(4.0)
+            .gap(space::S4)
             .focusable(true)
             .child(kit::glyph(format!("ph-act-{i}-icon"), ic, 18.0, white))
             .child(kit::label(format!("ph-act-{i}-label"), name, style::CAP, white))
