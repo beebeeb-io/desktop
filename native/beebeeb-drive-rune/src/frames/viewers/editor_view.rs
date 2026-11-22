@@ -33,6 +33,40 @@ mod tests;
 /// The gutter: the line number's box, 16 pt of padding on both sides.
 pub const GUTTER_W: f32 = 56.0;
 
+/// The editor's F6 stops (`ui::focus::pane`), in the order F6 visits them: the field, the find bar while it is
+/// open, the live preview while it shows.
+pub const FIELD_PANE: &str = "editor-field";
+pub const FIND_PANE: &str = "find-bar";
+pub const PREVIEW_PANE: &str = "live-preview-pane";
+
+/// `inner` inside the F6 stop `pane`: F6 / Shift+F6 on a control in it go to the editor's next / previous stop
+/// before the window's pane cycle sees the key, so the field, the find bar and the preview cycle among themselves.
+pub fn stop(inner: El, pane: &'static str) -> El {
+    let inner = inner.on_key(move |s: &mut crate::State, ev: &rune::KeyEvent, tx: &mut rune::Tx| {
+        let Some(back) = crate::ui::focus::f6(ev) else { return false };
+        super::editor_f6(s, pane, back, tx);
+        true
+    });
+    crate::ui::focus::pane(el().child(inner), pane)
+}
+
+/// The stop after (`back`: before) `from`, wrapping; `None` when the field is the only one.
+pub fn f6_stop(ui: &Ui, from: &str, back: bool) -> Option<&'static str> {
+    let mut stops = vec![FIELD_PANE];
+    if ui.editor_view.find.open {
+        stops.push(FIND_PANE);
+    }
+    if ui.editor_view.preview_open && live_preview::kind_of(&ui.file.name).is_some() {
+        stops.push(PREVIEW_PANE);
+    }
+    let n = stops.len();
+    if n < 2 {
+        return None;
+    }
+    let i = stops.iter().position(|k| *k == from).unwrap_or(0);
+    Some(stops[if back { (i + n - 1) % n } else { (i + 1) % n }])
+}
+
 /// What the editor shows around its text, kept on [`Ui`] across edits.
 pub struct EditorView {
     pub preview_open: bool,
@@ -175,10 +209,11 @@ pub fn parts(ui: &Ui, editor: &Editor, t: &Theme) -> (Vec<El>, Option<El>, El) {
     let name = &ui.file.name;
     let kind = live_preview::kind_of(name);
     let tools = text::editor_tools(kind.is_some(), ui.editor_view.preview_open, t);
-    let banner = text::refused_banner(editor.refused.as_deref(), t)
-        .or_else(|| editor_find_bar::bar(&ui.editor_view, t));
+    // The field first: the F6 stops go in the order they are built (field, find bar, preview).
     let field = text::editor(editor, name, field_spans(ui, editor, t), t)
         .on_scroll_offset(super::editor_minimap::note_scroll);
+    let banner = text::refused_banner(editor.refused.as_deref(), t)
+        .or_else(|| editor_find_bar::bar(&ui.editor_view, t));
     let body = match kind {
         Some(kind) if ui.editor_view.preview_open => row()
             .key("editor-split")

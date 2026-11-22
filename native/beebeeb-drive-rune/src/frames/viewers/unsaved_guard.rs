@@ -190,6 +190,17 @@ fn on_cancel(s: &mut State, _tx: &mut Tx) {
     s.viewer.leave = None;
 }
 
+/// Where the keyboard goes as the question closes, when what opened it (the b's menu row, the tray, a sign-out
+/// button behind a gate) is gone with it: the text editor's field, else the office document's surface. An opener
+/// that stays gets focus back from the modal itself.
+pub(crate) fn back_key(s: &State) -> &'static str {
+    match s.viewer.ui.as_ref() {
+        Some(ui) if ui.editor.is_some() => super::EDITOR_KEY,
+        Some(ui) => super::office_over::doc_key(&ui.file.name),
+        None => super::EDITOR_KEY,
+    }
+}
+
 /// The window with the question over it, while it is up; else `behind` as it is.
 pub(crate) fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
     let Some(leave) = s.viewer.leave.as_ref() else {
@@ -210,7 +221,8 @@ pub(crate) fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         on_discard,
         on_cancel,
         &t,
-    );
+    )
+    .focus_return(back_key(s));
     rune::el()
         .key("window-with-unsaved")
         .w_full()
