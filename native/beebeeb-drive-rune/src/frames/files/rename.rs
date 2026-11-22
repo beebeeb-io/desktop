@@ -10,6 +10,7 @@
 use super::names::{self, NameError};
 use super::source::{Action, ActionError};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::icons_files;
 use crate::theme::tokens::Theme;
 use crate::ui::{field, kit};
@@ -210,9 +211,9 @@ pub fn name_field(s: &State, t: &Theme) -> El {
         .h(22.0)
         // `margin: 0 -4px`: the text stays where the name was.
         .mx(-4.0)
-        .px(4.0)
+        .px(scale::space::S4)
         .center_y()
-        .radius(4.0)
+        .radius(crate::theme::tokens::radius::SM)
         .fill(t.card)
         .box_shadow(ring)
         .box_shadow(rune::Shadow {

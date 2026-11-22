@@ -18,6 +18,7 @@ use crate::State;
 use crate::shell::app::{Dialog, Event};
 use crate::shell::host;
 use crate::shell::registry::{DialogFrame, FeedbackPolicy, FrameGroup};
+use crate::theme::scale;
 use crate::theme::icons_settings;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::settings_dialog::{self, Weight};
@@ -115,12 +116,12 @@ fn page(key: &str, t: &Theme) -> El {
     let mut page = col()
         .key(format!("{key}-page"))
         .size(96.0, 124.0)
-        .radius(4.0)
+        .radius(crate::theme::tokens::radius::SM)
         .fill(t.white)
         .box_shadow(kit::drop(2.0, 10.0, t.shadow_page))
-        .py(12.0)
-        .px(10.0)
-        .gap(5.0)
+        .py(scale::space::S12)
+        .px(scale::space::S10)
+        .gap(scale::space::S4)
         .child(
             el().key(format!("{key}-line-0"))
                 .h(6.0)
@@ -154,18 +155,18 @@ fn side(key: &str, side: &Side, t: &Theme) -> El {
         .label(format!("{}, {}, {}", side.device, side.when, side.size))
         // Two side by side in the 512 pt body, 12 pt between them.
         .w(250.0)
-        .padding(12.0)
-        .gap(10.0)
-        .radius(10.0)
+        .padding(scale::space::S12)
+        .gap(scale::space::S10)
+        .radius(crate::theme::tokens::radius::LG)
         .fill(t.card)
         .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
         .child(
             el().key(format!("{key}-well"))
                 .w_full()
-                .py(12.0)
+                .py(scale::space::S12)
                 .center()
-                .radius(8.0)
+                .radius(crate::theme::tokens::radius::CONTROL)
                 .fill(t.text.alpha(0.05))
                 .child(page(key, t)),
         )
@@ -173,7 +174,7 @@ fn side(key: &str, side: &Side, t: &Theme) -> El {
             row()
                 .key(format!("{key}-device-row"))
                 .center_y()
-                .gap(8.0)
+                .gap(scale::space::S8)
                 .child(kit::glyph(format!("{key}-icon"), mark, 15.0, t.text))
                 .child(kit::label(format!("{key}-device"), side.device.clone(), type_::HEAD, t.text).truncate()),
         )
@@ -211,7 +212,7 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
         row()
             .key("versions-pair")
             .w_full()
-            .gap(12.0)
+            .gap(scale::space::S12)
             .child(side("version-here", &conflict.here, &t))
             .child(side("version-there", &conflict.there, &t)),
         // Review of desktop#423, P2 #8: this PC's version under Keep there was never uploaded, so it is in no version
