@@ -243,11 +243,14 @@ fn scroll_to(rt: &mut rune::Runtime<State>, log: &crate::frames::office::docs::l
 }
 
 /// A sheet of 6,000 rows and 300 columns (80 x 24 pt), frozen panes `frozen`, scrolled to `at`, drawn once.
+/// The runtime and the cell rectangles it asked for.
+type Asked = Vec<(u32, u32, u32, u32)>;
+
 fn scrolled_frozen(
     frozen: (u32, u32),
     at: Cell,
     held: &[(u32, u32)],
-) -> (rune::Runtime<State>, Vec<(u32, u32, u32, u32)>) {
+) -> (rune::Runtime<State>, Asked) {
     let mut view = sheet(6_000, 300);
     view.frozen = frozen;
     for &(r, c) in held {

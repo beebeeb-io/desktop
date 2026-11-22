@@ -21,8 +21,8 @@ use rune::tok::Family;
 use rune::{Cx, El, Icon, Key, Mods, Span, SurfaceFit, TextStyle, col, el, rich, row};
 use zeroize::Zeroize;
 
+use crate::theme::scale::{self as sc, space};
 use crate::State;
-use crate::frames::placeholder;
 use crate::frames::viewers::kinds::OfficePicture;
 #[cfg(test)]
 use crate::frames::viewers::source::Body;
@@ -257,25 +257,25 @@ pub fn status_words(view: &SheetView) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// 12px/400 on 16px: a cell's words.
-pub(crate) const CELL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
+pub(crate) const CELL: TextStyle = crate::theme::tokens::type_::BODY;
 const CELL_BOLD: TextStyle = TextStyle::new(12.0, 650.0).lh(16.0);
 /// 11.5px mono on 16px: a figure in a cell (the board's `font-mono t-num`), and its bold twin (the total row).
-const CELL_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(16.0);
+const CELL_MONO: TextStyle = crate::theme::tokens::type_::META_MONO;
 const CELL_MONO_BOLD: TextStyle = TextStyle::new(11.5, 600.0).family(Family::Mono).lh(16.0);
 /// 11px/500 on 14px: a column letter.
-const HEADER: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
+const HEADER: TextStyle = crate::theme::tokens::type_::CAPTION;
 /// 11px mono on 14px: a row number (the board's `font-mono`).
 const ROW_NUMBER: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(14.0);
 /// 12px on 15px: the viewer bar's "Open in another app…" and the zoom figure's neighbours.
-const BAR_LABEL: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-const BAR_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
+const BAR_LABEL: TextStyle = sc::text::SUB;
+const BAR_MONO: TextStyle = sc::text::META_MONO_TIGHT;
 /// 12px/600 on 15px: the sheet tab that is open; 12px/500 the others.
-const TAB_ON: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
-const TAB: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
+const TAB_ON: TextStyle = crate::theme::tokens::type_::BODY_SEMI;
+const TAB: TextStyle = sc::text::SUB_STRONG;
 /// 11.5px mono on 17px: a cell's name and the formula (machine text).
-pub(crate) const MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0);
+pub(crate) const MONO: TextStyle = sc::text::META_MONO_LOOSE;
 /// 11.5px/600 on 17px: "Encrypted".
-const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
+const STATUS_ENC: TextStyle = sc::text::STATUS_SEMI;
 
 /// Widths in the board: the row numbers' column, the cell box, and the heights of the bars.
 pub(crate) const ROW_HEAD_W: f32 = 40.0;
@@ -328,8 +328,8 @@ fn formula_bar(view: &SheetView, cellbox: Option<El>, formula: Option<El>, t: &T
         .label("Formula bar")
         .w_full()
         .h(FORMULA_BAR_H)
-        .px(12.0)
-        .gap(8.0)
+        .px(space::S12)
+        .gap(space::S8)
         .center_y()
         .fill(t.paper)
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
@@ -390,8 +390,8 @@ fn viewer_bar(t: &Theme) -> El {
         .focus_group()
         .w_full()
         .h(VBAR_H)
-        .px(12.0)
-        .gap(12.0)
+        .px(space::S12)
+        .gap(space::S12)
         .center_y()
         .fill(t.card)
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
@@ -401,7 +401,7 @@ fn viewer_bar(t: &Theme) -> El {
                 .key("vbar-zoom")
                 .role("group")
                 .label("Zoom, 100 per cent")
-                .gap(4.0)
+                .gap(space::S4)
                 .center_y()
                 .child(glyph("zoom-less", "Zoom out", &LESS))
                 .child(fitted("zoom", "100%", BAR_MONO, t.text_secondary))
@@ -414,9 +414,9 @@ fn viewer_bar(t: &Theme) -> El {
                 .role("button")
                 .label(OPEN_ELSEWHERE)
                 .h(28.0)
-                .px(10.0)
+                .px(space::S10)
                 .center_y()
-                .radius(7.0)
+                .radius(crate::theme::tokens::radius::CONTROL)
                 .fill(t.card)
                 .border(1.0, t.card_border)
                 .border_layout()
@@ -643,7 +643,7 @@ fn grid(view: &SheetView, shown: &Shown, anchors: El, layer: Option<El>, t: &The
                 })
                 .w(w)
                 .h(*h)
-                .px(8.0)
+                .px(space::S8)
                 .center_y()
                 .fill(if in_selection(r, c) { t.selection } else { t.paper });
             cell = if here == view.current {
@@ -765,7 +765,7 @@ fn status(view: &SheetView, kept: Option<&str>, t: &Theme) -> El {
     bar.push(
         row()
             .key(format!("{enc}-box"))
-            .gap(4.0)
+            .gap(space::S4)
             .center_y()
             .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
             .child(fitted(enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),
@@ -1020,7 +1020,7 @@ mod tests {
         let row_1559 = FRAMES.iter().find(|(id, _)| *id == "DW-1559").expect("the DW-1559 row");
         assert_ne!(
             row_1559.1 as usize,
-            placeholder::scene as usize,
+            crate::frames::placeholder::scene as fn(&mut State) as usize,
             "DW-1559 is the sheet ribbon's scene (w04-ui-sheet-ribbon)"
         );
     }

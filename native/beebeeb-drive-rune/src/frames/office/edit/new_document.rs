@@ -12,6 +12,7 @@
 use beebeeb_office_protocol::office::{EditKind, Template};
 use rune::{El, Key, KeyEvent, TextStyle, Tx, col, row};
 
+use crate::theme::scale::{self as sc, space};
 use crate::State;
 use crate::frames::files::Toast;
 use crate::frames::files::names::{self, NameError};
@@ -46,8 +47,8 @@ const APPS: [(Kind, &str, EditKind); 3] = [
     (Kind::PowerPoint, "Slides", EditKind::Pptx),
 ];
 
-const TAB: TextStyle = TextStyle::new(12.0, 600.0).lh(17.0);
-const ROW_TITLE: TextStyle = TextStyle::new(13.0, 600.0).lh(17.0);
+const TAB: TextStyle = sc::text::BODY_SEMI_LOOSE;
+const ROW_TITLE: TextStyle = crate::theme::tokens::type_::LABEL;
 
 /// New document's state while its dialog is open.
 pub struct Doc {
@@ -254,9 +255,9 @@ fn tab(i: usize, on: bool, t: &Theme) -> El {
         .label(word)
         .checked(on)
         .h(28.0)
-        .px(14.0)
+        .px(space::S14)
         .center()
-        .radius(14.0)
+        .radius(crate::theme::tokens::radius::XL)
         .fill(if on { t.text } else { t.tile })
         .focusable(true)
         .focus_ring(2.0, 2.0, t.accent_deep)
@@ -279,8 +280,8 @@ fn template_row(i: usize, on: bool, t: &Theme) -> El {
         .label(format!("{title}, {words}"))
         .checked(on)
         .w_full()
-        .px(12.0)
-        .py(8.0)
+        .px(space::S12)
+        .py(space::S8)
         .gap(1.0)
         .radius(8.0)
         .focusable(true)
@@ -296,19 +297,19 @@ fn template_row(i: usize, on: bool, t: &Theme) -> El {
 pub fn card(nf: &NewFile, t: &Theme) -> El {
     let creating = nf.doc.as_ref().is_some_and(|d| d.creating);
     let template = nf.doc.as_ref().map_or(Template::Blank, |d| d.template);
-    let mut tabs = row().key("doc-tabs").role("radiogroup").label("App").gap(6.0);
-    for i in 0..APPS.len() {
-        tabs = tabs.child(tab(i, APPS[i].0 == nf.kind, t));
+    let mut tabs = row().key("doc-tabs").role("radiogroup").label("App").gap(space::S6);
+    for (i, app) in APPS.iter().enumerate() {
+        tabs = tabs.child(tab(i, app.0 == nf.kind, t));
     }
     let mut templates = col()
         .key("doc-templates")
         .role("radiogroup")
         .label("Template")
         .w_full()
-        .gap(2.0);
+        .gap(space::S2);
     if nf.kind == Kind::Word {
-        for i in 0..TEMPLATES.len() {
-            templates = templates.child(template_row(i, TEMPLATES[i].0 == template, t));
+        for (i, tpl) in TEMPLATES.iter().enumerate() {
+            templates = templates.child(template_row(i, tpl.0 == template, t));
         }
     } else {
         // Sheets and Slides: Blank only.

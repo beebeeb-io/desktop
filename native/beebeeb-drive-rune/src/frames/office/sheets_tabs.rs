@@ -14,6 +14,7 @@ use rune::{Color, El, Key, KeyEvent, TextEdit, Tx, col, el, row, text_input};
 
 use super::sheets_scroll::follow;
 use super::{Cell, SheetView, TAB, TAB_ON, TABS_H, fitted};
+use crate::theme::scale::space;
 use crate::State;
 use crate::frames::viewers::{self, source::Body};
 use crate::theme::tokens::Theme;
@@ -309,7 +310,7 @@ fn menu(view: &SheetView, hidden: &[usize], t: &Theme) -> El {
         .label("More sheets")
         .pin(None, None, Some(BAR_PAD), Some(TABS_H))
         .w(MENU_W)
-        .padding(4.0)
+        .padding(space::S4)
         .radius(8.0)
         .fill(t.card)
         .box_shadow(kit::drop(8.0, 28.0, Color::BLACK.alpha(0.20)))
@@ -324,7 +325,7 @@ fn menu(view: &SheetView, hidden: &[usize], t: &Theme) -> El {
                 .label(name.clone())
                 .w_full()
                 .h(30.0)
-                .px(10.0)
+                .px(space::S10)
                 .center_y()
                 .radius(5.0)
                 .hover(t.hover)
@@ -345,7 +346,7 @@ fn menu(view: &SheetView, hidden: &[usize], t: &Theme) -> El {
                 .key("sh-more-unnamed")
                 .w_full()
                 .h(30.0)
-                .px(10.0)
+                .px(space::S10)
                 .center_y()
                 .child(fitted("sh-more-unnamed-t", &words, TAB, t.text_tertiary)),
         );
@@ -354,6 +355,7 @@ fn menu(view: &SheetView, hidden: &[usize], t: &Theme) -> El {
 }
 
 /// The tabs' bar. `room`: the bar's width as the last frame laid it out (`None` on a first build: every tab is drawn).
+#[cfg(test)]
 pub(super) fn sheet_tabs(view: &SheetView, live: bool, room: Option<f32>, t: &Theme) -> El {
     sheet_tabs_edit(view, live, room, false, t)
 }

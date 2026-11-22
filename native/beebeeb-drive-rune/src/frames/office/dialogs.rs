@@ -8,6 +8,7 @@
 
 use rune::{El, TextStyle, col, el, row};
 
+use crate::theme::scale::{self as sc, space};
 use crate::State;
 use crate::frames::viewers;
 use crate::theme::tokens::{Theme, type_};
@@ -16,7 +17,7 @@ use crate::ui::kit;
 use crate::ui::settings_dialog::DIALOG_TITLE;
 
 /// 12px on 15px (`.t-sub`).
-const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+const SUB: TextStyle = sc::text::SUB;
 
 /// The notice, as the board's DW-1557 words it (viewer contract section 6.2). One text node.
 pub const NOTICE: &str = "This viewer and editor are built on WordCraft, GridCraft and DeckCraft, open-source projects \
@@ -100,8 +101,8 @@ pub fn licence_panel(t: &Theme) -> El {
                 col()
                     .key("lic-inner")
                     .w_full()
-                    .padding(16.0)
-                    .gap(8.0)
+                    .padding(space::S16)
+                    .gap(space::S8)
                     .child(
                         kit::label("lic-title", TITLE, DIALOG_TITLE, t.text)
                             .role("heading")
@@ -113,7 +114,7 @@ pub fn licence_panel(t: &Theme) -> El {
                         col()
                             .key("lic-links")
                             .w_full()
-                            .gap(4.0)
+                            .gap(space::S4)
                             .child(link(0, LINKS[0], t))
                             .child(link(1, LINKS[1], t)),
                     ),

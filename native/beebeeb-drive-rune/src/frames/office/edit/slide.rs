@@ -357,11 +357,11 @@ fn command_key(s: &mut State, ev: &KeyEvent, l: Live) -> bool {
     if !l.caret {
         return false;
     }
-    if matches!(ev.key, Key::Left | Key::Right | Key::Home | Key::End) {
-        if let Some(to) = motion(&ev.key, true) {
-            send(s, EditOp::Move { to, extend: shift });
-            return true;
-        }
+    if matches!(ev.key, Key::Left | Key::Right | Key::Home | Key::End)
+        && let Some(to) = motion(&ev.key, true)
+    {
+        send(s, EditOp::Move { to, extend: shift });
+        return true;
     }
     match &ev.key {
         Key::Backspace => {

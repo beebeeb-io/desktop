@@ -23,6 +23,7 @@ use beebeeb_office_protocol::check::MAX_OP_TEXT_BYTES;
 use beebeeb_office_protocol::office::{CellRange, EditOp};
 use rune::{Drag, Key, KeyEvent, Phase, TextEdit, Tx, el, text_input};
 
+use crate::theme::scale::space;
 use crate::State;
 use crate::frames::office::sheets::{self, Cell, Geometry, SheetView, sheets_scroll};
 use crate::frames::viewers;
@@ -761,7 +762,7 @@ pub fn layer(grid: &SheetGrid, view: &SheetView, geometry: Geometry, room: (f32,
                 .absolute(x, y)
                 .w(w.max(EDITOR_MIN_W))
                 .h(h)
-                .px(8.0)
+                .px(space::S8)
                 .fill(t.paper)
                 .border(2.0, t.text)
                 .border_layout(),

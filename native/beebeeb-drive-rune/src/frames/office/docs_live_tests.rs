@@ -12,10 +12,13 @@ use crate::frames::viewers::source::{Body, OpenError, OpenFile, ViewerSource};
 use crate::{init, view};
 
 /// What a live source was asked, in order.
+/// A cell picture the engine was asked for (five numbers, as the source takes them).
+pub(crate) type CellAsk = (u32, u32, u32, u32, u32);
+
 #[derive(Default)]
 pub(crate) struct Log {
     pub pictures: RefCell<Vec<OfficePicture>>,
-    pub cells: RefCell<Vec<(u32, u32, u32, u32, u32)>>,
+    pub cells: RefCell<Vec<CellAsk>>,
     /// Answer every picture with this size (px); `None`: nothing has come yet.
     pub answer: Cell<Option<(u32, u32)>>,
     pub retries: Cell<u32>,
