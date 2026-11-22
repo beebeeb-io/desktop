@@ -116,26 +116,7 @@ fn click(rt: &mut Runtime<State>, key: &str) {
 
 /// Tab until the element keyed `target` has focus; panics when focus never gets there.
 fn tab_to(rt: &mut Runtime<State>, target: &str) {
-    for _ in 0..80 {
-        if find(rt, target).is_some_and(|e| e.focused) {
-            return;
-        }
-        key(rt, Key::Tab);
-    }
-    // A roving group (the settings sidebar) is one Tab stop: its other members take arrows,
-    // down from the item Tab lands on, then back up past it.
-    for _ in 0..40 {
-        key(rt, Key::Tab);
-        for arrow in [Key::Down, Key::Up] {
-            for _ in 0..12 {
-                if find(rt, target).is_some_and(|e| e.focused) {
-                    return;
-                }
-                key(rt, arrow.clone());
-            }
-        }
-    }
-    panic!("Tab never reaches {target}");
+    super::tests_keys::tab_to(rt, target);
 }
 
 /// Is the window on settings (the shell's route), and on which of the shell's sections?
@@ -828,15 +809,10 @@ fn a_pop_up_row_is_one_tab_stop_and_every_tab_stop_acts() {
             "General-row",
             "item-0-0",
             "item-1-0",
-            "item-1-1",
-            "item-1-2",
             "item-2-0",
-            "item-2-1",
-            "item-2-2",
             "item-3-0",
-            "item-3-1",
         ],
-        "the Tab order of General: the sidebar (one stop, its selected item), then the rows, top to bottom; nothing twice"
+        "the Tab order of General: the sidebar (one stop, its selected item), then each list of links one stop, top to bottom; nothing twice"
     );
     // About has the other pop-up row.
     click(&mut rt, "item-3-1");

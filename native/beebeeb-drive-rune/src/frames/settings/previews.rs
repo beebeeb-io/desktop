@@ -15,11 +15,9 @@ use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::button as ui_button;
 use crate::ui::kit;
-use crate::ui::settings_card as cards;
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 use crate::ui::settings_list::{self as lists, Item, Trailing};
-use crate::ui::settings_meter as meters;
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell::{self as shell, SUB};
 use crate::ui::view_state::{ViewState, try_again, view_state};
@@ -333,7 +331,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     ui.previews.show(p.sample.as_ref());
 
     let on = p.on;
-    children.push(super::list(
+    children.push(lists::list(
         0,
         None,
         vec![lists::item_with(
@@ -357,7 +355,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let size_at = PreviewSize::ALL.iter().position(|s| *s == p.size).unwrap_or(0);
     let format_at = PreviewFormat::ALL.iter().position(|f| *f == p.format).unwrap_or(0);
     let seg_row = |key: &str, seg: El| el().key(key.to_string()).w_full().px(12.0).py(10.0).child(seg);
-    children.push(super::list(
+    children.push(lists::list(
         1,
         Some("Preview size"),
         vec![seg_row(
@@ -376,7 +374,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         None,
         t,
     ));
-    children.push(super::list(
+    children.push(lists::list(
         2,
         Some("Format"),
         vec![seg_row(
@@ -427,10 +425,10 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         )),
         None => counts.push('.'),
     }
-    children.push(super::list(3, Some("What it uses"), uses, Some(&counts), t));
+    children.push(lists::list(3, Some("What it uses"), uses, Some(&counts), t));
 
     if let Some(on_pc) = &p.on_pc {
-        children.push(super::list(
+        children.push(lists::roving_list(
             4,
             Some("On this PC"),
             vec![
@@ -468,7 +466,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             t,
         ));
     }
-    children.push(super::list(
+    children.push(lists::list(
         5,
         Some("Made automatically"),
         made,
@@ -479,7 +477,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         }),
         t,
     ));
-    children.push(super::list(
+    children.push(lists::roving_list(
         6,
         Some("Rebuild"),
         vec![

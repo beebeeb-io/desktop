@@ -21,11 +21,12 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let g = ui.source.general();
     let menu_open = ui.menu.is_some_and(|m| m.kind == MenuKind::Theme);
 
-    let appearance = super::list(
+    let appearance = lists::roving_list(
         0,
         Some("Appearance"),
         vec![
-            lists::item(
+            super::menu_keys(
+lists::item(
                 0,
                 0,
                 &Item::new(Some(&ic::THEME), "Theme")
@@ -38,13 +39,13 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     .role(Role::PopUp),
                 t,
             )
-            .on_press(|s: &mut State| s.settings.toggle_menu(MenuKind::Theme)),
+            .on_press(|s: &mut State| s.settings.toggle_menu(MenuKind::Theme)), MenuKind::Theme),
         ],
         None,
         t,
     );
 
-    let help = super::list(
+    let help = lists::roving_list(
         1,
         Some("Help"),
         vec![
@@ -71,7 +72,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         t,
     );
 
-    let privacy = super::list(
+    let privacy = lists::roving_list(
         2,
         Some("Privacy and data"),
         vec![
@@ -107,7 +108,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         Update::Current => format!("Version {}", g.version),
         Update::Available { .. } => format!("{} · update available", g.version),
     };
-    let about = super::list(
+    let about = lists::roving_list(
         3,
         Some("About"),
         vec![
@@ -179,7 +180,7 @@ fn report_problem(t: &Theme) -> El {
     };
     let body = vec![
         dialogs::para_rich(0, WORDS, &[at..at + ADDRESS.len()], t),
-        super::list(
+        lists::list(
             4,
             Some("In the bundle"),
             vec![
@@ -189,7 +190,7 @@ fn report_problem(t: &Theme) -> El {
             None,
             t,
         ),
-        super::list(
+        lists::list(
             5,
             Some("Removed first"),
             vec![
@@ -201,7 +202,7 @@ fn report_problem(t: &Theme) -> El {
             ),
             t,
         ),
-        super::list(
+        lists::list(
             6,
             Some("Your email"),
             vec![lists::item(

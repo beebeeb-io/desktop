@@ -14,10 +14,8 @@ use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
-use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 use crate::ui::settings_notice::{self as notices, Tone};
-use crate::ui::settings_shell::SUB;
 use crate::ui::view_state::{ViewState, try_again, view_state};
 use rune::tok::Family;
 use rune::{Align, El, TextStyle, col, el, row};
@@ -461,7 +459,7 @@ fn legend(t: &Theme) -> El {
 /// the pane's own.
 pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
     let draft = &ui.more.keep;
-    let mut n = first;
+    let n = first;
     let (body, sum, changed) = match ui.drive.keep() {
         Keep::Loading => (
             vec![tree_box().child(view_state(ViewState::Loading { words: "Loading your folders…" }, t))],

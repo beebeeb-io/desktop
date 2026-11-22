@@ -93,7 +93,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 .on_press(move |s: &mut State| super::go(s, leads_to))
             })
             .collect();
-        children.push(super::list(l, Some(day), rows, None, t));
+        children.push(lists::roving_list(l, Some(day), rows, None, t));
     }
     done(ui, children, t)
 }

@@ -74,14 +74,7 @@ fn click(rt: &mut Runtime<State>, key: &str) {
 
 /// Tab until the control keyed `target` has the focus.
 fn tab_to(rt: &mut Runtime<State>, target: &str) {
-    for _ in 0..120 {
-        key(rt, Key::Tab);
-        let focused = rt.elements().into_iter().find(|e| e.focused && !e.exiting);
-        if focused.and_then(|e| e.key).as_deref() == Some(target) {
-            return;
-        }
-    }
-    panic!("Tab never reaches {target}");
+    super::tests_keys::tab_to(rt, target);
 }
 
 fn ui(rt: &Runtime<State>) -> &super::SettingsUi {

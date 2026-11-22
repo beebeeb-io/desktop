@@ -229,7 +229,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 lists::item_with(0, i, &it, vec![figure], t).label(format!("{}, {}", a.measure.title(), a.now))
             })
             .collect();
-        children.push(super::list(
+        children.push(lists::list(
             0,
             Some("App activity"),
             rows,
@@ -240,7 +240,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 
     if d.activity.is_empty() {
         // The sampler fills this about 2 seconds after the page opens: said, with what will show.
-        children.push(super::list(
+        children.push(lists::list(
             0,
             Some("App activity"),
             vec![view_state(
@@ -282,9 +282,9 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             t,
         ),
     };
-    children.push(super::list(3, Some("Log file"), vec![log_row], None, t));
+    children.push(lists::list(3, Some("Log file"), vec![log_row], None, t));
 
-    children.push(super::list(
+    children.push(lists::list(
         1,
         Some("Support bundle"),
         vec![lists::item_with(
@@ -333,6 +333,6 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         lists::item(2, 2, &Item::new(Some(&ic::INFO), "Report a problem").opens(), t)
             .on_press(|s: &mut State| super::go(s, "DW-0782")),
     ]);
-    children.push(super::list(2, Some("Help"), help, None, t));
+    children.push(lists::roving_list(2, Some("Help"), help, None, t));
     (shell::pane(children, t), None)
 }

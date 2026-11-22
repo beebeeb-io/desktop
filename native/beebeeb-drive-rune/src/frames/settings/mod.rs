@@ -37,6 +37,8 @@ mod tests_bandwidth;
 #[cfg(test)]
 mod tests_drive;
 #[cfg(test)]
+mod tests_keys;
+#[cfg(test)]
 mod tests_more;
 #[cfg(test)]
 mod tests_previews;
@@ -46,9 +48,12 @@ mod tests_update;
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
 use crate::shell::{host, instance, placeholder, registry};
-use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{self, Theme};
-use crate::ui::{caption, settings_controls as controls, settings_shell as shell};
+use crate::ui::{caption, focus, settings_controls as controls, settings_shell as shell};
+
+/// The F6 stops of the settings window: its sidebar and its page.
+pub const SIDEBAR_PANE: &str = "settings-sidebar";
+pub const PAGE_PANE: &str = "settings-page";
 use rune::{Align, Cx, El, Key, KeyEvent, Side, Tx, col, row};
 
 use drive::{DriveSettings, Kept};
@@ -360,18 +365,21 @@ impl SettingsUi {
     }
 }
 
-/// [`lists::list`] whose rows know their place in the whole list (`position_in_set`), so a screen reader says
-/// "3 of 7" however many rows are in view.
-pub(crate) fn list(
-    index: usize,
-    title: Option<&str>,
-    rows: Vec<El>,
-    foot: Option<&str>,
-    t: &Theme,
-) -> El {
-    let size = rows.len();
-    let rows = rows.into_iter().enumerate().map(|(i, r)| r.position_in_set(i + 1, size)).collect();
-    crate::ui::settings_list::list(index, title, rows, foot, t)
+/// A pop-up row's keys beyond its press: the Menu key and Shift+F10 open its menu (the row's
+/// choices), as on Windows.
+pub fn menu_keys(row: El, kind: MenuKind) -> El {
+    row.on_key(move |s: &mut State, ev: &KeyEvent, _: &mut Tx| {
+        let m = ev.mods;
+        let asks = match ev.key {
+            Key::ContextMenu => true,
+            Key::Function(10) => m.shift && !m.ctrl && !m.alt && !m.cmd,
+            _ => false,
+        };
+        if asks && s.settings.menu.is_none_or(|open| open.kind != kind) {
+            s.settings.toggle_menu(kind);
+        }
+        asks
+    })
 }
 
 /// The menu `kind`, when it is the open one: its top-left corner on the point its row marks
@@ -832,12 +840,16 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(sidebar(
-            pane.section(),
-            ui.drive.photo_previews() != previews::PhotoPreviews::Unavailable,
-            &t,
+        // The sidebar and the page are F6 stops, as in account's sections (`ui::focus::pane`).
+        .child(focus::pane(
+            row().h_full().child(sidebar(
+                pane.section(),
+                ui.drive.photo_previews() != previews::PhotoPreviews::Unavailable,
+                &t,
+            )),
+            SIDEBAR_PANE,
         ))
-        .child(pane_el);
+        .child(focus::pane(row().grow(1.0).min_w(0.0).h_full().child(pane_el), PAGE_PANE));
     if let Some(overlay) = overlay {
         body = body.child(overlay);
     }

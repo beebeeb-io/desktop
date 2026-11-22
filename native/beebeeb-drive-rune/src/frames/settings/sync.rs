@@ -6,7 +6,7 @@
 use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::Theme;
-use crate::ui::kit;
+use crate::ui::{dialog, kit};
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 use crate::ui::settings_list::{self as lists, FOOT, Item, Role, Trailing};
@@ -70,7 +70,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         repair.into_iter().collect(),
         t,
     ));
-    children.push(super::list(0, Some("File Explorer"), explorer, None, t));
+    children.push(lists::list(0, Some("File Explorer"), explorer, None, t));
 
     // Sync: where it stands, and the one thing to do about it.
     let (icon, says, act): (&'static rune::Icon, String, El) = match &sy.status {
@@ -110,7 +110,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             t,
         ),
     ];
-    let mut sync_list = super::list(1, Some("Sync"), sync_rows, None, t);
+    let mut sync_list = lists::list(1, Some("Sync"), sync_rows, None, t);
     if matches!(sy.status, SyncStatus::WaitingMetered(_)) {
         sync_list = sync_list.child(metered_foot(t));
     }
@@ -162,7 +162,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             t,
         ),
     ];
-    children.push(super::list(
+    children.push(lists::list(
         2,
         Some("Space on this PC"),
         space,
@@ -173,7 +173,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     ));
 
     if sy.in_explorer {
-        children.push(super::list(
+        children.push(lists::roving_list(
             3,
             None,
             vec![
@@ -250,17 +250,27 @@ fn turn_off(not_uploaded: Option<&(u32, String)>, first: usize, t: &Theme) -> El
         }),
         dialogs::button(first + 1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
     ];
-    dialogs::alert(
-        "Turn off Beebeeb in File Explorer",
-        380.0,
-        notices::tile(0, Tone::Red, &ic::FOLDER_TAB, t),
-        "Turn off Beebeeb in File Explorer?",
-        &says,
-        foot,
+    let card = dialog::dialog(
+        dialog::Dialog {
+            alert: true,
+            head: dialog::Head::Alert {
+                tile: notices::tile(0, Tone::Red, &ic::FOLDER_TAB, t),
+                title: "Turn off Beebeeb in File Explorer?",
+                sub: &says,
+            },
+            foot: dialog::Foot::Even(foot),
+            ..dialog::Dialog::new("dlg", "Turn off Beebeeb in File Explorer", 380.0)
+        },
         t,
-    )
-    .modal(false, |s: &mut State| s.settings.dialog = None)
+    );
+    // Turned off, the row that opened this is gone: focus goes to the list above it.
+    dialog::modal_back(0.0, card, TURN_OFF_ROW, SPACE_LIST, |s: &mut State| s.settings.dialog = None, t)
 }
+
+/// The row that opens the turn-off question, gone once Beebeeb leaves File Explorer.
+pub const TURN_OFF_ROW: &str = "item-3-0";
+/// Where focus goes when that row is gone: the list above it (Space on this PC).
+pub const SPACE_LIST: &str = "list-2";
 
 /// Repair Beebeeb in File Explorer (DW-0746c): what the repair does, before it does it.
 fn repair_question(first: usize, t: &Theme) -> El {

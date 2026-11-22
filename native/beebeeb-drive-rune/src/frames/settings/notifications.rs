@@ -123,7 +123,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             s.settings.toast = None;
             s.settings.source.set_allow_notifications(!on)
         });
-        children.push(super::list(
+        children.push(lists::list(
             list,
             None,
             vec![lists::item_with(
@@ -157,7 +157,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     if n.new_recent > 0 {
         recent = recent.trailing(Trailing::Value(format!("{} new", n.new_recent)));
     }
-    children.push(super::list(
+    children.push(lists::roving_list(
         list,
         None,
         vec![lists::item(list, 0, &recent.opens(), t).on_press(|s: &mut State| super::go(s, "DW-0791"))],
@@ -171,7 +171,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     } else {
         "Off in Windows"
     };
-    children.push(super::list(
+    children.push(lists::list(
         list,
         Some("Security"),
         vec![lists::item(
@@ -217,7 +217,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 lists::item_with(list, i, &it, vec![switch], t)
             })
             .collect();
-        let group = super::list(list, Some(title), rows, None, t);
+        let group = lists::list(list, Some(title), rows, None, t);
         // Off in Windows: the choices stay, dimmed, so nothing is lost when they come back.
         children.push(if n.allowed_in_windows {
             group
