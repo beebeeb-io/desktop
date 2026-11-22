@@ -2,6 +2,7 @@
 //! status, the days and their tiles in virtual rows, the selection bar (DW-0602) and the empty
 //! state (DW-0116).
 
+use crate::theme::scale::{space, radius};
 use std::borrow::Cow;
 
 use rune::{Color, El, ScrollSpec, col, el, row};
@@ -27,7 +28,7 @@ pub fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -116,7 +117,7 @@ pub fn bar(ui: &Ui, t: &Theme) -> Bar {
         details: false,
         middle: row()
             .key("ph-tools")
-            .gap(4.0)
+            .gap(space::S4)
             .center_y()
             .child(across)
             .child(sources)
@@ -149,7 +150,7 @@ fn head(ui: &Ui, t: &Theme) -> El {
         .role("radiogroup")
         .focus_group()
         .label("Source")
-        .gap(6.0)
+        .gap(space::S6)
         .center_y()
         .child(pill(0, "All", ui.filter.is_none(), None, t));
     let shown = ui.source.devices().into_iter().enumerate().filter(|(_, d)| d.shown);
@@ -159,9 +160,9 @@ fn head(ui: &Ui, t: &Theme) -> El {
     let mut head = row()
         .key("ph-head")
         .w_full()
-        .px(20.0)
-        .py(10.0)
-        .gap(12.0)
+        .px(space::S20)
+        .py(space::S10)
+        .gap(space::S12)
         .center_y()
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
@@ -181,7 +182,7 @@ fn head(ui: &Ui, t: &Theme) -> El {
                 .key("ph-backup")
                 .role("status")
                 .label(format!("{} \u{00B7} {}", status.now, status.last))
-                .gap(8.0)
+                .gap(space::S8)
                 .center_y()
                 .child(kit::glyph("ph-backup-icon", &icons::BACKING_UP, 14.0, t.text_tertiary))
                 .child(
@@ -221,9 +222,9 @@ pub fn bulk(ui: &Ui, t: &Theme) -> El {
         .focus_group()
         .label("Selection")
         .w_full()
-        .px(14.0)
-        .py(6.0)
-        .gap(8.0)
+        .px(space::S14)
+        .py(space::S6)
+        .gap(space::S8)
         .center_y()
         .fill(bg)
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
@@ -325,8 +326,8 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
             .key(format!("{key}-badge"))
             .pin(left.then_some(5.0), None, (!left).then_some(5.0), Some(5.0))
             .h(18.0)
-            .px(5.0)
-            .gap(3.0)
+            .px(space::S4)
+            .gap(space::S4)
             .center_y()
             .radius(6.0)
             .fill(Color::BLACK.alpha(0.55))
@@ -360,7 +361,7 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
                 .key(format!("{key}-check-ring"))
                 .pin(None, Some(4.5), Some(4.5), None)
                 .size(23.0, 23.0)
-                .radius(11.5)
+                .radius(radius::DIALOG)
                 .center()
                 .fill(white)
                 .child(check);
@@ -387,12 +388,12 @@ fn line(ui: &Ui, i: usize, t: &Theme) -> El {
             None => el().key(format!("ph-gap-{i}-{column}")).w(ui.tile_side()),
         });
     }
-    let mut out = col().key(format!("ph-line-{i}")).w_full().px(16.0);
+    let mut out = col().key(format!("ph-line-{i}")).w_full().px(space::S16);
     if l.head {
         let title = ui.days.get(l.day).map_or(String::new(), |d| d.title.clone());
         out = out.child(
             el().key(format!("ph-day-{}-row", l.day))
-                .px(4.0)
+                .px(space::S4)
                 .pt(12.0)
                 .pb(8.0)
                 .child(kit::label(format!("ph-day-{}", l.day), title, type_::HEAD, t.text).role("heading")),
@@ -459,9 +460,9 @@ fn unshowable_notice(t: &Theme) -> El {
         .role("status")
         .label(UNSHOWABLE)
         .w_full()
-        .px(20.0)
-        .py(8.0)
-        .gap(8.0)
+        .px(space::S20)
+        .py(space::S8)
+        .gap(space::S8)
         .center_y()
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()

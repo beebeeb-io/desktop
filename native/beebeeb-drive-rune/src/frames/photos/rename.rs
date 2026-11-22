@@ -93,13 +93,13 @@ pub fn open(s: &mut State, tx: &mut Tx, id: PhotoId) {
     let mut edit = TextEdit::new(item.name.clone());
     edit.set_selection(0, names::stem_len(&item.name, false));
     s.photos.menu = None;
-    s.photos.dialog = Some(Dialog::Rename(Draft {
+    s.photos.dialog = Some(Dialog::Rename(Box::new(Draft {
         id,
         edit: Name(edit),
         original: item.name,
         others,
         error: None,
-    }));
+    })));
     tx.focus(INPUT, false);
 }
 

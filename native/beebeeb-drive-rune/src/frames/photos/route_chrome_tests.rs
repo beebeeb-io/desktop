@@ -46,7 +46,7 @@ fn enter_in_photos_search_box_shows_searchs_results_for_that_text() {
     click(&mut rt, "search-input");
     for c in "harbour".chars() {
         rt.key(KeyEvent {
-            key: Key::Text(c.to_string().into()),
+            key: Key::Text(c.to_string()),
             mods: Mods::default(),
         });
         rt.frame(0.0);

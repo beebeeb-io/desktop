@@ -15,31 +15,29 @@ use crate::ui::{button, caption, sidebar, status_bar};
 
 /// The group's own type styles, by the board's class.
 pub mod style {
+    use crate::theme::scale::text;
+    use crate::theme::tokens::type_;
     use rune::TextStyle;
     use rune::tok::Family;
 
     pub const SEG: TextStyle = TextStyle::new(12.0, 550.0).lh(15.0);
-    /// `.t-sub` and its `b`.
-    pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-    pub const SUB_STRONG: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
+    pub const SUB: TextStyle = text::SUB;
+    pub const SUB_STRONG: TextStyle = text::SUB_STRONG;
     /// `.mk-gbadge`.
     pub const BADGE: TextStyle = TextStyle::new(10.0, 600.0).family(Family::Mono).lh(13.0);
-    /// `.mk-bulk` and its `b`.
-    pub const BULK: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
-    pub const BULK_STRONG: TextStyle = TextStyle::new(12.5, 600.0).lh(17.0);
-    /// `.kit-btn-md`.
-    pub const BUTTON: TextStyle = TextStyle::new(13.0, 500.0).lh(18.5714).tracking(-0.065);
-    /// `.t-cap`, and in the machine face.
-    pub const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
-    pub const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
-    /// `.kit-list-title`, `.kit-item-title`, `.kit-item-sub`, `.kit-item-value` (and mono).
+    pub const BULK: TextStyle = type_::SEARCH;
+    pub const BULK_STRONG: TextStyle = text::FIELD_SEMI;
+    pub const BUTTON: TextStyle = text::ITEM_TITLE_TALL;
+    pub const CAP: TextStyle = type_::CAPTION;
+    pub const CAP_MONO: TextStyle = type_::KBD;
+    /// `.kit-list-title`: no token (tracking 0.1).
     pub const LIST_TITLE: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.1);
-    pub const ITEM_TITLE: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0).tracking(-0.065);
-    pub const ITEM_SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-    pub const ITEM_VALUE: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
-    pub const ITEM_VALUE_MONO: TextStyle = TextStyle::new(12.5, 400.0).family(Family::Mono).lh(17.0);
-    pub const POP: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
-    pub const SIZE_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
+    pub const ITEM_TITLE: TextStyle = type_::ITEM_TITLE;
+    pub const ITEM_SUB: TextStyle = text::SUB;
+    pub const ITEM_VALUE: TextStyle = text::READ;
+    pub const ITEM_VALUE_MONO: TextStyle = text::FIELD_MONO;
+    pub const POP: TextStyle = type_::SEARCH;
+    pub const SIZE_MONO: TextStyle = type_::KBD;
 }
 
 /// A colour from its sRGB bytes, as the board's computed styles give it.
@@ -138,6 +136,7 @@ pub fn status_line(sync: &str, details: &str, t: &Theme) -> El {
 }
 
 /// The window. `front` is drawn over the whole client area, in order (a menu; a scrim and its dialog).
+#[allow(clippy::too_many_arguments)]
 pub fn window(
     s: &State,
     cx: &mut rune::Cx<State>,
