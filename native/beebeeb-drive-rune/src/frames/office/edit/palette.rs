@@ -162,6 +162,7 @@ fn push(groups: &mut Vec<CommandGroup>, title: &str, command: Command) {
 
 /// What the search shows for `typed`: our operations for `kind` (when an editor is live), then what the source
 /// found (the document's styles, file names), without a name that is already listed in the same group.
+#[cfg(test)]
 pub fn found(kind: Option<EditKind>, typed: &str, from_source: Vec<CommandGroup>) -> Vec<CommandGroup> {
     found_at(kind, None, typed, from_source)
 }
@@ -201,16 +202,17 @@ pub fn found_at(kind: Option<EditKind>, stage: Option<Stage>, typed: &str, from_
 
 /// What the result `name` of group `group` does. `marks` are the selection's: a mark runs as the opposite of
 /// what the selection has.
+#[cfg(test)]
 pub fn resolve(kind: Option<EditKind>, group: &str, name: &str, marks: Option<&Marks>) -> Run {
     resolve_at(kind, None, group, name, marks)
 }
 
 /// [`resolve`] with the slide on the stage.
 pub fn resolve_at(kind: Option<EditKind>, stage: Option<Stage>, group: &str, name: &str, marks: Option<&Marks>) -> Run {
-    if kind == Some(EditKind::Pptx) {
-        if let Some(entry) = slide_entries(stage).into_iter().find(|x| x.group == group && x.name == name) {
-            return entry.run;
-        }
+    if kind == Some(EditKind::Pptx)
+        && let Some(entry) = slide_entries(stage).into_iter().find(|x| x.group == group && x.name == name)
+    {
+        return entry.run;
     }
     if group == FILES {
         return Run::File(name.to_string());

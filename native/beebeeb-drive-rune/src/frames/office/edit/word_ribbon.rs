@@ -4,6 +4,7 @@
 use beebeeb_office_protocol::office::{EditOp, ListKind, Mark, Marks, ParaStyle, Rgb, TextAlign};
 use rune::{Color, El, Key, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text_input};
 
+use crate::theme::scale::{self as sc, space};
 use crate::State;
 use crate::frames::viewers::office::{self as vo, Face, Tab, Tool, ico};
 use crate::frames::viewers::{self, Intent, Ui};
@@ -59,9 +60,9 @@ const DETAILS_W: f32 = 280.0;
 const PAGE_W: f32 = 520.0;
 const FLOAT_W: f32 = 4.0 * 2.0 + 5.0 * 28.0 + 4.0 * 2.0;
 const FLOAT_H: f32 = 34.0;
-const TOOL_WORD: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-const LINK_BODY: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
-const LINK_NOTE: TextStyle = TextStyle::new(11.0, 400.0).lh(14.0);
+const TOOL_WORD: TextStyle = sc::text::SUB;
+const LINK_BODY: TextStyle = sc::text::READ;
+const LINK_NOTE: TextStyle = crate::theme::tokens::type_::BODY_SM;
 
 /// A style the pop-up offers, with the words on its button.
 const STYLES: [(&str, &str, ParaStyle); 5] = [
@@ -322,10 +323,10 @@ fn worded(
         .role("button")
         .label(word)
         .h(28.0)
-        .px(6.0)
-        .gap(4.0)
+        .px(space::S6)
+        .gap(space::S4)
         .center_y()
-        .radius(7.0)
+        .radius(crate::theme::tokens::radius::CONTROL)
         .hover(t.hover)
         .press(t.press)
         .focusable(true)
@@ -388,7 +389,7 @@ pub fn tool_group(tools: Vec<El>) -> Vec<El> {
             .focus_group()
             .w_full()
             .h_full()
-            .gap(2.0)
+            .gap(space::S2)
             .center_y()
             .children(tools),
     ]
@@ -674,8 +675,8 @@ fn link_box(ui: &Ui, w: f32, t: &Theme) -> El {
         .role("dialog")
         .label("Link")
         .w(w)
-        .padding(10.0)
-        .gap(6.0)
+        .padding(space::S10)
+        .gap(space::S6)
         .radius(8.0)
         .fill(menu::raised(t))
         .box_shadow(kit::drop(8.0, 28.0, Color::BLACK.alpha(0.20)))
@@ -780,10 +781,10 @@ fn floating(ui: &Ui, t: &Theme) -> Option<El> {
                         .label("Selection")
                         .absolute(x, y)
                         .h(FLOAT_H)
-                        .px(4.0)
-                        .gap(2.0)
+                        .px(space::S4)
+                        .gap(space::S2)
                         .center_y()
-                        .radius(10.0)
+                        .radius(sc::radius::PANEL)
                         .fill(t.card.alpha(if t.dark { 0.68 } else { 0.72 }))
                         .border(kit::HAIR, t.separator)
                         .border_layout()

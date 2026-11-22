@@ -13,6 +13,7 @@
 
 use rune::{El, Tx, row};
 
+use crate::theme::scale::{self as sc, space};
 use crate::State;
 use crate::frames::files::Toast;
 use crate::frames::office::edit::EditUi;
@@ -107,11 +108,11 @@ pub fn view(banner: &Banner, name: &str, t: &Theme) -> El {
         .role("status")
         .mx(14.0)
         .mt(10.0)
-        .px(12.0)
-        .py(9.0)
-        .gap(10.0)
+        .px(space::S12)
+        .py(space::S9)
+        .gap(space::S10)
         .center_y()
-        .radius(10.0)
+        .radius(sc::radius::PANEL)
         .fill(crate::ui::banner::tone(crate::ui::banner::Tone::Neutral, t).0)
         .child(
             kit::label("recovery-text", words(banner, name), tokens::type_::CAPTION, t.text_secondary)
@@ -142,19 +143,6 @@ pub fn row_of(ui: &viewers::Ui, t: &Theme) -> Option<El> {
 /// What the Restore button says when the kept editing could not be opened.
 pub const NOT_RESTORED: &str = "Couldn't restore those changes. They are still kept on this PC.";
 
-/// What the source kept for the open file.
-pub fn offer(s: &mut State) -> Option<RecoveryOffer> {
-    let ui = viewers::ui(s)?;
-    let (source, id) = ui.edit_source();
-    let id = id.to_string();
-    source.recovery(&id)
-}
-
-/// Restore: the source opens the kept editing (answered `EditAnswer::Restored`, which `edit::poll` takes).
-pub fn restore(s: &mut State, _tx: &mut Tx) -> bool {
-    restore_now(s)
-}
-
 fn restore_press(s: &mut State) {
     restore_now(s);
 }
@@ -174,11 +162,6 @@ fn restore_now(s: &mut State) -> bool {
         ui.toast = Some(NOT_RESTORED.to_string());
     }
     restored
-}
-
-/// Discard: the kept editing is deleted.
-pub fn discard(s: &mut State, _tx: &mut Tx) {
-    discard_press(s);
 }
 
 fn discard_press(s: &mut State) {

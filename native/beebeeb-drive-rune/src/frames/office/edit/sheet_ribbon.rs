@@ -15,8 +15,9 @@ use beebeeb_office_protocol::office::{EditOp, Mark, Marks, NumberFormat, Rgb, Te
 use rune::{El, Key, KeyEvent, Tx, row};
 
 use super::sheet;
+use crate::theme::scale::{self as sc, space};
 use crate::State;
-use crate::frames::office::sheets::{self, Cell, SheetView};
+use crate::frames::office::sheets::{self, Cell};
 use crate::frames::office::sheets::sheets_scroll;
 use crate::frames::viewers::office::{self as vo, Face, Tool, ico};
 use crate::frames::viewers::source::Body;
@@ -31,7 +32,7 @@ pub const NOT_VALID: &str = "Not a valid cell or range";
 const MENU: &str = "rib-menu";
 /// Under the ribbon's tool row, in the ribbon's own coordinates.
 const MENU_Y: f32 = 68.0;
-const TOOL_WORD: rune::TextStyle = rune::TextStyle::new(12.0, 400.0).lh(15.0);
+const TOOL_WORD: rune::TextStyle = sc::text::SUB;
 
 /// The pop-ups of the Home tab, one open at a time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,10 +184,10 @@ impl<'a> Tools<'a> {
             .role("button")
             .label(name)
             .h(28.0)
-            .px(6.0)
-            .gap(4.0)
+            .px(space::S6)
+            .gap(space::S4)
             .center_y()
-            .radius(7.0)
+            .radius(crate::theme::tokens::radius::CONTROL)
             .hover(t.hover)
             .press(t.press)
             .focusable(true)

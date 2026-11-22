@@ -7,16 +7,15 @@
 //! Rules live in [`OfficeState`] (the host maps the engine's answer to it at O-CP3); the window only binds.
 //! DW-1556's "THE REASON LINE IS ONE OF" card is a design note and is not drawn (board fix DW-1556).
 
-use rune::tok::Family;
 use rune::{Color, Cx, El, Icon, TextStyle, col, el, row};
 
+use crate::theme::scale::{self as sc, space};
 use crate::State;
 use crate::frames::office::docs::docs_fixture;
 use crate::frames::viewers::source::Body;
 use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
-use crate::ui::settings_dialog::{BUTTON_MD, DIALOG_TITLE};
 use crate::ui::button::{self, ButtonState, Size, Variant};
 use crate::ui::view_state::{self, ViewState};
 use crate::ui::{caption, kit, sidebar};
@@ -46,6 +45,7 @@ pub enum OfficeState {
     /// The engine has not answered yet: the skeleton shows.
     Opening,
     /// Drawn.
+    #[cfg(test)]
     Ready,
     /// No preview for this file.
     NoPreview(Reason),
@@ -57,7 +57,6 @@ pub enum OfficeState {
 
 pub const TITLE: &str = "We couldn't show this file here.";
 pub const NOT_CHANGED: &str = "The file was not changed.";
-pub const TRY_AGAIN: &str = "Try again";
 pub const OPEN_ELSEWHERE: &str = "Open in another app\u{2026}";
 pub const KEEP_FIRST: &str = "Keep this file on this PC first.";
 pub const KEEP_ACTION: &str = "Keep on this PC";
@@ -65,7 +64,9 @@ pub const QUIET_LINE: &str = "Some content isn't shown.";
 pub const OPENING: &str = "Opening\u{2026}";
 pub const ENCRYPTED: &str = "Encrypted";
 pub const ABOUT: &str = "About";
+#[cfg(test)]
 pub const EMPTY_TITLE: &str = "This document is empty";
+#[cfg(test)]
 pub const EMPTY_BODY: &str = "Nothing to show yet. Open it for editing to add the first words.";
 
 pub const REASON_TYPE: &str = "No preview for this type (.ppt, .odp, password-protected)";
@@ -85,7 +86,9 @@ impl OfficeState {
             OfficeState::NoPreview(Reason::NotOnThisComputer) => Some(REASON_NOT_HERE),
             OfficeState::NoPreview(Reason::NeedsWindowsUpdate) => Some(REASON_NEEDS_WINDOWS),
             OfficeState::Stopped { .. } => Some(REASON_STOPPED),
-            OfficeState::Opening | OfficeState::Ready | OfficeState::ContentMissing => None,
+            OfficeState::Opening | OfficeState::ContentMissing => None,
+            #[cfg(test)]
+            OfficeState::Ready => None,
         }
     }
 
@@ -209,11 +212,11 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[("DW-1563", scene_opening
 // Drawing
 // ---------------------------------------------------------------------------
 
-const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-const STATUS_STATE: TextStyle = TextStyle::new(11.5, 500.0).lh(17.0);
-const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
-const BAR_LABEL: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-const BAR_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
+const SUB: TextStyle = sc::text::SUB;
+const STATUS_STATE: TextStyle = crate::theme::tokens::type_::STATUS_STRONG;
+const STATUS_ENC: TextStyle = sc::text::STATUS_SEMI;
+const BAR_LABEL: TextStyle = sc::text::SUB;
+const BAR_MONO: TextStyle = sc::text::META_MONO_TIGHT;
 
 static ZOOM_LESS: Icon = Icon {
     name: "states-zoom-less",
@@ -273,8 +276,8 @@ fn viewer_bar(t: &Theme) -> El {
         .focus_group()
         .w_full()
         .h(38.0)
-        .px(12.0)
-        .gap(12.0)
+        .px(space::S12)
+        .gap(space::S12)
         .center_y()
         .fill(t.bg)
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
@@ -284,7 +287,7 @@ fn viewer_bar(t: &Theme) -> El {
                 .key("vbar-zoom")
                 .role("group")
                 .label("Zoom, 100 per cent")
-                .gap(6.0)
+                .gap(space::S6)
                 .center_y()
                 .child(kit::glyph("zoom-less-icon", &ZOOM_LESS, 13.0, t.text_secondary))
                 .child(kit::label("zoom", "100%", BAR_MONO, t.text_secondary))
@@ -313,7 +316,7 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
             viewers::office_try_again(s);
         })
     });
-    let mut actions = row().key("empty-actions").gap(8.0).center_y();
+    let mut actions = row().key("empty-actions").gap(space::S8).center_y();
     if body.state.open_elsewhere_offered(body.kept) {
         actions = actions.child(ui_button("empty-btn-1", OPEN_ELSEWHERE, false, t).on_press(|s: &mut State| {
             if let Some(ui) = viewers::ui(s) {
@@ -345,6 +348,7 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
 }
 
 /// An empty document: nothing in the file to show, and what to do about it.
+#[cfg(test)]
 pub fn empty_document(t: &Theme) -> El {
     view_state::view_state(
         ViewState::Empty {
@@ -364,13 +368,13 @@ pub fn skeleton(t: &Theme) -> El {
         .key("outline-skeleton")
         .w(OUTLINE_W)
         .h_full()
-        .py(12.0)
-        .px(12.0)
-        .gap(8.0)
+        .py(space::S12)
+        .px(space::S12)
+        .gap(space::S8)
         .fill(t.sidebar_bg)
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
-        .child(kit::label("outline-label", "OUTLINE", type_::SECTION_LABEL, t.text_tertiary).px(8.0));
+        .child(kit::label("outline-label", "OUTLINE", type_::SECTION_LABEL, t.text_tertiary).px(space::S8));
     for (i, pct) in [70.0_f32, 54.0, 62.0, 48.0].iter().enumerate() {
         outline = outline.child(bone(format!("ol-bone-{i}"), OUTLINE_W * 0.8 * pct / 100.0, 12.0, t).ml(8.0));
     }
@@ -383,7 +387,7 @@ pub fn skeleton(t: &Theme) -> El {
         .min_h(700.0)
         .px(48.0)
         .py(44.0)
-        .gap(12.0)
+        .gap(space::S12)
         .fill(Color::WHITE)
         .box_shadow(kit::drop(2.0, 12.0, t.shadow_page))
         .child(bone("pg-bone-title".into(), inner * 0.46, 22.0, t))
@@ -424,7 +428,7 @@ pub fn status_bar(state: OfficeState, left: &[&str], t: &Theme) -> El {
     let mut bar: Vec<El> = Vec::new();
     let mut said = String::new();
     if state.is_opening() {
-        bar.push(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(warn_dot(t)));
+        bar.push(el().key("status-dot").size(7.0, 7.0).radius(sc::radius::PILL).fill(warn_dot(t)));
         bar.push(kit::label("status-text", OPENING, STATUS_STATE, t.text_secondary));
         said.push_str(OPENING);
     } else {
@@ -453,7 +457,7 @@ pub fn status_bar(state: OfficeState, left: &[&str], t: &Theme) -> El {
     bar.push(
         row()
             .key("st-enc-box")
-            .gap(4.0)
+            .gap(space::S4)
             .center_y()
             .child(kit::glyph(k_icon, &icons::LOCK, 11.0, t.accent_deep))
             .child(kit::label(k_enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),

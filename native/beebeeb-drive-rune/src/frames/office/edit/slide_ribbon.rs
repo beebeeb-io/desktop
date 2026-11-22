@@ -16,6 +16,7 @@ use beebeeb_office_protocol::office::{EditOp, Mark, Marks, TextAlign};
 use rune::{El, Key, KeyEvent, Tx, row};
 
 use super::slide;
+use crate::theme::scale::{self as sc, space};
 use crate::State;
 use crate::frames::viewers::office::{self as vo, Face, Tab, Tool, ico};
 use super::word_insert::Insert;
@@ -25,6 +26,9 @@ use crate::ui::kit;
 use crate::ui::menu::{self, Entry};
 
 use super::word_ribbon::Pop;
+
+/// What a ribbon tool does when pressed.
+type Act = Box<dyn Fn(&mut State, &mut Tx)>;
 
 const MENU: &str = "rib-menu";
 /// Under the ribbon's tool row, in the ribbon's own coordinates.
@@ -56,10 +60,10 @@ fn send(s: &mut State, tx: &mut Tx, op: EditOp, asked: &'static str) {
         ui.office.ribbon.open = None;
         ui.office.ribbon.hot = None;
     }
-    if !slide::send(s, op) {
-        if let Some(ui) = viewers::ui(s) {
-            ui.intent(Intent::Office(asked));
-        }
+    if !slide::send(s, op)
+        && let Some(ui) = viewers::ui(s)
+    {
+        ui.intent(Intent::Office(asked));
     }
 }
 
@@ -85,16 +89,16 @@ fn worded(
     t: &Theme,
 ) -> El {
     let ink = if state == Tool::Off { t.text_quaternary } else { t.text };
-    let style = rune::TextStyle::new(12.0, 400.0).lh(15.0);
+    let style = sc::text::SUB;
     let mut b = row()
         .key(key.to_string())
         .role("button")
         .label(word)
         .h(28.0)
-        .px(6.0)
-        .gap(4.0)
+        .px(space::S6)
+        .gap(space::S4)
         .center_y()
-        .radius(7.0)
+        .radius(crate::theme::tokens::radius::CONTROL)
         .hover(t.hover)
         .press(t.press)
         .child(kit::glyph(format!("{key}-icon"), icon, 15.0, ink))
@@ -148,7 +152,7 @@ fn home_tools(ui: &Ui, t: &Theme) -> Vec<El> {
     let mut tools = Vec::new();
     let mut n = 0;
     let mut seps = 0;
-    let mut tool = |tools: &mut Vec<El>, name: &'static str, face: Face, state: Tool, act: Box<dyn Fn(&mut State, &mut Tx)>| {
+    let mut tool = |tools: &mut Vec<El>, name: &'static str, face: Face, state: Tool, act: Act| {
         tools.push(vo::tool_with(&format!("rt-{n}"), name, face, state, act, t));
         n += 1;
     };
@@ -283,7 +287,7 @@ fn design_tools(ui: &Ui, t: &Theme) -> Vec<El> {
         .map(|(i, name)| {
             let key = format!("rl-{i}");
             let is_on = now == Some(i as u32);
-            let style = rune::TextStyle::new(12.0, if is_on { 600.0 } else { 400.0 }).lh(15.0);
+            let style = if is_on { crate::theme::tokens::type_::BODY_SEMI } else { sc::text::SUB };
             let ink = if is_on { t.text } else { t.text_secondary };
             let act = apply_layout(i as u32);
             let mut b = row()
@@ -292,9 +296,9 @@ fn design_tools(ui: &Ui, t: &Theme) -> Vec<El> {
                 .label(name.clone())
                 .checked(is_on)
                 .h(28.0)
-                .px(8.0)
+                .px(space::S8)
                 .center_y()
-                .radius(7.0)
+                .radius(crate::theme::tokens::radius::CONTROL)
                 .hover(t.hover)
                 .press(t.press)
                 .focusable(true)
@@ -323,7 +327,7 @@ fn transitions_tools(t: &Theme) -> Vec<El> {
     vec![kit::label(
         "rt-none",
         NO_TRANSITIONS,
-        rune::TextStyle::new(12.0, 400.0).lh(15.0),
+        sc::text::SUB,
         t.text_tertiary,
     )]
 }

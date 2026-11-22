@@ -25,11 +25,10 @@ use super::docs::{ABOUT, KEEP_FIRST, Live, OPEN_ELSEWHERE};
 use super::edit::slide as edit_slide;
 use super::edit::{EditUi, slide_ribbon};
 use super::states;
+use crate::theme::scale::{self as sc, space};
 use crate::State;
-use crate::frames::placeholder;
 use crate::frames::signin::icons::EYE;
 use crate::frames::viewers::kinds::OfficePicture;
-use crate::frames::viewers::source::Body;
 use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
@@ -40,7 +39,9 @@ pub mod slides_fixture;
 #[path = "slides_strip.rs"]
 mod strip;
 
-pub use strip::{StripMenu, entries as menu_entries};
+pub use strip::StripMenu;
+#[cfg(test)]
+pub use strip::entries as menu_entries;
 
 /// The group's board frames and the scene that shows each (`frames::scenes`). DW-1560 is the editor's `slide_ribbon` scene.
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
@@ -51,10 +52,10 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
 
 /// DW-1509: the deck open on slide 2 of 3, in the window.
 pub fn scene_deck(s: &mut State) {
-    if viewers::open_deck(s, slides_fixture::file()) {
-        if let Some(deck) = viewers::deck_mut(s) {
-            deck.go(slides_fixture::BOARD_SLIDE);
-        }
+    if viewers::open_deck(s, slides_fixture::file())
+        && let Some(deck) = viewers::deck_mut(s)
+    {
+        deck.go(slides_fixture::BOARD_SLIDE);
     }
 }
 
@@ -259,10 +260,10 @@ pub const ENCRYPTED: &str = "Encrypted";
 /// Present's way back, said where the key is read.
 pub const BACK_TO_SLIDES: &str = "Back to the slides";
 
-const BAR_LABEL: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+const BAR_LABEL: TextStyle = sc::text::SUB;
 const BAR_HINT: TextStyle = TextStyle::new(10.0, 500.0).family(Family::Mono).lh(13.0);
-const NUM: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
-const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
+const NUM: TextStyle = crate::theme::tokens::type_::KBD;
+const STATUS_ENC: TextStyle = sc::text::STATUS_SEMI;
 
 static LESS: Icon = Icon {
     name: "slides-less",
@@ -282,8 +283,8 @@ static MORE: Icon = Icon {
     ),
 };
 
-const BAR_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
-const PANE_LABEL: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.7);
+const BAR_MONO: TextStyle = sc::text::META_MONO_TIGHT;
+const PANE_LABEL: TextStyle = crate::theme::tokens::type_::SECTION_LABEL;
 const THUMB_TITLE: TextStyle = TextStyle::new(8.5, 700.0).lh(10.0);
 const THUMB_TEXT: TextStyle = TextStyle::new(5.5, 400.0).lh(7.0);
 const ZOOM_STEP: u16 = 25;
@@ -340,7 +341,7 @@ fn step_button(key: &'static str, label: &'static str, icon: &'static Icon, act:
         .label(label)
         .size(24.0, 24.0)
         .center()
-        .radius(6.0)
+        .radius(crate::theme::tokens::radius::MD)
         .hover(t.hover)
         .press(t.press)
         .focusable(true)
@@ -370,8 +371,8 @@ fn bar(deck: &DeckBody, t: &Theme) -> El {
         .focus_group()
         .w_full()
         .h(38.0)
-        .px(12.0)
-        .gap(12.0)
+        .px(space::S12)
+        .gap(space::S12)
         .center_y()
         .fill(t.card)
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
@@ -381,7 +382,7 @@ fn bar(deck: &DeckBody, t: &Theme) -> El {
                 .key("vbar-zoom")
                 .role("group")
                 .label(format!("Zoom, {} per cent", deck.view.zoom))
-                .gap(4.0)
+                .gap(space::S4)
                 .center_y()
                 .child(step_button("zoom-less", "Zoom out", &LESS, DeckBody::zoom_out, t))
                 .child(
@@ -398,10 +399,10 @@ fn bar(deck: &DeckBody, t: &Theme) -> El {
                 .label(PRESENT_LABEL)
                 .shortcut_hint("F5")
                 .h(28.0)
-                .px(10.0)
-                .gap(6.0)
+                .px(space::S10)
+                .gap(space::S6)
                 .center_y()
-                .radius(7.0)
+                .radius(crate::theme::tokens::radius::CONTROL)
                 .border(PRESENT_BORDER_W, t.card_border)
                 .border_layout()
                 .hover(t.hover)
@@ -418,9 +419,9 @@ fn bar(deck: &DeckBody, t: &Theme) -> El {
                 .role("button")
                 .label(OPEN_ELSEWHERE)
                 .h(28.0)
-                .px(10.0)
+                .px(space::S10)
                 .center_y()
-                .radius(7.0)
+                .radius(crate::theme::tokens::radius::CONTROL)
                 .fill(t.paper)
                 .border(1.0, t.card_border)
                 .border_layout()
@@ -448,7 +449,7 @@ fn picture(key: String, label: String, w: f32, h: f32, pixels: Option<Pixels>) -
         .role("image")
         .label(label)
         .size(w, h)
-        .radius(4.0)
+        .radius(crate::theme::tokens::radius::SM)
         .fill(Color::WHITE);
     match pixels {
         Some(p) => frame.pixels_fit(&p, SurfaceFit::Fill),
@@ -464,9 +465,9 @@ fn thumbnail(i: usize, n: u32, page: Option<SlidePage>, current: bool, t: &Theme
         .role("image")
         .label(format!("Slide {n}"))
         .size(THUMB_W, THUMB_H)
-        .padding(8.0)
-        .gap(2.0)
-        .radius(4.0)
+        .padding(space::S8)
+        .gap(space::S2)
+        .radius(crate::theme::tokens::radius::SM)
         .clip_rounded(4.0)
         .fill(Color::WHITE);
     // The current slide wears the board's 2 px dark ring as a real border (a keyed, gated edge), inside the 8 px
@@ -528,7 +529,7 @@ fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, editing: 
             .label(format!("Slide {n}"))
             .checked(current)
             .position_in_set(i + 1, deck.view.slides.len())
-            .gap(8.0)
+            .gap(space::S8)
             .items_start()
             .focusable(true)
             .cursor(rune::Cursor::Pointer)
@@ -556,13 +557,13 @@ fn filmstrip(deck: &DeckBody, page: &dyn Fn(u32) -> Option<SlidePage>, editing: 
         .w(FILMSTRIP_W)
         .h_full()
         .min_h(0.0)
-        .py(12.0)
-        .px(12.0)
-        .gap(10.0)
+        .py(space::S12)
+        .px(space::S12)
+        .gap(space::S10)
         .fill(t.sidebar_bg)
         .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
         .border_layout()
-        .child(row().key("fs-head").w_full().px(4.0).center_y().child(kit::label(
+        .child(row().key("fs-head").w_full().px(space::S4).center_y().child(kit::label(
             "fs-title",
             "SLIDES",
             PANE_LABEL,
@@ -699,7 +700,7 @@ fn status(deck: &DeckBody, kept: Option<&str>, t: &Theme) -> El {
     bar.push(
         row()
             .key(format!("{enc}-box"))
-            .gap(4.0)
+            .gap(space::S4)
             .center_y()
             .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
             .child(kit::label(enc, ENCRYPTED, STATUS_ENC, t.accent_deep).w(rune::text::advance(ENCRYPTED, STATUS_ENC))),
@@ -845,7 +846,7 @@ const PRES_H: f32 = 619.0;
 const PRES_TITLE: TextStyle = TextStyle::new(44.0, 700.0).lh(50.6).tracking(-0.88);
 const PRES_POINT: TextStyle = TextStyle::new(22.0, 400.0).lh(33.0);
 const PRES_ESC: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.5);
-const PRES_COUNT: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
+const PRES_COUNT: TextStyle = crate::theme::tokens::type_::KBD;
 /// The slide's ink on its white (the board's `#090909`).
 fn ink() -> Color {
     rune::color::hex("#090909").unwrap_or(Color::BLACK)
@@ -869,7 +870,7 @@ fn slide_of_words(words: Option<&SlideWords>) -> El {
                 .child(
                     el().key(format!("pres-li-{i}-mark"))
                         .size(24.2, 33.0)
-                        .child(el().absolute(9.0, 13.0).size(7.0, 7.0).radius(3.5).fill(ink())),
+                        .child(el().absolute(9.0, 13.0).size(7.0, 7.0).radius(sc::radius::PILL).fill(ink())),
                 )
                 .child(kit::label(format!("pres-li-{i}"), point.clone(), PRES_POINT, ink()).grow(1.0)),
         );
@@ -883,7 +884,7 @@ fn slide_of_words(words: Option<&SlideWords>) -> El {
                 .w_full()
                 .grow(1.0)
                 .mt(26.0)
-                .radius(4.0),
+                .radius(crate::theme::tokens::radius::SM),
         ));
     }
     slide
@@ -944,10 +945,11 @@ pub fn present_live(cx: &mut Cx<State>, deck: &DeckBody, live: &Live) -> El {
 }
 
 /// Whether the open file is a deck in Present: the shell keeps the screen out of captures and shares meanwhile.
+#[cfg(test)]
 pub fn presenting(s: &State) -> bool {
     matches!(
         s.viewer.ui.as_ref().map(|ui| &ui.file.body),
-        Some(Body::Deck(deck)) if deck.presenting
+        Some(crate::frames::viewers::source::Body::Deck(deck)) if deck.presenting
     )
 }
 
@@ -982,7 +984,7 @@ fn present_of(cx: &mut Cx<State>, deck: &DeckBody, centre: El) -> El {
                         .label(BACK_TO_SLIDES)
                         .shortcut_hint("Esc")
                         .h(20.0)
-                        .px(6.0)
+                        .px(space::S6)
                         .center_y()
                         .radius(5.0)
                         .fill(t.card)
@@ -1079,7 +1081,7 @@ mod tests {
         assert!(
             FRAMES
                 .iter()
-                .any(|(id, f)| *id == "DW-1560" && *f as usize != placeholder::scene as usize)
+                .any(|(id, f)| *id == "DW-1560" && !std::ptr::fn_addr_eq(*f, crate::frames::placeholder::scene as fn(&mut State)))
         );
     }
 
@@ -1238,7 +1240,7 @@ mod tests {
     #[test]
     fn office_slides_present_button_is_bordered_with_the_eye() {
         assert_eq!(present_icon().name, "eye");
-        assert!(PRESENT_BORDER_W > 0.0);
+        const { assert!(PRESENT_BORDER_W > 0.0) };
         let rt = scene(scene_deck, false);
         let button = find(&rt, "present").expect("the Present button");
         assert_eq!(button.rect[3], 28.0);

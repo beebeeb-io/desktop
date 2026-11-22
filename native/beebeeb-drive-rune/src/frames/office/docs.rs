@@ -17,11 +17,11 @@
 //! `viewers::doc_mut(&mut State) -> Option<&mut DocBody>` and `viewers::open_doc(&mut State, OpenFile) -> bool` calls,
 //! the window arm calling [`window`], and the key route calling [`DocBody::on_key`].
 
-use rune::tok::Family;
 use rune::{Color, Cx, El, Icon, Key, Mods, Pixels, SurfaceFit, TextStyle, col, el, row};
 use beebeeb_office_protocol::office::EditKind;
 use zeroize::Zeroize;
 
+use crate::theme::scale::{self as sc, space};
 use crate::State;
 use super::edit::{EditUi, ime, word};
 use crate::frames::viewers::{self, Ui};
@@ -182,13 +182,13 @@ pub const OLDER_FORMAT: &str = "An older Word file (.doc). It opens read-only he
 pub const ENCRYPTED: &str = "Encrypted";
 pub const ABOUT: &str = "About";
 
-const BAR_LABEL: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-const BAR_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
-const PANE_LABEL: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.7);
-const OUTLINE: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-const OUTLINE_TOP: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
-const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
-const BANNER: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
+const BAR_LABEL: TextStyle = sc::text::SUB;
+const BAR_MONO: TextStyle = sc::text::META_MONO_TIGHT;
+const PANE_LABEL: TextStyle = crate::theme::tokens::type_::SECTION_LABEL;
+const OUTLINE: TextStyle = sc::text::SUB;
+const OUTLINE_TOP: TextStyle = crate::theme::tokens::type_::BODY_SEMI;
+const STATUS_ENC: TextStyle = sc::text::STATUS_SEMI;
+const BANNER: TextStyle = crate::theme::tokens::type_::SEARCH;
 
 static LESS: Icon = Icon {
     name: "docs-less",
@@ -260,7 +260,7 @@ fn step_button(key: &'static str, label: &'static str, icon: &'static Icon, act:
         .label(label)
         .size(24.0, 24.0)
         .center()
-        .radius(6.0)
+        .radius(crate::theme::tokens::radius::MD)
         .hover(t.hover)
         .press(t.press)
         .focusable(true)
@@ -278,8 +278,8 @@ fn bar(doc: &DocBody, t: &Theme) -> El {
         .label("Document")
         .w_full()
         .h(38.0)
-        .px(12.0)
-        .gap(12.0)
+        .px(space::S12)
+        .gap(space::S12)
         .center_y()
         .fill(t.card)
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
@@ -289,7 +289,7 @@ fn bar(doc: &DocBody, t: &Theme) -> El {
                 .key("vbar-zoom")
                 .role("group")
                 .label(format!("Zoom, {} per cent", doc.view.zoom))
-                .gap(4.0)
+                .gap(space::S4)
                 .center_y()
                 .child(step_button("zoom-less", "Zoom out", &LESS, DocBody::zoom_out, t))
                 .child(
@@ -309,9 +309,9 @@ fn bar(doc: &DocBody, t: &Theme) -> El {
                 .role("button")
                 .label(OPEN_ELSEWHERE)
                 .h(28.0)
-                .px(10.0)
+                .px(space::S10)
                 .center_y()
-                .radius(7.0)
+                .radius(crate::theme::tokens::radius::CONTROL)
                 .fill(t.paper)
                 .border(1.0, t.card_border)
                 .hover(t.hover)
@@ -344,10 +344,10 @@ fn note(t: &Theme) -> El {
         .mt(10.0)
         .pl(12.0)
         .pr(10.0)
-        .py(9.0)
-        .gap(10.0)
+        .py(space::S9)
+        .gap(space::S10)
         .center_y()
-        .radius(10.0)
+        .radius(sc::radius::PANEL)
         .fill(banner_fill(t))
         .child(kit::glyph("banner-icon", &viewers::icons::INFO, 16.0, t.text_secondary))
         .child(kit::label("banner-text", OLDER_FORMAT, BANNER, t.text_secondary).grow(1.0))
@@ -367,7 +367,7 @@ fn outline_close(open: bool, t: &Theme) -> El {
         .label(if open { "Close the outline" } else { "Open the outline" })
         .size(28.0, 28.0)
         .center()
-        .radius(6.0)
+        .radius(crate::theme::tokens::radius::MD)
         .hover(t.hover)
         .press(t.press)
         .focusable(true)
@@ -388,8 +388,8 @@ fn outline(doc: &DocBody, t: &Theme) -> El {
             .label("Outline, closed")
             .w(STRIP_W)
             .h_full()
-            .py(12.0)
-            .px(8.0)
+            .py(space::S12)
+            .px(space::S8)
             .fill(t.surface)
             .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
             .border_layout()
@@ -402,9 +402,9 @@ fn outline(doc: &DocBody, t: &Theme) -> El {
         .label("Outline")
         .w(OUTLINE_W)
         .h_full()
-        .py(12.0)
-        .px(8.0)
-        .gap(4.0)
+        .py(space::S12)
+        .px(space::S8)
+        .gap(space::S4)
         .fill(t.surface)
         .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
         .border_layout()
@@ -413,7 +413,7 @@ fn outline(doc: &DocBody, t: &Theme) -> El {
             row()
                 .key("ol-head")
                 .w_full()
-                .px(8.0)
+                .px(space::S8)
                 .pb(4.0)
                 .center_y()
                 .child(kit::label("ol-title", "OUTLINE", PANE_LABEL, t.text_tertiary))
@@ -666,7 +666,7 @@ fn status(doc: &DocBody, t: &Theme) -> El {
     bar.push(
         row()
             .key(format!("st-{n}-box"))
-            .gap(4.0)
+            .gap(space::S4)
             .center_y()
             .child(kit::glyph(format!("st-{n}-icon"), &icons::LOCK, 11.0, t.accent_deep))
             .child(
@@ -905,7 +905,7 @@ mod tests {
         assert!(
             FRAMES
                 .iter()
-                .any(|(id, f)| *id == "DW-1507" && *f as usize == scene_docx as usize)
+                .any(|(id, f)| *id == "DW-1507" && std::ptr::fn_addr_eq(*f, scene_docx as fn(&mut State)))
         );
         assert!(viewers::FRAMES.iter().any(|(id, _)| *id == "DW-1511"));
     }

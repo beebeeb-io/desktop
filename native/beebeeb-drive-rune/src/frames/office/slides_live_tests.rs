@@ -1,6 +1,7 @@
 //! Tests of the live deck (V3-5): the filmstrip asks the thumbnails in view, Present draws the slide's pixels.
 
 use super::*;
+use crate::frames::viewers::source::Body;
 use crate::frames::office::docs::live_tests::{find, live_runtime};
 
 fn deck(count: u32) -> Body {
