@@ -20,7 +20,8 @@ fn the_security_page_says_two_factor_and_the_devices_of_this_account_and_nothing
     let before = source.security_facts();
     assert_eq!((before.two_factor, before.sessions), (None, Count::NotKnown));
     the_rest_is_not_known(&before);
-    assert_eq!(source.pane_state(Pane::Security), PaneState::Loading);
+    // The page never waits on a read (Sign out must work offline): drawn at once, every part "Not known".
+    assert_eq!(source.pane_state(Pane::Security), PaneState::Ready);
     opened(&mut source, Pane::Security);
     assert_eq!(source.pane_state(Pane::Security), PaneState::Ready);
     let facts = source.security_facts();
@@ -283,4 +284,48 @@ fn the_device_count_is_not_read_for_a_page_that_does_not_show_it() {
     // Fresh: opening it again asks nothing more.
     opened(&mut source, Pane::Security);
     assert_eq!(server.asked("GET /api/v1/account/sessions"), 1);
+}
+
+/// Offline (drive-complete-RC1 check 3): the page is drawn from what this PC holds, the parts Beebeeb would say are
+/// "offline", and Sign out of Drive runs to the end. Its revoke is sent once and never answered, so the engine owes
+/// it (LD-0028: recorded before it is sent; paid when the network is back, `app::session_revoke`).
+#[test]
+fn offline_the_security_page_shows_and_sign_out_runs_with_its_revoke_owed() {
+    let server = server();
+    server.two_factor.lock().unwrap()[0] = Some(true);
+    let engine = signed_in(&server);
+    let mut source = Source::new(engine.clone());
+    server.offline.store(true, Ordering::SeqCst);
+    opened(&mut source, Pane::Security);
+    assert_eq!(
+        source.pane_state(Pane::Security),
+        PaneState::Ready,
+        "the page, never \"Couldn't load this\""
+    );
+    assert!(source.offline(), "the reads found Beebeeb out of reach");
+    let facts = source.security_facts();
+    assert!(facts.can_sign_out, "Sign out of Drive is there offline");
+    assert_eq!((facts.two_factor, facts.sessions), (None, Count::NotKnown));
+    let logouts = || server.asked("POST /api/v1/auth/logout");
+    let before = logouts();
+    assert_eq!(source.sign_out_this_app(), SignOutAnswer::Pending);
+    let began = Instant::now();
+    let answer = loop {
+        source.pump();
+        if let Some(answer) = source.sign_out_result() {
+            break answer;
+        }
+        assert!(began.elapsed() < Duration::from_secs(15), "the sign-out never answered offline");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(answer, SignOutAnswer::Done, "signed out offline");
+    assert!(!engine.has_session());
+    let began = Instant::now();
+    while logouts() == before {
+        assert!(began.elapsed() < Duration::from_secs(10), "the revoke was never tried");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(logouts(), before + 1, "one revoke, unanswered: owed");
+    assert_eq!(source.pane_state(Pane::Security), PaneState::SignedOut);
+    assert!(!source.offline(), "nothing is said of a session that is over");
 }

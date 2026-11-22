@@ -25,6 +25,13 @@ const SCORE_HEAD: TextStyle = TextStyle::new(20.0, 650.0).lh(24.0).tracking(-0.3
 
 /// What a part says when nobody read it.
 pub(super) const NOT_KNOWN: &str = "Not known";
+/// What a part read from Beebeeb says when Beebeeb could not be reached to read it (`AccountSource::offline`).
+pub(super) const OFFLINE: &str = "Offline";
+
+/// The words for a part read from Beebeeb that nobody read: offline, or not known.
+fn unread(source: &dyn AccountSource) -> &'static str {
+    if source.offline() { OFFLINE } else { NOT_KNOWN }
+}
 /// The name the shell holds the web's delete-account page under (`Intent::Web`).
 pub const DELETE_PAGE: &str = "delete-account";
 
@@ -250,7 +257,7 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> Opti
             (Some(true), Some((left, of))) => format!("On · {left} of {of} backup codes left"),
             (Some(true), None) => "On".into(),
             (Some(false), _) => "Off: your password alone signs you in".into(),
-            (None, _) => NOT_KNOWN.into(),
+            (None, _) => unread(source).into(),
         },
     );
     let two_ok = checked(facts.two_factor.is_some(), facts.two_factor == Some(true));
@@ -374,7 +381,7 @@ fn devices(facts: &SecurityFacts, source: &dyn AccountSource, hide_capture: bool
     let signed_in = Tail::Value(match facts.sessions {
         Count::Known(n) => format!("{n} signed in"),
         Count::Reading => "Loading".into(),
-        Count::NotKnown => NOT_KNOWN.into(),
+        Count::NotKnown => unread(source).into(),
     });
     list_of(
         1,
@@ -407,7 +414,7 @@ fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> Opt
     };
     let rows = match &facts.activity {
         // Not read: the way to the page stays, when the page answers.
-        None => vec![all(0, NOT_KNOWN)],
+        None => vec![all(0, unread(source))],
         Some(None) => vec![all(0, "Security logging is off: nothing is recorded")],
         Some(Some(events)) if events.is_empty() => vec![all(0, "Recording is on. Nothing recorded yet")],
         Some(Some(events)) => {

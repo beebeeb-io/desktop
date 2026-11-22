@@ -478,6 +478,31 @@ fn the_running_app_signs_out_of_drive_from_its_confirm_and_has_no_all_apps_row()
     wait_for(&mut rt, "the sign-out", |_| !engine.has_session());
 }
 
+/// Offline (drive-complete-RC1 check 3): Settings > Sign-in and security shows the page with what Beebeeb says
+/// marked "Offline", never "Couldn't load this", and Sign out of Drive signs out from its confirm.
+#[test]
+fn offline_the_running_app_shows_the_security_page_and_can_sign_out_of_drive() {
+    let server = server();
+    server.two_factor.lock().unwrap()[0] = Some(true);
+    let engine = signed_in(&server);
+    server.offline.store(true, Ordering::SeqCst);
+    let mut rt = window_on(engine.clone(), SettingsPane::Security);
+    wait_for(&mut rt, "the page, offline", |rt| {
+        shows(rt, "Sign out of Drive") && shows(rt, "Offline")
+    });
+    assert!(!says_anywhere(&rt, "Couldn't load this"));
+    assert!(!says_anywhere(&rt, "3 signed in") && !has(&rt, "item-0-1-check"), "nothing guessed");
+    let before = server.asked("POST /api/v1/auth/logout");
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A57"));
+    rt.frame(0.4);
+    assert!(has(&rt, "dlg"), "the confirm opens");
+    click(&mut rt, "btn-1");
+    wait_for(&mut rt, "the sign-out", |_| !engine.has_session());
+    wait_for(&mut rt, "its revoke, tried", |_| {
+        server.asked("POST /api/v1/auth/logout") == before + 1
+    });
+}
+
 #[test]
 fn the_running_app_saves_the_name_and_draws_it_after_beebeeb_has_it() {
     let server = super::bound::bound();
