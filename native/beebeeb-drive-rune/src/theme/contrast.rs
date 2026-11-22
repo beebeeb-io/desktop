@@ -52,7 +52,7 @@ fn lift(fg: Color, bgs: &[Color], min: f32, dark: bool) -> Color {
 
 /// The theme as drawn: the generated tokens with the pairs that failed WCAG lifted (the override layer).
 pub fn themed(dark: bool) -> Theme {
-    let mut t = super::tokens::theme(dark);
+    let mut t = super::tokens::base(dark);
     let bgs = [t.bg, t.surface, t.card, t.sidebar_bg];
     t.text_quaternary = lift(t.text_quaternary, &bgs, 3.0, dark);
     t.card_border = lift(t.card_border, &bgs, 3.0, dark);
@@ -89,7 +89,7 @@ pub fn theme_from_system(s: SystemColors) -> Theme {
     let face = colorref(s.btn_face);
     let btn_text = colorref(s.btn_text);
     let none = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
-    let mut t = super::tokens::theme(relative_luminance(window) < 0.18);
+    let mut t = super::tokens::base(relative_luminance(window) < 0.18);
     t.bg = window;
     t.card = window;
     t.toolbar_bg = window;
@@ -136,14 +136,70 @@ pub fn theme_from_system(s: SystemColors) -> Theme {
     t
 }
 
-/// The Windows contrast theme as a [`Theme`]; `None` when none is on, and off Windows.
-pub fn system_contrast() -> Option<Theme> {
-    #[cfg(windows)]
-    {
-        crate::shell::platform::contrast_colors().map(theme_from_system)
+/// What the system said last: its contrast colours (`None`: no contrast theme) and the theme made from them,
+/// made once per change rather than once per frame.
+#[derive(Clone, Copy)]
+struct Known {
+    colors: Option<SystemColors>,
+    theme: Option<Theme>,
+}
+
+impl Known {
+    fn of(colors: Option<SystemColors>) -> Self {
+        Known {
+            colors,
+            theme: colors.map(theme_from_system),
+        }
     }
-    #[cfg(not(windows))]
+}
+
+/// The platform's answer, read once at the first frame. Tests start from "none" and never read the desktop
+/// they run on.
+fn first_read() -> Option<SystemColors> {
+    #[cfg(all(windows, not(test)))]
+    {
+        crate::shell::platform::contrast_colors()
+    }
+    #[cfg(not(all(windows, not(test))))]
     {
         None
     }
+}
+
+// One answer for the process: every window follows the same setting. Per thread under test, so a test that
+// turns a contrast theme on cannot change what a test on another thread draws.
+#[cfg(not(test))]
+static KNOWN: std::sync::Mutex<Option<Known>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+thread_local! {
+    static KNOWN: std::cell::RefCell<Option<Known>> = const { std::cell::RefCell::new(None) };
+}
+
+fn with_known<R>(f: impl FnOnce(&mut Option<Known>) -> R) -> R {
+    #[cfg(not(test))]
+    {
+        f(&mut KNOWN.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+    #[cfg(test)]
+    {
+        KNOWN.with(|k| f(&mut k.borrow_mut()))
+    }
+}
+
+/// The Windows contrast theme as a [`Theme`]; `None` when none is on, and off Windows.
+pub fn system_contrast() -> Option<Theme> {
+    with_known(|k| k.get_or_insert_with(|| Known::of(first_read())).theme)
+}
+
+/// A settings change: what the system says now (`None`: no contrast theme). True when that differs from what
+/// was known, so the caller redraws.
+pub fn system_changed(colors: Option<SystemColors>) -> bool {
+    with_known(|k| {
+        let was = k.get_or_insert_with(|| Known::of(first_read())).colors;
+        if was == colors {
+            return false;
+        }
+        *k = Some(Known::of(colors));
+        true
+    })
 }

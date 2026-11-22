@@ -247,7 +247,15 @@ impl Theme {
     }
 }
 
+/// The palette every frame draws with: the Windows contrast theme while one is on (it overrides light and dark),
+/// else the board's light or dark tokens. The contrast answer is cached and re-read on `WM_SETTINGCHANGE`
+/// (`theme::contrast`), so this stays cheap enough for every frame.
 pub fn theme(dark: bool) -> Theme {
+    super::contrast::system_contrast().unwrap_or_else(|| base(dark))
+}
+
+/// The board's light or dark tokens, never the contrast theme.
+pub fn base(dark: bool) -> Theme {
     let black = Color::BLACK;
     let white = Color::WHITE;
     if dark {

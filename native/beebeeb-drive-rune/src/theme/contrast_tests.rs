@@ -94,3 +94,83 @@ fn contrast_theme_is_opaque_and_readable() {
     #[cfg(not(windows))]
     assert!(system_contrast().is_none());
 }
+
+/// Windows "High Contrast Black", as `GetSysColor` gives it.
+fn hc_black() -> SystemColors {
+    SystemColors {
+        window: 0x000000,
+        window_text: 0xffffff,
+        highlight: 0xffff00,
+        highlight_text: 0x000000,
+        gray_text: 0x00ff00,
+        hot_light: 0xffff00,
+        btn_face: 0x000000,
+        btn_text: 0xffffff,
+    }
+}
+
+fn same(a: &Theme, b: &Theme) -> bool {
+    [
+        a.bg,
+        a.text,
+        a.surface,
+        a.sidebar_bg,
+        a.card_border,
+        a.selection,
+        a.accent,
+        a.hover,
+    ] == [
+        b.bg,
+        b.text,
+        b.surface,
+        b.sidebar_bg,
+        b.card_border,
+        b.selection,
+        b.accent,
+        b.hover,
+    ]
+}
+
+#[test]
+fn contrast_tokens_theme_is_the_contrast_palette_when_one_is_on() {
+    use crate::theme::tokens;
+    assert!(super::system_changed(Some(hc_black())));
+    let want = theme_from_system(hc_black());
+    // Light or dark asked, the contrast theme wins: no frame has to know.
+    for dark in [false, true] {
+        let got = tokens::theme(dark);
+        assert!(same(&got, &want), "tokens::theme({dark}) is not the contrast palette");
+        assert!(!same(&got, &tokens::base(dark)));
+    }
+    assert_eq!(tokens::theme(false).bg, Color::BLACK);
+    assert!(super::system_contrast().is_some());
+}
+
+#[test]
+fn contrast_settings_change_flips_it() {
+    use crate::theme::tokens;
+    // Off at the start: the board's tokens.
+    assert!(same(&tokens::theme(false), &tokens::base(false)));
+    assert!(!super::system_changed(None), "no change, no redraw");
+    // Switched on under the running app.
+    assert!(super::system_changed(Some(hc_black())));
+    assert!(same(&tokens::theme(false), &theme_from_system(hc_black())));
+    assert!(
+        !super::system_changed(Some(hc_black())),
+        "the same theme again is no change"
+    );
+    // Another contrast theme (Windows "High Contrast White").
+    let white = SystemColors {
+        window: 0xffffff,
+        window_text: 0x000000,
+        btn_face: 0xffffff,
+        btn_text: 0x000000,
+        ..hc_black()
+    };
+    assert!(super::system_changed(Some(white)));
+    assert_eq!(tokens::theme(true).bg, Color::WHITE);
+    // Back off.
+    assert!(super::system_changed(None));
+    assert!(same(&tokens::theme(false), &tokens::base(false)));
+    assert!(same(&tokens::theme(true), &tokens::base(true)));
+}

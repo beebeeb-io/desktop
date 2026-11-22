@@ -393,8 +393,8 @@ pub(super) fn pc_idle() -> Option<Duration> {
     Some(Duration::from_millis(u64::from(now.wrapping_sub(info.dwTime))))
 }
 
-/// `WM_SETTINGCHANGE`: re-read the Windows contrast theme. True if it changed, so the app redraws.
-#[allow(dead_code)] // not wired to the window procedure yet
+/// `WM_SETTINGCHANGE` (the tray window's procedure): re-read the Windows contrast theme. True if it changed, so
+/// the app redraws.
 pub(super) fn on_setting_change() -> bool {
-    super::windows_contrast::refresh()
+    crate::theme::contrast::system_changed(super::windows_contrast::read())
 }
