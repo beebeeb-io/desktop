@@ -1176,3 +1176,55 @@ fn a_replaced_session_stops_a_running_proof_and_its_client_is_released() {
     pc.wait_for_outcomes(1);
     assert_eq!(pc.outcomes(), vec!["stopped"]);
 }
+
+/// dc-144b: a corrupt `state.db` at the startup and the start is moved aside (never deleted), the start goes on past
+/// the binding on a fresh one, and the window is told once.
+#[test]
+fn a_corrupt_state_db_at_start_is_moved_aside_the_start_goes_on_and_the_notice_is_shown_once() {
+    let pc = Pc::new();
+    std::fs::write(pc.state_db(), vec![0xABu8; 8192]).unwrap();
+    pc.sign_in(&owner());
+
+    pc.engine.fix_upgrade_candidate_at_startup();
+    let aside = pc.engine.config.state_dir.join("state.db.corrupt");
+    assert!(aside.exists(), "moved aside at the startup, never deleted");
+    assert_eq!(std::fs::read(&aside).unwrap(), vec![0xABu8; 8192]);
+
+    assert_eq!(
+        pc.start(),
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }),
+        "the start goes past the binding to the registration"
+    );
+    assert_eq!(
+        pc.db().owner().unwrap(),
+        Some(owner()),
+        "a fresh state.db, bound to this account"
+    );
+    assert_eq!(
+        pc.engine.take_local_list_rebuilt_notice(),
+        Some(super::LOCAL_LIST_REBUILT_NOTICE)
+    );
+    assert_eq!(pc.engine.take_local_list_rebuilt_notice(), None, "said once");
+}
+
+/// dc-144b: a state.db that goes corrupt while the app runs is moved aside by the next start itself.
+#[test]
+fn a_corrupt_state_db_found_by_a_start_is_moved_aside_and_the_start_goes_on() {
+    let pc = Pc::new();
+    pc.sign_in(&owner());
+    pc.engine.fix_upgrade_candidate_at_startup();
+    assert_eq!(
+        pc.engine.take_local_list_rebuilt_notice(),
+        None,
+        "nothing to say without a move"
+    );
+    std::fs::write(pc.state_db(), vec![0xCDu8; 8192]).unwrap();
+
+    assert_eq!(
+        pc.start(),
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
+    assert!(pc.engine.config.state_dir.join("state.db.corrupt").exists());
+    assert!(pc.engine.take_local_list_rebuilt_notice().is_some());
+    assert_eq!(pc.engine.take_local_list_rebuilt_notice(), None);
+}

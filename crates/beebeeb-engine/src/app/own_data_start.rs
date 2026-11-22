@@ -71,6 +71,10 @@ use crate::signin::start;
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 use crate::sync_view::Start;
 
+/// dc-144b: what the window says once after a corrupt `state.db` was moved aside and the files listed again.
+pub const LOCAL_LIST_REBUILT_NOTICE: &str =
+    "Beebeeb rebuilt its local file list. Your files are listed again from your account; nothing in your account changed.";
+
 #[cfg(test)]
 #[path = "own_data_start_tests.rs"]
 mod tests;
@@ -151,6 +155,8 @@ struct Seat {
 struct SeatState {
     /// The upgrade's adoption, as this handle's first startup fixed it.
     startup: Startup,
+    /// dc-144b: a corrupt `state.db` was moved aside and a fresh one is made; the window has not said so yet.
+    rebuilt: bool,
     /// The proof the last refused start owes; `ready` once that refusal is in the view.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     owed: Option<Owed>,
@@ -450,6 +456,28 @@ impl<C: CredentialStores> Engine<C> {
         drop(data);
     }
 
+    /// dc-144b: a corrupt `state.db` is moved aside (`local_state::move_corrupt_state_db_aside`, never deleted), so
+    /// the next open makes a fresh one and the files are listed again from the server. Called at the startup
+    /// ([`Self::fix_upgrade_candidate_at_startup`]) and at every engine start, once no other live process holds this
+    /// state. A move is remembered until the window says so once ([`Engine::take_local_list_rebuilt_notice`]). Any
+    /// other failure to open is an `Err` and nothing is moved: it fails closed.
+    pub(in crate::app) fn move_aside_a_corrupt_state_db(&self) -> Result<(), String> {
+        match crate::local_state::move_corrupt_state_db_aside(&self.config.state_dir)? {
+            crate::local_state::StateDbCheck::Sound => {}
+            crate::local_state::StateDbCheck::MovedAside(_) => {
+                lock(&self.own_data_seat().state).rebuilt = true;
+                self.host.wake();
+            }
+        }
+        Ok(())
+    }
+
+    /// The words the window shows once after a corrupt `state.db` was moved aside, or `None`. Taking them clears
+    /// them: a second ask answers `None` until the next move.
+    pub fn take_local_list_rebuilt_notice(&self) -> Option<&'static str> {
+        std::mem::take(&mut lock(&self.own_data_seat().state).rebuilt).then_some(LOCAL_LIST_REBUILT_NOTICE)
+    }
+
     /// The binding rule, from `restore` (under the step lock, after the stored key was or was not loaded): the first
     /// startup of this handle fixes the upgrade's adoption candidate and shuts the adoption window on disk. The window
     /// is open on a `state.db` that a release before the binding wrote, and nothing else: whatever this startup finds,
@@ -466,6 +494,9 @@ impl<C: CredentialStores> Engine<C> {
                 return;
             }
             state.startup.fixed = true;
+        }
+        if self.move_aside_a_corrupt_state_db().is_err() {
+            tracing::warn!("state.db could not be checked at startup; the next start checks again");
         }
         let path = state_paths::state_db_path_from_state_dir(&self.config.state_dir);
         let open = match StateDb::shut_adoption_window_at_startup(&path) {
