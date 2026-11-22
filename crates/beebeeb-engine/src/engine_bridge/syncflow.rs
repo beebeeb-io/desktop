@@ -769,7 +769,7 @@ pub fn apply_snapshot(
     let mut reported = std::time::Instant::now();
 
     // dc-163: the rows commit PULL_BATCH_ROWS at a time (they committed one by one: 2.1 M write calls
-    // at 41,510 rows). Each batch holds whole rows only; a failure or a crash mid-pull leaves the
+    // at 41,510 rows); dc-170: or every BATCH_MAX_TIME (250 ms), whichever comes first. Each batch holds whole rows only; a failure or a crash mid-pull leaves the
     // batches before it, no cursor, and the next tick pulls again over them (every write here is
     // an upsert). The count is reported between batches, at most every LISTING_REPORT_EVERY, so
     // the board's wake never runs under the database lock.
@@ -1573,7 +1573,9 @@ mod first_pull_batch_tests {
         first_pull(&bridge, &sync_root, &nodes).await;
         let commits = bridge.db().wal_commits_for_test() - before;
         println!("first pull of {ITEMS} items: {commits} commits, {:?}", started.elapsed());
-        assert!(commits <= ITEMS / 500, "{commits} commits for {ITEMS} items");
+        // dc-170: batches also commit every BATCH_MAX_TIME, so a slow (debug) build commits more often than
+        // ITEMS / PULL_BATCH_ROWS; one commit per row (the dc-086 bug) is still 100x over this bound.
+        assert!(commits <= ITEMS / 100, "{commits} commits for {ITEMS} items");
         assert_eq!(rows(&db, "SELECT COUNT(*) FROM files"), ITEMS as i64);
         assert_eq!(rows(&db, "SELECT COUNT(*) FROM owned_key_records"), ITEMS as i64);
         assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(41));
@@ -1617,7 +1619,8 @@ mod first_pull_batch_tests {
         assert_eq!(check, "ok");
         let landed = rows(&db, "SELECT COUNT(*) FROM files");
         assert!(landed > 0 && landed < (ITEMS / 2) as i64, "{landed} rows after a crash at half");
-        assert_eq!(landed % crate::state_db::PULL_BATCH_ROWS as i64, 0, "a part of a batch landed");
+        // dc-170: a batch also commits by time (BATCH_MAX_TIME), so the count need not be a multiple of
+        // PULL_BATCH_ROWS; whole rows only is what the folder check below proves.
         assert_eq!(
             rows(&db, "SELECT COUNT(*) FROM files f WHERE f.parent_id IS NOT NULL
                         AND NOT EXISTS(SELECT 1 FROM files p WHERE p.file_id = f.parent_id)"),
