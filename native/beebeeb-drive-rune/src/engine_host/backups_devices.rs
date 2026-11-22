@@ -46,7 +46,7 @@ pub const FRESH_FOR: Duration = Duration::from_secs(30);
 /// What "Other devices" says while its first read is out.
 pub const READING: &str = "Reading your other devices\u{2026}";
 /// What it says when the list could not be read (an older list, if any, stays).
-pub const NOT_READ: &str = "Couldn't read your other devices. Try again in a moment.";
+pub const NOT_READ: &str = crate::frames::backups::source::DEVICES_NOT_READ;
 /// What it says when the Backups listing was cut short.
 pub const NOT_ALL: &str = "Not every device could be listed.";
 /// What it says when nothing has synced on this PC yet (the keys of the other devices' files are not here).
@@ -251,12 +251,15 @@ impl<E: DevicesEngine> DeviceCalls<E> {
         });
     }
 
-    /// The section opened: read when nothing is held for this session, or it is older than [`FRESH_FOR`].
+    /// The section opened (or Try again): read when nothing is held for this session, the last read failed, or what
+    /// is held is older than [`FRESH_FOR`].
     pub fn opened(&mut self) {
         self.wanted = true;
         let now = self.engine.stamp();
         self.look(&now);
-        let fresh = self.held.is_some() && self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
+        let fresh = self.held.is_some()
+            && self.note != Some(NOT_READ)
+            && self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
         if !fresh {
             self.ask_read();
         }

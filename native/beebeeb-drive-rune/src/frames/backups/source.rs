@@ -180,6 +180,9 @@ pub enum Stopped {
     StoppedOnly(&'static str),
 }
 
+/// What "Other devices" says when its list could not be read (an older list, if any, stays).
+pub const DEVICES_NOT_READ: &str = "Couldn't read your other devices. Try again in a moment.";
+
 #[cfg_attr(not(test), allow(dead_code))] // the defaulted methods are for the view lane's poll (PR body)
 pub trait BackupsSource {
     /// Whether this source answers for `part` (`false`: the view draws that part's "not built yet" state, never a
@@ -210,6 +213,11 @@ pub trait BackupsSource {
     /// every device listed. A fixed sentence; `None`: nothing to say.
     fn devices_note(&self) -> Option<&'static str> {
         None
+    }
+    /// The "Other devices" list could not be read: the section draws the failed state with Try again
+    /// ([`BackupsSource::read_again`]) in the list's place, or Try again under an older list.
+    fn devices_failed(&self) -> bool {
+        self.devices_note() == Some(DEVICES_NOT_READ)
     }
     /// A "Delete this backup" is on its way (a source that answers late): the dialog says so and sends nothing more.
     fn deleting(&self) -> bool {
