@@ -195,7 +195,9 @@ fn new_document_from_the_files_menu_opens_dw_1558() {
             .expect("New document is in the New menu");
         s.pick_menu(at, tx);
         assert!(
-            s.actions.intents.contains(&crate::frames::files::Intent::Frame("DW-1558")),
+            s.actions
+                .intents
+                .contains(&crate::frames::files::Intent::Frame("DW-1558")),
             "the press asks for DW-1558"
         );
     });
@@ -203,7 +205,9 @@ fn new_document_from_the_files_menu_opens_dw_1558() {
     rt.frame(1.0);
     rt.update(|s, _| {
         assert!(
-            !s.actions.intents.contains(&crate::frames::files::Intent::Frame("DW-1558")),
+            !s.actions
+                .intents
+                .contains(&crate::frames::files::Intent::Frame("DW-1558")),
             "the poll took it"
         );
         let dialog = s.viewer.new_file.as_ref().expect("New document is open");
@@ -212,7 +216,10 @@ fn new_document_from_the_files_menu_opens_dw_1558() {
         assert_eq!(dialog.folder, s.listing.folder.id);
     });
     let drawn = texts(&rt);
-    assert!(drawn.contains(crate::frames::office::edit::new_document::TITLE), "{drawn}");
+    assert!(
+        drawn.contains(crate::frames::office::edit::new_document::TITLE),
+        "{drawn}"
+    );
     assert!(drawn.contains("Meeting notes"), "Docs' templates are offered: {drawn}");
 }
 
@@ -236,7 +243,10 @@ fn new_files_continue_on_an_office_type_opens_new_document_on_that_app() {
 }
 
 /// A source that says which files have a kept editing.
-struct Kept(crate::frames::viewers::source::FixtureViewerSource, Vec<(String, String)>);
+struct Kept(
+    crate::frames::viewers::source::FixtureViewerSource,
+    Vec<(String, String)>,
+);
 
 impl crate::frames::viewers::source::ViewerSource for Kept {
     fn open(
@@ -270,7 +280,9 @@ fn runtime_keeping(kept: usize) -> Runtime<State> {
     crate::frames::viewers::wire(
         &mut state,
         Box::new(move || {
-            let files = (0..kept).map(|n| (format!("invented-{n}"), "14:32".to_string())).collect();
+            let files = (0..kept)
+                .map(|n| (format!("invented-{n}"), "14:32".to_string()))
+                .collect();
             Box::new(Kept(crate::frames::viewers::source::FixtureViewerSource::new(), files))
         }),
     );
@@ -290,7 +302,10 @@ fn the_gate_opening_says_what_unsaved_editing_this_pc_kept() {
     let rt = runtime_keeping(2);
     assert_eq!(rt.state.actions.toast, Some(Toast::KeptEdits(2)));
     let drawn = texts(&rt);
-    assert!(drawn.contains("Unsaved changes to 2 files were kept on this PC."), "{drawn}");
+    assert!(
+        drawn.contains("Unsaved changes to 2 files were kept on this PC."),
+        "{drawn}"
+    );
 
     let rt = runtime_keeping(1);
     assert_eq!(rt.state.actions.toast, Some(Toast::KeptEdits(1)));
@@ -307,5 +322,8 @@ fn nothing_kept_says_nothing_and_the_notice_is_said_once() {
     for _ in 0..3 {
         rt.frame(0.016);
     }
-    assert_eq!(rt.state.actions.toast, None, "once per opening of the gate, not every poll");
+    assert_eq!(
+        rt.state.actions.toast, None,
+        "once per opening of the gate, not every poll"
+    );
 }

@@ -3,6 +3,7 @@
 
 use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::space as sp;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::settings_list::{self as lists, Item, Role};
 use crate::ui::settings_notice as notices;
@@ -66,10 +67,16 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     AlertKind::Request => &ic::FOLDER,
                     AlertKind::Security => &ic::SHIELD,
                 };
-                let mut trailing = row().key(format!("item-{l}-{i}-when")).center_y().gap(8.0);
+                let mut trailing = row().key(format!("item-{l}-{i}-when")).center_y().gap(sp::S8);
                 let mut name = a.title.clone();
                 if a.new {
-                    trailing = trailing.child(crate::ui::pill::pill(&format!("pill-{}", pills), "New", crate::ui::pill::Tone::Neutral, true, t));
+                    trailing = trailing.child(crate::ui::pill::pill(
+                        &format!("pill-{}", pills),
+                        "New",
+                        crate::ui::pill::Tone::Neutral,
+                        true,
+                        t,
+                    ));
                     pills += 1;
                     name = format!("New. {name}");
                 }

@@ -21,15 +21,15 @@ pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
 #[cfg(test)]
 pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
 pub(crate) mod details;
-mod editor_view;
-mod editor_minimap;
 pub(crate) mod dialogs;
+mod editor_minimap;
+mod editor_view;
 mod fixture_media;
 mod fixture_text;
 pub mod icons;
 pub mod kinds;
-mod markdown;
 mod local_file;
+mod markdown;
 mod md_source;
 pub mod media;
 mod media_icons;
@@ -45,6 +45,7 @@ pub mod office_over;
 mod open_route;
 mod pdf;
 mod photo;
+pub mod refusal_text;
 mod settle;
 pub mod source;
 mod states;
@@ -52,7 +53,6 @@ mod style;
 mod table;
 mod text;
 pub(crate) mod unsaved_guard;
-pub mod refusal_text;
 pub mod video;
 use open_route::is_this_groups;
 
@@ -853,7 +853,9 @@ pub fn editor_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// focus marks follow, so the caret is drawn in the field that has the keyboard.
 pub fn editor_f6(s: &mut State, from: &str, back: bool, tx: &mut Tx) {
     let Some(ui) = ui(s) else { return };
-    let Some(to) = editor_view::f6_stop(ui, from, back) else { return };
+    let Some(to) = editor_view::f6_stop(ui, from, back) else {
+        return;
+    };
     if let Some(editor) = ui.editor.as_mut() {
         editor.edit.focused = to == editor_view::FIELD_PANE;
     }
@@ -910,7 +912,13 @@ fn apply_edit(edit: &mut rune::TextEdit, new: &str, sel: std::ops::Range<usize>)
         pre -= 1;
     }
     let max_suf = old.len().min(new.len()) - pre;
-    let mut suf = old.bytes().rev().zip(new.bytes().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
+    let mut suf = old
+        .bytes()
+        .rev()
+        .zip(new.bytes().rev())
+        .take(max_suf)
+        .take_while(|(a, b)| a == b)
+        .count();
     while !old.is_char_boundary(old.len() - suf) || !new.is_char_boundary(new.len() - suf) {
         suf -= 1;
     }
@@ -966,16 +974,17 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         s.viewer.unopened = None;
     }
     if let (None, Some(id), true) = (&s.viewer.ui, here, gate_open)
-        && s.viewer.unopened.as_deref() != Some(id.as_str()) {
-            match route_source(s).map(|source| Ui::open_or_say_why(source, &id)) {
-                Some(Ok(ui)) => {
-                    s.viewer.ui = Some(ui);
-                    return true;
-                }
-                Some(Err(_)) => s.viewer.unopened = Some(id),
-                None => {}
+        && s.viewer.unopened.as_deref() != Some(id.as_str())
+    {
+        match route_source(s).map(|source| Ui::open_or_say_why(source, &id)) {
+            Some(Ok(ui)) => {
+                s.viewer.ui = Some(ui);
+                return true;
             }
+            Some(Err(_)) => s.viewer.unopened = Some(id),
+            None => {}
         }
+    }
     let Some(ui) = ui(s) else { return had || new_file };
     let changed = ui.pump() | ui.refind();
     // An open text or note whose version is read: woken when the next read is due, not only by a press.
@@ -1028,7 +1037,12 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
             // Share and Version history of the open file are Files' dialogs: they stand over the viewer.
             let theme = tokens::theme(cx.system_dark());
             match crate::frames::files::window::dialog_over_viewer(s, &theme) {
-                Some(dialog) => rune::el().key("viewer-root").w_full().h_full().child(page).child(dialog),
+                Some(dialog) => rune::el()
+                    .key("viewer-root")
+                    .w_full()
+                    .h_full()
+                    .child(page)
+                    .child(dialog),
                 None => page,
             }
         }
@@ -1178,9 +1192,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     sync(s);
     // A "not built yet" notice goes with the next key.
     if let Some(ui) = ui(s)
-        && ui.toast.as_deref().is_some_and(|words| words.starts_with(NOT_BUILT)) {
-            ui.toast = None;
-        }
+        && ui.toast.as_deref().is_some_and(|words| words.starts_with(NOT_BUILT))
+    {
+        ui.toast = None;
+    }
     // The editor's frame: the question, the command search, Ctrl+K and Ctrl+S.
     if office_over::on_key(s, ev, tx) {
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
@@ -1193,10 +1208,11 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if media::on_key(s, ev) {
         // A page turned by a key: its thumbnail comes into view, and the page is read from its top.
         if let Some(ui) = ui(s).filter(|ui| matches!(ui.file.body, Body::Pdf(_)))
-            && Some(ui.media.page) != page_before {
-                tx.scroll_into_view(pdf::thumb_key(ui.media.page));
-                pdf::show_page_from_its_top(tx);
-            }
+            && Some(ui.media.page) != page_before
+        {
+            tx.scroll_into_view(pdf::thumb_key(ui.media.page));
+            pdf::show_page_from_its_top(tx);
+        }
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
             tx.focus(key, true);
         }

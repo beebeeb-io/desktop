@@ -110,11 +110,19 @@ fn emit_source_offer() {
     println!("cargo:rerun-if-env-changed=BEEBEEB_RELEASE_VERSION");
     let text = std::fs::read_to_string(lock).expect("reading the office-render lock");
     let marker = "desktop-office?rev=";
-    let at = text.find(marker).expect("the office-render lock has a desktop-office git source") + marker.len();
+    let at = text
+        .find(marker)
+        .expect("the office-render lock has a desktop-office git source")
+        + marker.len();
     let rev: String = text[at..].chars().take_while(char::is_ascii_hexdigit).collect();
-    assert!(rev.len() == 40, "the desktop-office rev in the lock is not a full commit: {rev:?}");
+    assert!(
+        rev.len() == 40,
+        "the desktop-office rev in the lock is not a full commit: {rev:?}"
+    );
     println!("cargo:rustc-env=BEEBEEB_OFFICE_REV={rev}");
-    let release = std::env::var("BEEBEEB_RELEASE_VERSION").ok().filter(|v| !v.trim().is_empty());
+    let release = std::env::var("BEEBEEB_RELEASE_VERSION")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let version = release.unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION"));
     println!("cargo:rustc-env=BEEBEEB_SOURCE_VERSION={}", version.trim());
 }

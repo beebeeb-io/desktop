@@ -181,15 +181,23 @@ fn device_confirm(session: &Session, all: &[Session], button: usize, t: &Theme) 
             "{apps} on that device are signed out the next time they contact Beebeeb. Their encrypted data stays on that device until it is removed there."
         ),
         Vec::new(),
-        foot(others, "Sign out", format!("Sign out {}", session.name), t, move |s: &mut State| {
-            if let Some(source) = s.account.source.as_mut() {
-                source.sign_out_device(&id);
-            }
-            s.account.dialog = None;
-        }),
+        foot(
+            others,
+            "Sign out",
+            format!("Sign out {}", session.name),
+            t,
+            move |s: &mut State| {
+                if let Some(source) = s.account.source.as_mut() {
+                    source.sign_out_device(&id);
+                }
+                s.account.dialog = None;
+            },
+        ),
         t,
     );
-    super::modal_back(card, &format!("btn-{button}"), LIST, |s: &mut State| s.account.dialog = None)
+    super::modal_back(card, &format!("btn-{button}"), LIST, |s: &mut State| {
+        s.account.dialog = None
+    })
 }
 
 /// Sign out every device but this one: the same confirm, in the plural.
@@ -201,14 +209,22 @@ fn elsewhere_confirm(all: &[Session], t: &Theme) -> El {
         "Sign out everywhere else?",
         "The Beebeeb apps on your other devices are signed out the next time they contact Beebeeb. Their encrypted data stays on those devices until it is removed there.",
         Vec::new(),
-        foot(others, "Sign out", "Sign out everywhere else".into(), t, |s: &mut State| {
-            if let Some(source) = s.account.source.as_mut() {
-                source.sign_out_everywhere_else();
-            }
-            s.account.dialog = None;
-        }),
+        foot(
+            others,
+            "Sign out",
+            "Sign out everywhere else".into(),
+            t,
+            |s: &mut State| {
+                if let Some(source) = s.account.source.as_mut() {
+                    source.sign_out_everywhere_else();
+                }
+                s.account.dialog = None;
+            },
+        ),
         t,
     );
     // Its opener, "Sign out everywhere else", goes once nothing else is signed in: then focus goes into the list.
-    super::modal_back(card, &format!("btn-{others}"), LIST, |s: &mut State| s.account.dialog = None)
+    super::modal_back(card, &format!("btn-{others}"), LIST, |s: &mut State| {
+        s.account.dialog = None
+    })
 }

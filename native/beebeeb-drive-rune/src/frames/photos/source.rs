@@ -365,7 +365,9 @@ fn decode(file: &[u8]) -> Pixels {
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf[..count * 4].to_vec(),
         png::ColorType::Rgb => buf[..count * 3]
-            .as_chunks::<3>().0.iter()
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
         other => panic!("a bundled sample photo is RGB or RGBA, not {other:?}"),

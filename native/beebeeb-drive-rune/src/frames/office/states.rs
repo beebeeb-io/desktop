@@ -9,12 +9,12 @@
 
 use rune::{Color, Cx, El, Icon, TextStyle, col, el, row};
 
-use crate::theme::scale::{self as sc, space};
 use crate::State;
 use crate::frames::office::docs::docs_fixture;
 use crate::frames::viewers::source::Body;
 use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::icons;
+use crate::theme::scale::{self as sc, space};
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::button::{self, ButtonState, Size, Variant};
 use crate::ui::view_state::{self, ViewState};
@@ -318,19 +318,23 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
     });
     let mut actions = row().key("empty-actions").gap(space::S8).center_y();
     if body.state.open_elsewhere_offered(body.kept) {
-        actions = actions.child(ui_button("empty-btn-1", OPEN_ELSEWHERE, false, t).on_press(|s: &mut State| {
-            if let Some(ui) = viewers::ui(s) {
-                ui.intent(Intent::OpenInAnotherApp);
-            }
-        }));
+        actions = actions.child(
+            ui_button("empty-btn-1", OPEN_ELSEWHERE, false, t).on_press(|s: &mut State| {
+                if let Some(ui) = viewers::ui(s) {
+                    ui.intent(Intent::OpenInAnotherApp);
+                }
+            }),
+        );
     } else {
         actions = actions
             .child(kit::label("empty-keep-first", KEEP_FIRST, SUB, t.text_secondary))
-            .child(ui_button("empty-keep", KEEP_ACTION, false, t).on_press(|s: &mut State| {
-                if let Some(ui) = viewers::ui(s) {
-                    ui.intent(Intent::KeepOffline);
-                }
-            }));
+            .child(
+                ui_button("empty-keep", KEEP_ACTION, false, t).on_press(|s: &mut State| {
+                    if let Some(ui) = viewers::ui(s) {
+                        ui.intent(Intent::KeepOffline);
+                    }
+                }),
+            );
     }
     col()
         .key("failure")
@@ -428,7 +432,12 @@ pub fn status_bar(state: OfficeState, left: &[&str], t: &Theme) -> El {
     let mut bar: Vec<El> = Vec::new();
     let mut said = String::new();
     if state.is_opening() {
-        bar.push(el().key("status-dot").size(7.0, 7.0).radius(sc::radius::PILL).fill(warn_dot(t)));
+        bar.push(
+            el().key("status-dot")
+                .size(7.0, 7.0)
+                .radius(sc::radius::PILL)
+                .fill(warn_dot(t)),
+        );
         bar.push(kit::label("status-text", OPENING, STATUS_STATE, t.text_secondary));
         said.push_str(OPENING);
     } else {
@@ -637,7 +646,10 @@ mod tests {
     #[test]
     fn office_states_try_again_only_once() {
         assert!(OfficeState::Stopped { retried: false }.try_again_shown());
-        assert!(OfficeState::Stopped { retried: true }.try_again_shown(), "a second stop still offers it");
+        assert!(
+            OfficeState::Stopped { retried: true }.try_again_shown(),
+            "a second stop still offers it"
+        );
         for s in [
             OfficeState::Opening,
             OfficeState::Ready,
@@ -729,7 +741,10 @@ mod tests {
     #[test]
     fn office_states_failure_says_reason_and_not_changed() {
         let rt = showing(StateBody::new(OfficeState::Stopped { retried: false }, true));
-        assert!(keyed(&rt, "empty-title") && keyed(&rt, "empty-text"), "title and reason are drawn");
+        assert!(
+            keyed(&rt, "empty-title") && keyed(&rt, "empty-text"),
+            "title and reason are drawn"
+        );
         let words = said(&rt);
         assert!(
             words

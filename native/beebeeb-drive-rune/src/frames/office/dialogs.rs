@@ -8,9 +8,9 @@
 
 use rune::{El, TextStyle, col, el, row};
 
-use crate::theme::scale::{self as sc, space};
 use crate::State;
 use crate::frames::viewers;
+use crate::theme::scale::{self as sc, space};
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::dialog::{Dialog, Surface, dialog};
 use crate::ui::kit;
@@ -83,13 +83,12 @@ fn link(index: usize, words: &str, t: &Theme) -> El {
             }
         })
     };
-    link
-        .child(
-            col()
-                .key(format!("{key}-col"))
-                .child(text)
-                .child(el().key(format!("{key}-rule")).w_full().h(1.0).fill(ink)),
-        )
+    link.child(
+        col()
+            .key(format!("{key}-col"))
+            .child(text)
+            .child(el().key(format!("{key}-rule")).w_full().h(1.0).fill(ink)),
+    )
 }
 
 /// The panel: a title, the notice, the two links. No image and no mark: names appear only inside the notice text.
@@ -146,8 +145,11 @@ mod tests {
 
     /// The rev the shipped helper builds desktop-office at, read straight from its Cargo.lock.
     fn locked_office_rev() -> String {
-        let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../beebeeb-office-render/Cargo.lock"))
-            .expect("the office-render lock");
+        let lock = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../beebeeb-office-render/Cargo.lock"
+        ))
+        .expect("the office-render lock");
         let at = lock.find("desktop-office?rev=").expect("a desktop-office git source") + "desktop-office?rev=".len();
         lock[at..].chars().take_while(char::is_ascii_hexdigit).collect()
     }
@@ -162,7 +164,10 @@ mod tests {
     fn source_link_is_the_pinned_office_rev_not_a_crate_version_tag() {
         assert_eq!(
             SOURCE_URL,
-            format!("https://github.com/beebeeb-io/desktop-office/tree/{}", locked_office_rev()),
+            format!(
+                "https://github.com/beebeeb-io/desktop-office/tree/{}",
+                locked_office_rev()
+            ),
             "AGPL source offer: desktop-office at the commit the lock pins"
         );
     }
@@ -182,7 +187,10 @@ mod tests {
             "MPL-2.0",
             "AGPL-3.0-or-later",
         ] {
-            assert!(w.contains(named), "{named} must be named (the shipped notice carries all of them)");
+            assert!(
+                w.contains(named),
+                "{named} must be named (the shipped notice carries all of them)"
+            );
         }
         // Stale spec text: the Office engine is not LibreOffice, and no Qt or LGPL code ships.
         for banned in ["LibreOffice", "Qt", "LGPL", "ffmpeg", "GPL-2"] {
@@ -257,7 +265,11 @@ mod tests {
         click(&mut rt, "lic-link-0");
         assert_eq!(rt.state.settings.toast, None);
         let opened = crate::engine_host::signin::OPENED.with(|o| o.borrow().clone());
-        assert_eq!(opened, vec![SOURCE_URL.to_string()], "the source link opened the tagged source");
+        assert_eq!(
+            opened,
+            vec![SOURCE_URL.to_string()],
+            "the source link opened the tagged source"
+        );
         // No licence file sits beside a test build, so the press reaching the licence target says so.
         click(&mut rt, "lic-link-1");
         assert_eq!(

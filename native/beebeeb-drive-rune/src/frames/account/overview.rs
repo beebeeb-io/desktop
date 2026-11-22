@@ -29,8 +29,14 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
     let who = source.identity();
     // Name and email each open their page: one Tab stop, the arrows between them. A page nothing answers for
     // leaves its row as text, and then the list is a plain one.
-    let wired = [Pane::Name, Pane::Email].iter().all(|p| source.pane_state(*p) != PaneState::Unwired);
-    let identity = (if wired { crate::ui::settings_list::roving_list } else { crate::ui::settings_list::list })(
+    let wired = [Pane::Name, Pane::Email]
+        .iter()
+        .all(|p| source.pane_state(*p) != PaneState::Unwired);
+    let identity = (if wired {
+        crate::ui::settings_list::roving_list
+    } else {
+        crate::ui::settings_list::list
+    })(
         0,
         None,
         vec![

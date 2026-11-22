@@ -6,11 +6,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use beebeeb_office_protocol::office::{EditKind, EditOp, ListKind, Mark, Marks, NumberFormat, ParaStyle, Rgb, TextAlign};
+use beebeeb_office_protocol::office::{
+    EditKind, EditOp, ListKind, Mark, Marks, NumberFormat, ParaStyle, Rgb, TextAlign,
+};
 use rune::{Env, Key, KeyEvent, Runtime};
 
-use super::*;
 use super as sheets_tabs;
+use super::*;
 use crate::frames::office::docs::docs_fixture;
 use crate::frames::office::edit::EditUi;
 use crate::frames::office::edit::sheet_ribbon::{
@@ -72,10 +74,7 @@ fn open_state(marks: Option<Marks>) -> (State, Ops) {
     let ops: Ops = Rc::default();
     let mut state = init();
     let id = file.id.clone();
-    let source = Source {
-        file,
-        ops: ops.clone(),
-    };
+    let source = Source { file, ops: ops.clone() };
     assert!(viewers::open_from(&mut state, Box::new(source), &id));
     let mut edit = EditUi::new(EditKind::Xlsx);
     edit.marks = marks;
@@ -152,9 +151,27 @@ fn office_sheets_ribbon_tools_are_one_edit_each() {
     let (mut rt, ops) = ribbon_rt(None);
     for (name, op) in [
         ("Undo", EditOp::Undo),
-        ("Bold", EditOp::Mark { mark: Mark::Bold, on: true }),
-        ("Italic", EditOp::Mark { mark: Mark::Italic, on: true }),
-        ("Underline", EditOp::Mark { mark: Mark::Underline, on: true }),
+        (
+            "Bold",
+            EditOp::Mark {
+                mark: Mark::Bold,
+                on: true,
+            },
+        ),
+        (
+            "Italic",
+            EditOp::Mark {
+                mark: Mark::Italic,
+                on: true,
+            },
+        ),
+        (
+            "Underline",
+            EditOp::Mark {
+                mark: Mark::Underline,
+                on: true,
+            },
+        ),
         ("Align centre", EditOp::Align(TextAlign::Center)),
         ("Currency", EditOp::NumberFormat(NumberFormat::Currency)),
         ("More decimals", EditOp::NumberFormat(NumberFormat::MoreDecimals)),
@@ -182,7 +199,13 @@ fn office_sheets_ribbon_lit_tools_follow_the_marks() {
     // A lit tool turns its mark off.
     let key = tool_key(&rt, "Bold");
     press(&mut rt, &key);
-    assert_eq!(ops.borrow().last(), Some(&EditOp::Mark { mark: Mark::Bold, on: false }));
+    assert_eq!(
+        ops.borrow().last(),
+        Some(&EditOp::Mark {
+            mark: Mark::Bold,
+            on: false
+        })
+    );
 }
 
 #[test]
@@ -194,7 +217,11 @@ fn office_sheets_ribbon_fill_pop_up_sends_the_colour() {
     press(&mut rt, "rib-menu-item-1");
     assert_eq!(
         ops.borrow().last(),
-        Some(&EditOp::FillColour(Some(Rgb { r: 0xD9, g: 0xEA, b: 0xD3 })))
+        Some(&EditOp::FillColour(Some(Rgb {
+            r: 0xD9,
+            g: 0xEA,
+            b: 0xD3
+        })))
     );
     assert!(find(&rt, "rib-menu").is_none(), "and closes");
     // No fill is its own entry, after a separator.
@@ -230,7 +257,10 @@ fn office_sheets_data_tools_are_sort_filter_and_table() {
 fn office_sheets_alt_equals_is_sum() {
     let key = |k: &str, alt: bool| KeyEvent {
         key: Key::Text(k.into()),
-        mods: rune::Mods { alt, ..Default::default() },
+        mods: rune::Mods {
+            alt,
+            ..Default::default()
+        },
     };
     assert!(is_auto_sum(&key("=", true)));
     assert!(!is_auto_sum(&key("=", false)));
@@ -252,13 +282,33 @@ fn office_sheets_references_are_cells_or_ranges_inside_the_sheet() {
     assert_eq!(parse_reference("C4:B2", ext), Some((at(3, 2), at(1, 1))));
     assert_eq!(parse_reference("AD400", ext), Some((at(399, 29), at(399, 29))));
     for wrong in [
-        "", "B", "5", "B0", "B05", "5B", "B5:", ":B5", "B5:C", "B5C", "A1:B2:C3", "AE1", "A401", "A-1", "B 5", "Sheet1!A1",
-        "ABCD1", "A99999999", "=A1",
+        "",
+        "B",
+        "5",
+        "B0",
+        "B05",
+        "5B",
+        "B5:",
+        ":B5",
+        "B5:C",
+        "B5C",
+        "A1:B2:C3",
+        "AE1",
+        "A401",
+        "A-1",
+        "B 5",
+        "Sheet1!A1",
+        "ABCD1",
+        "A99999999",
+        "=A1",
     ] {
         assert_eq!(parse_reference(wrong, ext), None, "{wrong:?}");
     }
     // The sheet's own bounds, not the grid's: XFD1048576 is valid only in a sheet that big.
-    assert_eq!(parse_reference("XFD1", (1_048_576, 16_384)), Some((at(0, 16_383), at(0, 16_383))));
+    assert_eq!(
+        parse_reference("XFD1", (1_048_576, 16_384)),
+        Some((at(0, 16_383), at(0, 16_383)))
+    );
     assert_eq!(parse_reference("XFE1", (1_048_576, 16_384)), None);
 }
 
@@ -316,7 +366,12 @@ fn office_sheets_the_cell_box_goes_there_or_says_why_not() {
         ops.borrow().last(),
         Some(&EditOp::SelectCells {
             sheet: 0,
-            range: beebeeb_office_protocol::office::CellRange { row: 1, col: 1, rows: 3, cols: 2 }
+            range: beebeeb_office_protocol::office::CellRange {
+                row: 1,
+                col: 1,
+                rows: 3,
+                cols: 2
+            }
         })
     );
     // Far away: the grid scrolls to it.
@@ -384,10 +439,16 @@ fn office_sheets_a_double_press_renames_the_tab_with_one_edit() {
     });
     settle(&mut rt);
     assert_eq!(
-        ops.borrow().iter().filter(|o| matches!(o, EditOp::RenameSheet { .. })).count(),
+        ops.borrow()
+            .iter()
+            .filter(|o| matches!(o, EditOp::RenameSheet { .. }))
+            .count(),
         1
     );
-    assert!(ops.borrow().contains(&EditOp::RenameSheet { sheet: 1, name: "2025!".into() }));
+    assert!(ops.borrow().contains(&EditOp::RenameSheet {
+        sheet: 1,
+        name: "2025!".into()
+    }));
     assert_eq!(sheets_tabs::renaming(), None);
     assert!(find(&rt, "sh-tab-1").is_some(), "the tab is back");
     assert_eq!(sheet_of(&mut rt).tabs[1], "2025!");
@@ -437,7 +498,10 @@ fn office_sheets_names_are_checked_before_they_are_sent() {
     for bad in ["a:b", "a\\b", "a/b", "a?b", "a*b", "[a]"] {
         assert!(sheets_tabs::name_problem(bad, &others).is_some(), "{bad}");
     }
-    assert!(sheets_tabs::name_problem("notes", &others).is_some(), "names differ by more than case");
+    assert!(
+        sheets_tabs::name_problem("notes", &others).is_some(),
+        "names differ by more than case"
+    );
     assert!(sheets_tabs::name_problem("Budget", &others).is_none());
 }
 
@@ -446,7 +510,10 @@ fn office_sheets_the_plus_is_dimmed_and_says_why() {
     let (mut rt, ops) = tabs_rt();
     let add = find(&rt, "sh-tab-add").expect("the + is there");
     assert_eq!(add.label.as_deref(), Some("Add sheet"));
-    assert_eq!(add.help.as_deref(), Some("Adding sheets isn't available in this editor yet"));
+    assert_eq!(
+        add.help.as_deref(),
+        Some("Adding sheets isn't available in this editor yet")
+    );
     press(&mut rt, "sh-tab-add");
     assert_eq!(
         toast(&mut rt).as_deref(),
@@ -464,7 +531,10 @@ fn office_sheets_the_viewers_tabs_have_no_plus_and_no_rename() {
         let Some(Body::Sheet(v)) = s.viewer.ui.as_ref().map(|ui| &ui.file.body) else {
             panic!("a sheet is open")
         };
-        rune::col().w_full().h_full().child(sheets_tabs::sheet_tabs(v, true, Some(800.0), &t))
+        rune::col()
+            .w_full()
+            .h_full()
+            .child(sheets_tabs::sheet_tabs(v, true, Some(800.0), &t))
     }
     let _ = t;
     let (state, _) = open_state(None);
@@ -503,7 +573,12 @@ fn office_sheets_data_and_formulas_tabs_draw_and_press() {
     press(&mut rt, "rib-tab-2-cell");
     assert_eq!(viewers::ui(&mut rt.state).expect("a file").office.tab, Tab::Data);
     for name in ["Sort A to Z", "Filter", "Table"] {
-        assert!(rt.elements().iter().any(|e| !e.exiting && e.label.as_deref() == Some(name)), "Data draws {name}");
+        assert!(
+            rt.elements()
+                .iter()
+                .any(|e| !e.exiting && e.label.as_deref() == Some(name)),
+            "Data draws {name}"
+        );
     }
     let sort = tool_key(&rt, "Sort A to Z");
     press(&mut rt, &sort);

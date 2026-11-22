@@ -9,6 +9,8 @@
 
 use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::{radius as sc_radius, space as sp, text};
+use crate::theme::tokens::radius as rad;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::settings_card as cards;
@@ -34,7 +36,7 @@ pub const DOWNLOAD_MENU_AT: &str = "item-1-1-menu-at";
 const MENU_AT: (f32, f32) = (436.0, -5.0);
 
 /// 11.5px/600 on a 17px line: a figure's name (`.mk-fig-k`, `.mk-step-k`).
-const FIG_NAME: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
+const FIG_NAME: TextStyle = text::STATUS_SEMI;
 /// 24px/650 mono on a 30px line, tracked -.02em: a live figure (`.mk-fig-v`).
 const FIG: TextStyle = TextStyle::new(24.0, 650.0)
     .family(Family::Mono)
@@ -51,13 +53,13 @@ const AXIS_X: TextStyle = TextStyle::new(10.5, 400.0).family(Family::Mono).lh(13
 /// 11px/500 mono on a 15px line: the chart's hover note (`.mk-chart-tip`).
 const TIP: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(15.0);
 /// 13px/500 on a 17px line: a device's name (`.mk-drow-tx b`).
-const DEVICE: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0);
+const DEVICE: TextStyle = type_::LIST_ITEM;
 /// 11.5px/400 mono on a 15px line: a device's line (`.mk-drow-tx span`).
-const DEVICE_SAYS: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
+const DEVICE_SAYS: TextStyle = text::META_MONO_TIGHT;
 /// 18px/650 mono on a 24px line: a step's figure (`.mk-step-v`).
 const STEP: TextStyle = TextStyle::new(18.0, 650.0).family(Family::Mono).lh(24.0);
 /// 11px/500 mono: a step's unit (`.mk-step-v small`).
-const STEP_UNIT: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
+const STEP_UNIT: TextStyle = type_::KBD;
 /// 11px/400 mono: the line under a step's figure (`.mk-step-s`).
 const STEP_SAYS: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(14.5);
 
@@ -256,15 +258,15 @@ fn right_now(bw: &Bandwidth, t: &Theme) -> El {
             .role("group")
             .label(said)
             .w(248.0)
-            .gap(3.0)
-            .py(12.0)
-            .px(14.0)
-            .radius(12.0)
+            .gap(sp::S4)
+            .py(sp::S12)
+            .px(sp::S14)
+            .radius(sc_radius::DIALOG)
             .fill(wash(t))
             .child(
                 row()
                     .key(format!("fig-{i}-name-row"))
-                    .gap(6.0)
+                    .gap(sp::S6)
                     .center_y()
                     .child(kit::glyph(format!("fig-{i}-icon"), icon, 14.0, ink))
                     .child(kit::label(format!("fig-{i}-name"), name, FIG_NAME, t.text_secondary)),
@@ -289,7 +291,7 @@ fn right_now(bw: &Bandwidth, t: &Theme) -> El {
             row()
                 .key("card-0-figs")
                 .w_full()
-                .gap(12.0)
+                .gap(sp::S12)
                 .child(tile(0, Direction::Upload, &bw.upload))
                 .child(tile(1, Direction::Download, &bw.download)),
         )
@@ -297,7 +299,7 @@ fn right_now(bw: &Bandwidth, t: &Theme) -> El {
 
 /// A swatch and a total in the chart's legend.
 fn legend(key: &str, direction: Direction, total: &str, t: &Theme) -> El {
-    let mut swatch = el().key(format!("{key}-swatch")).size(10.0, 10.0).radius(3.0);
+    let mut swatch = el().key(format!("{key}-swatch")).size(10.0, 10.0).radius(rad::SM);
     swatch = match direction {
         Direction::Upload => swatch.fill(t.accent).border(1.0, t.accent_deep),
         Direction::Download => swatch.fill(t.text_tertiary),
@@ -305,7 +307,7 @@ fn legend(key: &str, direction: Direction, total: &str, t: &Theme) -> El {
     // The swatch, the name and the total are 6 points apart (`gap-1.5`); the total is a machine's value.
     row()
         .key(key.to_string())
-        .gap(6.0)
+        .gap(sp::S6)
         .center_y()
         .child(swatch)
         .child(kit::label(
@@ -347,7 +349,7 @@ fn last_20_hours(h: &History, tip: Option<usize>, t: &Theme) -> El {
             .w_full()
             .h(PLOT_H + 22.0)
             .center()
-            .gap(4.0)
+            .gap(sp::S4)
             .child(kit::label("card-1-sub", "Nothing recorded yet.", SUB, t.text_tertiary))
             .child(kit::label(
                 "card-1-empty",
@@ -359,7 +361,7 @@ fn last_20_hours(h: &History, tip: Option<usize>, t: &Theme) -> El {
         top = top.child(
             row()
                 .key("legend")
-                .gap(12.0)
+                .gap(sp::S12)
                 .center_y()
                 .child(legend("legend-up", Direction::Upload, &h.up_total, t))
                 .child(legend("legend-down", Direction::Download, &h.down_total, t)),
@@ -472,10 +474,10 @@ fn chart(h: &History, tip: Option<usize>, t: &Theme) -> El {
             el().key(key.to_string())
                 .absolute(x - 5.0, plot_y(mb, h.top_mb) - 5.0)
                 .size(10.0, 10.0)
-                .radius(5.0)
+                .radius(rad::SM)
                 .fill(t.card)
                 .center()
-                .child(el().key(format!("{key}-ink")).size(6.0, 6.0).radius(3.0).fill(ink))
+                .child(el().key(format!("{key}-ink")).size(6.0, 6.0).radius(rad::SM).fill(ink))
         };
         plot = plot
             .child(dot("chart-dot-up", h.up_mb[i], t.accent))
@@ -487,9 +489,9 @@ fn chart(h: &History, tip: Option<usize>, t: &Theme) -> El {
                     .label(format!("{when}. {moved}"))
                     // Left of the crosshair where there is room, right of it otherwise.
                     .absolute(if x >= 228.0 { x - 228.0 } else { x + 12.0 }, 18.0)
-                    .py(6.0)
-                    .px(9.0)
-                    .radius(8.0)
+                    .py(sp::S6)
+                    .px(sp::S9)
+                    .radius(rad::CONTROL)
                     .fill(t.card)
                     .box_shadow(kit::drop(4.0, 14.0, Color::BLACK.alpha(0.14)))
                     .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -541,16 +543,22 @@ fn bar(key: &str, share: f32, direction: Direction, t: &Theme) -> El {
 /// otherwise. The word says the state; the colour only repeats it.
 fn state_pill(i: usize, state: DeviceState, t: &Theme) -> El {
     if state != DeviceState::UpToDate {
-        return crate::ui::pill::pill(&format!("pill-{}", i), state.label(), crate::ui::pill::Tone::Neutral, true, t);
+        return crate::ui::pill::pill(
+            &format!("pill-{}", i),
+            state.label(),
+            crate::ui::pill::Tone::Neutral,
+            true,
+            t,
+        );
     }
     let key = format!("pill-{i}");
     row()
         .key(key.clone())
         .h(20.0)
-        .px(8.0)
-        .gap(5.0)
+        .px(sp::S8)
+        .gap(sp::S6)
         .center_y()
-        .radius(10.0)
+        .radius(rad::LG)
         .fill(t.green.alpha(0.14))
         .child(meters::disc(&format!("{key}-dot"), 6.0, t.green))
         .child(kit::label(format!("{key}-label"), state.label(), PILL, green_text(t)))
@@ -574,7 +582,7 @@ fn devices(list: usize, devices: &[Device], t: &Theme) -> El {
                 .weight(400.0)
                 .color(t.text_tertiary);
             kit::note_text(&format!("{key}-name"), &format!("{key}-name"), &name, DEVICE, t.text);
-            let mut words = col().key(format!("{key}-text")).grow(1.0).min_w(0.0).gap(3.0).child(
+            let mut words = col().key(format!("{key}-text")).grow(1.0).min_w(0.0).gap(sp::S4).child(
                 rich(name, vec![tag])
                     .key(format!("{key}-name"))
                     .font(DEVICE)
@@ -590,9 +598,9 @@ fn devices(list: usize, devices: &[Device], t: &Theme) -> El {
                 .role("link")
                 .label(format!("{}, {}, {}. {}", d.name, d.tag, d.state.label(), d.says))
                 .w_full()
-                .py(9.0)
-                .px(14.0)
-                .gap(12.0)
+                .py(sp::S9)
+                .px(sp::S14)
+                .gap(sp::S12)
                 .center_y()
                 .hover(t.hover)
                 .press(t.press)
@@ -610,7 +618,7 @@ fn devices(list: usize, devices: &[Device], t: &Theme) -> El {
             r.child(
                 el().key(format!("{key}-tile"))
                     .size(30.0, 30.0)
-                    .radius(8.0)
+                    .radius(rad::CONTROL)
                     .fill(t.text.alpha(0.07))
                     .center()
                     .child(kit::glyph(format!("{key}-icon"), icon, 15.0, t.text_secondary)),
@@ -676,8 +684,16 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, metered_control: bool
             2,
             &metered,
             vec![
-                crate::ui::switch::switch_sized(&format!("{}-switch", &format!("item-{list}-2")), "", on, true, crate::ui::button::Size::Md, t).label("Sync on metered connections")
-                    .on_press(move |s: &mut State| s.settings.drive.set_sync_on_metered(!on)),
+                crate::ui::switch::switch_sized(
+                    &format!("{}-switch", &format!("item-{list}-2")),
+                    "",
+                    on,
+                    true,
+                    crate::ui::button::Size::Md,
+                    t,
+                )
+                .label("Sync on metered connections")
+                .on_press(move |s: &mut State| s.settings.drive.set_sync_on_metered(!on)),
             ],
             t,
         ));
@@ -736,10 +752,10 @@ fn step(i: usize, name: &str, step: &Step, t: &Theme) -> El {
         .label(said)
         .w((shell::COLUMN_W - 28.0 - 16.0) / 3.0)
         .min_h(83.5)
-        .gap(4.0)
-        .py(10.0)
-        .px(12.0)
-        .radius(10.0)
+        .gap(sp::S4)
+        .py(sp::S10)
+        .px(sp::S12)
+        .radius(rad::LG)
         .fill(wash(t))
         .child(top)
         .child(value)
@@ -770,7 +786,7 @@ fn speed_test(list: usize, test: &SpeedTest, t: &Theme) -> El {
     });
     let mut rows = vec![lists::item_with(list, 0, &head, vec![button], t)];
     let steps = |steps: &[Step; 3]| {
-        let mut line = row().key("steps").w_full().pt(2.0).px(14.0).pb(14.0).gap(8.0);
+        let mut line = row().key("steps").w_full().pt(2.0).px(sp::S14).pb(14.0).gap(sp::S8);
         for (i, name) in ["Latency", "Upload", "Download"].into_iter().enumerate() {
             line = line.child(step(i, name, &steps[i], t));
         }
@@ -784,14 +800,9 @@ fn speed_test(list: usize, test: &SpeedTest, t: &Theme) -> El {
             rows.push(steps(result));
             foot = measured;
         }
-        SpeedTest::Failed(why) => rows.push(el().key("test-failed").w_full().px(12.0).pb(12.0).child(notices::note(
-            0,
-            Tone::Red,
-            &ic::WARN_CIRCLE,
-            "Couldn't run the speed test.",
-            why,
-            t,
-        ))),
+        SpeedTest::Failed(why) => rows.push(el().key("test-failed").w_full().px(sp::S12).pb(12.0).child(
+            notices::note(0, Tone::Red, &ic::WARN_CIRCLE, "Couldn't run the speed test.", why, t),
+        )),
     }
     lists::list(list, Some("Speed test"), rows, Some(foot), t)
 }

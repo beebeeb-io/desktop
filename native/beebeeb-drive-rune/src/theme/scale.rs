@@ -105,24 +105,52 @@ mod tests {
     #[test]
     fn space_steps() {
         let got = [
-            space::S2, space::S4, space::S6, space::S7, space::S8, space::S9, space::S10, space::S12,
-            space::S14, space::S16, space::S18, space::S20, space::S24, space::S28, space::S36,
+            space::S2,
+            space::S4,
+            space::S6,
+            space::S7,
+            space::S8,
+            space::S9,
+            space::S10,
+            space::S12,
+            space::S14,
+            space::S16,
+            space::S18,
+            space::S20,
+            space::S24,
+            space::S28,
+            space::S36,
         ];
-        let want = [2.0, 4.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0, 36.0];
+        let want = [
+            2.0, 4.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0, 36.0,
+        ];
         assert_eq!(got, want);
     }
 
     #[test]
     fn radii_and_sizes() {
-        assert_eq!([radius::TILE, radius::PILL, radius::DIALOG, radius::PANEL], [9.0, 999.0, 12.0, 10.0]);
         assert_eq!(
-            [size::CONTROL_SM, size::CONTROL_MD, size::CONTROL_LG, size::ROW, size::ICON_SM, size::ICON_MD],
+            [radius::TILE, radius::PILL, radius::DIALOG, radius::PANEL],
+            [9.0, 999.0, 12.0, 10.0]
+        );
+        assert_eq!(
+            [
+                size::CONTROL_SM,
+                size::CONTROL_MD,
+                size::CONTROL_LG,
+                size::ROW,
+                size::ICON_SM,
+                size::ICON_MD
+            ],
             [22.0, 28.0, 32.0, 30.0, 14.0, 16.0]
         );
     }
 
     fn pin(s: TextStyle, size: f32, weight: f32, mono: bool, lh: f32, tracking: f32) {
-        assert_eq!((s.size, s.weight, s.line_height, s.tracking), (size, weight, lh, tracking));
+        assert_eq!(
+            (s.size, s.weight, s.line_height, s.tracking),
+            (size, weight, lh, tracking)
+        );
         assert_eq!(s.family == Family::Mono, mono);
     }
 

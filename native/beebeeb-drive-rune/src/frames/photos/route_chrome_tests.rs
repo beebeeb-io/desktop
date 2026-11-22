@@ -3,15 +3,18 @@
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 use super::{Intent, Ui};
+use crate::State;
 use crate::shell::app::{Route, Section};
 use crate::shell::registry::view;
-use crate::State;
 
 fn photos_window() -> Runtime<State> {
     let engine = std::sync::Arc::new(crate::shell::actions::FixtureEngine::ready());
     let platform = std::sync::Arc::new(crate::shell::platform::fake::FakePlatform::default());
     let mut state = crate::shell::state::init_with(crate::shell::host::Shell::fixture_on(engine, platform));
-    crate::shell::host::dispatch(&mut state, crate::shell::app::Event::Navigate(Route::section(Section::Photos)));
+    crate::shell::host::dispatch(
+        &mut state,
+        crate::shell::app::Event::Navigate(Route::section(Section::Photos)),
+    );
     state.photos = Ui::new(Box::new(super::source::FixturePhotos::new()));
     let env = Env {
         system_dark: false,
@@ -53,7 +56,11 @@ fn enter_in_photos_search_box_shows_searchs_results_for_that_text() {
         rt.settle_all();
         rt.frame(0.0);
     }
-    let focus = rt.elements().into_iter().find(|e| e.focused && !e.exiting).and_then(|e| e.key);
+    let focus = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.focused && !e.exiting)
+        .and_then(|e| e.key);
     assert_eq!(rt.state.search.text.to_string(), "harbour", "typed; focus={focus:?}");
     rt.key(KeyEvent {
         key: Key::Enter,
@@ -70,9 +77,15 @@ fn enter_in_photos_search_box_shows_searchs_results_for_that_text() {
         super::route::route(&mut rt.state, &mut tx, intent);
     }
     rt.frame(0.0);
-    assert_eq!(crate::shell::registry::group_for(&rt.state.shell.app), crate::shell::registry::FrameGroup::Section(Section::Files));
+    assert_eq!(
+        crate::shell::registry::group_for(&rt.state.shell.app),
+        crate::shell::registry::FrameGroup::Section(Section::Files)
+    );
     assert_eq!(rt.state.search.text.to_string(), "harbour");
-    assert!(crate::frames::search::shows_over_files(&rt.state), "Search's results are what the window shows");
+    assert!(
+        crate::frames::search::shows_over_files(&rt.state),
+        "Search's results are what the window shows"
+    );
     assert!(rt.state.photos.toast.is_none(), "not 'not built yet'");
 }
 
@@ -82,7 +95,10 @@ fn new_in_photos_opens_files_new_menu_only_where_files_can_add() {
     let mut tx = rune::Tx::default();
     super::route::route(&mut rt.state, &mut tx, Intent::NewInFiles);
     rt.frame(0.0);
-    assert_eq!(crate::shell::registry::group_for(&rt.state.shell.app), crate::shell::registry::FrameGroup::Section(Section::Files));
+    assert_eq!(
+        crate::shell::registry::group_for(&rt.state.shell.app),
+        crate::shell::registry::FrameGroup::Section(Section::Files)
+    );
     assert_eq!(rt.state.actions.menu.is_some(), rt.state.can_add());
     assert!(rt.state.photos.toast.is_none());
 }

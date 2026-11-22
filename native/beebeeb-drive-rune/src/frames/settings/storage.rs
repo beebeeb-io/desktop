@@ -4,6 +4,7 @@
 
 use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::space as sp;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::settings_controls::{self as controls, Emphasis};
@@ -39,7 +40,12 @@ fn previews_row_shown(shows: bool, previews: &KeptOnPc) -> bool {
 fn unanswered(ui: &SettingsUi, st: &super::drive::Storage, t: &Theme) -> Option<El> {
     let why = match ui.drive.insights() {
         Insights::Loading => {
-            return Some(view_state(ViewState::Loading { words: "Loading your storage…" }, t));
+            return Some(view_state(
+                ViewState::Loading {
+                    words: "Loading your storage…",
+                },
+                t,
+            ));
         }
         Insights::Failed(why) => why.as_str(),
         _ if st.used.is_empty() || st.total.is_empty() => "Beebeeb could not read how much space you use.",
@@ -68,8 +74,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         .role("status")
         .label(format!("{} used of {}", st.used, st.total))
         .w_full()
-        .padding(12.0)
-        .gap(8.0)
+        .padding(sp::S12)
+        .gap(sp::S8)
         .child(
             row()
                 .key("usage-line")
@@ -158,7 +164,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             vec![
                 row()
                     .key(format!("item-1-{index}-actions"))
-                    .gap(6.0)
+                    .gap(sp::S6)
                     .child(clear)
                     .child(change),
             ],
@@ -186,10 +192,10 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         col()
             .key("account-use")
             .w_full()
-            .gap(8.0)
+            .gap(sp::S8)
             .child(lists::list(0, Some("In your Beebeeb account"), account, None, t))
             .child(
-                el().key("cap-0-box").w_full().px(4.0).child(
+                el().key("cap-0-box").w_full().px(sp::S4).child(
                     kit::label(
                         "cap-0",
                         "Need more space? Plans are on beebeeb.io.",
@@ -250,7 +256,7 @@ pub fn limit(ui: &SettingsUi, which: Kept, first: usize, t: &Theme) -> El {
             PANE_TITLE.family(Family::Mono),
             t.text,
         ),
-        col().key("slider-box").w_full().gap(4.0).child(slider).child(
+        col().key("slider-box").w_full().gap(sp::S4).child(slider).child(
             row()
                 .key("slider-ends")
                 .w_full()
@@ -321,7 +327,10 @@ mod tests {
         let mut state = crate::init();
         assert!(crate::frames::settings::scene("DW-0712", &mut state));
         state.settings.drive = Box::new(BoardDrive::new().with_insights(insights));
-        let env = rune::Env { system_dark: false, scale: 2.0 };
+        let env = rune::Env {
+            system_dark: false,
+            scale: 2.0,
+        };
         let mut rt = rune::Runtime::new(state, crate::view, (958.0, 718.0), env);
         rt.frame(0.0);
         rt.frame(0.016);

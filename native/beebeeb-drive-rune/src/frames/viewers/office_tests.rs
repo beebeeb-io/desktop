@@ -717,7 +717,10 @@ mod live_ribbon {
         // Right moves tool by tool, and Left comes back.
         press(&mut rt, Key::Right);
         let second = focused(&rt).expect("a tool has the keyboard");
-        assert!(ribbon_tool(&second) && second != first, "Right moved from {first} to {second}");
+        assert!(
+            ribbon_tool(&second) && second != first,
+            "Right moved from {first} to {second}"
+        );
         press(&mut rt, Key::Right);
         let third = focused(&rt).expect("a tool has the keyboard");
         assert!(ribbon_tool(&third) && third != second && third != first, "{third}");
@@ -1013,12 +1016,19 @@ mod edit_guarded {
         assert!(ui(&rt).office.edit.is_none());
         assert!(!has(&rt, "edit-chrome"));
         operate(&mut rt, "banner-action");
-        assert_eq!(*elsewhere.borrow(), 1, "Open in … goes through the viewer's other-app chain");
+        assert_eq!(
+            *elsewhere.borrow(),
+            1,
+            "Open in … goes through the viewer's other-app chain"
+        );
     }
 
     #[test]
     fn edit_guarded_names_the_systems_app_and_every_part() {
-        let (rt, _) = deck(vec![DroppedPart::ActiveX, DroppedPart::Other], Some("LibreOffice Impress"));
+        let (rt, _) = deck(
+            vec![DroppedPart::ActiveX, DroppedPart::Other],
+            Some("LibreOffice Impress"),
+        );
         assert_eq!(words(&rt, "banner-action-label"), "Open in LibreOffice Impress");
         let said = notice(&rt);
         assert!(said.contains(DroppedPart::ActiveX.notice()), "{said}");

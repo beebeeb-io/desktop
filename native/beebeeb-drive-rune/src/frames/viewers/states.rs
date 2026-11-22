@@ -8,12 +8,12 @@
 use rune::{El, Icon, col, row};
 
 use super::chrome::{Dot, Status};
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::source::{Body, NoPreview, OpenFile, Origin, Stopped, percent, progress_words, size_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
 use crate::theme::scale;
 use crate::theme::tokens::Theme;
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::view_state::{self, ViewState, view_state};
 
 /// The key focus moves to when a state replaces what was on screen: the state's first button (`ui::view_state`
@@ -73,20 +73,22 @@ pub fn empty_file(name: &str, t: &Theme) -> El {
         &icons::INFO,
         "This file is empty",
         &format!("{name} has nothing in it, so there is nothing to show. Open it in another app to add something."),
-        vec![button(
-            keys("state-btn-0"),
-            "Open in another app\u{2026}",
-            None,
-            Variant::Secondary,
-            Size::Md,
-            ButtonState::Enabled,
-            t,
-        )
-        .on_press(|s: &mut State| {
-            if let Some(ui) = ui(s) {
-                ui.intent(Intent::OpenInAnotherApp);
-            }
-        })],
+        vec![
+            button(
+                keys("state-btn-0"),
+                "Open in another app\u{2026}",
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| {
+                if let Some(ui) = ui(s) {
+                    ui.intent(Intent::OpenInAnotherApp);
+                }
+            }),
+        ],
         t,
     )
 }
@@ -184,7 +186,18 @@ fn decrypting(file: &OpenFile, done: u64, total: u64, t: &Theme) -> El {
         .gap(scale::space::S8)
         .child(view_state(ViewState::Loading { words: &words }, t))
         // Closing cancels: nothing is kept half-decrypted.
-        .child(button(keys("state-btn-0"), "Cancel", None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t).on_press(super::close));
+        .child(
+            button(
+                keys("state-btn-0"),
+                "Cancel",
+                None,
+                Variant::Ghost,
+                Size::Sm,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(super::close),
+        );
     stage(content, t)
 }
 
@@ -200,12 +213,30 @@ fn too_large(file: &OpenFile, size: u64, free: u64, t: &Theme) -> El {
             file.name
         ),
         vec![
-            button(keys("state-btn-0"), "Free up space\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
+            button(
+                keys("state-btn-0"),
+                "Free up space\u{2026}",
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::FreeUpSpace);
                 }
             }),
-            button(keys("state-btn-1"), "Download to\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
+            button(
+                keys("state-btn-1"),
+                "Download to\u{2026}",
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::DownloadTo);
                 }
@@ -232,8 +263,26 @@ fn failed(t: &Theme) -> El {
         "Couldn't decrypt this file",
         "Nothing changed: the copy in Beebeeb is untouched. This can happen when a download is cut off.",
         vec![
-            button(keys("state-btn-0"), view_state::TRY_AGAIN, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(retry),
-            button(keys("state-btn-1"), "Report a problem", None, Variant::Ghost, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
+            button(
+                keys("state-btn-0"),
+                view_state::TRY_AGAIN,
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(retry),
+            button(
+                keys("state-btn-1"),
+                "Report a problem",
+                None,
+                Variant::Ghost,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::ReportProblem);
                 }
@@ -296,9 +345,27 @@ fn stopped(why: Stopped, t: &Theme) -> El {
         } else {
             "Try again"
         };
-        button(keys("state-btn-0"), label, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(retry)
+        button(
+            keys("state-btn-0"),
+            label,
+            None,
+            Variant::Secondary,
+            Size::Md,
+            ButtonState::Enabled,
+            t,
+        )
+        .on_press(retry)
     } else {
-        button(keys("state-btn-0"), "Close", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(super::close)
+        button(
+            keys("state-btn-0"),
+            "Close",
+            None,
+            Variant::Secondary,
+            Size::Md,
+            ButtonState::Enabled,
+            t,
+        )
+        .on_press(super::close)
     };
     failed_view(title, words, vec![act], t)
 }
@@ -382,22 +449,37 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
         ),
     };
     let mut buttons = vec![
-        button(keys("state-btn-0"), &heic_button(why), None, Variant::Secondary, Size::Md, ButtonState::Enabled, t)
-            .on_press(|s: &mut State| {
-                if let Some(ui) = ui(s) {
-                    ui.intent(Intent::OpenInAnotherApp);
-                }
-            }),
+        button(
+            keys("state-btn-0"),
+            &heic_button(why),
+            None,
+            Variant::Secondary,
+            Size::Md,
+            ButtonState::Enabled,
+            t,
+        )
+        .on_press(|s: &mut State| {
+            if let Some(ui) = ui(s) {
+                ui.intent(Intent::OpenInAnotherApp);
+            }
+        }),
     ];
     if copies {
         buttons.push(
-            button(keys("state-btn-1"), "Save a copy\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(
-                |s: &mut State| {
-                    if let Some(ui) = ui(s) {
-                        ui.intent(Intent::SaveCopy);
-                    }
-                },
-            ),
+            button(
+                keys("state-btn-1"),
+                "Save a copy\u{2026}",
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| {
+                if let Some(ui) = ui(s) {
+                    ui.intent(Intent::SaveCopy);
+                }
+            }),
         );
     }
     empty_view(&icons::INFO, title, &words, buttons, t)

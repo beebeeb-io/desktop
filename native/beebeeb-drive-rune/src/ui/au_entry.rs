@@ -608,7 +608,11 @@ mod tests {
         assert_eq!(step(0, Key::Left, 0, 0, 5), WordStep::Pass, "nothing before the first");
         assert_eq!(step(4, Key::Right, 5, 5, 5), moved(5, CaretAt::Start));
         assert_eq!(step(4, Key::Right, 4, 4, 5), WordStep::Pass);
-        assert_eq!(step(4, Key::Right, 0, 0, 0), moved(5, CaretAt::Start), "an empty box's caret is at its end");
+        assert_eq!(
+            step(4, Key::Right, 0, 0, 0),
+            moved(5, CaretAt::Start),
+            "an empty box's caret is at its end"
+        );
         assert_eq!(step(11, Key::Right, 5, 5, 5), WordStep::Pass, "nothing after the last");
     }
 
@@ -629,10 +633,18 @@ mod tests {
         assert_eq!(step(4, Key::Home, 3, 3, 5), WordStep::Pass);
         assert_eq!(step(4, Key::End, 0, 0, 5), WordStep::Pass);
         assert_eq!(step(4, Key::Enter, 1, 1, 5), moved(5, CaretAt::End));
-        assert_eq!(step(11, Key::Enter, 5, 5, 5), WordStep::Pass, "the last Enter is the screen's");
+        assert_eq!(
+            step(11, Key::Enter, 5, 5, 5),
+            WordStep::Pass,
+            "the last Enter is the screen's"
+        );
         assert_eq!(step(4, Key::Text(" ".into()), 5, 5, 5), moved(5, CaretAt::End));
         assert_eq!(step(4, Key::Text(" ".into()), 2, 2, 5), WordStep::Swallow);
-        assert_eq!(step(4, Key::Text(" ".into()), 0, 0, 0), WordStep::Swallow, "an empty box keeps its place");
+        assert_eq!(
+            step(4, Key::Text(" ".into()), 0, 0, 0),
+            WordStep::Swallow,
+            "an empty box keeps its place"
+        );
         assert_eq!(step(11, Key::Text(" ".into()), 5, 5, 5), WordStep::Swallow);
         assert_eq!(step(4, Key::Text("a".into()), 5, 5, 5), WordStep::Pass);
         assert_eq!(step(4, Key::Backspace, 0, 0, 0), moved(3, CaretAt::End));
@@ -642,7 +654,10 @@ mod tests {
 
     #[test]
     fn a_held_modifier_leaves_the_key_to_the_box() {
-        let shift = Mods { shift: true, ..Mods::default() };
+        let shift = Mods {
+            shift: true,
+            ..Mods::default()
+        };
         let caret = Caret { from: 0, to: 0, len: 5 };
         assert_eq!(word_step(4, &Key::Left, shift, caret), WordStep::Pass);
     }

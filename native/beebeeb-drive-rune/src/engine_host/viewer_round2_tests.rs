@@ -629,7 +629,11 @@ fn a_pdf_whose_helper_stops_at_a_page_shows_failed_once_and_try_again_opens_it_a
     assert!(!source.finds(), "nothing of the stopped opening is searched");
     // Try again: the file is read and opened anew, in a new helper.
     assert!(source.retry("f-pdf").is_ok());
-    assert_eq!(fake.s().fetches.len(), 1, "the first open's download; the retry's comes on its worker");
+    assert_eq!(
+        fake.s().fetches.len(),
+        1,
+        "the first open's download; the retry's comes on its worker"
+    );
     let began = Instant::now();
     let again = loop {
         if let Some(body @ Body::Pdf(_)) = source.poll("f-pdf") {

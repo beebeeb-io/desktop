@@ -100,7 +100,8 @@ impl Held {
 
     /// What a new helper opens: the last snapshot, else the opened bytes. `None`: a new document with no snapshot.
     pub(super) fn restart_bytes(&self) -> Option<Zeroizing<Vec<u8>>> {
-        self.snapshot_copy().or_else(|| self.opened.as_ref().and_then(Bytes::copy))
+        self.snapshot_copy()
+            .or_else(|| self.opened.as_ref().and_then(Bytes::copy))
     }
 }
 
@@ -123,14 +124,21 @@ mod tests {
     }
 
     fn scratch_has_marker(dir: &std::path::Path) -> bool {
-        let Ok(rd) = std::fs::read_dir(dir.join("office-scratch")) else { return false };
+        let Ok(rd) = std::fs::read_dir(dir.join("office-scratch")) else {
+            return false;
+        };
         rd.flatten().any(|e| {
-            std::fs::read(e.path()).unwrap().windows(MARKER.len()).any(|w| w == MARKER)
+            std::fs::read(e.path())
+                .unwrap()
+                .windows(MARKER.len())
+                .any(|w| w == MARKER)
         })
     }
 
     fn file_count(dir: &std::path::Path) -> usize {
-        std::fs::read_dir(dir.join("office-scratch")).map(|r| r.count()).unwrap_or(0)
+        std::fs::read_dir(dir.join("office-scratch"))
+            .map(|r| r.count())
+            .unwrap_or(0)
     }
 
     #[test]

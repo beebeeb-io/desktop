@@ -7,7 +7,9 @@
 
 use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::{space as sp, text};
 use crate::theme::tokens::Theme;
+use crate::theme::tokens::radius as rad;
 use crate::ui::kit;
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item};
@@ -89,7 +91,7 @@ pub struct Diagnostics {
 pub const BUNDLE_SAYS: &str = "Saves a support bundle you can read before you send it: queue counts, an error code and the last error message. Paths, file and folder names and sign-in tokens are removed. Standard error words, numbers, opaque ids and the server address are kept, so a name the app does not recognise can stay only if it is itself a standard word or a number.";
 
 /// 12px/400 mono on a 15px line: a measure's value (`.font-mono.t-sub`).
-const VALUE: rune::TextStyle = rune::TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
+const VALUE: rune::TextStyle = text::MONO;
 
 /// A sparkline (`.kit-spark.tone-ink`), 72 x 20: the samples left to right, the lowest 2 pt
 /// above the foot and the highest 2 pt under the top, a faint wash under the line.
@@ -166,11 +168,11 @@ fn banner(bundle: &Bundle, t: &Theme) -> Option<El> {
         .label(words.replace('\n', " "))
         .w_full()
         .center_y()
-        .gap(10.0)
-        .py(9.0)
+        .gap(sp::S10)
+        .py(sp::S9)
         .pl(12.0)
         .pr(10.0)
-        .radius(10.0)
+        .radius(rad::LG)
         .fill(t.text.alpha(0.06))
         .child(kit::glyph("note-0-icon", icon, 16.0, t.text_secondary))
         .child(
@@ -187,7 +189,7 @@ fn banner(bundle: &Bundle, t: &Theme) -> Option<El> {
                 .on_press(|s: &mut State| s.settings.ask(Intent::Open("support-bundle"))),
         );
     }
-    Some(el().key("note-0-margin").w_full().pt(10.0).px(14.0).child(line))
+    Some(el().key("note-0-margin").w_full().pt(10.0).px(sp::S14).child(line))
 }
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
@@ -218,7 +220,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 let figure = row()
                     .key(format!("spark-{i}-box"))
                     .center_y()
-                    .gap(12.0)
+                    .gap(sp::S12)
                     .child(spark(&format!("spark-{i}"), &a.samples, t))
                     .child(kit::label(
                         format!("spark-{i}-value"),

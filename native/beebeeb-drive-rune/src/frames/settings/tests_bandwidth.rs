@@ -611,13 +611,7 @@ fn every_control_of_the_pane_takes_the_keyboard_once() {
         .collect();
     assert_eq!(
         pane,
-        [
-            "device-0",
-            "item-1-0",
-            "item-1-1",
-            "item-1-2-switch",
-            "btn-0"
-        ],
+        ["device-0", "item-1-0", "item-1-1", "item-1-2-switch", "btn-0"],
         "the Tab order of Bandwidth: top to bottom, the devices one stop, nothing twice"
     );
 }

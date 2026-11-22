@@ -109,7 +109,10 @@ impl Model {
     /// them.
     pub(super) fn edited_cells(&mut self, changed: &[(u32, CellRange)]) {
         for (sheet, range) in changed {
-            let (rows, cols) = (range.row.saturating_add(range.rows), range.col.saturating_add(range.cols));
+            let (rows, cols) = (
+                range.row.saturating_add(range.rows),
+                range.col.saturating_add(range.cols),
+            );
             if let Some(size) = self.sheets.get_mut(*sheet as usize) {
                 size.0 = size.0.max(rows);
                 size.1 = size.1.max(cols);
@@ -121,9 +124,16 @@ impl Model {
                 continue;
             }
             view.extent = (view.extent.0.max(rows), view.extent.1.max(cols));
-            let dropped: Vec<CellRange> = self.asked.iter().filter(|asked| touches(asked, range)).copied().collect();
+            let dropped: Vec<CellRange> = self
+                .asked
+                .iter()
+                .filter(|asked| touches(asked, range))
+                .copied()
+                .collect();
             self.asked.retain(|asked| !touches(asked, range));
-            self.remove_cells(|row, col| range.contains(row, col) || dropped.iter().any(|block| block.contains(row, col)));
+            self.remove_cells(|row, col| {
+                range.contains(row, col) || dropped.iter().any(|block| block.contains(row, col))
+            });
         }
     }
 

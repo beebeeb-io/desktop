@@ -144,7 +144,11 @@ fn tray_tip_step_draws_no_card_in_the_main_window() {
     assert_eq!(text(&rt, "coach-title"), None);
     assert_eq!(text(&rt, "coach-text"), None);
     press(&mut rt, Key::Escape);
-    assert_eq!(rt.state.guide.step, Some(Step::Tray), "Esc in the main window is not the tip's");
+    assert_eq!(
+        rt.state.guide.step,
+        Some(Step::Tray),
+        "Esc in the main window is not the tip's"
+    );
 }
 
 /// The tray tip's "Got it" or Esc, as its window tells the main one (`host::on_tray_tip_dismissed`).

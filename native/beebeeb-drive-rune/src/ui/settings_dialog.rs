@@ -14,8 +14,8 @@ use crate::theme::tokens::{Theme, type_};
 use rune::{Color, El, Span, TextStyle, col, rich, row};
 
 use super::button::{self as btn, ButtonState, Size, Variant};
-use super::dialog::{Dialog, Foot, Head, Sub, scrim};
 use super::dialog;
+use super::dialog::{Dialog, Foot, Head, Sub, scrim};
 use super::kit;
 use super::settings_shell::SUB;
 
@@ -44,7 +44,15 @@ pub fn button(index: usize, label: &str, weight: Weight, t: &Theme) -> El {
         Weight::Primary => Variant::Primary,
         Weight::Quiet => Variant::Ghost,
     };
-    btn::button(btn::keys(&format!("btn-{index}")), label, None, variant, Size::Md, ButtonState::Enabled, t)
+    btn::button(
+        btn::keys(&format!("btn-{index}")),
+        label,
+        None,
+        variant,
+        Size::Md,
+        ButtonState::Enabled,
+        t,
+    )
 }
 
 /// A small print line of a dialog's body (`.wn-dlg-body > p.t-cap`). Key: `dlg-text-<I>`.
@@ -96,7 +104,10 @@ pub fn dialog_enter(
 ) -> El {
     let d = Dialog {
         enter,
-        head: Head::Title { title, sub: sub.map(Sub::Wrap) },
+        head: Head::Title {
+            title,
+            sub: sub.map(Sub::Wrap),
+        },
         body,
         foot: Foot::Row(foot),
         ..Dialog::new("dlg", name, width)
@@ -136,5 +147,13 @@ pub fn alert_enter(
 /// A dialog-size button for a destructive answer (`.kit-btn-md` on red): white on red, the
 /// same in both themes. Keys: `btn-<N>`, `btn-<N>-label`.
 pub fn button_danger(index: usize, label: &str, t: &Theme) -> El {
-    btn::button(btn::keys(&format!("btn-{index}")), label, None, Variant::Danger, Size::Md, ButtonState::Enabled, t)
+    btn::button(
+        btn::keys(&format!("btn-{index}")),
+        label,
+        None,
+        Variant::Danger,
+        Size::Md,
+        ButtonState::Enabled,
+        t,
+    )
 }

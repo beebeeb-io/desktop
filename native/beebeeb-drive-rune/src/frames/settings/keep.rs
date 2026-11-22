@@ -12,6 +12,8 @@
 
 use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::{space as sp, text};
+use crate::theme::tokens::radius as rad;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::settings_dialog::{self as dialogs, Weight};
@@ -283,21 +285,21 @@ fn confirm(s: &mut State) {
 }
 
 /// 11px/600 on a 17px line: the tree's column heads (`.mk-trow.is-head`).
-const TREE_HEAD: TextStyle = TextStyle::new(11.0, 600.0).lh(17.0);
+const TREE_HEAD: TextStyle = text::CAPTION_SEMI;
 /// 13px/500 on a 17px line: a folder's name (`.mk-tname b`).
-const NAME: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0);
+const NAME: TextStyle = type_::LIST_ITEM;
 /// 11px/500 on a 17px line: what a choice does (`.mk-tnote`).
 const NOTE: TextStyle = TextStyle::new(11.0, 500.0).lh(17.0);
 /// 11.5px/400 on a 17px line: "Some folders kept" (`.mk-tname i`).
-const MIXED: TextStyle = TextStyle::new(11.5, 400.0).lh(17.0);
+const MIXED: TextStyle = type_::STATUS;
 /// 11.5px/400 mono: a folder's size (`.mk-tsize`).
-const SIZE: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
+const SIZE: TextStyle = text::META_MONO_TIGHT;
 /// 11px/500 mono on a 14px line: the foot's sum (`.t-cap .font-mono`).
-const SUM: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
+const SUM: TextStyle = type_::KBD;
 
 /// A folder's box (`.mk-ck`), 15 pt: a check when kept, a dash when some inside are kept.
 fn check_mark(key: &str, state: Check, t: &Theme) -> El {
-    let b = el().key(key.to_string()).size(15.0, 15.0).radius(4.0).center();
+    let b = el().key(key.to_string()).size(15.0, 15.0).radius(rad::SM).center();
     match state {
         Check::On => b
             .fill(t.text)
@@ -325,7 +327,7 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
             .role("button")
             .label(format!("{} {}", if f.open { "Close" } else { "Open" }, f.name))
             .expanded(f.open)
-            .radius(3.0)
+            .radius(rad::SM)
             .hover(t.hover)
             .focusable(true)
             .on_press(move |s: &mut State| adopted(&mut s.settings).toggle_open(&id_open))
@@ -351,7 +353,7 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
         state => check.checked(state == Check::On),
     };
     let check = check
-        .radius(4.0)
+        .radius(rad::SM)
         .focusable(true)
         .on_press(move |s: &mut State| adopted(&mut s.settings).toggle(&id_check))
         .child(check_mark(&format!("{key}-ck"), state, t));
@@ -360,7 +362,7 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
         .grow(1.0)
         .min_w(0.0)
         .center_y()
-        .gap(7.0)
+        .gap(sp::S7)
         .pl(22.0 * depth as f32)
         .child(disclosure)
         .child(check)
@@ -374,9 +376,9 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
             };
             name = name.child(
                 el().key(format!("{key}-note"))
-                    .py(1.0)
-                    .px(6.0)
-                    .radius(5.0)
+                    .py(sp::S2)
+                    .px(sp::S6)
+                    .radius(rad::SM)
                     .fill(t.text.alpha(0.07))
                     .child(kit::label(format!("{key}-note-text"), words, NOTE, t.text_secondary)),
             );
@@ -397,7 +399,7 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
         .label(f.name.clone())
         .w_full()
         .h(32.0)
-        .px(12.0)
+        .px(sp::S12)
         .center_y()
         // The hairline takes room (a CSS border): the row's content is centred under it.
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
@@ -427,7 +429,7 @@ fn tree_rows(folders: &[Folder], depth: usize, changes: &[(Folder, Change)], out
 
 /// The frame of the tree (`.mk-tree`): a card with an inset hairline.
 fn tree_box() -> El {
-    col().key("tree").w_full().radius(10.0)
+    col().key("tree").w_full().radius(rad::LG)
 }
 
 fn legend(t: &Theme) -> El {
@@ -435,7 +437,7 @@ fn legend(t: &Theme) -> El {
         row()
             .key(format!("legend-{i}"))
             .center_y()
-            .gap(6.0)
+            .gap(sp::S6)
             .child(check_mark(&format!("legend-{i}-ck"), state, t))
             .child(kit::label(
                 format!("legend-{i}-label"),
@@ -449,7 +451,7 @@ fn legend(t: &Theme) -> El {
         .a11y_hidden()
         .w_full()
         .center_y()
-        .gap(16.0)
+        .gap(sp::S16)
         .child(entry(0, Check::On, "Kept on this PC"))
         .child(entry(1, Check::Mixed, "Some folders inside kept"))
         .child(entry(2, Check::Off, "Online only"))
@@ -462,7 +464,12 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
     let n = first;
     let (body, sum, changed) = match ui.drive.keep() {
         Keep::Loading => (
-            vec![tree_box().child(view_state(ViewState::Loading { words: "Loading your folders…" }, t))],
+            vec![tree_box().child(view_state(
+                ViewState::Loading {
+                    words: "Loading your folders…",
+                },
+                t,
+            ))],
             None,
             false,
         ),
@@ -511,7 +518,7 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
                 .key("tree-head")
                 .w_full()
                 .h(26.0)
-                .px(12.0)
+                .px(sp::S12)
                 .center_y()
                 .fill(t.text.alpha(0.03))
                 .child(kit::label("tree-head-folder", "Folder", TREE_HEAD, t.text_tertiary).grow(1.0))
@@ -538,7 +545,7 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
                 .child(
                     el().key("tree-ring")
                         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                        .radius(10.0)
+                        .radius(rad::LG)
                         .box_shadow(kit::ring_inset(t.separator)),
                 );
             let on_pc = draft.kept_mb();

@@ -22,8 +22,8 @@ mod view;
 #[cfg(test)]
 pub use view::PLAIN_NOTE;
 
-use std::sync::Arc;
 use rune::{El, Key, KeyEvent, TextEdit, Tx};
+use std::sync::Arc;
 
 use crate::State;
 use crate::frames::{self, Intent};
@@ -266,9 +266,7 @@ pub fn is_open(s: &State) -> bool {
 /// Something of the Files window that takes the keyboard on its own (a menu, a dialog, a name
 /// being typed in a row) keeps it: search does not open over it.
 fn files_busy(s: &State) -> bool {
-    s.actions.menu.is_some()
-        || (s.actions.dialog.is_some() && !s.frames.find.dialog_over)
-        || s.actions.rename.is_some()
+    s.actions.menu.is_some() || (s.actions.dialog.is_some() && !s.frames.find.dialog_over) || s.actions.rename.is_some()
 }
 
 /// While search shows, Alt+Left and Alt+Right are not the window's Back and Forward: the board

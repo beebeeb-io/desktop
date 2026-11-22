@@ -39,11 +39,7 @@ fn edited(revision: u64, caret: Option<office::PageRect>) -> office::Edited {
 }
 
 /// A helper that opens a Letter page and answers `edit` for every `Edit`; `save` decides the save handshake.
-fn helper(
-    edit: impl Fn(u32) -> Message + Send + Sync + 'static,
-    save_ready_len: u64,
-    saved_len: Option<u64>,
-) -> Fake {
+fn helper(edit: impl Fn(u32) -> Message + Send + Sync + 'static, save_ready_len: u64, saved_len: Option<u64>) -> Fake {
     Fake::new(move |link| {
         while let Some((id, message)) = link.next() {
             let reply = match message {
@@ -121,7 +117,11 @@ fn stopped_state(host: &OfficeHost) -> bool {
 #[test]
 fn an_edit_answer_arrives_for_its_request_id() {
     let registry = Registry::new();
-    let fake = helper(|_| Message::Edited(edited(1, Some(page_rect(0, 72.0, 72.0, 1.0, 14.0)))), 10, None);
+    let fake = helper(
+        |_| Message::Edited(edited(1, Some(page_rect(0, 72.0, 72.0, 1.0, 14.0)))),
+        10,
+        None,
+    );
     let (mut host, log) = open_editing(fake, &registry);
     let first = host.edit(EditOp::InsertText("a".to_owned())).expect("sent");
     let second = host.edit(EditOp::SelectAll).expect("sent");
@@ -142,7 +142,11 @@ fn an_edit_answer_arrives_for_its_request_id() {
 fn a_rect_outside_its_page_is_refused_and_the_helper_ended() {
     let registry = Registry::new();
     // Letter is 612 x 792 pt: this caret is past the right edge.
-    let fake = helper(|_| Message::Edited(edited(1, Some(page_rect(0, 600.0, 10.0, 50.0, 14.0)))), 10, None);
+    let fake = helper(
+        |_| Message::Edited(edited(1, Some(page_rect(0, 600.0, 10.0, 50.0, 14.0)))),
+        10,
+        None,
+    );
     let (mut host, log) = open_editing(fake, &registry);
     host.edit(EditOp::SelectAll).expect("sent");
     let got = edit_events(&mut host, 1);
@@ -166,7 +170,11 @@ fn a_save_ready_over_the_cap_is_refused_and_the_helper_ended() {
     host.save_bytes(Purpose::Save).expect("sent");
     assert!(until_stopped(&mut host));
     assert_eq!(log.kills(), 1);
-    assert_eq!(log.section_sizes.lock().unwrap().len(), 1, "no section was made for it: only the document's");
+    assert_eq!(
+        log.section_sizes.lock().unwrap().len(),
+        1,
+        "no section was made for it: only the document's"
+    );
     assert!(edit_events(&mut host, 0).is_empty());
 }
 
@@ -203,7 +211,10 @@ fn a_save_makes_a_section_of_exactly_len_and_hands_out_its_bytes() {
         }
         other => panic!("{other:?}"),
     }
-    assert!(matches!(&got[1], EditEvent::Edited { id, .. } if *id == edit), "{got:?}");
+    assert!(
+        matches!(&got[1], EditEvent::Edited { id, .. } if *id == edit),
+        "{got:?}"
+    );
     assert_eq!(log.live(), 1, "the save's section is dropped: the document's stays");
 }
 
@@ -255,7 +266,9 @@ fn guarding(dropped: Vec<office::DroppedPart>) -> Fake {
     Fake::new(move |link| {
         while let Some((id, message)) = link.next() {
             let reply = match message {
-                Message::OpenEdit(_) => Message::EditGuarded(office::EditGuarded { dropped: dropped.clone() }),
+                Message::OpenEdit(_) => Message::EditGuarded(office::EditGuarded {
+                    dropped: dropped.clone(),
+                }),
                 Message::Open(_) => opened(&[LETTER]),
                 _ => Message::Error(office::Error {
                     code: office::ErrorCode::Internal,
@@ -274,7 +287,15 @@ fn open_guarded(
 ) -> (OfficeHost, std::sync::Arc<Log>) {
     let fake = guarding(dropped);
     let log = fake.log.clone();
-    let mut host = open_mode(fake, registry, TEST_TIMEOUTS, Mode::Edit(kind), doc_kind, Some(Zeroizing::new(doc())), noop_wake());
+    let mut host = open_mode(
+        fake,
+        registry,
+        TEST_TIMEOUTS,
+        Mode::Edit(kind),
+        doc_kind,
+        Some(Zeroizing::new(doc())),
+        noop_wake(),
+    );
     let mut events = Vec::new();
     assert!(until_open(&mut host, &mut events), "{:?}", host.state());
     (host, log)
@@ -283,18 +304,40 @@ fn open_guarded(
 #[test]
 fn edit_guarded_pptx_with_speaker_notes_opens_read_only_in_the_viewer() {
     let registry = Registry::new();
-    let (mut host, log) = open_guarded(&registry, vec![office::DroppedPart::SpeakerNotes], EditKind::Pptx, DocKind::Pptx);
+    let (mut host, log) = open_guarded(
+        &registry,
+        vec![office::DroppedPart::SpeakerNotes],
+        EditKind::Pptx,
+        DocKind::Pptx,
+    );
     // Not "Renderer stopped" (Stop::Protocol): the viewer's pages, from a second helper told `Open`.
-    assert!(matches!(host.state(), OfficeState::Pages { pages: 1, .. }), "{:?}", host.state());
-    assert_eq!(log.starts(), 2, "the guarded editor ends; a viewer helper opens the same document");
+    assert!(
+        matches!(host.state(), OfficeState::Pages { pages: 1, .. }),
+        "{:?}",
+        host.state()
+    );
+    assert_eq!(
+        log.starts(),
+        2,
+        "the guarded editor ends; a viewer helper opens the same document"
+    );
     assert_eq!(host.guarded(), vec![office::DroppedPart::SpeakerNotes]);
-    assert_eq!(host.edit(office::EditOp::Undo), Err(EditRefused::NotEditing), "no edit on a guarded file");
+    assert_eq!(
+        host.edit(office::EditOp::Undo),
+        Err(EditRefused::NotEditing),
+        "no edit on a guarded file"
+    );
 }
 
 #[test]
 fn edit_guarded_other_is_named_too() {
     let registry = Registry::new();
-    let (host, _log) = open_guarded(&registry, vec![office::DroppedPart::Other], EditKind::Docx, DocKind::Docx);
+    let (host, _log) = open_guarded(
+        &registry,
+        vec![office::DroppedPart::Other],
+        EditKind::Docx,
+        DocKind::Docx,
+    );
     assert!(matches!(host.state(), OfficeState::Pages { .. }), "{:?}", host.state());
     assert_eq!(host.guarded(), vec![office::DroppedPart::Other]);
 }
@@ -304,13 +347,36 @@ fn edit_guarded_to_a_viewer_open_is_a_protocol_stop() {
     // Only `OpenEdit` may be guarded: a viewer told `EditGuarded` broke the protocol.
     let fake = Fake::new(|link| {
         while let Some((id, _)) = link.next() {
-            link.answer(id, Message::EditGuarded(office::EditGuarded { dropped: vec![office::DroppedPart::Ink] }));
+            link.answer(
+                id,
+                Message::EditGuarded(office::EditGuarded {
+                    dropped: vec![office::DroppedPart::Ink],
+                }),
+            );
         }
     });
     let registry = Registry::new();
-    let mut host = open_mode(fake, &registry, TEST_TIMEOUTS, Mode::View, DocKind::Pptx, Some(Zeroizing::new(doc())), noop_wake());
+    let mut host = open_mode(
+        fake,
+        &registry,
+        TEST_TIMEOUTS,
+        Mode::View,
+        DocKind::Pptx,
+        Some(Zeroizing::new(doc())),
+        noop_wake(),
+    );
     let mut events = Vec::new();
     assert!(until_open(&mut host, &mut events));
-    assert!(matches!(host.state(), OfficeState::Stopped { why: Stop::Protocol, .. }), "{:?}", host.state());
+    assert!(
+        matches!(
+            host.state(),
+            OfficeState::Stopped {
+                why: Stop::Protocol,
+                ..
+            }
+        ),
+        "{:?}",
+        host.state()
+    );
     assert!(host.guarded().is_empty());
 }

@@ -852,7 +852,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             )),
             SIDEBAR_PANE,
         ))
-        .child(focus::pane(row().grow(1.0).min_w(0.0).h_full().child(pane_el), PAGE_PANE));
+        .child(focus::pane(
+            row().grow(1.0).min_w(0.0).h_full().child(pane_el),
+            PAGE_PANE,
+        ));
     if let Some(overlay) = overlay {
         body = body.child(overlay);
     }

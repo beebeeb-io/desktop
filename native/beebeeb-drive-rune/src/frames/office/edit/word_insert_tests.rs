@@ -61,7 +61,11 @@ fn a_table_is_asked_for_in_whole_numbers_inside_the_bounds() {
     }
     let (field, words) = table_op("3", "21").expect_err("21 columns");
     assert_eq!((field, words.as_str()), (1, "Columns: a whole number from 1 to 20."));
-    assert_eq!(table_op("0", "0").expect_err("both").0, 0, "the first wrong one is named");
+    assert_eq!(
+        table_op("0", "0").expect_err("both").0,
+        0,
+        "the first wrong one is named"
+    );
 }
 
 #[test]
@@ -110,16 +114,30 @@ fn a_picture_file_is_refused_in_words_before_it_is_read_whole() {
     assert!(image.png);
     assert_eq!(image.bytes.as_slice(), &PNG);
     let jpeg = dir.file("a.jpg.png", &JPEG);
-    assert!(!read_image_capped(&jpeg, 64).expect("a JPEG by its bytes, not its name").png);
+    assert!(
+        !read_image_capped(&jpeg, 64)
+            .expect("a JPEG by its bytes, not its name")
+            .png
+    );
     // A renamed WebP or GIF is not a picture of the two kinds.
     let gif = dir.file("b.png", b"GIF89a......");
     assert_eq!(read_image_capped(&gif, 64).err().as_deref(), Some(NOT_AN_IMAGE));
-    assert_eq!(read_image_capped(&dir.file("empty.png", b""), 64).err().as_deref(), Some(EMPTY_FILE));
+    assert_eq!(
+        read_image_capped(&dir.file("empty.png", b""), 64).err().as_deref(),
+        Some(EMPTY_FILE)
+    );
     // Over the cap: refused from the size, with the cap in the words.
     let big = dir.file("big.png", &[PNG.as_slice(), &[0u8; 100]].concat());
     assert_eq!(read_image_capped(&big, 64).err(), Some(too_large(64)));
-    assert_eq!(read_image_capped(&dir.0.join("missing.png"), 64).err().as_deref(), Some(UNREADABLE));
-    assert_eq!(read_image_capped(&dir.0, 64).err().as_deref(), Some(UNREADABLE), "a folder");
+    assert_eq!(
+        read_image_capped(&dir.0.join("missing.png"), 64).err().as_deref(),
+        Some(UNREADABLE)
+    );
+    assert_eq!(
+        read_image_capped(&dir.0, 64).err().as_deref(),
+        Some(UNREADABLE),
+        "a folder"
+    );
     assert_eq!(
         too_large(check::MAX_INPUT_BYTES),
         "That picture is too large to add: at most 100 MB."
@@ -216,11 +234,15 @@ fn table_sends_the_rows_and_columns_and_a_wrong_number_stays_in_the_dialog() {
     let (mut ui, asked) = live_ui(true);
     ui.office_insert(Insert::Table);
     assert!(matches!(&ui.office.over, Some(Over::Table(form)) if form.rows.text == "3" && form.cols.text == "3"));
-    let Some(Over::Table(form)) = &mut ui.office.over else { unreachable!() };
+    let Some(Over::Table(form)) = &mut ui.office.over else {
+        unreachable!()
+    };
     type_into(&mut form.rows, "0");
     ui.office_table_ok();
     assert!(asked.borrow().edits.is_empty(), "nothing was sent");
-    let Some(Over::Table(form)) = &mut ui.office.over else { panic!("the dialog stays") };
+    let Some(Over::Table(form)) = &mut ui.office.over else {
+        panic!("the dialog stays")
+    };
     assert_eq!(form.error.as_ref().map(|(at, _)| *at), Some(0));
     type_into(&mut form.rows, "4");
     type_into(&mut form.cols, "2");
@@ -236,7 +258,9 @@ fn link_sends_text_and_address_as_text_only() {
     ui.office_link_ok();
     assert!(matches!(&ui.office.over, Some(Over::Link(form)) if form.error.as_ref().is_some_and(|(at, _)| *at == 1)));
     assert!(asked.borrow().edits.is_empty());
-    let Some(Over::Link(form)) = &mut ui.office.over else { unreachable!() };
+    let Some(Over::Link(form)) = &mut ui.office.over else {
+        unreachable!()
+    };
     type_into(&mut form.text, "Terms");
     type_into(&mut form.url, "https://beebeeb.io/terms");
     ui.office_link_ok();
@@ -263,7 +287,9 @@ fn page_break_is_one_edit_and_a_source_that_does_not_take_it_says_so() {
     assert_eq!(ui.toast.as_deref(), Some(NOT_DONE));
     ui.toast = None;
     ui.office_insert(Insert::Table);
-    let Some(Over::Table(_)) = &ui.office.over else { panic!("a table dialog") };
+    let Some(Over::Table(_)) = &ui.office.over else {
+        panic!("a table dialog")
+    };
     ui.office_table_ok();
     assert_eq!(ui.toast.as_deref(), Some(NOT_DONE), "a refused table is not silent");
 }
@@ -380,7 +406,10 @@ fn the_tools_press_through_the_window_and_stay_on_the_boards_keys() {
     operate(&mut rt, "rt-3");
     assert_eq!(asked.borrow().edits, [EditOp::PageBreak]);
     operate(&mut rt, "rt-0");
-    assert!(has(&rt, "dlg") && has(&rt, ROWS_KEY) && has(&rt, COLS_KEY), "the table dialog");
+    assert!(
+        has(&rt, "dlg") && has(&rt, ROWS_KEY) && has(&rt, COLS_KEY),
+        "the table dialog"
+    );
     // Esc leaves it without a word to the editor.
     key(&mut rt, Key::Escape);
     assert!(!has(&rt, "dlg"));
@@ -416,7 +445,12 @@ const LINK_URL_KEY: &str = crate::frames::viewers::office_over::LINK_URL;
 
 #[test]
 fn the_fields_of_the_dialogs_are_not_the_editing_surfaces() {
-    for key in [ROWS_KEY, COLS_KEY, LINK_URL_KEY, crate::frames::viewers::office_over::LINK_TEXT] {
+    for key in [
+        ROWS_KEY,
+        COLS_KEY,
+        LINK_URL_KEY,
+        crate::frames::viewers::office_over::LINK_TEXT,
+    ] {
         assert!(!key.starts_with(crate::frames::office::edit::FOCUS_PREFIX), "{key}");
     }
 }

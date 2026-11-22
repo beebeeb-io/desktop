@@ -17,10 +17,24 @@ fn open_harbour() -> Ui {
 fn progress_answers_move_the_bar_and_the_last_byte_waits_for_the_decoded_picture() {
     let mut ui = open_harbour();
     ui.show_original();
-    ui.original_answered(OriginalAnswer::Progress { id: harbour(), done: 12_400_000, total: 30_900_000 });
-    assert_eq!(ui.viewer.as_ref().unwrap().original, Original::Downloading { done: 12_400_000 });
-    ui.original_answered(OriginalAnswer::Progress { id: harbour(), done: 30_900_000, total: 30_900_000 });
-    assert!(matches!(ui.viewer.as_ref().unwrap().original, Original::Downloading { .. }));
+    ui.original_answered(OriginalAnswer::Progress {
+        id: harbour(),
+        done: 12_400_000,
+        total: 30_900_000,
+    });
+    assert_eq!(
+        ui.viewer.as_ref().unwrap().original,
+        Original::Downloading { done: 12_400_000 }
+    );
+    ui.original_answered(OriginalAnswer::Progress {
+        id: harbour(),
+        done: 30_900_000,
+        total: 30_900_000,
+    });
+    assert!(matches!(
+        ui.viewer.as_ref().unwrap().original,
+        Original::Downloading { .. }
+    ));
     ui.original_answered(OriginalAnswer::Done(harbour()));
     assert_eq!(ui.viewer.as_ref().unwrap().original, Original::Whole);
 }
@@ -38,6 +52,10 @@ fn a_failed_original_and_stop_leave_the_preview() {
     ui.show_preview();
     assert_eq!(ui.viewer.as_ref().unwrap().original, Original::Preview);
     // A progress answer that lands after Stop does not bring the bar back.
-    ui.original_answered(OriginalAnswer::Progress { id: harbour(), done: 1, total: 10 });
+    ui.original_answered(OriginalAnswer::Progress {
+        id: harbour(),
+        done: 1,
+        total: 10,
+    });
     assert_eq!(ui.viewer.as_ref().unwrap().original, Original::Preview);
 }

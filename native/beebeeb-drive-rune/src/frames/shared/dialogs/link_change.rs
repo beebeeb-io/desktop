@@ -76,11 +76,22 @@ fn expiry_card(t: &Theme) -> El {
             .autofocus()
             .on_press_tx(dismiss),
     );
-    kit::card("link-change", WIDTH, Some(kit::title("Change expiry", t)), vec![list], foot, t)
+    kit::card(
+        "link-change",
+        WIDTH,
+        Some(kit::title("Change expiry", t)),
+        vec![list],
+        foot,
+        t,
+    )
 }
 
 fn password_card(s: &State, has_password: bool, t: &Theme) -> El {
-    let title = if has_password { "Change password" } else { "Add a password" };
+    let title = if has_password {
+        "Change password"
+    } else {
+        "Add a password"
+    };
     let edit = &s.frames.shared.fields.link_password;
     let field = kit::field(
         &Field {
@@ -104,10 +115,24 @@ fn password_card(s: &State, has_password: bool, t: &Theme) -> El {
     .w_full();
     let ready = !edit.text.trim().is_empty();
     let save_btn = if ready {
-        button_keyed("btn-save-password".into(), "Save", ButtonKind::Amber, ButtonSize::Medium, None, t)
-            .on_press_tx(|s: &mut State, _tx: &mut Tx| save(s))
+        button_keyed(
+            "btn-save-password".into(),
+            "Save",
+            ButtonKind::Amber,
+            ButtonSize::Medium,
+            None,
+            t,
+        )
+        .on_press_tx(|s: &mut State, _tx: &mut Tx| save(s))
     } else {
-        button_keyed("btn-save-password".into(), "Save", ButtonKind::Outline, ButtonSize::Medium, None, t)
+        button_keyed(
+            "btn-save-password".into(),
+            "Save",
+            ButtonKind::Outline,
+            ButtonSize::Medium,
+            None,
+            t,
+        )
     };
     let remove = button_keyed(
         "btn-remove-password".into(),
@@ -123,7 +148,14 @@ fn password_card(s: &State, has_password: bool, t: &Theme) -> El {
         save_btn,
         button_md("Cancel", ButtonKind::Outline, None, t).on_press_tx(dismiss),
     ]);
-    kit::card("link-change", WIDTH, Some(kit::title(title, t)), vec![note, field], foot, t)
+    kit::card(
+        "link-change",
+        WIDTH,
+        Some(kit::title(title, t)),
+        vec![note, field],
+        foot,
+        t,
+    )
 }
 
 /// Send what is typed as the link's password; the field is wiped at once and the card closes.

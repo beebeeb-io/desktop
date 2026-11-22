@@ -22,18 +22,18 @@ use crate::frames::{self, Intent};
 use crate::shell::app::Section;
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, tokens};
+use crate::ui::file_row::ROW_H;
 use crate::ui::kit;
+use crate::ui::view_state::{ViewState, try_again};
 use parts::controls::{ButtonKind, ButtonSize, Tone, button, button_keyed, pill, segments};
 use parts::menu::{Entry, Open, Took, Trail};
 use parts::table::{Columns, Row, header, rows, table_row, tile};
 use parts::toolbar::{Bar, slot_sep, toolbar};
 use parts::{chrome, list, style};
-use crate::ui::file_row::ROW_H;
-use crate::ui::view_state::{ViewState, try_again};
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el, row};
+use source::{BoardShared, Invitation, LinkShare, Loaded, Notice, PeopleShare, Request, RequestState, SharedSource};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
-use source::{BoardShared, Invitation, LinkShare, Loaded, Notice, PeopleShare, Request, RequestState, SharedSource};
 
 const COLUMNS: Columns = Columns {
     names: ["Name", "Shared on", "Size", "From", "PC"],
@@ -197,27 +197,31 @@ fn notice_words(notice: Notice) -> &'static str {
 /// The notice over the lists (Trash's). Keys: `notice`, `notice-words`.
 fn notice_note(notice: Notice, t: &Theme) -> El {
     const WORDS: rune::TextStyle = rune::TextStyle::new(12.5, 400.0).lh(17.0);
-    el().key("notice-wrap").w_full().px(crate::theme::scale::space::S14).pt(10.0).child(
-        col()
-            .key("notice")
-            .role("status")
-            .live_region(rune::LiveRegion::Polite)
-            .label(notice_words(notice))
-            .w_full()
-            .pt(9.0)
-            .pb(9.0)
-            .pl(12.0)
-            .pr(10.0)
-            .radius(crate::theme::tokens::radius::LG)
-            .fill(t.text.alpha(0.06))
-            .child(
-                rune::rich(notice_words(notice), Vec::new())
-                    .key("notice-words")
-                    .font(WORDS)
-                    .color(t.text_secondary)
-                    .w_full(),
-            ),
-    )
+    el().key("notice-wrap")
+        .w_full()
+        .px(crate::theme::scale::space::S14)
+        .pt(10.0)
+        .child(
+            col()
+                .key("notice")
+                .role("status")
+                .live_region(rune::LiveRegion::Polite)
+                .label(notice_words(notice))
+                .w_full()
+                .pt(9.0)
+                .pb(9.0)
+                .pl(12.0)
+                .pr(10.0)
+                .radius(crate::theme::tokens::radius::LG)
+                .fill(t.text.alpha(0.06))
+                .child(
+                    rune::rich(notice_words(notice), Vec::new())
+                        .key("notice-words")
+                        .font(WORDS)
+                        .color(t.text_secondary)
+                        .w_full(),
+                ),
+        )
 }
 
 /// What stands for lists that are not here (`None`: they are, draw them): Loading while the first answer is out, Failed
@@ -669,32 +673,36 @@ fn invitation_card(n: usize, inv: &source::Invitation, t: &Theme) -> El {
                 .truncate(),
         )
         .child(kit::label(format!("{k}-sub"), inv.from_line.clone(), style::SUB, t.text_tertiary).truncate());
-    el().key(format!("{k}-wrap")).w_full().px(crate::theme::scale::space::S16).pt(12.0).child(
-        row()
-            .key(k.clone())
-            .role("group")
-            .label(format!("Waiting for you: {}", inv.name))
-            .w_full()
-            .padding(crate::theme::scale::space::S12)
-            .gap(crate::theme::scale::space::S12)
-            .center_y()
-            .radius(crate::theme::tokens::radius::LG)
-            .fill(t.card)
-            .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)))
-            .box_shadow(kit::ring(kit::HAIR, t.separator))
-            .child(tile(&k, format!("{k}-icon"), &inv.name, inv.kind, 36.0, 9.0, 22.0, t))
-            .child(words)
-            .child(
-                button("Decline", ButtonKind::Outline, None, t).on_press(move |s: &mut State| {
-                    s.frames.shared.source.decline(&decline);
-                }),
-            )
-            .child(
-                button("Accept", ButtonKind::Outline, None, t).on_press(move |s: &mut State| {
-                    s.frames.shared.source.accept(&accept);
-                }),
-            ),
-    )
+    el().key(format!("{k}-wrap"))
+        .w_full()
+        .px(crate::theme::scale::space::S16)
+        .pt(12.0)
+        .child(
+            row()
+                .key(k.clone())
+                .role("group")
+                .label(format!("Waiting for you: {}", inv.name))
+                .w_full()
+                .padding(crate::theme::scale::space::S12)
+                .gap(crate::theme::scale::space::S12)
+                .center_y()
+                .radius(crate::theme::tokens::radius::LG)
+                .fill(t.card)
+                .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)))
+                .box_shadow(kit::ring(kit::HAIR, t.separator))
+                .child(tile(&k, format!("{k}-icon"), &inv.name, inv.kind, 36.0, 9.0, 22.0, t))
+                .child(words)
+                .child(
+                    button("Decline", ButtonKind::Outline, None, t).on_press(move |s: &mut State| {
+                        s.frames.shared.source.decline(&decline);
+                    }),
+                )
+                .child(
+                    button("Accept", ButtonKind::Outline, None, t).on_press(move |s: &mut State| {
+                        s.frames.shared.source.accept(&accept);
+                    }),
+                ),
+        )
 }
 
 fn with_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
@@ -752,12 +760,13 @@ fn with_me(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
             ),
     );
     let t = &t;
-    body =
-        body.child(el().key("label-wrap").px(crate::theme::scale::space::S20).pt(16.0).child(list::label(
-            "shared-with-you",
-            "Shared with you",
-            t,
-        )))
+    body = body
+        .child(
+            el().key("label-wrap")
+                .px(crate::theme::scale::space::S20)
+                .pt(16.0)
+                .child(list::label("shared-with-you", "Shared with you", t)),
+        )
         .child(header(&COLUMNS, t))
         .child(list);
     (body, status, count)

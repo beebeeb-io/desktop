@@ -64,7 +64,11 @@ pub(super) fn save_to_pc(
     saver: Arc<dyn CopySaver>,
     id: PhotoId,
 ) {
-    let item = s.photos.source.file_items(&[id]).and_then(|items| items.into_iter().next());
+    let item = s
+        .photos
+        .source
+        .file_items(&[id])
+        .and_then(|items| items.into_iter().next());
     let Some(item) = item else {
         s.photos.toast = Some(Toast::Words(NOT_HERE));
         return;

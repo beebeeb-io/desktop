@@ -274,7 +274,9 @@ fn host(account: Option<&str>) -> Arc<Host> {
 fn settle(source: &mut EngineSearchSource<Host>) {
     let began = Instant::now();
     // A refusal that waits to be built again is not an answer on its way.
-    while source.pump().busy && (source.building.is_some() || source.shared_out || source.asked.is_some() || source.recent_out.is_some()) {
+    while source.pump().busy
+        && (source.building.is_some() || source.shared_out || source.asked.is_some() || source.recent_out.is_some())
+    {
         assert!(began.elapsed() < HOLD_FOR, "an answer did not come back");
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -1216,7 +1218,10 @@ fn while_the_first_listing_runs_the_answer_carries_how_far_it_is() {
         source.search("contract", Narrow::All),
         Answer::Found {
             hits: Vec::new().into(),
-            loading: Some(Loading { listed: 0, total: 40_112 })
+            loading: Some(Loading {
+                listed: 0,
+                total: 40_112
+            })
         }
     );
     // Part of the list is in: the matches so far come with the count; a complete list carries none.
@@ -1235,12 +1240,21 @@ fn while_the_first_listing_runs_the_answer_carries_how_far_it_is() {
     match source.search("contract", Narrow::All) {
         Answer::Found { hits, loading } => {
             assert!(!hits.is_empty());
-            assert_eq!(loading, Some(Loading { listed: 10, total: 40_112 }));
+            assert_eq!(
+                loading,
+                Some(Loading {
+                    listed: 10,
+                    total: 40_112
+                })
+            );
         }
         other => panic!("{other:?}"),
     }
     *host.listing.lock().unwrap() = Some((40_112, 40_112));
-    assert!(matches!(source.search("contract", Narrow::All), Answer::Found { loading: None, .. }));
+    assert!(matches!(
+        source.search("contract", Narrow::All),
+        Answer::Found { loading: None, .. }
+    ));
 }
 
 #[test]
@@ -1252,7 +1266,11 @@ fn a_results_shared_line_says_how_it_is_shared_once_the_shares_are_read() {
         .insert("f-signed".into(), "Anyone with the link".into());
     let source = opened(&host);
     assert_eq!(source.details("f-signed").unwrap().shared, "Anyone with the link");
-    assert_eq!(source.details("f-draft").unwrap().shared, "", "not shared, or not known: never invented");
+    assert_eq!(
+        source.details("f-draft").unwrap().shared,
+        "",
+        "not shared, or not known: never invented"
+    );
 }
 
 /// A named move of the host's turn.

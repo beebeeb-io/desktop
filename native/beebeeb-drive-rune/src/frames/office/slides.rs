@@ -25,12 +25,12 @@ use super::docs::{ABOUT, KEEP_FIRST, Live, OPEN_ELSEWHERE};
 use super::edit::slide as edit_slide;
 use super::edit::{EditUi, slide_ribbon};
 use super::states;
-use crate::theme::scale::{self as sc, space};
 use crate::State;
 use crate::frames::signin::icons::EYE;
 use crate::frames::viewers::kinds::OfficePicture;
 use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::icons;
+use crate::theme::scale::{self as sc, space};
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::{caption, kit, sidebar};
 
@@ -878,9 +878,12 @@ fn slide_of_words(words: Option<&SlideWords>) -> El {
                 .key(format!("pres-li-{i}-row"))
                 .w_full()
                 .child(
-                    el().key(format!("pres-li-{i}-mark"))
-                        .size(24.2, 33.0)
-                        .child(el().absolute(9.0, 13.0).size(7.0, 7.0).radius(sc::radius::PILL).fill(ink())),
+                    el().key(format!("pres-li-{i}-mark")).size(24.2, 33.0).child(
+                        el().absolute(9.0, 13.0)
+                            .size(7.0, 7.0)
+                            .radius(sc::radius::PILL)
+                            .fill(ink()),
+                    ),
                 )
                 .child(kit::label(format!("pres-li-{i}"), point.clone(), PRES_POINT, ink()).grow(1.0)),
         );
@@ -1088,11 +1091,8 @@ mod tests {
         assert_eq!(deck_state(&mut rt), (slides_fixture::BOARD_SLIDE, true));
         assert!(find(&rt, "pres-stage").is_some() && find(&rt, "filmstrip").is_none());
         // DW-1560 is the editor's Design tab: no longer the placeholder.
-        assert!(
-            FRAMES
-                .iter()
-                .any(|(id, f)| *id == "DW-1560" && !std::ptr::fn_addr_eq(*f, crate::frames::placeholder::scene as fn(&mut State)))
-        );
+        assert!(FRAMES.iter().any(|(id, f)| *id == "DW-1560"
+            && !std::ptr::fn_addr_eq(*f, crate::frames::placeholder::scene as fn(&mut State))));
     }
 
     /// The viewer has no edit control: nothing keyed or labelled New slide, Duplicate, Delete, Save, Undo, Redo,

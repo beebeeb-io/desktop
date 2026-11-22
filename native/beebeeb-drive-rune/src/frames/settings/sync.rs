@@ -5,13 +5,14 @@
 
 use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::space as sp;
 use crate::theme::tokens::Theme;
-use crate::ui::{dialog, kit};
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 use crate::ui::settings_list::{self as lists, FOOT, Item, Role, Trailing};
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell as shell;
+use crate::ui::{dialog, kit};
 use rune::{El, Link, Span, col, el, rich};
 
 use super::drive::{Kept, Repair, SyncStatus};
@@ -104,8 +105,16 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             1,
             &Item::new(Some(&ic::POWER), "Open Beebeeb when you log in").ruled(),
             vec![
-                crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-1"), "", login, true, crate::ui::button::Size::Md, t).label("Open Beebeeb when you log in")
-                    .on_press(move |s: &mut State| s.settings.drive.set_open_at_login(!login)),
+                crate::ui::switch::switch_sized(
+                    &format!("{}-switch", "item-1-1"),
+                    "",
+                    login,
+                    true,
+                    crate::ui::button::Size::Md,
+                    t,
+                )
+                .label("Open Beebeeb when you log in")
+                .on_press(move |s: &mut State| s.settings.drive.set_open_at_login(!login)),
             ],
             t,
         ),
@@ -219,7 +228,7 @@ fn metered_foot(t: &Theme) -> El {
         .key("list-1-foot-box")
         .w_full()
         .items_start()
-        .px(16.0)
+        .px(sp::S16)
         .child(
             el().key("list-1-foot-mark")
                 .pin(Some(16.0), Some(0.5), None, None)
@@ -264,7 +273,14 @@ fn turn_off(not_uploaded: Option<&(u32, String)>, first: usize, t: &Theme) -> El
         t,
     );
     // Turned off, the row that opened this is gone: focus goes to the list above it.
-    dialog::modal_back(0.0, card, TURN_OFF_ROW, SPACE_LIST, |s: &mut State| s.settings.dialog = None, t)
+    dialog::modal_back(
+        0.0,
+        card,
+        TURN_OFF_ROW,
+        SPACE_LIST,
+        |s: &mut State| s.settings.dialog = None,
+        t,
+    )
 }
 
 /// The row that opens the turn-off question, gone once Beebeeb leaves File Explorer.

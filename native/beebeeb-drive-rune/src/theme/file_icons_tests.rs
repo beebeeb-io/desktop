@@ -30,7 +30,13 @@ fn item(name: &str, folder: bool, protected: bool) -> crate::source::DriveItem {
 #[test]
 fn file_icon_folders() {
     assert_eq!(icon_for_item(&item("Backups", true, true)).id, IconId::FolderBackups);
-    assert_eq!(icon_for("Stuff", true, None), FileIcon { id: IconId::Folder, tint: Tint::Folder });
+    assert_eq!(
+        icon_for("Stuff", true, None),
+        FileIcon {
+            id: IconId::Folder,
+            tint: Tint::Folder
+        }
+    );
     assert_eq!(id("PHOTOS", true, None), IconId::FolderPhotos);
     assert_eq!(id("Afbeeldingen", true, None), IconId::FolderPhotos);
     assert_eq!(id("node_modules", true, None), IconId::FolderNodeModules);
@@ -51,7 +57,13 @@ fn file_icon_files() {
 #[test]
 fn file_icon_mime_fallback() {
     assert_eq!(id("noext", false, Some("video/mp4")), IconId::Video);
-    assert_eq!(icon_for("noext", false, None), FileIcon { id: IconId::File, tint: Tint::Default });
+    assert_eq!(
+        icon_for("noext", false, None),
+        FileIcon {
+            id: IconId::File,
+            tint: Tint::Default
+        }
+    );
 }
 
 #[test]

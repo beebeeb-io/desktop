@@ -234,10 +234,10 @@ fn office_docs_tiles_cover_the_page_box_at_150_per_cent_display_scaling() {
         "the last row ends at the page's foot: {last:?} in {h}"
     );
     assert!(
-        log.pictures
-            .borrow()
-            .iter()
-            .all(|k| !matches!(k, OfficePicture::Tile { col: 3.., .. } | OfficePicture::Tile { row: 4.., .. })),
+        log.pictures.borrow().iter().all(|k| !matches!(
+            k,
+            OfficePicture::Tile { col: 3.., .. } | OfficePicture::Tile { row: 4.., .. }
+        )),
         "no tile past the raster is asked"
     );
     // Two tiles share their edge: no gap and no overlap.
@@ -245,7 +245,10 @@ fn office_docs_tiles_cover_the_page_box_at_150_per_cent_display_scaling() {
         tile_in_page(&rt, 0, 0).expect("tile (0, 0)"),
         tile_in_page(&rt, 1, 1).expect("tile (1, 1)"),
     );
-    assert!((a[0] + a[2] - b[0]).abs() < 0.01 && (a[1] + a[3] - b[1]).abs() < 0.01, "{a:?} {b:?}");
+    assert!(
+        (a[0] + a[2] - b[0]).abs() < 0.01 && (a[1] + a[3] - b[1]).abs() < 0.01,
+        "{a:?} {b:?}"
+    );
 }
 
 #[test]
@@ -267,10 +270,16 @@ fn office_docs_a_tile_is_drawn_at_the_scale_the_pointer_and_the_caret_use() {
     });
     let top = doc.page_top(1);
     assert!((tile[0] - caret[0]).abs() < 0.7, "x: tile {tile:?}, caret {caret:?}");
-    assert!((tile[1] - (caret[1] - top)).abs() < 0.7, "y: tile {tile:?}, caret {caret:?}");
+    assert!(
+        (tile[1] - (caret[1] - top)).abs() < 0.7,
+        "y: tile {tile:?}, caret {caret:?}"
+    );
     let (page, x, y) = doc.page_point(tile[0], top + tile[1]);
     assert_eq!(page, 0);
-    assert!((x - 256.0).abs() < 1.0 && (y - 256.0).abs() < 1.0, "a press on it is ({x}, {y})");
+    assert!(
+        (x - 256.0).abs() < 1.0 && (y - 256.0).abs() < 1.0,
+        "a press on it is ({x}, {y})"
+    );
 }
 
 #[test]
@@ -282,7 +291,10 @@ fn office_docs_tiles_divide_by_the_device_factor() {
     assert!((tile[0] - 167.8).abs() < 0.6, "{tile:?}");
     assert!((tile[1] - 167.8).abs() < 0.6, "{tile:?}");
     // On whole device pixels: half points.
-    assert!((tile[0] * 2.0).fract().abs() < 0.01 && (tile[1] * 2.0).fract().abs() < 0.01, "{tile:?}");
+    assert!(
+        (tile[0] * 2.0).fract().abs() < 0.01 && (tile[1] * 2.0).fract().abs() < 0.01,
+        "{tile:?}"
+    );
 }
 
 #[test]
@@ -425,8 +437,8 @@ fn office_docs_scroll_frame_time_p95() {
         }
     }
 
-    let helper =
-        std::env::var("BB_OFFICE_HELPER").expect("BB_OFFICE_HELPER names the real helper: this is the Windows test machine rung");
+    let helper = std::env::var("BB_OFFICE_HELPER")
+        .expect("BB_OFFICE_HELPER names the real helper: this is the Windows test machine rung");
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../beebeeb-office-render/tests/fixtures/latency/big-60.docx");
     let bytes = zeroize::Zeroizing::new(std::fs::read(&fixture).expect("the 60-page latency fixture"));

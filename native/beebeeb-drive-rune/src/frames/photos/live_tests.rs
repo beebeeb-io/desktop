@@ -234,7 +234,11 @@ fn fxr_the_stage_draws_its_own_videos_state_only() {
 fn w13_the_poll_ends_on_the_players_own_state() {
     let mut ui = Ui::new(Box::new(FixturePhotos::new()));
     ui.open(video_id());
-    assert_eq!(ui.settle_playing(), (false, false), "nothing started, nothing to wait for");
+    assert_eq!(
+        ui.settle_playing(),
+        (false, false),
+        "nothing started, nothing to wait for"
+    );
     ui.playing = Some((video_id(), a_player()));
     assert_eq!(ui.settle_playing(), (false, true), "no state yet: keep asking");
     assert!(ui.playing_file.is_none());

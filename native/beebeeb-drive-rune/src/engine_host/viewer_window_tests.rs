@@ -496,7 +496,8 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     );
     assert!(w.rt.state.viewer.ui.as_ref().unwrap().editor.is_none());
     assert!(
-        w.drawn().contains("Not on this PC: keep it available offline to edit it here"),
+        w.drawn()
+            .contains("Not on this PC: keep it available offline to edit it here"),
         "{}",
         w.drawn()
     );
@@ -566,7 +567,11 @@ fn a_kind_with_no_preview_never_opens_the_viewer_from_a_list_and_its_route_says_
     // system's app, else the file manager): the route stays on the list. No sync runs here, so the file is not on
     // this PC and nothing is started; the window says so (and nothing was downloaded).
     w.open_row(PLAN_NAME);
-    assert_eq!(w.route_item(), None, "a list's Open does not go to a file the viewer cannot show");
+    assert_eq!(
+        w.route_item(),
+        None,
+        "a list's Open does not go to a file the viewer cannot show"
+    );
     assert!(w.rt.state.viewer.ui.is_none());
     assert_eq!(w.chunk_requests(), 0);
 
@@ -959,7 +964,11 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
         let mut opened = Opened::Failed(crate::frames::files::source::ActionError::Failed);
         w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(id, name))));
         w.settle_until(|w| w.route_item().as_deref() == Some(id));
-        assert_eq!((opened, w.route_item().as_deref()), (Opened::InApp, Some(id)), "Search: {name}");
+        assert_eq!(
+            (opened, w.route_item().as_deref()),
+            (Opened::InApp, Some(id)),
+            "Search: {name}"
+        );
         in_app += 1;
         leave(&mut w);
     }
@@ -980,7 +989,10 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
     assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
     let mut opened = Opened::InApp;
     w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(PLAN, PLAN_NAME))));
-    assert_eq!(opened, Opened::Failed(crate::frames::files::source::ActionError::Unavailable));
+    assert_eq!(
+        opened,
+        Opened::Failed(crate::frames::files::source::ActionError::Unavailable)
+    );
     // A video, in this window (no player here), is the same: step 2, never the viewer's frame.
     w.open_row(CLIP_NAME);
     assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
@@ -991,7 +1003,13 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_knows_an_app_for_text_and_none_for_an_unregistered_kind() {
-    assert!(crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\notes.txt")));
-    assert!(!crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\file.bbunregisteredkind")));
-    assert!(!crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\no-extension")));
+    assert!(crate::engine_host::has_default_app(std::path::Path::new(
+        "C:\\x\\notes.txt"
+    )));
+    assert!(!crate::engine_host::has_default_app(std::path::Path::new(
+        "C:\\x\\file.bbunregisteredkind"
+    )));
+    assert!(!crate::engine_host::has_default_app(std::path::Path::new(
+        "C:\\x\\no-extension"
+    )));
 }

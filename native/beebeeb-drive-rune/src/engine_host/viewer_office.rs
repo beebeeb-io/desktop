@@ -151,7 +151,9 @@ pub(crate) enum HostEdit {
         too_large: bool,
     },
     /// The helper restarted from a snapshot; `at` is its time of day (UTC, "09:41").
-    Restored { at: String },
+    Restored {
+        at: String,
+    },
     /// A second crash within a minute: the document is read-only now (the editor is no longer live).
     ReadOnly,
 }
@@ -257,7 +259,6 @@ impl Live {
             }
         }
     }
-
 }
 
 impl Host for Live {
@@ -669,9 +670,8 @@ impl OfficeView {
     /// Start the renderer for `bytes` (moved in, never copied elsewhere). Returns at once. A `.ppt` starts nothing: its
     /// bytes are dropped (wiped) unread, and the view says there is no preview for this type.
     pub(crate) fn open(helper: &Path, kind: OfficeKind, bytes: Zeroizing<Vec<u8>>, wake: Wake) -> OfficeView {
-        let host = doc_kind(kind).map(|doc| {
-            Box::new(Live::new(OfficeHost::open(helper, doc, bytes, wake))) as Box<dyn Host>
-        });
+        let host =
+            doc_kind(kind).map(|doc| Box::new(Live::new(OfficeHost::open(helper, doc, bytes, wake))) as Box<dyn Host>);
         OfficeView::on(host, kind)
     }
 
@@ -684,7 +684,9 @@ impl OfficeView {
         wake: Wake,
         scratch: Option<ScratchStore>,
     ) -> OfficeView {
-        let host = Box::new(Live::new(OfficeHost::open_edit_scratch(helper, kind, bytes, wake, scratch))) as Box<dyn Host>;
+        let host = Box::new(Live::new(OfficeHost::open_edit_scratch(
+            helper, kind, bytes, wake, scratch,
+        ))) as Box<dyn Host>;
         OfficeView::editing_on(host, kind)
     }
 
@@ -696,7 +698,9 @@ impl OfficeView {
         wake: Wake,
         scratch: Option<ScratchStore>,
     ) -> OfficeView {
-        let host = Box::new(Live::new(OfficeHost::new_doc_scratch(helper, kind, template, wake, scratch))) as Box<dyn Host>;
+        let host = Box::new(Live::new(OfficeHost::new_doc_scratch(
+            helper, kind, template, wake, scratch,
+        ))) as Box<dyn Host>;
         OfficeView::editing_on(host, kind)
     }
 
@@ -963,12 +967,19 @@ impl OfficeView {
     /// What the editor's guard said editing would drop: the document is open read-only in the viewer. Empty: not
     /// guarded (or no renderer).
     pub(crate) fn guarded(&self) -> Vec<beebeeb_office_protocol::office::DroppedPart> {
-        self.host.borrow().as_ref().map(|host| host.guarded()).unwrap_or_default()
+        self.host
+            .borrow()
+            .as_ref()
+            .map(|host| host.guarded())
+            .unwrap_or_default()
     }
 
     /// The renderer ended or failed (not opening, not open): nothing more comes of it.
     pub(crate) fn ended(&self) -> bool {
-        !matches!(self.model.borrow().phase, Phase::Pages(_) | Phase::Sheets(_) | Phase::State(ViewState::Opening))
+        !matches!(
+            self.model.borrow().phase,
+            Phase::Pages(_) | Phase::Sheets(_) | Phase::State(ViewState::Opening)
+        )
     }
 
     /// The body as it is now (a save's answer carries it: the document stays as it is on screen).
@@ -1090,7 +1101,9 @@ impl OfficeView {
                         tap.keep(&bytes);
                     }
                 }
-                HostEdit::Saved { id, revision, bytes, .. } => self.saved.push(SavedBytes { id, revision, bytes }),
+                HostEdit::Saved {
+                    id, revision, bytes, ..
+                } => self.saved.push(SavedBytes { id, revision, bytes }),
                 // A copy the helper could not answer at all is said; any other refusal waits for who asked it.
                 HostEdit::Failed { id, too_large } => match self.copies.iter().position(|copy| *copy == id) {
                     Some(at) => {
@@ -1120,9 +1133,9 @@ impl OfficeView {
                 let sheets: HashSet<u32> = edited.cells.iter().map(|(sheet, _)| *sheet).collect();
                 if matches!(edited.dirty, Dirty::All) || !sheets.is_empty() {
                     let all = matches!(edited.dirty, Dirty::All);
-                    pictures.drop_where(|key| {
-                        matches!(key, OfficePicture::Anchor { sheet, .. } if all || sheets.contains(sheet))
-                    });
+                    pictures.drop_where(
+                        |key| matches!(key, OfficePicture::Anchor { sheet, .. } if all || sheets.contains(sheet)),
+                    );
                 }
                 self.model.get_mut().edited_cells(&edited.cells);
             }

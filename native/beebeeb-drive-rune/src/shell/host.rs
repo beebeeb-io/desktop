@@ -18,8 +18,8 @@ use super::flyout_window::FlyoutState;
 use super::instance::{self, Forwarded};
 use super::platform::{self, Platform, PlatformError, TrayEvent, TrayHandler, TrayIcon};
 use super::surfaces::WindowKind;
-use super::tray_tip_window::{self, TipState};
 use super::tray::{EngineState, LeftClick, MenuAction, TrayInputs, TrayModel, tray_model};
+use super::tray_tip_window::{self, TipState};
 use super::window_state::{self, Observed, SavedWindows};
 use super::{registry, surfaces};
 use crate::State;
@@ -1124,7 +1124,9 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     // Esc on a presentation that is on leaves Present, not the file.
-    if matches!(ev.key, Key::Escape) && (crate::frames::viewers::leave_present(s) || crate::frames::viewers::close_find(s)) {
+    if matches!(ev.key, Key::Escape)
+        && (crate::frames::viewers::leave_present(s) || crate::frames::viewers::close_find(s))
+    {
         return true;
     }
     let event = match ev.key {

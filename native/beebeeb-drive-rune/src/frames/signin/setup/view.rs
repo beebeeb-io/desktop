@@ -411,7 +411,12 @@ fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
 fn previews_loading(k: &mut Keys, t: &Theme) -> El {
     setup::column()
         .child(au::heading("Thumbnails and previews", None, false, t))
-        .child(view_state(ViewState::Loading { words: "Reading your preview settings\u{2026}" }, t))
+        .child(view_state(
+            ViewState::Loading {
+                words: "Reading your preview settings\u{2026}",
+            },
+            t,
+        ))
         .child(
             actions()
                 .child(primary(k, "Continue", ButtonState::Disabled, t, Ui::go_on))
@@ -517,7 +522,12 @@ fn explorer_added(k: &mut Keys, t: &Theme) -> El {
         .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
         .box_shadow(kit::ring(kit::HAIR, t.separator));
     for (i, (name, icon)) in places.iter().enumerate() {
-        let mut ni = row().h(28.0).px(space::S10).gap(space::S9).center_y().radius(tokens::radius::SM);
+        let mut ni = row()
+            .h(28.0)
+            .px(space::S10)
+            .gap(space::S9)
+            .center_y()
+            .radius(tokens::radius::SM);
         ni = match icon {
             Some(icon) => ni.child(kit::glyph(format!("nav-{i}-icon"), icon, 15.0, os.icon)),
             // The b as Windows shows it in the pane: one colour, the letter cut out of its plate.
@@ -609,7 +619,11 @@ const NOTHING_SYNCS: &str = "Your files are safe in Beebeeb. Nothing syncs with 
 /// folder was kept yet, so another one can be chosen (the folder may be what was refused).
 fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Keys, t: &Theme) -> El {
     let lead = "Try again in a moment.";
-    let why = if code.is_empty() { lead.to_string() } else { format!("{lead} {code}") };
+    let why = if code.is_empty() {
+        lead.to_string()
+    } else {
+        format!("{lead} {code}")
+    };
     let retry = try_again("explorer-failed", t).on_press_tx(act(Ui::go_on));
     setup::column()
         .child(au::heading(
@@ -619,7 +633,12 @@ fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Ke
             t,
         ))
         .child(view_state(
-            ViewState::Failed { key: "explorer-failed", title, why: &why, retry: Some(retry) },
+            ViewState::Failed {
+                key: "explorer-failed",
+                title,
+                why: &why,
+                retry: Some(retry),
+            },
             t,
         ))
         .child(
@@ -657,14 +676,19 @@ fn notifications(k: &mut Keys, t: &Theme) -> El {
             t,
         ))
         .child(
-            el().key("tile-at").a11y_hidden().w_full().py(space::S16).center().child(
-                el().key("tile")
-                    .size(64.0, 64.0)
-                    .radius(18.0)
-                    .fill(wash)
-                    .center()
-                    .child(kit::glyph("tile-icon", &icons::BELL, 32.0, mark)),
-            ),
+            el().key("tile-at")
+                .a11y_hidden()
+                .w_full()
+                .py(space::S16)
+                .center()
+                .child(
+                    el().key("tile")
+                        .size(64.0, 64.0)
+                        .radius(18.0)
+                        .fill(wash)
+                        .center()
+                        .child(kit::glyph("tile-icon", &icons::BELL, 32.0, mark)),
+                ),
         )
         .child(
             actions()
@@ -825,7 +849,10 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             note(
                 "not-changed",
                 k,
-                format!("Couldn't change {}. You can set it in Settings.", not_changed.join(" and ")),
+                format!(
+                    "Couldn't change {}. You can set it in Settings.",
+                    not_changed.join(" and ")
+                ),
             )
         }))
         .children((!lock_kept.is_empty()).then(|| {
@@ -1101,5 +1128,7 @@ fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
 /// First letter up, for a name that starts a sentence.
 fn capitalised(s: &str) -> String {
     let mut c = s.chars();
-    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }

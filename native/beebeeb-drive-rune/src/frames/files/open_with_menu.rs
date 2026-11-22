@@ -13,8 +13,8 @@ use std::sync::{Mutex, PoisonError};
 
 use rune::{El, Key, KeyEvent, Tx};
 
-use super::source::Action;
 use super::MenuKind;
+use super::source::Action;
 use crate::State;
 use crate::frames::viewers::kinds::{self, OfficeShips};
 use crate::source::DriveItem;

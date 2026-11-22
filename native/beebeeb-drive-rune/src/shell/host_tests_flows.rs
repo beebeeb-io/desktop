@@ -370,7 +370,11 @@ fn the_tray_tip_opens_once_at_its_step_and_hides_on_dismiss() {
     settle(&mut rt);
     settle(&mut rt);
     assert_eq!(rt.state.guide.step, Some(Step::Tray));
-    assert_eq!(rt.state.shell.tray_tip_counts, (1, 0), "opened once, however many polls run");
+    assert_eq!(
+        rt.state.shell.tray_tip_counts,
+        (1, 0),
+        "opened once, however many polls run"
+    );
 
     // "Got it" or Esc in the tip's window (`tray_tip_window::dismiss`).
     rt.update(on_tray_tip_dismissed);

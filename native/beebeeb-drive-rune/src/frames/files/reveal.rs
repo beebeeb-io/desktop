@@ -5,9 +5,9 @@
 //! the next finished check (`reread::take_reread`) selects it and says where to scroll. An item the account does not
 //! know says so once, in a toast.
 
+use super::Toast;
 use super::reread::LIST_TOP;
 use super::source::{Action, ActionError};
-use super::Toast;
 use crate::State;
 use crate::shell::app::{Event, Route, Screen, Section};
 use crate::ui::file_list::ROW_H;
@@ -93,11 +93,27 @@ mod tests {
     impl DriveSource for Drive {
         fn list(&self, folder: Option<&str>) -> Result<Listing, SourceError> {
             let (crumb, items) = match folder {
-                Some("f-deep") => (Crumb { id: Some("f-deep".into()), name: "Deep".into() }, self.0.lock().unwrap().clone()),
-                None => (Crumb { id: None, name: "Files".into() }, vec![item("near", None, false)]),
+                Some("f-deep") => (
+                    Crumb {
+                        id: Some("f-deep".into()),
+                        name: "Deep".into(),
+                    },
+                    self.0.lock().unwrap().clone(),
+                ),
+                None => (
+                    Crumb {
+                        id: None,
+                        name: "Files".into(),
+                    },
+                    vec![item("near", None, false)],
+                ),
                 _ => return Err(SourceError::NotFound),
             };
-            Ok(Listing { folder: crumb.clone(), path: vec![crumb], items })
+            Ok(Listing {
+                folder: crumb.clone(),
+                path: vec![crumb],
+                items,
+            })
         }
         fn storage(&self) -> Option<StorageSummary> {
             None
@@ -143,7 +159,11 @@ mod tests {
     }
 
     fn selected_ids(s: &State) -> Vec<String> {
-        s.actions.selection.iter().map(|&r| s.listing.items[r].id.clone()).collect()
+        s.actions
+            .selection
+            .iter()
+            .map(|&r| s.listing.items[r].id.clone())
+            .collect()
     }
 
     #[test]
@@ -159,7 +179,10 @@ mod tests {
             assert_eq!(s.actions.reveal.as_deref(), Some("target"));
         });
         // The listing arrives later: the read after a check.
-        *rows.lock().unwrap() = vec![item("other", Some("f-deep"), false), item("target", Some("f-deep"), false)];
+        *rows.lock().unwrap() = vec![
+            item("other", Some("f-deep"), false),
+            item("target", Some("f-deep"), false),
+        ];
         rt.update(|s, _| {
             let (read, error) = crate::load(s.source.as_ref(), Some("f-deep"));
             s.take_reread(read, error);

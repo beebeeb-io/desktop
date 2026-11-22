@@ -72,7 +72,11 @@ fn phrase_grid(ui: &Ui, t: &Theme) -> El {
         .gap(space::S6);
     let mut boxes = boxes.into_iter().peekable();
     while boxes.peek().is_some() {
-        grid = grid.child(row().gap(space::S6).children(boxes.by_ref().take(3).collect::<Vec<_>>()));
+        grid = grid.child(
+            row()
+                .gap(space::S6)
+                .children(boxes.by_ref().take(3).collect::<Vec<_>>()),
+        );
     }
     grid
 }

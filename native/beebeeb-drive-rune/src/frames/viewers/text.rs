@@ -4,12 +4,12 @@
 use rune::{Align, Color, El, Icon, Span, col, el, row, text_input};
 
 use super::chrome::{Dot, Status};
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::source::{Cut, Ink, Keep, OpenFile, Run, TextDoc, count_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
 use crate::theme::scale;
 use crate::theme::tokens::{self, Theme};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::toolbar::{ToolState, tool_button};
 use crate::ui::view_state::{self, ViewState};
 use crate::ui::{au, kit};
@@ -334,11 +334,13 @@ pub fn editor_tools(has_preview: bool, preview_open: bool, t: &Theme) -> Vec<El>
     ];
     if has_preview {
         tools.push(
-            tool_action("tb-preview", "Preview", None, None, t).checked(preview_open).on_press(|s: &mut State| {
-                if let Some(ui) = ui(s) {
-                    ui.editor_view.preview_open = !ui.editor_view.preview_open;
-                }
-            }),
+            tool_action("tb-preview", "Preview", None, None, t)
+                .checked(preview_open)
+                .on_press(|s: &mut State| {
+                    if let Some(ui) = ui(s) {
+                        ui.editor_view.preview_open = !ui.editor_view.preview_open;
+                    }
+                }),
         );
     }
     tools
@@ -356,13 +358,20 @@ pub fn newer_banner(file: &OpenFile, t: &Theme) -> Option<El> {
     };
     // The time is a figure: mono.
     let time = words.len() - newer.at.len() - 1;
-    let show = button(keys("banner-btn"), "Show it", None, Variant::Secondary, Size::Sm, ButtonState::Enabled, t).on_press(
-        |s: &mut State| {
-            if let Some(ui) = ui(s) {
-                ui.show_newer();
-            }
-        },
-    );
+    let show = button(
+        keys("banner-btn"),
+        "Show it",
+        None,
+        Variant::Secondary,
+        Size::Sm,
+        ButtonState::Enabled,
+        t,
+    )
+    .on_press(|s: &mut State| {
+        if let Some(ui) = ui(s) {
+            ui.show_newer();
+        }
+    });
     Some(banner_spans(
         &icons::REFRESH,
         &words,
@@ -394,12 +403,20 @@ pub fn banner_el(icon: &'static Icon, words: &str, action: Option<El>, t: &Theme
 /// (task 2530, item 1). No board draws it: DW-1519's banner, its words wrapped (they are longer than a line).
 pub fn refused_banner(words: Option<&str>, t: &Theme) -> Option<El> {
     let words = words?;
-    let copy = button(keys("banner-btn"), "Save a copy", None, Variant::Secondary, Size::Sm, ButtonState::Enabled, t)
-        .on_press(|s: &mut State| {
-            if let Some(ui) = ui(s) {
-                ui.resolve(Keep::Both);
-            }
-        });
+    let copy = button(
+        keys("banner-btn"),
+        "Save a copy",
+        None,
+        Variant::Secondary,
+        Size::Sm,
+        ButtonState::Enabled,
+        t,
+    )
+    .on_press(|s: &mut State| {
+        if let Some(ui) = ui(s) {
+            ui.resolve(Keep::Both);
+        }
+    });
     Some(view_state::view_state(
         ViewState::Failed {
             key: "refused",

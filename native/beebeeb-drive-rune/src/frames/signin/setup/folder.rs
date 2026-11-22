@@ -10,9 +10,9 @@ use rune::{El, TextStyle, col};
 use super::source::{FolderAsk, FolderSaid};
 use super::view::{actions, ghost, primary};
 use super::{Step, Ui, act, icons};
-use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::au::{self, ButtonState, Keys, Tone};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::{kit, setup};
 
 /// The folder as the PC writes it: mono, as every path the app shows.
@@ -172,7 +172,12 @@ pub fn not_yet(step: Step, k: &mut Keys, t: &Theme) -> El {
 pub fn backup_loading(k: &mut Keys, t: &Theme) -> El {
     setup::column()
         .child(au::heading("Back up your folders", None, false, t))
-        .child(view_state(ViewState::Loading { words: "Looking at the folders on this PC\u{2026}" }, t))
+        .child(view_state(
+            ViewState::Loading {
+                words: "Looking at the folders on this PC\u{2026}",
+            },
+            t,
+        ))
         .child(
             actions()
                 .child(primary(k, "Turn on backup", ButtonState::Disabled, t, Ui::go_on))

@@ -249,9 +249,17 @@ fn open_with_an_app_hands_over_any_file() {
         label: "Invented".into(),
     };
     let notes = row(NOTES, "Invented notes.txt", false);
-    assert_eq!(set.source.open_in_app(&notes, &app), Err(ActionError::NotOnThisSystem), "online only");
+    assert_eq!(
+        set.source.open_in_app(&notes, &app),
+        Err(ActionError::NotOnThisSystem),
+        "online only"
+    );
     put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Local, true);
-    assert_eq!(set.source.open_in_app(&notes, &app), Err(ActionError::NotOnThisSystem), "kept and here");
+    assert_eq!(
+        set.source.open_in_app(&notes, &app),
+        Err(ActionError::NotOnThisSystem),
+        "kept and here"
+    );
     assert_eq!(
         set.source.open_in_app(&row(FOLDER, "Invented folder", true), &app),
         Err(ActionError::Failed)

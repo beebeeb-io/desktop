@@ -27,7 +27,11 @@ const BUILT: [(&str, &str, &str); 11] = [
     ("DW-1524", "toast-text", "Saved \u{00B7} encrypted \u{00B7} version 4"),
     ("DW-1525", "dlg-title", "You have unsaved changes"),
     ("DW-1526", "dlg-title", "Two versions"),
-    ("DW-1516", "loading-words", "Decrypting Tram 28.mov on this PC \u{00B7} 46 of 120 MB (38 percent)"),
+    (
+        "DW-1516",
+        "loading-words",
+        "Decrypting Tram 28.mov on this PC \u{00B7} 46 of 120 MB (38 percent)",
+    ),
     ("DW-1517", "state-title", "Too large to preview here"),
     ("DW-1518", "state-title", "Couldn't decrypt this file"),
     ("DW-1512", "run-0-0", "# Export this month's invoices as one CSV"),
@@ -184,7 +188,10 @@ fn tool_to(rt: &mut Runtime<State>, key: &str) {
         }
         press(rt, Key::Tab);
     }
-    assert!(focused(rt).as_deref().is_some_and(in_file_tools), "Tab never entered the toolbar");
+    assert!(
+        focused(rt).as_deref().is_some_and(in_file_tools),
+        "Tab never entered the toolbar"
+    );
     press(rt, Key::Home);
     for _ in 0..12 {
         if focused(rt).as_deref() == Some(key) {
@@ -192,7 +199,10 @@ fn tool_to(rt: &mut Runtime<State>, key: &str) {
         }
         press(rt, Key::Right);
     }
-    panic!("the arrows never reached {key} in the toolbar; focus is on {:?}", focused(rt));
+    panic!(
+        "the arrows never reached {key} in the toolbar; focus is on {:?}",
+        focused(rt)
+    );
 }
 
 /// [`tool_to`], then Space.
@@ -319,7 +329,10 @@ fn too_large_says_the_numbers_and_both_ways_out_are_intents() {
 fn a_failure_is_an_alert_and_try_again_decrypts_again() {
     let (mut rt, calls) = recording(board::FAILED);
     assert_eq!(info(&rt, "state").role, "group");
-    assert_eq!(info(&rt, "state-title").text.as_deref(), Some("Couldn't decrypt this file"));
+    assert_eq!(
+        info(&rt, "state-title").text.as_deref(),
+        Some("Couldn't decrypt this file")
+    );
     operate(&mut rt, "state-btn-1");
     assert_eq!(intents(&mut rt), [Intent::ReportProblem]);
     operate(&mut rt, "state-btn-0");
@@ -1029,7 +1042,11 @@ fn f6_cycles_the_toolbar_the_file_and_the_details_panel() {
         },
     );
     assert!(viewer(&rt).show_details);
-    for pane in [super::chrome::PANE_TOOLBAR, super::chrome::PANE_BODY, super::chrome::PANE_DETAILS] {
+    for pane in [
+        super::chrome::PANE_TOOLBAR,
+        super::chrome::PANE_BODY,
+        super::chrome::PANE_DETAILS,
+    ] {
         assert!(has(&rt, pane), "{pane} is an F6 stop");
     }
     tab_to(&mut rt, "back");
@@ -1039,9 +1056,17 @@ fn f6_cycles_the_toolbar_the_file_and_the_details_panel() {
         seen.push(focused(&rt));
     }
     assert!(seen.iter().all(Option::is_some), "each F6 lands on a control: {seen:?}");
-    assert_eq!(seen.iter().collect::<std::collections::HashSet<_>>().len(), 3, "three panes: {seen:?}");
+    assert_eq!(
+        seen.iter().collect::<std::collections::HashSet<_>>().len(),
+        3,
+        "three panes: {seen:?}"
+    );
     press(&mut rt, Key::Function(6));
-    assert_eq!(focused(&rt), Some("back".to_string()), "and around to the toolbar's first stop");
+    assert_eq!(
+        focused(&rt),
+        Some("back".to_string()),
+        "and around to the toolbar's first stop"
+    );
 }
 
 #[test]
@@ -1225,7 +1250,11 @@ fn assert_file_bar(rt: &Runtime<State>, what: &str, wanted: &[&str]) {
 #[test]
 fn the_preview_bar_has_no_files_view_buttons() {
     let rt = runtime("DW-1512");
-    assert_file_bar(&rt, "preview", &["back", "panel-toggle-btn", "show-in-folder", "more-btn"]);
+    assert_file_bar(
+        &rt,
+        "preview",
+        &["back", "panel-toggle-btn", "show-in-folder", "more-btn"],
+    );
 }
 
 #[test]
@@ -1233,7 +1262,11 @@ fn the_text_edit_bar_has_no_files_view_buttons() {
     let mut rt = runtime("DW-1512");
     operate_tool(&mut rt, "tb-btn-0");
     assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some());
-    assert_file_bar(&rt, "text edit", &["back", "tb-btn-0", "show-in-folder", "panel-toggle-btn"]);
+    assert_file_bar(
+        &rt,
+        "text edit",
+        &["back", "tb-btn-0", "show-in-folder", "panel-toggle-btn"],
+    );
 }
 
 #[test]
@@ -1254,8 +1287,14 @@ fn a_quit_with_unsaved_changes_asks_save_discard_or_cancel() {
     assert!(ask(&mut rt.state, Then::Quit), "unsaved: the question is up");
     rt.invalidate();
     rt.frame(0.0);
-    assert_eq!(info(&rt, "dlg-text-0").text.as_deref(), Some("You have unsaved changes in Meeting notes 4 Nov.md."));
-    assert_eq!(info(&rt, "btn-2").label.as_deref(), Some("Discard and quit, destructive"));
+    assert_eq!(
+        info(&rt, "dlg-text-0").text.as_deref(),
+        Some("You have unsaved changes in Meeting notes 4 Nov.md.")
+    );
+    assert_eq!(
+        info(&rt, "btn-2").label.as_deref(),
+        Some("Discard and quit, destructive")
+    );
     // Cancel keeps the edit and nothing was saved.
     operate(&mut rt, "btn-3");
     assert!(rt.state.viewer.leave.is_none() && viewer(&rt).dirty());
@@ -1279,7 +1318,11 @@ fn enter_on_the_shown_unsaved_question_presses_save() {
     rt.invalidate();
     rt.frame(0.0);
     press(&mut rt, Key::Enter);
-    assert!(calls.borrow().iter().any(|c| c.starts_with("save")), "Enter saved: {:?}", calls.borrow());
+    assert!(
+        calls.borrow().iter().any(|c| c.starts_with("save")),
+        "Enter saved: {:?}",
+        calls.borrow()
+    );
     assert!(!holds(&rt.state));
 }
 
@@ -1308,7 +1351,11 @@ fn focus_after_the_unsaved_question_goes_to_the_editor_or_else_the_toolbar() {
     operate(&mut rt, "dlg-btn-2");
     rt.settle_all();
     rt.frame(0.0);
-    assert_eq!(focused(&rt).as_deref(), Some(super::EDITOR_KEY), "Keep editing: back in the editor");
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some(super::EDITOR_KEY),
+        "Keep editing: back in the editor"
+    );
     operate(&mut rt, "back");
     operate(&mut rt, "dlg-btn-1");
     rt.settle_all();

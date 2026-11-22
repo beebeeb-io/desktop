@@ -293,7 +293,10 @@ fn every_launch_takes_the_launch_lock() {
     // confined helper).
     let ffmpeg = std::fs::read_to_string(root.join(FFMPEG)).unwrap();
     let ffmpeg_bare = bare_starts(&ffmpeg);
-    eprintln!("launch scan: {} files + the updater, 0 bare; {FFMPEG}: {ffmpeg_bare:?}", files.len());
+    eprintln!(
+        "launch scan: {} files + the updater, 0 bare; {FFMPEG}: {ffmpeg_bare:?}",
+        files.len()
+    );
     assert!(
         ffmpeg_bare.is_empty(),
         "the engine's media file starts a program: {ffmpeg_bare:?}"

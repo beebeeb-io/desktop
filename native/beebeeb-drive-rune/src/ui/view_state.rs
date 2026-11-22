@@ -121,13 +121,28 @@ fn loading(key: &str, words: &str, t: &Theme) -> El {
         .label(words)
         .live_region(LiveRegion::Polite)
         .child(kit::label(format!("{key}-words"), words, type_::HEAD, t.text))
-        .child(strip_bar(&format!("{key}-bar"), 0.3, t).role("progressbar").label(words))
+        .child(
+            strip_bar(&format!("{key}-bar"), 0.3, t)
+                .role("progressbar")
+                .label(words),
+        )
 }
 
 /// The centred column Empty and Failed share: 28/24 padding, 8 between its parts.
 fn column(key: &str, title: &str, size: Size) -> El {
-    let (py, px, gap) = if size == Size::Sm { (16.0, 16.0, 6.0) } else { (28.0, 24.0, 8.0) };
-    col().key(key).role("group").label(title).py(py).px(px).gap(gap).items_center()
+    let (py, px, gap) = if size == Size::Sm {
+        (16.0, 16.0, 6.0)
+    } else {
+        (28.0, 24.0, 8.0)
+    };
+    col()
+        .key(key)
+        .role("group")
+        .label(title)
+        .py(py)
+        .px(px)
+        .gap(gap)
+        .items_center()
 }
 
 fn sentence(key: &str, words: &str, t: &Theme) -> El {

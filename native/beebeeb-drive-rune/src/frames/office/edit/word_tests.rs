@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use beebeeb_office_protocol::office::{Dirty, ListKind, ParaStyle, PageRect, RectPt, TextAlign};
+use beebeeb_office_protocol::office::{Dirty, ListKind, PageRect, ParaStyle, RectPt, TextAlign};
 use beebeeb_office_protocol::office::{EditKind, Edited};
 use rune::{Env, Mods, Pixels, Runtime, WheelEvent};
 
@@ -204,14 +204,41 @@ const K: f32 = 520.0 / 595.0;
 fn keys_become_ops() {
     let m = marks();
     let op = |key: Key, mods: Mods| op_for(&key_event(key, mods), Some(&m));
-    assert_eq!(op(Key::Text("a".into()), Mods::default()), Some(EditOp::InsertText("a".into())));
-    assert_eq!(op(Key::Text(" ".into()), Mods::default()), Some(EditOp::InsertText(" ".into())));
+    assert_eq!(
+        op(Key::Text("a".into()), Mods::default()),
+        Some(EditOp::InsertText("a".into()))
+    );
+    assert_eq!(
+        op(Key::Text(" ".into()), Mods::default()),
+        Some(EditOp::InsertText(" ".into()))
+    );
     assert_eq!(op(Key::Enter, Mods::default()), Some(EditOp::InsertParagraph));
     assert_eq!(op(Key::Enter, shift()), Some(EditOp::InsertLineBreak));
-    assert_eq!(op(Key::Backspace, Mods::default()), Some(EditOp::Delete { back: true, word: false }));
-    assert_eq!(op(Key::Backspace, ctrl()), Some(EditOp::Delete { back: true, word: true }));
-    assert_eq!(op(Key::Delete, Mods::default()), Some(EditOp::Delete { back: false, word: false }));
-    assert_eq!(op(Key::Delete, ctrl()), Some(EditOp::Delete { back: false, word: true }));
+    assert_eq!(
+        op(Key::Backspace, Mods::default()),
+        Some(EditOp::Delete {
+            back: true,
+            word: false
+        })
+    );
+    assert_eq!(
+        op(Key::Backspace, ctrl()),
+        Some(EditOp::Delete { back: true, word: true })
+    );
+    assert_eq!(
+        op(Key::Delete, Mods::default()),
+        Some(EditOp::Delete {
+            back: false,
+            word: false
+        })
+    );
+    assert_eq!(
+        op(Key::Delete, ctrl()),
+        Some(EditOp::Delete {
+            back: false,
+            word: true
+        })
+    );
     for (key, to) in [
         (Key::Left, Motion::Left),
         (Key::Right, Motion::Right),
@@ -222,34 +249,67 @@ fn keys_become_ops() {
         (Key::PageUp, Motion::PageUp),
         (Key::PageDown, Motion::PageDown),
     ] {
-        assert_eq!(op(key.clone(), Mods::default()), Some(EditOp::Move { to, extend: false }));
+        assert_eq!(
+            op(key.clone(), Mods::default()),
+            Some(EditOp::Move { to, extend: false })
+        );
         assert_eq!(op(key, shift()), Some(EditOp::Move { to, extend: true }));
     }
-    assert_eq!(op(Key::Left, ctrl()), Some(EditOp::Move { to: Motion::WordLeft, extend: false }));
+    assert_eq!(
+        op(Key::Left, ctrl()),
+        Some(EditOp::Move {
+            to: Motion::WordLeft,
+            extend: false
+        })
+    );
     assert_eq!(
         op(Key::Right, Mods { shift: true, ..ctrl() }),
-        Some(EditOp::Move { to: Motion::WordRight, extend: true })
+        Some(EditOp::Move {
+            to: Motion::WordRight,
+            extend: true
+        })
     );
-    assert_eq!(op(Key::Home, ctrl()), Some(EditOp::Move { to: Motion::DocStart, extend: false }));
+    assert_eq!(
+        op(Key::Home, ctrl()),
+        Some(EditOp::Move {
+            to: Motion::DocStart,
+            extend: false
+        })
+    );
     assert_eq!(
         op(Key::End, Mods { shift: true, ..ctrl() }),
-        Some(EditOp::Move { to: Motion::DocEnd, extend: true })
+        Some(EditOp::Move {
+            to: Motion::DocEnd,
+            extend: true
+        })
     );
     assert_eq!(op(Key::Command('a'), ctrl()), Some(EditOp::SelectAll));
     assert_eq!(op(Key::Command('z'), ctrl()), Some(EditOp::Undo));
     assert_eq!(op(Key::Command('y'), ctrl()), Some(EditOp::Redo));
-    assert_eq!(op(Key::Command('z'), Mods { shift: true, ..ctrl() }), Some(EditOp::Redo));
+    assert_eq!(
+        op(Key::Command('z'), Mods { shift: true, ..ctrl() }),
+        Some(EditOp::Redo)
+    );
     assert_eq!(
         op(Key::Command('b'), ctrl()),
-        Some(EditOp::Mark { mark: Mark::Bold, on: true })
+        Some(EditOp::Mark {
+            mark: Mark::Bold,
+            on: true
+        })
     );
     assert_eq!(
         op(Key::Command('i'), ctrl()),
-        Some(EditOp::Mark { mark: Mark::Italic, on: true })
+        Some(EditOp::Mark {
+            mark: Mark::Italic,
+            on: true
+        })
     );
     assert_eq!(
         op(Key::Command('u'), ctrl()),
-        Some(EditOp::Mark { mark: Mark::Underline, on: true })
+        Some(EditOp::Mark {
+            mark: Mark::Underline,
+            on: true
+        })
     );
 }
 
@@ -265,16 +325,22 @@ fn other_keys_are_left_alone() {
     assert_eq!(op(Key::Escape, Mods::default()), None);
     assert_eq!(op(Key::Text("\u{8}".into()), Mods::default()), None);
     assert_eq!(op(Key::Text(String::new()), Mods::default()), None);
-    assert_eq!(op(Key::Left, Mods { alt: true, ..Mods::default() }), None);
+    assert_eq!(
+        op(
+            Key::Left,
+            Mods {
+                alt: true,
+                ..Mods::default()
+            }
+        ),
+        None
+    );
     assert_eq!(op(Key::Up, ctrl()), None);
     assert_eq!(op(Key::PageDown, ctrl()), None);
     // Text typed with Ctrl is a chord; with Ctrl and Alt (AltGr) it types.
     assert_eq!(op(Key::Text("v".into()), ctrl()), None);
     if !cfg!(target_os = "macos") {
-        let altgr = Mods {
-            alt: true,
-            ..ctrl()
-        };
+        let altgr = Mods { alt: true, ..ctrl() };
         assert_eq!(op(Key::Text("@".into()), altgr), Some(EditOp::InsertText("@".into())));
     }
 }
@@ -285,11 +351,17 @@ fn a_mark_toggles_from_where_the_caret_is() {
     let bold = Marks { bold: true, ..marks() };
     assert_eq!(
         op_for(&key_event(Key::Command('b'), ctrl()), Some(&bold)),
-        Some(EditOp::Mark { mark: Mark::Bold, on: false })
+        Some(EditOp::Mark {
+            mark: Mark::Bold,
+            on: false
+        })
     );
     assert_eq!(
         op_for(&key_event(Key::Command('i'), ctrl()), Some(&bold)),
-        Some(EditOp::Mark { mark: Mark::Italic, on: true })
+        Some(EditOp::Mark {
+            mark: Mark::Italic,
+            on: true
+        })
     );
 }
 
@@ -318,7 +390,10 @@ fn the_focused_surface_sends_ops() {
             EditOp::InsertText("h".into()),
             EditOp::InsertText("i".into()),
             EditOp::InsertParagraph,
-            EditOp::Move { to: Motion::Left, extend: true },
+            EditOp::Move {
+                to: Motion::Left,
+                extend: true
+            },
             EditOp::SelectAll,
         ]
     );
@@ -329,9 +404,19 @@ fn the_focused_surface_sends_ops() {
 fn bold_follows_the_answered_marks() {
     let (mut rt, shared) = editor(true);
     focus_surface(&mut rt);
-    answer(&mut rt, &shared, edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), Marks { bold: true, ..marks() }));
+    answer(
+        &mut rt,
+        &shared,
+        edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), Marks { bold: true, ..marks() }),
+    );
     press(&mut rt, Key::Command('b'), ctrl());
-    assert_eq!(ops(&shared), vec![EditOp::Mark { mark: Mark::Bold, on: false }]);
+    assert_eq!(
+        ops(&shared),
+        vec![EditOp::Mark {
+            mark: Mark::Bold,
+            on: false
+        }]
+    );
 }
 
 /// A ribbon tool pressed with the pointer takes the keyboard with it; once it acted the keyboard is the page's again,
@@ -353,15 +438,22 @@ fn a_ribbon_tool_gives_the_keyboard_back_to_the_page() {
     rt.frame(0.0);
     rt.frame(0.0);
     assert!(
-        ops(&shared).iter().any(|op| matches!(op, EditOp::Mark { mark: Mark::Bold, .. })),
+        ops(&shared)
+            .iter()
+            .any(|op| matches!(op, EditOp::Mark { mark: Mark::Bold, .. })),
         "the tool acted: {:?}",
         ops(&shared)
     );
-    assert!(find(&rt, SURFACE).is_some_and(|e| e.focused), "the page has the keyboard again");
+    assert!(
+        find(&rt, SURFACE).is_some_and(|e| e.focused),
+        "the page has the keyboard again"
+    );
     // What is typed next reaches the document.
     plain(&mut rt, Key::Text("x".into()));
     assert!(
-        ops(&shared).iter().any(|op| matches!(op, EditOp::InsertText(t) if t == "x")),
+        ops(&shared)
+            .iter()
+            .any(|op| matches!(op, EditOp::InsertText(t) if t == "x")),
         "typed after the tool: {:?}",
         ops(&shared)
     );
@@ -498,7 +590,10 @@ fn a_drag_extends_the_selection() {
         })
         .collect();
     assert_eq!(modes, vec![HitMode::Place, HitMode::Extend]);
-    assert!(find(&rt, SURFACE).is_some_and(|e| e.focused), "the press focused the surface");
+    assert!(
+        find(&rt, SURFACE).is_some_and(|e| e.focused),
+        "the press focused the surface"
+    );
 }
 
 /// A press in the gap or past the last page lands on the nearer page, kept on it.
@@ -520,18 +615,32 @@ fn a_press_off_the_pages_lands_on_a_page() {
 #[test]
 fn the_caret_is_drawn_from_the_answer() {
     let (mut rt, shared) = editor(true);
-    assert!(find(&rt, CARET).is_none(), "no caret before the editor says where it is");
-    answer(&mut rt, &shared, edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()));
+    assert!(
+        find(&rt, CARET).is_none(),
+        "no caret before the editor says where it is"
+    );
+    answer(
+        &mut rt,
+        &shared,
+        edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()),
+    );
     let page = rect(&rt, "page");
     let caret = rect(&rt, CARET);
     assert!((caret[0] - (page[0] + 72.0 * K)).abs() < 0.6, "{caret:?} on {page:?}");
     assert!((caret[1] - (page[1] + 96.0 * K)).abs() < 0.6, "{caret:?} on {page:?}");
     assert!((caret[3] - 14.0 * K).abs() < 0.6);
     // A caret on a later page is drawn on that page.
-    answer(&mut rt, &shared, edited(2, Some(at(1, 72.0, 96.0)), Vec::new(), marks()));
+    answer(
+        &mut rt,
+        &shared,
+        edited(2, Some(at(1, 72.0, 96.0)), Vec::new(), marks()),
+    );
     let second = rect(&rt, "page-2");
     let caret = rect(&rt, CARET);
-    assert!((caret[1] - (second[1] + 96.0 * K)).abs() < 0.6, "{caret:?} on {second:?}");
+    assert!(
+        (caret[1] - (second[1] + 96.0 * K)).abs() < 0.6,
+        "{caret:?} on {second:?}"
+    );
 }
 
 /// A selection is its rectangles, and a range has no caret.
@@ -543,11 +652,18 @@ fn a_selection_is_drawn_from_the_answer() {
     let page = rect(&rt, "page");
     for (i, y) in [96.0, 112.0].into_iter().enumerate() {
         let r = rect(&rt, &format!("sel-{i}"));
-        assert!((r[0] - (page[0] + 72.0 * K)).abs() < 0.6 && (r[1] - (page[1] + y * K)).abs() < 0.6, "{r:?}");
+        assert!(
+            (r[0] - (page[0] + 72.0 * K)).abs() < 0.6 && (r[1] - (page[1] + y * K)).abs() < 0.6,
+            "{r:?}"
+        );
     }
     assert!(find(&rt, "sel-2").is_none());
     assert!(find(&rt, CARET).is_none(), "a range selection has no caret");
-    answer(&mut rt, &shared, edited(2, Some(at(0, 100.0, 112.0)), Vec::new(), marks()));
+    answer(
+        &mut rt,
+        &shared,
+        edited(2, Some(at(0, 100.0, 112.0)), Vec::new(), marks()),
+    );
     assert!(find(&rt, "sel-0").is_none() && find(&rt, CARET).is_some());
 }
 
@@ -555,17 +671,32 @@ fn a_selection_is_drawn_from_the_answer() {
 #[test]
 fn the_caret_blinks_only_with_the_keyboard() {
     let (mut rt, shared) = editor(true);
-    answer(&mut rt, &shared, edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()));
+    answer(
+        &mut rt,
+        &shared,
+        edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()),
+    );
     let idle = find(&rt, CARET).expect("caret");
-    assert!(idle.opacity < 1.0 && idle.loop_phase.is_none(), "an idle caret rests dimmed: {}", idle.opacity);
+    assert!(
+        idle.opacity < 1.0 && idle.loop_phase.is_none(),
+        "an idle caret rests dimmed: {}",
+        idle.opacity
+    );
     focus_surface(&mut rt);
     rt.update(|s, tx| {
         edit::poll(s, tx);
     });
     rt.frame(0.0);
     rt.frame(0.0);
-    assert!(viewers::ui(&mut rt.state).and_then(|u| u.office.edit.as_ref()).is_some_and(|e| e.has_keyboard));
-    assert!(find(&rt, CARET).expect("caret").loop_phase.is_some(), "a caret with the keyboard blinks");
+    assert!(
+        viewers::ui(&mut rt.state)
+            .and_then(|u| u.office.edit.as_ref())
+            .is_some_and(|e| e.has_keyboard)
+    );
+    assert!(
+        find(&rt, CARET).expect("caret").loop_phase.is_some(),
+        "a caret with the keyboard blinks"
+    );
 }
 
 /// A caret the editor moved off screen is scrolled into view, and not before the editor has answered.
@@ -573,11 +704,22 @@ fn the_caret_blinks_only_with_the_keyboard() {
 fn the_caret_is_scrolled_into_view() {
     let (mut rt, shared) = editor(true);
     focus_surface(&mut rt);
-    answer(&mut rt, &shared, edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()));
+    answer(
+        &mut rt,
+        &shared,
+        edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()),
+    );
     // A move down: asked, and the editor answers with the caret on page 4.
     plain(&mut rt, Key::PageDown);
-    assert!(viewers::doc_mut(&mut rt.state).is_some_and(|d| d.reveal.is_some()), "waiting for the editor's answer");
-    answer(&mut rt, &shared, edited(2, Some(at(3, 72.0, 400.0)), Vec::new(), marks()));
+    assert!(
+        viewers::doc_mut(&mut rt.state).is_some_and(|d| d.reveal.is_some()),
+        "waiting for the editor's answer"
+    );
+    answer(
+        &mut rt,
+        &shared,
+        edited(2, Some(at(3, 72.0, 400.0)), Vec::new(), marks()),
+    );
     for _ in 0..4 {
         rt.frame(0.0);
     }
@@ -587,7 +729,10 @@ fn the_caret_is_scrolled_into_view() {
         caret[1] >= stage[1] && caret[1] + caret[3] <= stage[1] + stage[3],
         "the caret {caret:?} is in the stage {stage:?}"
     );
-    assert!(viewers::doc_mut(&mut rt.state).is_some_and(|d| d.reveal.is_none()), "no longer waiting");
+    assert!(
+        viewers::doc_mut(&mut rt.state).is_some_and(|d| d.reveal.is_none()),
+        "no longer waiting"
+    );
 }
 
 /// A caret that is in view does not move the stage.
@@ -595,10 +740,18 @@ fn the_caret_is_scrolled_into_view() {
 fn a_visible_caret_does_not_scroll() {
     let (mut rt, shared) = editor(true);
     focus_surface(&mut rt);
-    answer(&mut rt, &shared, edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()));
+    answer(
+        &mut rt,
+        &shared,
+        edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()),
+    );
     let before = rect(&rt, "page")[1];
     plain(&mut rt, Key::Right);
-    answer(&mut rt, &shared, edited(2, Some(at(0, 80.0, 96.0)), Vec::new(), marks()));
+    answer(
+        &mut rt,
+        &shared,
+        edited(2, Some(at(0, 80.0, 96.0)), Vec::new(), marks()),
+    );
     for _ in 0..3 {
         rt.frame(0.0);
     }
@@ -609,7 +762,11 @@ fn a_visible_caret_does_not_scroll() {
 #[test]
 fn the_wheel_scrolls_and_ctrl_wheel_zooms() {
     let (mut rt, shared) = editor(true);
-    answer(&mut rt, &shared, edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()));
+    answer(
+        &mut rt,
+        &shared,
+        edited(1, Some(at(0, 72.0, 96.0)), Vec::new(), marks()),
+    );
     focus_surface(&mut rt);
     plain(&mut rt, Key::Down);
     assert!(viewers::doc_mut(&mut rt.state).is_some_and(|d| d.reveal.is_some()));
@@ -621,7 +778,10 @@ fn the_wheel_scrolls_and_ctrl_wheel_zooms() {
         rt.frame(1.0 / 60.0);
     }
     assert!(rect(&rt, "page")[1] < before, "the stage scrolled");
-    assert!(viewers::doc_mut(&mut rt.state).is_some_and(|d| d.reveal.is_none()), "a scroll away is not taken back");
+    assert!(
+        viewers::doc_mut(&mut rt.state).is_some_and(|d| d.reveal.is_none()),
+        "a scroll away is not taken back"
+    );
     rt.wheel_event(WheelEvent::new(0.0, 40.0).at(x, y).mods(ctrl()));
     rt.frame(0.0);
     assert_eq!(viewers::doc_mut(&mut rt.state).map(|d| d.view.zoom), Some(110));

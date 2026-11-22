@@ -62,7 +62,12 @@ fn push(rows: &mut Vec<Row>, depth: usize, key: Option<&str>, v: &Value) {
         Value::Bool(b) => (b.to_string(), Kind::Lit),
         Value::Null => ("null".to_string(), Kind::Lit),
     };
-    rows.push(Row { depth, key: key.map(str::to_string), text, kind });
+    rows.push(Row {
+        depth,
+        key: key.map(str::to_string),
+        text,
+        kind,
+    });
     match v {
         Value::Object(o) => o.iter().for_each(|(k, c)| push(rows, depth + 1, Some(k), c)),
         Value::Array(a) => a.iter().for_each(|c| push(rows, depth + 1, None, c)),
@@ -77,7 +82,12 @@ pub(super) fn parse(source: &str) -> Parsed {
             push(&mut rows, 0, None, &v);
             let total = count(&v);
             if total > rows.len() {
-                rows.push(Row { depth: 0, key: None, text: format!("... {} more", total - rows.len()), kind: Kind::More });
+                rows.push(Row {
+                    depth: 0,
+                    key: None,
+                    text: format!("... {} more", total - rows.len()),
+                    kind: Kind::More,
+                });
             }
             Ok(rows)
         }
@@ -117,9 +127,19 @@ pub fn view(source: &str, _ui: &Ui, t: &Theme) -> El {
                 };
                 let mut line = row().key(format!("live-json-row-{i}")).pl(r.depth as f32 * INDENT);
                 if let Some(k) = &r.key {
-                    line = line.child(kit::label(format!("live-json-key-{i}"), format!("{k}: "), style::CODE, t.text_secondary));
+                    line = line.child(kit::label(
+                        format!("live-json-key-{i}"),
+                        format!("{k}: "),
+                        style::CODE,
+                        t.text_secondary,
+                    ));
                 }
-                c = c.child(line.child(kit::label(format!("live-json-val-{i}"), r.text.clone(), style::CODE, color)));
+                c = c.child(line.child(kit::label(
+                    format!("live-json-val-{i}"),
+                    r.text.clone(),
+                    style::CODE,
+                    color,
+                )));
             }
             c
         }

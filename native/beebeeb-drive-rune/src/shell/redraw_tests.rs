@@ -73,8 +73,14 @@ fn the_locked_view_asks_for_no_redraw_without_a_state_change() {
             );
         } else {
             quiet += 1;
-            assert_eq!(live.rt.stats.commits, commits, "ring {ring}: the view ran for a ring that moved nothing");
-            assert!(!live.rt.animating, "ring {ring}: the locked window animates with nothing new");
+            assert_eq!(
+                live.rt.stats.commits, commits,
+                "ring {ring}: the view ran for a ring that moved nothing"
+            );
+            assert!(
+                !live.rt.animating,
+                "ring {ring}: the locked window animates with nothing new"
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }

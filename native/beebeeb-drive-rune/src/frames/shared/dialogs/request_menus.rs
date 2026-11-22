@@ -131,7 +131,11 @@ impl Pick {
         RequestForm {
             title: title.trim().to_string(),
             note: note.trim().to_string(),
-            target_folder: self.folder.checked_sub(1).and_then(|i| self.folders.get(i)).map(|(id, _)| id.clone()),
+            target_folder: self
+                .folder
+                .checked_sub(1)
+                .and_then(|i| self.folders.get(i))
+                .map(|(id, _)| id.clone()),
             max_files: FILES[self.files].1,
             max_total_bytes: SIZES[self.size].1,
             expires_in_hours: EXPIRES[self.expires].1,

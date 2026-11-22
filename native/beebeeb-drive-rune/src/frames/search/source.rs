@@ -10,8 +10,8 @@
 
 use crate::frames::files::source::Details;
 use crate::frames::shared::parts::table::Kind;
-use std::sync::Arc;
 use crate::ui::file_list::PcState;
+use std::sync::Arc;
 
 /// What the pills narrow a search to (DW-0802: All · Folders · Photos · Documents).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

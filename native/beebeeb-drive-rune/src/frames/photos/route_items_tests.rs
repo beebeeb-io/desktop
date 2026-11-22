@@ -54,7 +54,12 @@ impl PhotosSource for Held {
     }
     fn file_items(&self, ids: &[PhotoId]) -> Option<Vec<DriveItem>> {
         ids.iter()
-            .map(|id| self.files.iter().find(|(photo, _)| photo == id).map(|(_, item)| item.clone()))
+            .map(|id| {
+                self.files
+                    .iter()
+                    .find(|(photo, _)| photo == id)
+                    .map(|(_, item)| item.clone())
+            })
             .collect()
     }
     fn devices(&self) -> Vec<Device> {
@@ -114,7 +119,15 @@ fn window(protected: bool) -> (Runtime<State>, Arc<Mutex<Vec<Call>>>) {
 }
 
 fn window_with(protected: bool, unshowable: bool) -> (Runtime<State>, Arc<Mutex<Vec<Call>>>) {
-    let mut rt = Runtime::new(init(), view, (1278.0, 798.0), Env { system_dark: false, scale: 2.0 });
+    let mut rt = Runtime::new(
+        init(),
+        view,
+        (1278.0, 798.0),
+        Env {
+            system_dark: false,
+            scale: 2.0,
+        },
+    );
     rt.on_key = Some(crate::shell::host::on_key);
     rt.poll = Some(crate::shell::host::poll);
     rt.frame(0.0);
@@ -122,7 +135,10 @@ fn window_with(protected: bool, unshowable: bool) -> (Runtime<State>, Arc<Mutex<
     crate::shell::host::dispatch(&mut rt.state, Event::Navigate(Route::section(Section::Photos)));
     rt.state.photos = Ui::new(Box::new(Held {
         library: FixturePhotos::new(),
-        files: vec![(A, file("f-a", "harbour.jpg", protected)), (B, file("f-b", "dock.jpg", false))],
+        files: vec![
+            (A, file("f-a", "harbour.jpg", protected)),
+            (B, file("f-b", "dock.jpg", false)),
+        ],
         unshowable,
     }));
     let fixture = FilesFixture::default();
@@ -190,7 +206,10 @@ fn rename_to_a_taken_name_is_refused_before_the_source_is_asked() {
     let (mut rt, calls) = window(false);
     rt.state.photos.ask(Intent::Rename(A));
     settle(&mut rt);
-    assert!(matches!(rt.state.photos.dialog, Some(Dialog::Rename(_))), "the name dialog opened");
+    assert!(
+        matches!(rt.state.photos.dialog, Some(Dialog::Rename(_))),
+        "the name dialog opened"
+    );
 
     // Another file of the folder has it, with other capitals: Files' rule.
     type_name(&mut rt, "DOCK.jpg");
@@ -238,7 +257,10 @@ fn show_in_folder_reveals_the_photos_file_and_nothing_else() {
     let (mut rt, calls) = window(false);
     rt.state.photos.ask(Intent::ShowInFolder(A));
     settle(&mut rt);
-    assert_eq!(*calls.lock().unwrap(), [Call::ShowInFileExplorer(vec!["f-a".to_string()])]);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [Call::ShowInFileExplorer(vec!["f-a".to_string()])]
+    );
     assert_eq!(rt.state.photos.toast, None);
     // A photo with no file on this PC: the line, no call.
     calls.lock().unwrap().clear();
@@ -251,7 +273,9 @@ fn show_in_folder_reveals_the_photos_file_and_nothing_else() {
 fn has(rt: &mut Runtime<State>, key: &str) -> bool {
     rt.settle_all();
     rt.frame(0.0);
-    rt.elements().into_iter().any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+    rt.elements()
+        .into_iter()
+        .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
 #[test]
@@ -294,5 +318,10 @@ fn a_pc_with_no_default_app_gets_the_file_selected_in_its_folder() {
 }
 
 fn viewer(id: PhotoId) -> super::super::Viewer {
-    super::super::Viewer { id, original: super::super::Original::Preview, playing: false, gone: None }
+    super::super::Viewer {
+        id,
+        original: super::super::Original::Preview,
+        playing: false,
+        gone: None,
+    }
 }

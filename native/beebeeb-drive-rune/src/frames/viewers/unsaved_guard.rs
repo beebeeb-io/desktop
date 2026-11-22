@@ -57,14 +57,10 @@ pub(crate) type Press = fn(&mut State, &mut Tx);
 
 /// The open document holds changes no save has landed.
 pub(crate) fn holds(s: &State) -> bool {
-    s.viewer.ui.as_ref().is_some_and(|ui| {
-        ui.dirty()
-            || ui
-                .office
-                .edit
-                .as_ref()
-                .is_some_and(|e| !e.stopped && e.unsaved())
-    })
+    s.viewer
+        .ui
+        .as_ref()
+        .is_some_and(|ui| ui.dirty() || ui.office.edit.as_ref().is_some_and(|e| !e.stopped && e.unsaved()))
 }
 
 /// The open document's name for the question.
@@ -127,11 +123,14 @@ pub(crate) fn question(
         cancel_b = cancel_b.on_press_tx(on_cancel);
     }
     let foot = vec![(save_b, false), (discard_b, false), (cancel_b, true)];
-    set::dialog_enter(title, 440.0, title, words, Vec::new(), foot, Some(0), t).modal_tx(false, move |s: &mut State, tx: &mut Tx| {
-        if !saving {
-            on_cancel(s, tx);
-        }
-    })
+    set::dialog_enter(title, 440.0, title, words, Vec::new(), foot, Some(0), t).modal_tx(
+        false,
+        move |s: &mut State, tx: &mut Tx| {
+            if !saving {
+                on_cancel(s, tx);
+            }
+        },
+    )
 }
 
 /// What the question says.
@@ -229,7 +228,12 @@ pub(crate) fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         .w_full()
         .h_full()
         .child(behind)
-        .child(rune::el().key("dialog-unsaved").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).child(card))
+        .child(
+            rune::el()
+                .key("dialog-unsaved")
+                .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .child(card),
+        )
 }
 
 /// The poll: the question goes with its editor; while Save waits, the ending follows the save.

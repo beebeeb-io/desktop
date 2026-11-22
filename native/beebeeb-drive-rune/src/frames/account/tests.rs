@@ -85,8 +85,14 @@ pub(super) fn tab_to(rt: &mut Runtime<State>, target: &str) {
 /// Focus the row keyed `item-<L>-<I>` the way a person does: Tab to it, or, in a roving list (one Tab stop),
 /// Tab into the list and arrow down to it.
 pub(super) fn row_to(rt: &mut Runtime<State>, target: &str) {
-    let list = target.rsplit_once('-').map(|(l, _)| format!("{l}-")).expect("item-<L>-<I>");
-    let is_row = |k: &str| k.strip_prefix(list.as_str()).is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()));
+    let list = target
+        .rsplit_once('-')
+        .map(|(l, _)| format!("{l}-"))
+        .expect("item-<L>-<I>");
+    let is_row = |k: &str| {
+        k.strip_prefix(list.as_str())
+            .is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()))
+    };
     // A plain list: every row its own Tab stop.
     for _ in 0..80 {
         if find(rt, target).is_some_and(|e| e.focused) {
@@ -96,7 +102,11 @@ pub(super) fn row_to(rt: &mut Runtime<State>, target: &str) {
     }
     // A roving list: its one stop, then the arrows.
     for _ in 0..80 {
-        let now = rt.elements().into_iter().find(|e| e.focused && !e.exiting).and_then(|e| e.key);
+        let now = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.focused && !e.exiting)
+            .and_then(|e| e.key);
         if now.as_deref() == Some(target) {
             return;
         }
@@ -1217,8 +1227,16 @@ fn the_delete_subtitle_is_the_boards_two_lines_and_names_no_length_of_time() {
 #[test]
 fn every_settings_pane_draws_the_same_sidebar() {
     const NAMES: [&str; 10] = [
-        "General", "Account", "Security", "Devices and sessions", "Notifications", "Storage", "Backups",
-        "Sync and File Explorer", "Thumbnails and previews", "Bandwidth",
+        "General",
+        "Account",
+        "Security",
+        "Devices and sessions",
+        "Notifications",
+        "Storage",
+        "Backups",
+        "Sync and File Explorer",
+        "Thumbnails and previews",
+        "Bandwidth",
     ];
     let sidebar = |frame: &str| -> (Vec<String>, Vec<String>) {
         let mut state = init();
@@ -1232,9 +1250,14 @@ fn every_settings_pane_draws_the_same_sidebar() {
         for e in rt.elements().into_iter().filter(|e| !e.exiting) {
             let Some(k) = e.key.as_deref() else { continue };
             let labelled = |suffix: &str| {
-                k.strip_suffix(suffix).is_some_and(|l| l == "Back to Drive" || NAMES.contains(&l))
+                k.strip_suffix(suffix)
+                    .is_some_and(|l| l == "Back to Drive" || NAMES.contains(&l))
             };
-            let side = k == "sidebar" || k == "settings-nav" || k.starts_with("side-") || labelled("-row") || labelled("-icon");
+            let side = k == "sidebar"
+                || k == "settings-nav"
+                || k.starts_with("side-")
+                || labelled("-row")
+                || labelled("-icon");
             if side {
                 shape.push(format!("{k}|{:?}|{:?}", e.role, e.label));
                 if k.ends_with("-row") && e.fill.a > 0.0 {
@@ -1248,7 +1271,10 @@ fn every_settings_pane_draws_the_same_sidebar() {
         "DW-0701", "DW-A51", "DW-S01", "DW-A55", "DW-0750", "DW-0712", "DW-0746", "DW-0744", "DW-0785",
     ];
     let (first, _) = sidebar(frames[0]);
-    assert!(first.iter().any(|k| k.starts_with("Security-row")), "the sidebar is there");
+    assert!(
+        first.iter().any(|k| k.starts_with("Security-row")),
+        "the sidebar is there"
+    );
     assert!(first.iter().any(|k| k.starts_with("Bandwidth-icon")));
     for frame in frames {
         let (shape, selected) = sidebar(frame);
@@ -1258,7 +1284,10 @@ fn every_settings_pane_draws_the_same_sidebar() {
 }
 
 fn focused(rt: &Runtime<State>) -> Option<String> {
-    rt.elements().into_iter().find(|e| e.focused && !e.exiting).and_then(|e| e.key)
+    rt.elements()
+        .into_iter()
+        .find(|e| e.focused && !e.exiting)
+        .and_then(|e| e.key)
 }
 
 /// Sign-in on the Security page is a list of rows that each open a page: one Tab stop, the arrows, Home, End,
@@ -1295,13 +1324,21 @@ fn delete_on_a_device_row_asks_the_same_confirm_as_its_button() {
     let mut rt = runtime("DW-A55");
     tab_to(&mut rt, "btn-0");
     key(&mut rt, Key::Enter);
-    let by_button = (rt.state.account.dialog.clone(), says(&rt, "dlg-title"), name(&rt, "btn-3"));
+    let by_button = (
+        rt.state.account.dialog.clone(),
+        says(&rt, "dlg-title"),
+        name(&rt, "btn-3"),
+    );
     key(&mut rt, Key::Escape);
     assert_eq!(rt.state.account.dialog, None);
     tab_to(&mut rt, "btn-0");
     key(&mut rt, Key::Delete);
     assert_eq!(
-        (rt.state.account.dialog.clone(), says(&rt, "dlg-title"), name(&rt, "btn-3")),
+        (
+            rt.state.account.dialog.clone(),
+            says(&rt, "dlg-title"),
+            name(&rt, "btn-3")
+        ),
         by_button
     );
     assert_eq!(by_button.0, Some(Dialog::SignOutDevice("dev-iphone".into())));

@@ -165,7 +165,15 @@ pub fn button(
 /// The outlined button ("Add files" in an empty folder): Secondary, Md, Enabled. The caller adds
 /// `.on_press(..)`.
 pub fn outline_button(key: &str, label: &str, ic: Option<&'static Icon>, t: &Theme) -> El {
-    button(keys(key), label, ic, Variant::Secondary, Size::Md, ButtonState::Enabled, t)
+    button(
+        keys(key),
+        label,
+        ic,
+        Variant::Secondary,
+        Size::Md,
+        ButtonState::Enabled,
+        t,
+    )
 }
 
 #[cfg(test)]

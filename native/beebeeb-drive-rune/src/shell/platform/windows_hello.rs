@@ -499,13 +499,13 @@ mod imp {
         use std::time::{Duration, Instant};
 
         use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, TRUE};
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            EnumWindows, GW_OWNER, GetClassNameW, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
-            WM_CLOSE,
-        };
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
             TerminateProcess,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GW_OWNER, GetClassNameW, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
+            WM_CLOSE,
         };
 
         const CLASS: &str = "Credential Dialog Xaml Host";
