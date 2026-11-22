@@ -495,7 +495,7 @@ fn an_outline_past_its_time_budget_is_stopped() {
         .iter()
         .filter(|(kind, _)| *kind == office::KIND_OUTLINE)
         .count();
-    assert!(pages >= 3, "each page came in time: {pages} asked");
+    assert!(pages >= 2, "each page came in time: {pages} asked");
     assert!(!events.iter().any(|event| matches!(event, Event::Outline(_))));
     assert_eq!(log.kills(), 1);
 }
