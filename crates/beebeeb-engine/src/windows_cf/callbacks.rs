@@ -238,6 +238,23 @@ pub unsafe extern "system" fn fetch_data_callback(
         return;
     }
 
+    // LD-0092: a placeholder whose size correction is still pending (its reader held it when the
+    // mismatch was found) is known to have the wrong size: fail at once, no download, until the
+    // retry loop has resized it.
+    if pending_resize(&file_id).is_some() {
+        tracing::debug!(file_id = %file_id, "fetch refused while the placeholder's size correction is pending");
+        unsafe {
+            fail_transfer(
+                connection_key,
+                transfer_key,
+                request_key,
+                required_offset,
+                required_length,
+            )
+        };
+        return;
+    }
+
     // Reach the daemon's tokio runtime. The filter-driver worker thread
     // we're on has no runtime attached, so `Handle::try_current()` would
     // fail — we use the handle stashed in `connect_root()` instead.
@@ -305,15 +322,30 @@ pub unsafe extern "system" fn fetch_data_callback(
     // read, `meter`) to Cloud Files at least every few seconds. Windows fails a request that sees no
     // provider activity for 60 s and fetches the file again from its first byte; the reports reset that
     // timer. A minute without a new byte stops them, so a dead network still fails the open.
-    let meter = crate::transfer_progress::ReceiveMeter::default();
+    //
+    // LD-0110: one download per file at a time, shared. A fetch that finds another fetch of the same
+    // file downloading waits for that download instead of starting its own, and a download that just
+    // finished is served again for a short while ([`share::join_or_lead`]); the first fetch to
+    // transfer it sends the WHOLE file, so the reader's next reads find their bytes on disk.
+    let role = share::join_or_lead(&file_id);
+    let meter = role.shared().meter.clone();
     // LD-0105 U1: the fetch's named "Downloading" row (tray, Activity), following the same meter; it
     // ends with `finished()` once the whole file is transferred, and every other exit below marks it failed.
     let row = bridge.whole_fetch_row(&file_id, u64::try_from(file_size).unwrap_or(0));
     let buf = handle.block_on(async {
+        let fetch = async {
+            match &role {
+                share::Role::Lead(lead) => {
+                    let result = bridge.hydrate_file_to_memory_metered(&file_id, Some(&*meter)).await;
+                    lead.finish(result)
+                }
+                share::Role::Join(shared) => shared.wait().await,
+            }
+        };
         tokio::select! {
             biased;
             _ = super::cancelled(&bridge) => Err(anyhow::anyhow!("vault locked")),
-            result = bridge.hydrate_file_to_memory_metered(&file_id, Some(&meter)) => result,
+            result = fetch => result,
             never = super::fetch_progress::keep_fetch_alive(connection_key, transfer_key, file_size, &meter) => match never {},
             never = row.follow(&meter) => match never {},
             // Hydration deadline: a link that delivers no new byte for HYDRATE_STALL_SECS fails the
@@ -321,11 +353,9 @@ pub unsafe extern "system" fn fetch_data_callback(
             _ = hydrate_stalled(&meter) => Err(anyhow::anyhow!("hydration stalled: no data for {HYDRATE_STALL_SECS} s")),
         }
     });
-    let crate::engine_bridge::FetchedBytes {
-        bytes: buf,
-        version: fetched,
-        ticket,
-    } = match buf {
+    // A lead cut off above (lock, stall) tells its joiners when this drops.
+    drop(role);
+    let downloaded = match buf {
         Ok(b) => b,
         Err(e) => {
             // Do NOT log the error's inner content at info+ if it could carry
@@ -378,12 +408,17 @@ pub unsafe extern "system" fn fetch_data_callback(
     //   a fresh, now-aligned FETCH_DATA and hydrates successfully, so the file
     //   becomes openable at its true size.
     //
+    //   A resize refused because the reader still holds the file is retried each
+    //   second (LD-0092, `retry_pending_resize`); fetches of the file fail at once
+    //   without a download until it applies.
+    //
     //   Tier-2 (visible error): if the out-of-band correction itself can't be
-    //   applied (the resize failed — the placeholder is gone, or some other CF
-    //   error), we still must not be silent: flip the row to Error and mark the
+    //   applied (no placeholder path, or the resize stays refused through every
+    //   retry), we still must not be silent: flip the row to Error and mark the
     //   placeholder NOT in-sync so Explorer shows a non-synced/error overlay
     //   rather than a green check on a file that won't open. The failed
     //   transfer (below) already surfaces an error on this open.
+    let buf: &[u8] = &downloaded.bytes;
     if let SizeDecision::ResolveTo { corrected_size } = decide_size_action(buf.len() as i64, file_size) {
         tracing::warn!(
             file_id = %file_id,
@@ -392,9 +427,10 @@ pub unsafe extern "system" fn fetch_data_callback(
             "hydrated size != placeholder size; resolving to the decrypted (authenticated) length"
         );
 
-        // Drop `buf` here — the resolution path works from the size only,
-        // never the bytes. The Zeroizing drop wipes the allocation.
-        drop(buf);
+        // Drop the bytes here — the resolution path works from the size only,
+        // never the bytes. The Zeroizing drop wipes the allocation once the
+        // shared download lets go of it too.
+        drop(downloaded);
 
         // Fail THIS fetch cleanly first: the file must not be mid-hydration
         // when we resize, and Explorer must stop spinning on this open.
@@ -417,43 +453,58 @@ pub unsafe extern "system" fn fetch_data_callback(
 
     // Splice the required range back into the placeholder. `buf` is kept alive
     // here so the data is valid for every CfExecute call inside transfer_range.
+    let cancelled = || bridge.is_revoked() || bridge.is_stopping();
     let transfer_ok = unsafe {
         transfer_range(
             connection_key,
             transfer_key,
             request_key,
-            &buf,
-            || bridge.is_revoked() || bridge.is_stopping(),
+            buf,
+            cancelled,
             required_offset,
             required_length,
         )
     };
 
-    // Drop `buf` now — transfer_range has consumed all bytes it needs.
-    // The Zeroizing wrapper wipes the plaintext allocation on drop.
-    drop(buf);
-
     match transfer_ok {
         Ok(()) => {
             row.finished();
             tracing::info!(file_id = %file_id, "hydrated and transferred Cloud Files range");
+            // LD-0110: the whole version is in hand, so the rest of the file goes into the
+            // placeholder too, after the required range (the reader is unblocked first). The
+            // reader's next reads then find their bytes on disk instead of each firing a fetch
+            // that downloads the file again. Best-effort: a refused extra range only means the
+            // file is not known to be whole, so it is not marked in sync.
+            let rest_ok = rest_ranges(required_offset, required_length, buf.len() as i64)
+                .into_iter()
+                .flatten()
+                .all(|(offset, length)| {
+                    match unsafe {
+                        transfer_range(connection_key, transfer_key, request_key, buf, cancelled, offset, length)
+                    } {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::debug!(file_id = %file_id, error = %e, offset, length, "transfer of the rest of the file refused");
+                            false
+                        }
+                    }
+                });
             // Best-effort: mark the placeholder IN_SYNC so Explorer flips
             // the overlay from "downloading" to the synced check — but
             // ONLY when this fetch delivered the whole file. With
             // CF_HYDRATION_POLICY_PARTIAL a request may cover just a
             // range; marking the file fully in-sync after a partial
             // transfer would be a lie and could suppress later fetches.
-            // (hydrate_file_to_memory always decrypts the whole file, so a
-            // [0, file_size) required range means the file is now fully
-            // present.) A failure here doesn't undo the transfer, so we
-            // only log.
-            let whole_file = required_offset == 0 && required_length >= file_size;
+            // A failure here doesn't undo the transfer, so we only log.
+            let whole_file = rest_ok && buf.len() as i64 == file_size;
             if whole_file {
                 // Task 1640 (review F1): every byte on disk is this fetch's version now, so they
                 // become the agreed content; only now, after the transfer, never before (a
                 // transfer that fails or is cut off leaves the fetch's candidate, recorded before
                 // it, which only moves down). A failure leaves that candidate: never too high.
-                if let Some(fetched) = fetched.as_ref() {
+                // The download's ticket goes with it; a fetch served the same download later finds
+                // it taken, and the record already made.
+                if let (Some(fetched), Some(ticket)) = (downloaded.version.as_ref(), downloaded.take_ticket()) {
                     if let Err(e) = bridge.record_whole_fetch(&file_id, fetched, &ticket) {
                         tracing::warn!(file_id = %file_id, error = %e, "could not record the fetched file as agreed");
                     }
@@ -483,9 +534,270 @@ pub unsafe extern "system" fn fetch_data_callback(
             };
         }
     }
-    // Task 1640 (self-review #1): this fetch's transfer has ended; another fetch's agreed content
-    // may now be recorded.
-    drop(ticket);
+    // Task 1640 (self-review #1): this fetch's transfer has ended. The download's ticket (when no
+    // whole transfer took it) ends with the download itself: when the last fetch served it lets go
+    // and its short reuse window has passed; then another fetch's agreed content may be recorded.
+    drop(downloaded);
+}
+
+/// LD-0110: the parts of a `len`-byte file outside the required range `[offset, offset + length)`,
+/// in transfer order: the tail after it, then the head before it. `None` for an empty part. Cloud
+/// Files asks for page-aligned ranges, so each part starts and ends on a page boundary or at EOF.
+fn rest_ranges(offset: i64, length: i64, len: i64) -> [Option<(i64, i64)>; 2] {
+    let start = offset.clamp(0, len);
+    let end = offset.saturating_add(length).clamp(start, len);
+    [
+        (end < len).then_some((end, len - end)),
+        (start > 0).then_some((0, start)),
+    ]
+}
+
+/// LD-0110: one whole-file download per file, shared by the fetches that need it while it runs and
+/// for [`REUSE_SECS`] after. Without it, a reader of a cloud-only file (robocopy, a ZIP reader) whose
+/// every read fires its own fetch downloaded the whole version again for each read.
+mod share {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+    use std::time::{Duration, Instant};
+
+    use crate::engine_bridge::{FetchTicket, FetchedBytes, FetchedVersion};
+    use crate::transfer_progress::ReceiveMeter;
+
+    /// How long a finished download is served again to a new fetch of the same file.
+    pub(super) const REUSE_SECS: u64 = 10;
+    /// A finished download larger than this is not kept for reuse (memory); it is still shared by
+    /// the fetches already waiting on it, and its first transfer sends the whole file anyway.
+    pub(super) const REUSE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+    /// One download's plaintext (wiped on drop), the version it is, and its fetch ticket.
+    pub(super) struct Downloaded {
+        pub(super) bytes: zeroize::Zeroizing<Vec<u8>>,
+        pub(super) version: Option<FetchedVersion>,
+        ticket: Mutex<Option<FetchTicket>>,
+    }
+
+    impl Downloaded {
+        /// The download's ticket, for the one fetch that transfers the whole file; `None` after.
+        pub(super) fn take_ticket(&self) -> Option<FetchTicket> {
+            self.ticket.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+        }
+    }
+
+    type Outcome = Option<Result<Arc<Downloaded>, String>>;
+
+    pub(super) struct Shared {
+        /// The lead's receive meter; joiners report its progress to Cloud Files too.
+        pub(super) meter: Arc<ReceiveMeter>,
+        outcome: tokio::sync::watch::Sender<Outcome>,
+        finished_at: Mutex<Option<Instant>>,
+    }
+
+    impl Shared {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                meter: Arc::new(ReceiveMeter::default()),
+                outcome: tokio::sync::watch::channel(None).0,
+                finished_at: Mutex::new(None),
+            })
+        }
+
+        /// Wait for the lead's download.
+        pub(super) async fn wait(&self) -> anyhow::Result<Arc<Downloaded>> {
+            let mut rx = self.outcome.subscribe();
+            let outcome = rx
+                .wait_for(Option::is_some)
+                .await
+                .map_err(|_| anyhow::anyhow!("the shared download went away"))?;
+            match outcome.as_ref() {
+                Some(Ok(done)) => Ok(done.clone()),
+                Some(Err(e)) => Err(anyhow::anyhow!("the shared download failed: {e}")),
+                None => unreachable!("waited for an outcome"),
+            }
+        }
+
+        /// Whether a new fetch may be served this download: finished well, and recently.
+        fn reusable(&self, now: Instant) -> bool {
+            let finished = *self.finished_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match finished {
+                None => true, // still downloading: join it
+                Some(at) => {
+                    matches!(&*self.outcome.borrow(), Some(Ok(_))) && now.duration_since(at) < Duration::from_secs(REUSE_SECS)
+                }
+            }
+        }
+    }
+
+    static DOWNLOADS: LazyLock<Mutex<HashMap<String, Arc<Shared>>>> = LazyLock::new(Default::default);
+
+    fn downloads() -> std::sync::MutexGuard<'static, HashMap<String, Arc<Shared>>> {
+        DOWNLOADS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) enum Role {
+        /// This fetch downloads; the others wait for it.
+        Lead(Lead),
+        /// Another fetch's download, running or just finished.
+        Join(Arc<Shared>),
+    }
+
+    impl Role {
+        pub(super) fn shared(&self) -> &Arc<Shared> {
+            match self {
+                Role::Lead(lead) => &lead.shared,
+                Role::Join(shared) => shared,
+            }
+        }
+    }
+
+    /// The fetch that downloads. Dropped without [`Lead::finish`] (cut off by a lock or a stall), it
+    /// fails its joiners and leaves the place free for the next fetch.
+    pub(super) struct Lead {
+        file_id: String,
+        shared: Arc<Shared>,
+        finished: std::sync::atomic::AtomicBool,
+    }
+
+    impl Lead {
+        /// Hand the download's result to every joiner, and give it back to the lead.
+        pub(super) fn finish(&self, result: anyhow::Result<FetchedBytes>) -> anyhow::Result<Arc<Downloaded>> {
+            self.publish(result.map(|fetched| {
+                Arc::new(Downloaded {
+                    bytes: fetched.bytes,
+                    version: fetched.version,
+                    ticket: Mutex::new(Some(fetched.ticket)),
+                })
+            }))
+        }
+
+        /// [`Self::finish`] once the result is a [`Downloaded`].
+        pub(super) fn publish(&self, result: anyhow::Result<Arc<Downloaded>>) -> anyhow::Result<Arc<Downloaded>> {
+            let keep = matches!(&result, Ok(done) if done.bytes.len() <= REUSE_MAX_BYTES);
+            self.settle(match &result {
+                Ok(done) => Ok(done.clone()),
+                Err(e) => Err(e.to_string()),
+            }, keep);
+            result
+        }
+
+        fn settle(&self, outcome: Result<Arc<Downloaded>, String>, keep: bool) {
+            if self.finished.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            *self.shared.finished_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+            self.shared.outcome.send_replace(Some(outcome));
+            if !keep {
+                let mut map = downloads();
+                if map.get(&self.file_id).is_some_and(|s| Arc::ptr_eq(s, &self.shared)) {
+                    map.remove(&self.file_id);
+                }
+            }
+        }
+    }
+
+    impl Drop for Lead {
+        fn drop(&mut self) {
+            self.settle(Err("the downloading fetch was cut off".into()), false);
+        }
+    }
+
+    /// Join the file's running (or just finished) download, or lead a new one. Stale entries of
+    /// every file are dropped on the way, so a kept download's memory goes once its window passes.
+    pub(super) fn join_or_lead(file_id: &str) -> Role {
+        let now = Instant::now();
+        let mut map = downloads();
+        map.retain(|_, shared| shared.reusable(now));
+        if let Some(shared) = map.get(file_id) {
+            return Role::Join(shared.clone());
+        }
+        let shared = Shared::new();
+        map.insert(file_id.to_string(), shared.clone());
+        Role::Lead(Lead {
+            file_id: file_id.to_string(),
+            shared,
+            finished: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn forget_all() {
+        downloads().clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn downloaded(bytes: Vec<u8>) -> Arc<Downloaded> {
+        Arc::new(Downloaded {
+            bytes: zeroize::Zeroizing::new(bytes),
+            version: None,
+            ticket: Mutex::new(None),
+        })
+    }
+}
+
+/// LD-0092: placeholders whose size correction could not be applied yet (the reader that fetched
+/// still holds the file: `CfOpenFileWithOplock` 0x80070322 / 0x80070020), by file id, with the
+/// authenticated size they wait for. While a file is here, a fetch of it fails at once without a
+/// download: its placeholder size is known wrong, so a download could only mismatch again. Before
+/// this, every such fetch downloaded the whole file, failed the resize, and marked the file Error
+/// and not in sync; the reader retried within a millisecond (1,447 downloads of one file).
+static PENDING_RESIZE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// How often, and how many times, a pending size correction is tried again before it is an error.
+const RESIZE_RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+const RESIZE_RETRIES: u32 = 300;
+
+fn pending_resizes() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, i64>> {
+    PENDING_RESIZE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The size `file_id`'s placeholder waits to be corrected to, if a correction is pending.
+fn pending_resize(file_id: &str) -> Option<i64> {
+    pending_resizes().get(file_id).copied()
+}
+
+/// Record a pending correction. `true` when none was pending (the caller starts the retry loop).
+fn add_pending_resize(file_id: &str, true_size: i64) -> bool {
+    pending_resizes().insert(file_id.to_string(), true_size).is_none()
+}
+
+/// Try the pending correction of `file_id` again every [`RESIZE_RETRY_EVERY`] until it applies
+/// (the reader closed the file), the engine stops, or [`RESIZE_RETRIES`] tries failed (then the file
+/// is marked Error and not in sync: a placeholder that will not take its size is a real error).
+fn retry_pending_resize(file_id: String, os_path: std::path::PathBuf) {
+    let Some(handle) = super::runtime() else {
+        pending_resizes().remove(&file_id);
+        return;
+    };
+    handle.spawn(async move {
+        for _ in 0..RESIZE_RETRIES {
+            tokio::time::sleep(RESIZE_RETRY_EVERY).await;
+            let Some(true_size) = pending_resize(&file_id) else {
+                return;
+            };
+            // A fresh lease per try, never held across the sleep, so a lock drains at once.
+            let Some(bridge) = super::bridge() else {
+                pending_resizes().remove(&file_id);
+                return;
+            };
+            match super::placeholders::resize_placeholder(&os_path, true_size) {
+                Ok(()) => {
+                    pending_resizes().remove(&file_id);
+                    let _ = bridge.db().set_status(&file_id, crate::state_db::FileStatus::CloudOnly);
+                    tracing::info!(file_id = %file_id, "resolved size mismatch; placeholder resized once the reader let go");
+                    return;
+                }
+                Err(e) => tracing::debug!(file_id = %file_id, error = %e, "pending placeholder resize still refused"),
+            }
+        }
+        pending_resizes().remove(&file_id);
+        if let Some(bridge) = super::bridge() {
+            tracing::warn!(file_id = %file_id, "placeholder resize still refused after retries; marking Error + not-in-sync");
+            let _ = bridge.db().set_status(&file_id, crate::state_db::FileStatus::Error);
+            let mut wide: Vec<u16> = os_path.as_os_str().encode_wide().collect();
+            wide.push(0);
+            unsafe { mark_not_in_sync(&wide) };
+        }
+    });
 }
 
 /// Resolve a hydration size mismatch out-of-band (task 0783, Tier-1) with a
@@ -571,10 +883,7 @@ fn resolve_size_with_path(
     // NormalizedPath (a NUL-terminated wide string we strip below). FALLBACK
     // (the common case — we connect without REQUIRE_FULL_FILE_PATH so this is
     // usually empty): reconstruct `<sync_root>/<state-DB rel path>` by file_id.
-    // We keep the wide form (when available) so Tier-2's mark_not_in_sync can
-    // reuse the exact openable path the OS gave us.
-    let mut wide_path: Option<Vec<u16>> = callback_path;
-    let os_path: Option<std::path::PathBuf> = match &wide_path {
+    let os_path: Option<std::path::PathBuf> = match &callback_path {
         Some(path) => {
             let path_no_nul: Vec<u16> = path.iter().copied().take_while(|&c| c != 0).collect();
             Some(std::path::PathBuf::from(String::from_utf16_lossy(&path_no_nul)))
@@ -589,15 +898,6 @@ fn resolve_size_with_path(
         let _ = bridge.db().set_status(file_id, crate::state_db::FileStatus::Error);
         return;
     };
-
-    // If we resolved via the DB (no wide path from the callback), build a
-    // NUL-terminated wide form too so a Tier-2 fallback can mark_not_in_sync the
-    // same on-disk file.
-    if wide_path.is_none() {
-        let mut w: Vec<u16> = os_path.as_os_str().encode_wide().collect();
-        w.push(0);
-        wide_path = Some(w);
-    }
 
     // Step 2 (Tier-1) — resize the placeholder to the authenticated length. On
     // success the next open hydrates against the aligned size and the file is
@@ -614,11 +914,16 @@ fn resolve_size_with_path(
             tracing::info!(file_id = %file_id, "resolved size mismatch; placeholder resized to decrypted length");
         }
         Err(e) => {
-            // Tier-2: the resize could not be applied — never leave it silent.
-            tracing::warn!(file_id = %file_id, error = %e, "placeholder resize failed; marking Error + not-in-sync");
-            let _ = bridge.db().set_status(file_id, crate::state_db::FileStatus::Error);
-            if let Some(path) = wide_path.as_deref() {
-                unsafe { mark_not_in_sync(path) };
+            // LD-0092: the resize is refused while the reader that fetched still holds the file
+            // (0x80070322 oplock / 0x80070020 in use). That is not an error yet: the correction
+            // stays pending and is tried again each second until the reader lets go; meanwhile a
+            // fetch of the file fails at once without a download. The row is back to CloudOnly
+            // (the fetch delivered nothing). Only a correction that stays refused through every
+            // retry becomes Tier-2 (Error + not in sync), in `retry_pending_resize`.
+            tracing::info!(file_id = %file_id, error = %e, "placeholder resize refused for now; retrying until the file is let go");
+            let _ = bridge.db().set_status(file_id, crate::state_db::FileStatus::CloudOnly);
+            if add_pending_resize(file_id, true_size) {
+                retry_pending_resize(file_id.to_string(), os_path);
             }
         }
     }
@@ -1370,6 +1675,68 @@ fn wide_to_vec(ptr: *const u16) -> Option<Vec<u16>> {
 #[cfg(test)]
 #[path = "callbacks_tests.rs"]
 mod tests;
+
+/// LD-0092 / LD-0110: the shared download and the pending size correction.
+#[cfg(test)]
+mod dc116_tests {
+    use super::*;
+
+    #[test]
+    fn rest_ranges_cover_everything_outside_the_required_range() {
+        let mib = TRANSFER_CHUNK;
+        // A read in the middle: the tail, then the head.
+        assert_eq!(rest_ranges(mib, mib, 4 * mib), [Some((2 * mib, 2 * mib)), Some((0, mib))]);
+        // The whole file asked for: nothing left.
+        assert_eq!(rest_ranges(0, 4 * mib, 4 * mib), [None, None]);
+        // The last page, running past EOF: the head only.
+        assert_eq!(rest_ranges(3 * mib, 2 * mib, 3 * mib + 10), [None, Some((0, 3 * mib))]);
+        // An empty file.
+        assert_eq!(rest_ranges(0, 0, 0), [None, None]);
+    }
+
+    /// One download per file: a fetch that comes while it runs, or just after it finished, is
+    /// served it; a download cut off leaves the place free and fails the fetches waiting on it.
+    #[test]
+    fn concurrent_and_back_to_back_fetches_share_one_download() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        share::forget_all();
+        let id = "dc116-share-a";
+        let share::Role::Lead(lead) = share::join_or_lead(id) else { panic!("the first fetch leads") };
+        let share::Role::Join(joiner) = share::join_or_lead(id) else { panic!("a second fetch joins") };
+        lead.publish(Ok(share::downloaded(vec![7; 100]))).unwrap();
+        assert_eq!(rt.block_on(joiner.wait()).unwrap().bytes.len(), 100);
+        // Back to back, within the reuse window: served again, no new download.
+        let share::Role::Join(again) = share::join_or_lead(id) else { panic!("a finished download is reused") };
+        assert_eq!(rt.block_on(again.wait()).unwrap().bytes[0], 7);
+        drop(lead);
+
+        let id = "dc116-share-b";
+        let share::Role::Lead(lead) = share::join_or_lead(id) else { panic!("the first fetch leads") };
+        let share::Role::Join(joiner) = share::join_or_lead(id) else { panic!("a second fetch joins") };
+        drop(lead); // cut off (a lock, a stall)
+        assert!(rt.block_on(joiner.wait()).is_err());
+        assert!(matches!(share::join_or_lead(id), share::Role::Lead(_)), "the next fetch downloads again");
+
+        let id = "dc116-share-c";
+        let share::Role::Lead(lead) = share::join_or_lead(id) else { panic!("the first fetch leads") };
+        assert!(lead.publish(Err(anyhow::anyhow!("network"))).is_err());
+        assert!(matches!(share::join_or_lead(id), share::Role::Lead(_)), "a failed download is not reused");
+        share::forget_all();
+    }
+
+    /// LD-0092: a correction is pending once per file (one retry loop), and while it is pending the
+    /// fetch path sees it (and fails without a download).
+    #[test]
+    fn a_pending_size_correction_is_recorded_once() {
+        let id = "dc116-pending";
+        assert_eq!(pending_resize(id), None);
+        assert!(add_pending_resize(id, 5408));
+        assert!(!add_pending_resize(id, 5408), "a second mismatch starts no second retry loop");
+        assert_eq!(pending_resize(id), Some(5408));
+        pending_resizes().remove(id);
+        assert_eq!(pending_resize(id), None);
+    }
+}
 
 #[cfg(test)]
 #[path = "finalization_tests.rs"]
