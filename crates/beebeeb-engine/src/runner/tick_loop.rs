@@ -64,7 +64,7 @@ pub(super) const LOCAL_CACHE_WARNING_THRESHOLD_NUMERATOR: i128 = 9;
 
 pub(super) const LOCAL_CACHE_WARNING_THRESHOLD_DENOMINATOR: i128 = 10;
 
-/// Task 1670 round 3 (lead review of round 2): cadence for the macOS
+/// Task 1670 round 3: cadence for the macOS
 /// hydrate-cache TTL sweep. With `TICK_INTERVAL` at 30s, every 2 ticks is
 /// ~60s — the "every Nth tick of the daemon's one already-running loop" idiom,
 /// reusing the existing runtime rather than spawning a second timer task.
@@ -138,7 +138,7 @@ pub(super) fn finish_tick_payload(
 ) -> crate::engine_status::StatusPayload {
     let outcome = tick_outcome(result, &link.snapshot(), tick_started_at);
     let activity = current_activity(db, transfers);
-    let payload = tracker.finish_tick(&outcome, now_secs() as i64, activity);
+    let payload = tracker.finish_tick(&outcome, now_secs(), activity);
     if activity.files_remaining == 0 {
         // Nothing left: the batch is over, the next burst starts its bar at 0.
         transfers.reset_batch();
@@ -301,11 +301,10 @@ pub(super) fn handle_new_conflict(app: &Host, c: &ConflictDetected) {
         file_name: c.file_name.clone(),
         is_text: c.is_text,
     };
-    if app.conflict_opens_window() {
-        if let Err(e) = app.open_conflict(&notice) {
+    if app.conflict_opens_window()
+        && let Err(e) = app.open_conflict(&notice) {
             tracing::warn!(error = %e, file_id = %c.file_id, "open_conflict_window failed");
         }
-    }
     if let Err(e) = app.notify(Notice::Conflict {
         file_name: c.file_name.clone(),
     }) {
@@ -407,7 +406,7 @@ mod tests {
     #[test]
     fn w31_a_state_with_no_cursor_owes_the_first_list_and_one_with_a_cursor_does_not() {
         let dir = tempfile::tempdir().unwrap();
-        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
         assert!(first_list_owed(&db), "never listed: owed");
         db.set_sync_cursor(0).unwrap();
         assert!(!first_list_owed(&db), "a cursor of 0 is a list that arrived");

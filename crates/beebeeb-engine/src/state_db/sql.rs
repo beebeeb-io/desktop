@@ -86,7 +86,7 @@ pub(super) const OWNER_EMAIL_KEY: &str = "owner_email";
 /// database header, not in a table, so no purge or reset can clear it. 0 is every database from before R10.
 pub(super) const ADOPTION_CLOSED: i64 = 1;
 
-/// A Finder domain removal is owed before any engine may start (macOS; task 1834 fix round 1, F3). A `sync_state`
+/// A Finder domain removal is owed before any engine may start. A `sync_state`
 /// row like the owner record: not account data, written in the same transaction as the reset that creates the debt.
 pub(super) const FINDER_REMOVAL_OWED_KEY: &str = "finder_removal_owed";
 
@@ -639,14 +639,14 @@ pub(super) fn is_content_kind(kind: &OperationKind) -> bool {
     )
 }
 
-/// Task 2267 (fix round 2): the `sync_state` keys of "Keep on this PC only" (`found_while_paused.rs`).
+/// the `sync_state` keys of "Keep on this PC only" (`found_while_paused.rs`).
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 pub(super) const KEEP_JOURNAL_KEY: &str = "found_while_paused.keep_journal";
 
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 pub(super) const KEPT_DIR_KEY: &str = "found_while_paused.kept_dir";
 
-/// Task 2267 (lead review of round 2, P2-1): an op (aliased `o`) that creates its item on the server: a folder's
+/// an op (aliased `o`) that creates its item on the server: a folder's
 /// create, or an upload whose metadata says it creates the file (`engine_bridge::is_create_file_operation`).
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 pub(super) const CREATE_OP_SQL: &str = "(o.kind = 'create_folder'

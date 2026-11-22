@@ -560,7 +560,7 @@ fn an_exhausted_or_auth_paused_upload_is_not_work_left() {
     assert_eq!(backlog.queued_ops, 2);
 }
 
-/// Lead ruling F9: after a sign-in, the operations paused for `auth` are due again at once with their attempts kept,
+/// after a sign-in, the operations paused for `auth` are due again at once with their attempts kept,
 /// and the ones paused for quota, permission or a lock stay paused.
 #[test]
 fn only_the_operations_paused_for_auth_are_due_again_with_their_attempts_kept() {
@@ -761,7 +761,7 @@ fn list_tree_rows_carries_the_server_version_of_every_row() {
     );
 }
 
-/// Lead ruling, F9 review I-1: after a key replacement, the operations paused for `auth` are re-marked
+/// after a key replacement, the operations paused for `auth` are re-marked
 /// `key_replaced`. They stay queued and paused, with their attempts; the auth resume never makes them due again; the
 /// diagnostics count them under their own reason; every other pause, and an unpaused operation, is untouched.
 #[test]

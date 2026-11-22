@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn own_backups_names_the_resolved_device_folder() {
         let dir = tempfile::tempdir().unwrap();
-        let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
         db.set_owner(&crate::account_binding::Identity::new(Some("u-a"), None))
             .unwrap();
         let sources = [scheduler::BackupSource {

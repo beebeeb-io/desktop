@@ -77,7 +77,7 @@ fn a9c_request_row_keeps_content_under_c_and_name_under_derived() {
         Arc::new(fixture.api()),
     );
 
-    let prepared = run(bridge.prepare_owned_rows(&[row.clone()])).unwrap();
+    let prepared = run(bridge.prepare_owned_rows(std::slice::from_ref(&row))).unwrap();
     assert_eq!(prepared.len(), 1);
     assert!(prepared[0].readable, "the derived name authenticates");
     assert!(!prepared[0].record.foreign_added);
@@ -274,7 +274,7 @@ fn review_p2_2_a_c_sealed_request_row_renames_under_the_string_key() {
 
     // The real ingest: core opens the `C`-sealed name and the pin it records is
     // kept on the durable record.
-    let prepared = run(bridge.prepare_owned_rows(&[row.clone()])).unwrap();
+    let prepared = run(bridge.prepare_owned_rows(std::slice::from_ref(&row))).unwrap();
     assert!(prepared[0].readable, "core opens the name under C");
     assert_eq!(
         prepared[0].record.request_name,
@@ -368,7 +368,7 @@ fn review_p3_2_a_derived_name_request_row_renames_with_its_pin() {
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
     seed_rename_row(&db, OWNER, "report.txt");
     let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::TEST, db, Arc::new(fixture.api()));
-    let prepared = run(bridge.prepare_owned_rows(&[row.clone()])).unwrap();
+    let prepared = run(bridge.prepare_owned_rows(std::slice::from_ref(&row))).unwrap();
     assert_eq!(
         prepared[0].record.request_name,
         Some(RequestName {

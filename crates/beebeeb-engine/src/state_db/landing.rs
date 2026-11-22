@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Re-encrypts a queued op's metadata for the server id.
+type RekeyFn<'a, E> = dyn Fn(&PendingOperation, &str) -> std::result::Result<Option<String>, E> + 'a;
+
 impl StateDb {
     /// The held write of `file_id` (`files.held_*`): its write and base, and, once its upload landed, the version it
     /// became (§8.6.2: written only for that write). `None`: the row holds no write, or there is no row.
@@ -431,7 +434,7 @@ impl StateDb {
     pub fn apply_landing<E: RekeyFailure>(
         &self,
         input: &LandingInput<'_>,
-        rekey: &dyn Fn(&PendingOperation, &str) -> std::result::Result<Option<String>, E>,
+        rekey: &RekeyFn<'_, E>,
     ) -> Result<Option<LandingOutcome>> {
         // The landing's ids come from outside (the server's completion, the queue's claim,
         // the runner's op): a blank one is refused before it reaches SQL.

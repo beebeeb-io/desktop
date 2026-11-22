@@ -114,6 +114,8 @@ impl ItemKind {
         }
     }
 
+    // Infallible (unknown text is a file), so it is not `FromStr`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "folder" => ItemKind::Folder,
@@ -1119,7 +1121,7 @@ pub enum OperationPauseReason {
     /// arm does not count as building it, so other platforms would report it never constructed.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     KeyReplaced,
-    /// Task 2267 (fix round 2): a change the ownership proof could not tie to this account's own data (a new item at
+    /// a change the ownership proof could not tie to this account's own data (a new item at
     /// the top level, or in a folder that is not proven its own, such as a shared one), found when Beebeeb adopted the
     /// data on this PC. It is never sent on its own: the person uploads it or keeps it on this PC only.
     FoundWhilePaused,

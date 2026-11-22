@@ -502,6 +502,7 @@ pub(super) async fn register_session(api: &ApiClient, sync_root: &Path) -> Optio
 /// own `Arc<ApiClient>` + `Arc<StateDb>` clones, which drop with the task on
 /// cancel — releasing the session token / DB handle alongside the rest of the
 /// engine.
+#[allow(clippy::too_many_arguments)] // one call site; a params struct would only move the list
 pub(super) fn spawn_heartbeat_producer(
     api: Arc<ApiClient>,
     db: Arc<StateDb>,
@@ -638,7 +639,8 @@ mod fed_tests {
 
     #[test]
     fn each_feed_that_decided_keeps_the_watch_quiet() {
-        let feeds: [(&str, fn(&AuthHealth)); 6] = [
+        type Feed = (&'static str, fn(&AuthHealth));
+        let feeds: [Feed; 6] = [
             ("an answer to the engine's own call", |h| h.note_api_answer(None)),
             ("a 401 to the engine's own call", |h| {
                 h.note_api_answer(Some(&answered(401)))

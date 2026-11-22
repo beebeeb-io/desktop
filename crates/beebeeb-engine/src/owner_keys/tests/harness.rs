@@ -140,7 +140,7 @@ pub(super) fn foreign_child(id: &str, root: &str) -> Value {
 }
 
 /// The path the original bug used: `prepare_owned_rows`, not the custody
-/// helper (review P2-3). The custody GET answers 404 (record, then winner),
+/// helper. The custody GET answers 404 (record, then winner),
 /// the invite list and one invite's rows are served, and the custody PUT
 /// answers `put`.
 pub(super) fn prepare_world(

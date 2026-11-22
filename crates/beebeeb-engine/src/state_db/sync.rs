@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Changes after an anchor, plus the anchor to resume from.
+type ChangePage = (Vec<FileChange>, Option<Vec<u8>>);
+
 impl StateDb {
     // ── /sync delta-engine cursor + prune (task 0789) ──────────────────────────
     //
@@ -398,7 +401,7 @@ impl StateDb {
     /// never happens for the default domain: a fresh, empty log reports an
     /// empty anchor. `next_anchor` moves only when changes were delivered.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn list_file_changes(&self, since_anchor: Option<&[u8]>) -> Result<Option<(Vec<FileChange>, Option<Vec<u8>>)>> {
+    pub fn list_file_changes(&self, since_anchor: Option<&[u8]>) -> Result<Option<ChangePage>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let since: i64 = match since_anchor {
             None => 0,
@@ -451,7 +454,7 @@ impl StateDb {
         &self,
         since_anchor: Option<&[u8]>,
         limit: usize,
-    ) -> Result<Option<(Vec<FileChange>, Option<Vec<u8>>)>> {
+    ) -> Result<Option<ChangePage>> {
         let limit = limit.max(1);
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let since: i64 = match since_anchor {

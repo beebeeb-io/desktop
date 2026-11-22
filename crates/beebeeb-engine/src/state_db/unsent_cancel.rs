@@ -109,7 +109,8 @@ pub enum CancelDone {
 }
 
 fn decide_conn(conn: &Connection, op_id: &str) -> Result<CancelNew> {
-    let row: Option<(String, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+    type OpRow = (String, Option<String>, Option<String>, Option<String>, Option<String>);
+    let row: Option<OpRow> = conn
         .query_row(
             &format!(
                 "SELECT kind, metadata_json, origin, claim_id, file_id FROM operation_queue

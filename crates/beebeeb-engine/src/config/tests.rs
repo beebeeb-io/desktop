@@ -39,8 +39,10 @@ fn account_id_none_is_byte_identical_to_pre_phase1_serialisation() {
     );
 
     // Once set, the key DOES appear and round-trips losslessly.
-    let mut cfg = DesktopConfig::default();
-    cfg.account_id = Some("11111111-2222-3333-4444-555555555555".to_string());
+    let cfg = DesktopConfig {
+        account_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
+        ..DesktopConfig::default()
+    };
     let toml = toml::to_string_pretty(&cfg).expect("serialize with id");
     assert!(toml.contains("account_id"));
     let back: DesktopConfig = toml::from_str(&toml).expect("parse");
@@ -64,8 +66,10 @@ fn last_signed_in_email_round_trips_and_stays_absent_until_set() {
     assert_eq!(legacy.last_signed_in_email, None);
 
     // Once set, the key appears and round-trips losslessly.
-    let mut cfg = DesktopConfig::default();
-    cfg.last_signed_in_email = Some("user@example.com".to_string());
+    let cfg = DesktopConfig {
+        last_signed_in_email: Some("user@example.com".to_string()),
+        ..DesktopConfig::default()
+    };
     let toml = toml::to_string_pretty(&cfg).expect("serialize with email");
     assert!(toml.contains("last_signed_in_email"));
     let back: DesktopConfig = toml::from_str(&toml).expect("parse");
@@ -175,8 +179,10 @@ fn known_folder_onboarding_seen_defaults_false_and_round_trips() {
     assert!(!cfg.known_folder_onboarding_seen);
 
     // Once marked, the flag survives a serialise/parse round-trip.
-    let mut cfg = DesktopConfig::default();
-    cfg.known_folder_onboarding_seen = true;
+    let cfg = DesktopConfig {
+        known_folder_onboarding_seen: true,
+        ..DesktopConfig::default()
+    };
     let s = toml::to_string_pretty(&cfg).expect("serialize");
     let back: DesktopConfig = toml::from_str(&s).expect("parse");
     assert!(back.known_folder_onboarding_seen);
@@ -189,8 +195,10 @@ fn menu_bar_hint_seen_defaults_false_and_round_trips() {
     let cfg: DesktopConfig = toml::from_str("").expect("parse empty toml");
     assert!(!cfg.menu_bar_hint_seen);
 
-    let mut cfg = DesktopConfig::default();
-    cfg.menu_bar_hint_seen = true;
+    let cfg = DesktopConfig {
+        menu_bar_hint_seen: true,
+        ..DesktopConfig::default()
+    };
     let back: DesktopConfig = toml::from_str(&toml::to_string_pretty(&cfg).expect("serialize")).expect("parse");
     assert!(back.menu_bar_hint_seen);
 }
@@ -198,8 +206,10 @@ fn menu_bar_hint_seen_defaults_false_and_round_trips() {
 #[test]
 fn a_settings_save_never_reads_or_writes_the_menu_bar_hint() {
     // The hint belongs to Home, not to Settings: the settings DTO has no field for it, so no save can flip it.
-    let mut cfg = DesktopConfig::default();
-    cfg.menu_bar_hint_seen = true;
+    let cfg = DesktopConfig {
+        menu_bar_hint_seen: true,
+        ..DesktopConfig::default()
+    };
     let dto = DesktopSettings::from(&cfg);
     assert!(!serde_json::to_string(&dto).unwrap().contains("menu_bar_hint"));
     let mut other = DesktopConfig::default();
@@ -440,7 +450,7 @@ fn test_1889_two_updates_of_different_fields_both_survive_through_every_helper()
     assert!(lost.is_empty(), "changes lost to a stale save: {lost:?}");
 }
 
-/// The exact bug of the ticket (1882 round 5): an install or Repair flow loads its copy at the start, the app-start
+/// The exact bug of the ticket: an install or Repair flow loads its copy at the start, the app-start
 /// sweep saves a kept-folder record meanwhile, and the flow then writes its own result. The flow's write used to put
 /// back the copy it loaded, and the record was gone.
 #[test]
@@ -674,7 +684,7 @@ at = 1791291909
     assert!(cfg.finder_signed_out_by_choice, "and the rest of the file still loads");
 }
 
-// ── Lead ruling T4-3: the old, unredacted Finder error is scrubbed on macOS ─────────
+// ── the old, unredacted Finder error is scrubbed on macOS ─────────
 //
 // A 0.8.11 `desktop.toml` can hold `finder_install_last_error` = the OS's own message, which
 // can name a file or folder. macOS no longer writes it, so loading drops it and the next save
@@ -816,7 +826,7 @@ fn unit_tests_resolve_the_config_path_in_a_sandbox_never_the_real_one() {
 /// and a command's String error is that same line.
 #[test]
 fn config_error_display_keeps_the_legacy_message_of_every_variant() {
-    let io = |text: &str| std::io::Error::new(std::io::ErrorKind::Other, text);
+    let io = |text: &str| std::io::Error::other(text);
     let path = Path::new("/tmp/desktop.toml");
 
     let read = io("boom");

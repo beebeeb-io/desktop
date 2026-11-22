@@ -849,7 +849,7 @@ fn sf2279_custody_memory_survives_every_local_state_wipe() {
     assert!(seen(&db), "the Windows sign-out keeps the custody memory");
 }
 
-/// N1 (round 3 of 2279): the kept custody row must not read as account data. F2 keeps
+/// N1: the kept custody row must not read as account data. F2 keeps
 /// `shared_folder_custody_seen:%` through every wipe, and `account_rows` counted every `sync_state` key it did
 /// not name, so `has_account_data` stayed true after a completed sign-out — forever, the set only grows. The next
 /// engine start then wanted a reset on macOS/Linux and was refused as another account's data on Windows.
@@ -883,7 +883,7 @@ fn sf2279_the_kept_custody_row_is_not_account_data_after_every_wipe() {
     });
 }
 
-/// B05e (lead ruling 2026-11-09, desktop #265 delta 1): the share marks, the sealed and offered keys
+/// B05e: the share marks, the sealed and offered keys
 /// and the accepted fingerprints survive a sign-out (macOS/Linux and Windows), like the custody
 /// memory (a reset of local data removes them: `state_db_shell_tests.rs` in the Tauri shell, which owns R10's
 /// `reset`). They are not account
@@ -1050,7 +1050,7 @@ fn a_sync_cursor_alone_is_account_data_and_the_owner_record_alone_is_not() {
     assert!(db.has_account_data().unwrap(), "a sync cursor is");
 }
 
-/// F2 (fix round 1 of Task 10): adopting unowned local data is ONE conditional step, once per database, and
+/// F2: adopting unowned local data is ONE conditional step, once per database, and
 /// the "already done" mark is not a row, so no purge or reset can clear it and re-open the window.
 #[test]
 fn adoption_is_one_conditional_step_that_happens_at_most_once() {
@@ -1125,7 +1125,7 @@ fn adoption_never_replaces_a_recorded_owner() {
     assert_eq!(db.owner().unwrap(), Some(Identity::new(Some("u-a"), None)));
 }
 
-/// R3 (fix round 2): a clear that owes no removal leaves the "domain gone" mark; one that owes it leaves the debt
+/// R3: a clear that owes no removal leaves the "domain gone" mark; one that owes it leaves the debt
 /// and no mark; a debt recorded later wipes the mark (a domain may be registered again). Neither is account data.
 #[test]
 fn the_domain_gone_mark_and_the_removal_debt_exclude_each_other_and_are_not_account_data() {

@@ -22,7 +22,7 @@ fn sf2276_invite_rows_failures_that_are_not_gone_abort_the_proof_search() {
         {"id":"inv-18-old","file_id":root,"is_folder_share":true,"status":"approved",
          "created_at":"2026-10-20T00:00:00Z","encrypted_owner_folder_key":legacy_copy(&master, root, &folder)}
     ]});
-    // Review P3-A: only the server's "gone / not approved" answers on the
+    // only the server's "gone / not approved" answers on the
     // proof rows (400 invite-not-approved, 404 invite missing, invites.rs) may
     // skip an approved invite. Auth failures, other client errors and server
     // errors are the batch's failure, never a reason to read on.
@@ -138,7 +138,7 @@ fn sf2276_a_no_custody_repair_stops_retrying_the_index() {
     run(bridge.maintain_owned_keys(1_000)).unwrap();
     let after_first = seen.lock().unwrap().len();
     assert!(after_first > 0, "{seen:?}");
-    // Review P3-B: a legacy-proven folder has no custody, and no retry can
+    // a legacy-proven folder has no custody, and no retry can
     // change that before its owner upgrades. The maintenance pass clears the
     // dirty marker at the revision it read instead of asking again every 30 s.
     assert_eq!(
@@ -166,7 +166,7 @@ fn sf2276_a_404_from_the_custody_put_does_not_abort_the_snapshot() {
         "created_at":"2026-10-28T00:00:00Z",
         "encrypted_owner_folder_key":purpose_bound_copy(&master, root, &folder)
     }]});
-    // Review P3-C: the server answers 404 from the custody PUT when the folder
+    // the server answers 404 from the custody PUT when the folder
     // is missing, not owned, or trashed (shared_folders.rs:293-304) and when
     // the stored row is gone or owned by someone else (:650). A snapshot can
     // hold a live row under a trashed folder (its query has no ancestor
@@ -226,7 +226,7 @@ fn sf2276_a_501_that_does_not_name_the_feature_stays_an_error() {
         "created_at":"2026-10-28T00:00:00Z",
         "encrypted_owner_folder_key":purpose_bound_copy(&master, root, &folder)
     }]});
-    // Review P3-D: the 501 that means "no custody here" is the shared-folders
+    // the 501 that means "no custody here" is the shared-folders
     // feature gate, and it names itself in its body. Any other 501 is a server
     // failure the snapshot must surface.
     let (fixture, seen) = prepare_world(

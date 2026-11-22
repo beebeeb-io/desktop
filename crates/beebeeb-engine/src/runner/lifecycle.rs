@@ -234,6 +234,7 @@ impl EngineRunner {
     ///
     /// `api_base` is the one server this engine talks to, named by the host (the engine handle passes its
     /// `EngineConfig::api_base`; the Tauri shell passes `runner::api_base_url()`). The run reads no environment.
+    #[allow(clippy::too_many_arguments)] // one call site; a params struct would only move the list
     pub fn spawn(
         identity: &'static crate::identity::EngineIdentity,
         app: Host,
@@ -424,6 +425,8 @@ impl AbortOutcome {
 /// must treat the engine as alive); otherwise the FIRST failing revocation
 /// stage is reported, matching the old all-must-succeed conjunction.
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
+// Only the Windows build calls this outside tests; other targets build it for the tests.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub(super) fn classify_abort_result(
     task_stopped: bool,
     revoke_before_error: Option<String>,

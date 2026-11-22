@@ -48,11 +48,11 @@ impl UpdateError {
     }
 }
 
-/// A record that its own write failed and that rides the flow's next write instead (fix round 1, M4): the change to
+/// A record that its own write failed and that rides the flow's next write instead: the change to
 /// apply to the file, and its argument. It returns whether it changed the config.
 pub(super) type QueuedRecord = (fn(&mut DesktopConfig, &str) -> bool, String);
 
-/// A copy of the config that a flow keeps to READ across slow work (task 1889, fix round 1 M2). Add to Finder waits
+/// A copy of the config that a flow keeps to READ across slow work. Add to Finder waits
 /// many seconds on the File Provider and the config-write lock must not be held that long, so the Windows and Linux
 /// install, Repair and sync-root flows load a copy at the start and read it as they go. The copy can be read (it
 /// derefs to [`DesktopConfig`]) and it can only be changed through [`Self::update_held`], which applies the change to the

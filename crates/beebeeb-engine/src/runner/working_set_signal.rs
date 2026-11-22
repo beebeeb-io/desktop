@@ -19,6 +19,8 @@ use super::*;
 /// A `namespace:` id can no longer occur (`normalize_parent_id` strips it
 /// from writes) and no longer signals.
 #[cfg(any(target_os = "macos", any(test, feature = "test-support")))]
+// Only the macOS build calls this outside tests; other targets build it for the tests.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 pub fn working_set_signal_needed(changed_parent_ids: &[Option<String>], materialized: &[String]) -> bool {
     if materialized.is_empty() {
         return !changed_parent_ids.is_empty();
@@ -72,7 +74,7 @@ pub(super) fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_
         );
         return false;
     }
-    // Through the one bridge gate, like every other File Provider call (lead ruling T8-gate-all): a busy
+    // Through the one bridge gate, like every other File Provider call: a busy
     // gate fails at once, and the signal is reported as dropped so the caller can owe it to the next tick.
     let mut dropped = false;
     #[cfg(any(test, feature = "test-support"))]

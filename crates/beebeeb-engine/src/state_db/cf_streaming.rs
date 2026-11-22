@@ -126,7 +126,7 @@ impl StateDb {
         )? == 1)
     }
 
-    /// Amendment 4 (desktop #225 review P2): a pin state (`CF_PIN_STATE` value) the empty step could put
+    /// Amendment 4: a pin state (`CF_PIN_STATE` value) the empty step could put
     /// back neither through its handle nor by path. Kept in its own table, so it outlives the poison
     /// (an empty that succeeded clears the poison right after); every sweep retries it by path until
     /// it holds ("Always keep on this device" is never silently lost).
@@ -143,13 +143,13 @@ impl StateDb {
     /// The pin to restore for `file_id`, if one is waiting.
     pub fn pin_to_restore(&self, file_id: &str) -> Result<Option<i32>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        Ok(conn
+        conn
             .query_row(
                 "SELECT pin FROM cf_pin_restore WHERE file_id = ?1",
                 params![file_id],
                 |row| row.get(0),
             )
-            .optional()?)
+            .optional()
     }
 
     /// Every pin waiting to be restored, `(file_id, pin)`.
@@ -231,13 +231,13 @@ impl StateDb {
     /// Spec I5: is `file_id` poisoned? Every fetch of it fails at once while it is.
     pub fn poison(&self, file_id: &str) -> Result<Option<PoisonRow>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        Ok(conn
+        conn
             .query_row(
                 "SELECT file_id, poisoned_at, reason, write_ticks, key_size, needs_attention FROM cf_poison WHERE file_id = ?1",
                 params![file_id],
                 poison_row,
             )
-            .optional()?)
+            .optional()
     }
 
     /// Spec S6: every poisoned placeholder, oldest first (the sweep and the start-up pass).

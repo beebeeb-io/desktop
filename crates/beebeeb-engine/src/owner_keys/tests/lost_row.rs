@@ -5,6 +5,10 @@
 //! as "carries an envelope" (`row.get(field).is_some()` is true for null), blocking every row.
 //! `updated_at` is an RFC 3339 string, not an integer.
 
+// These fixtures need rows sealed the old way (`encrypt_name`, no item id binding), as the server
+// snapshot still holds them; the new sealers cannot make them.
+#![allow(deprecated)]
+
 use super::*;
 
 /// A fixture that serves 404 for every canonical file fetch.

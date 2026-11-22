@@ -385,8 +385,8 @@ async fn run(
     // or a private one when this runner has no app state (tests).
     let transfers = app
         .transfer_board()
-        .unwrap_or_else(crate::transfer_progress::TransferBoard::new);
-    // Spec D11 (review P2): the bridge's queue reads the account's pass requests, so it sends nothing while a release
+        .unwrap_or_default();
+    // Spec D11: the bridge's queue reads the account's pass requests, so it sends nothing while a release
     // waits for a pass.
     let bridge = Arc::new(
         EngineBridge::new_with_stop_flag(identity, db.clone(), api.clone(), stopping)
@@ -561,7 +561,7 @@ async fn run(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut sync_complete_notifications = SyncCompleteNotificationState::default();
     let mut quota_warning_notifications = QuotaWarningNotificationState::default();
-    // Working-set signals a busy bridge gate dropped (Task 9 fix round 1, item B): owed to the next tick.
+    // Working-set signals a busy bridge gate dropped: owed to the next tick.
     // It opens with the rows the startup reconcile reset, which no signal has carried yet.
     let mut first_tick_logged = false;
     let mut owed_working_set_signal = OwedWorkingSetSignal::owing(reset_item_ids);
@@ -715,7 +715,7 @@ async fn run(
                     // Windows breadcrumb flyout: reflect the paused state.
                     #[cfg(target_os = "windows")]
                     refresh_status_ui_snapshot(&db, mode, false);
-                    // Task 2521 (review P1-2): a paused tick pulls nothing, so with no heartbeat running (its
+                    // Task 2521: a paused tick pulls nothing, so with no heartbeat running (its
                     // registration failed, or its task ended) nothing would count an ended session's refusals. One
                     // small check of the session stands in for the pull: a 401 adds one to the run, an answer clears
                     // it. Bounded well under the stop's graceful wait, so a stop is never held up by it; a check
@@ -769,7 +769,7 @@ async fn run(
                 }
 
                 let syncing_before_tick = sync_in_flight_count(&db);
-                let tick_started_at = now_secs() as i64;
+                let tick_started_at = now_secs();
 
                 // w36: from the pull to the end of the passes no mid-tick step sends (they read the rows a landing
                 // writes), and these wait for one that is being sent.
@@ -798,7 +798,7 @@ async fn run(
                 // only after the whole list; stopped before anything below reads the pulled rows.
                 #[cfg(target_os = "windows")]
                 let early_placeholders = awaiting_first_list.then(|| crate::windows_cf::EarlyPasses::start(&sync_root));
-                let pulled = sync_tick_outcome(&*bridge, &sync_root).await;
+                let pulled = sync_tick_outcome(&bridge, &sync_root).await;
                 #[cfg(target_os = "windows")]
                 if let Some(early) = early_placeholders {
                     early.stop().await;
@@ -846,7 +846,7 @@ async fn run(
                         // a refused session paused, before this tick's queue step sends anything. A pass that fails
                         // resumes nothing and is tried again next tick; the queue step still runs (the parent-first
                         // gate keeps a ghost's children waiting), as before this pass existed. Only at a tick whose
-                        // pull came back (review P1): `Ok` alone is also a swallowed `/sync/ops` failure (offline, a
+                        // pull came back: `Ok` alone is also a swallowed `/sync/ops` failure (offline, a
                         // 5xx, a 401), which proves no token and leaves the rows the pass plans against stale.
                         let reconcile_started = std::time::Instant::now();
                         #[cfg(not(target_os = "macos"))]
@@ -957,7 +957,7 @@ async fn run(
                         // on disk). Idempotent — CfSetInSyncState on an already-
                         // in-sync placeholder is a Windows no-op. Bounded at
                         // MAX_IN_SYNC_STAMPS_PER_PASS files per tick.
-                        // Task 1640 (review P2-5): the pass may hash a file; off the async workers.
+                        // Task 1640: the pass may hash a file; off the async workers.
                         // Desktop 0.8.15: freeing work, so it waits until the start-up guard's pass
                         // has walked every file of unknown content (spec U4).
                         #[cfg(target_os = "windows")]
@@ -1150,7 +1150,7 @@ async fn run(
             tracing::debug!("heartbeat producer did not stop within 1s; abandoning");
         }
 
-        // Task 2521 (review P3-1): no last beat for a session Beebeeb no longer accepts. The stop that closes the
+        // Task 2521: no last beat for a session Beebeeb no longer accepts. The stop that closes the
         // vault after its refusals sends nothing more with the refused token.
         if auth_health.is_expired() {
             tracing::debug!("no final 'stopped' heartbeat: the server no longer accepts this session");
