@@ -9,9 +9,9 @@ use crate::ui::kit;
 use rune::{Align, Color, El, Key, KeyEvent, Side, TextStyle, Tx, col, el, row};
 
 /// `.wn-mi .lb`.
-const WORDS: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+const WORDS: TextStyle = crate::theme::scale::text::READ;
 /// `.wn-mi .sc`.
-const KEYS: TextStyle = TextStyle::new(12.0, 400.0).lh(14.5);
+const KEYS: TextStyle = crate::theme::scale::text::NOTE;
 
 /// What an item shows at its end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,7 +212,7 @@ pub fn menu(
     };
     let mut m = m
         .min_w(min_w)
-        .padding(4.0)
+        .padding(crate::theme::scale::space::S4)
         .radius(8.0)
         .fill(t.card)
         .box_shadow(kit::drop(8.0, 28.0, Color::BLACK.alpha(0.2)))
@@ -242,9 +242,9 @@ pub fn menu(
             .w_full()
             .pl(8.0)
             .pr(12.0)
-            .gap(10.0)
+            .gap(crate::theme::scale::space::S10)
             .center_y()
-            .radius(4.0)
+            .radius(crate::theme::tokens::radius::SM)
             // One wash: the lit item's. The pointer lights the item it enters (`light`).
             .fill(if hot { t.press } else { Color::TRANSPARENT })
             .focusable(true)

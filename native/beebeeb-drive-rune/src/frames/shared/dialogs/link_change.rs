@@ -46,14 +46,16 @@ pub(super) fn card(s: &State, dialog: &Dialog, t: &Theme) -> El {
     }
 }
 
+type Choose = fn(&mut State, &mut Tx);
+
 fn expiry_card(t: &Theme) -> El {
-    let choices: [(LinkExpiry, fn(&mut State, &mut Tx)); 4] = [
+    let choices: [(LinkExpiry, Choose); 4] = [
         (LinkExpiry::Day, |s, _| choose(s, LinkExpiry::Day)),
         (LinkExpiry::Week, |s, _| choose(s, LinkExpiry::Week)),
         (LinkExpiry::Month, |s, _| choose(s, LinkExpiry::Month)),
         (LinkExpiry::Never, |s, _| choose(s, LinkExpiry::Never)),
     ];
-    let mut list = col().key("expiry-choices").gap(6.0).w_full();
+    let mut list = col().key("expiry-choices").gap(crate::theme::scale::space::S6).w_full();
     for (choice, press) in choices {
         let words = choice.choice();
         list = list.child(

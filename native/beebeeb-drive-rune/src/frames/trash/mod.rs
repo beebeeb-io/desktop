@@ -373,7 +373,7 @@ fn folders_kept_words(done: usize, folders: usize, inside: u64) -> String {
 /// The notice over the list (`.mk-banner` without a bar). Keys: `notice`, `notice-words`.
 fn notice_note(notice: &Notice, t: &tokens::Theme) -> El {
     const WORDS: rune::TextStyle = rune::TextStyle::new(12.5, 400.0).lh(17.0);
-    el().key("notice-wrap").w_full().px(14.0).pt(10.0).child(
+    el().key("notice-wrap").w_full().px(crate::theme::scale::space::S14).pt(10.0).child(
         col()
             .key("notice")
             .role("status")
@@ -384,7 +384,7 @@ fn notice_note(notice: &Notice, t: &tokens::Theme) -> El {
             .pb(9.0)
             .pl(12.0)
             .pr(10.0)
-            .radius(10.0)
+            .radius(crate::theme::tokens::radius::LG)
             .fill(t.text.alpha(0.06))
             .child(
                 rune::rich(notice_words(notice), Vec::new())
@@ -474,7 +474,7 @@ fn emptying_note(e: source::Emptying, t: &tokens::Theme) -> El {
         .font(WORDS)
         .color(t.text_secondary)
         .w_full();
-    el().key("banner-wrap").w_full().px(14.0).pt(10.0).child(
+    el().key("banner-wrap").w_full().px(crate::theme::scale::space::S14).pt(10.0).child(
         col()
             .key("banner")
             .role("status")
@@ -484,8 +484,8 @@ fn emptying_note(e: source::Emptying, t: &tokens::Theme) -> El {
             .pb(9.0)
             .pl(12.0)
             .pr(10.0)
-            .gap(6.0)
-            .radius(10.0)
+            .gap(crate::theme::scale::space::S6)
+            .radius(crate::theme::tokens::radius::LG)
             .fill(t.text.alpha(0.06))
             .child(text)
             .child(
