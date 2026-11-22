@@ -235,7 +235,7 @@ fn status(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &The
         // Off: the one thing to do here is to turn it on (the set-up page, DW-A69).
         let turn_on = set::button("btn-0", "Turn on", None, Look::Plain, Size::Small, false, t)
             .on_press(|s: &mut State| super::go(s, "DW-A69"));
-        children.push(crate::ui::settings_list::list(
+        children.push(lists::list(
             0,
             None,
             vec![set::item(
@@ -285,7 +285,7 @@ fn status(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &The
     if !two.last_used.is_empty() {
         facts.push(fact(facts.len(), "Last used", &two.last_used));
     }
-    children.push(crate::ui::settings_list::list(0, None, facts, None, t));
+    children.push(lists::list(0, None, facts, None, t));
     // At 2 codes or fewer the row is red and says what to do.
     let counted = two.codes_total > 0;
     let low = counted && two.codes_left <= 2;
@@ -297,7 +297,7 @@ fn status(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &The
     let asks = |list: usize, index: usize, it: Row, code_for: CodeFor| {
         set::item(list, index, &it, Vec::new(), t).on_press(move |s: &mut State| super::ask(s, Dialog::Code(code_for)))
     };
-    children.push(crate::ui::settings_list::list(
+    children.push(lists::list(
         1,
         Some("Backup codes"),
         {
@@ -317,7 +317,7 @@ fn status(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &The
         t,
     ));
     // Both rows ask for a code: one Tab stop, the arrows between them.
-    children.push(crate::ui::settings_list::roving_list(
+    children.push(lists::roving_list(
         2,
         None,
         vec![

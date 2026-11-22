@@ -82,6 +82,39 @@ pub(super) fn tab_to(rt: &mut Runtime<State>, target: &str) {
     panic!("Tab never reaches {target}");
 }
 
+/// Focus the row keyed `item-<L>-<I>` the way a person does: Tab to it, or, in a roving list (one Tab stop),
+/// Tab into the list and arrow down to it.
+pub(super) fn row_to(rt: &mut Runtime<State>, target: &str) {
+    let list = target.rsplit_once('-').map(|(l, _)| format!("{l}-")).expect("item-<L>-<I>");
+    let is_row = |k: &str| k.strip_prefix(list.as_str()).is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()));
+    // A plain list: every row its own Tab stop.
+    for _ in 0..80 {
+        if find(rt, target).is_some_and(|e| e.focused) {
+            return;
+        }
+        key(rt, Key::Tab);
+    }
+    // A roving list: its one stop, then the arrows.
+    for _ in 0..80 {
+        let now = rt.elements().into_iter().find(|e| e.focused && !e.exiting).and_then(|e| e.key);
+        if now.as_deref() == Some(target) {
+            return;
+        }
+        if now.as_deref().is_some_and(is_row) {
+            key(rt, Key::Home);
+            for _ in 0..12 {
+                if find(rt, target).is_some_and(|e| e.focused) {
+                    return;
+                }
+                key(rt, Key::Down);
+            }
+            panic!("the arrows never reach {target}");
+        }
+        key(rt, Key::Tab);
+    }
+    panic!("Tab never reaches {target}");
+}
+
 fn tab_stops(rt: &mut Runtime<State>) -> Vec<String> {
     let mut stops: Vec<String> = Vec::new();
     for _ in 0..120 {
@@ -261,7 +294,7 @@ fn signing_out_of_all_apps_is_its_own_confirm() {
     assert_eq!(rt.state.account.dialog, None, "Cancel");
     assert!(asked(&rt).is_empty());
     // The row is below the window's edge on the one page: the keys reach it (and scroll to it).
-    tab_to(&mut rt, "item-3-1");
+    row_to(&mut rt, "item-3-1");
     key(&mut rt, Key::Enter);
     click(&mut rt, "btn-1");
     assert_eq!(asked(&rt), vec![Intent::Show("DW-A03")]);

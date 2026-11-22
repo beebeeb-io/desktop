@@ -2,7 +2,7 @@
 //! everything, part, or nothing; and that nothing unbound can be pressed. Input is scripted, as in `tests.rs`.
 
 use super::source::{BOARD_SIGN_OUT_REFUSED, BoardAccount, SecurityFacts, SignOutMode};
-use super::tests::{asked, click, find, info, key, name, runtime, says, section, settle, tab_to, window};
+use super::tests::{asked, click, find, info, key, name, runtime, says, row_to, section, settle, tab_to, window};
 use super::{Dialog, Pane, SettingsPane};
 use crate::frames::settings::Intent;
 use crate::{State, init};
@@ -21,7 +21,7 @@ fn every_row_of_sign_in_and_security_goes_where_it_points() {
     ] {
         let mut rt = runtime("DW-S01");
         assert_eq!(info(&rt, row).role, "link", "{row}");
-        tab_to(&mut rt, row);
+        row_to(&mut rt, row);
         key(&mut rt, Key::Enter);
         assert_eq!(rt.state.account.pane, pane, "{row}");
         assert_eq!(asked(&rt), Vec::new(), "{row}");
