@@ -12,6 +12,8 @@ workflow and the macOS release scripts are gone (no Tauri build on any OS in 0.9
 
 `RELEASE_BLOCKERS.md` at the repository root lists what must be fixed before any desktop release is cut, one list item (a line that starts with `- `) per blocker. While it lists an item, the release checks refuse: on this line `release-native-windows.yml` fails closed in its `validate-release-notes` job (step "Refuse while RELEASE_BLOCKERS.md lists a Windows item", with an `::error` that names the file). On the 0.8.x line the same refusal lives in that line's `release.yml` and `scripts/release-macos-local.sh`. A blocker is added when a merge to main ships something that must not reach a release yet, and the change that resolves it removes its item; an empty list, or no file, lets the release through. It exists because a rule that lives only in someone's memory does not stop a release: the first blocker is that a sign-out discards Finder saves still waiting to upload, so no release may ship the Finder write queue until that is fixed. On the 0.8.x line `scripts/test-release-macos-local.sh` has a scenario that proves the macOS script refuses. An item prefixed `- [macOS] ` (exact token, case-sensitive) is scoped to macOS only and is skipped by the Windows and Linux release workflow; `scripts/release-blockers-check.sh` implements the scope logic, and `scripts/test-release-blockers-check.sh` covers it.
 
+**Comparison with main (LD-0014).** A release branch carries its own copy of `RELEASE_BLOCKERS.md`, so deleting an item there would lift a gate that main still holds. `scripts/verify-release-branch-point.sh` (run for `release/*` dispatches before the build) therefore also refuses a branch whose file lacks an item that `origin/main`'s file lists, of any platform, and names the missing items. `scripts/release-blockers-check.sh` does the comparison when `RELEASE_BLOCKERS_MAIN_REF` is set (items are compared after trimming whitespace and normalising the bullet; a missing item is printed as `main: <item>` and binds by its scope). The reverse is allowed: an item the branch has and main no longer lists still binds. Resolve a blocker on main first, then bring that change into the release branch.
+
 **Amended 2026-10-24:** that first item was removed for desktop 0.8.12 on a maintainer waiver after 1 of the 12 sign-out device checks had run and passed (spec `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md`, §13.4 and §14). It goes back into the file after 0.8.12, so later releases stay gated until the other 11 pass.
 
 **Amended 2026-11-05:** the unscoped shared-folders item (2237d, Task 13's signed Finder/Explorer device rung) was moved out of this file before desktop 0.8.21. The maintainers ruled that it gates turning `shared_folders_v1` on for everyone (step 6 of `docs/superpowers/plans/2026-10-29-2237-flip-sequence-and-device-rungs.md` in the workspace), not a desktop release. The rung runs on released builds against production once the flag is on for the founders only (step 5), so it cannot also gate the release those builds come from. 0.8.21 ships with the flag off: on 2026-11-05 production's `shared_folders_v1` was disabled with 0 rules.
@@ -56,7 +58,32 @@ Write a 2-4 sentence intro in plain, honest language. Explain what changed and w
 On macOS the in-app update cannot install: download the `.dmg` from this release and drag Beebeeb into Applications to replace the installed version.
 
 For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets; <!-- 0.8.x only: --> for macOS, the `.dmg` from the same release.
+
+<!-- changelog
+title: Desktop X.Y.Z: <short tagline>
+date: YYYY-MM-DD
+tags: desktop
+release: https://github.com/beebeeb-io/desktop/releases/tag/desktop-vX.Y.Z
+summary: <one plain sentence for the website changelog>
+new:
+- <user-visible addition, one line each>
+improved:
+- <user-visible improvement, one line each>
+-->
 ```
+
+### Changelog step (every release)
+
+The website changelog entry is not the generated GitHub changelog (`generate_release_notes: true` only appends that
+under the authored notes). It is written by hand as the hidden `<!-- changelog ... -->` block at the **end** of
+`RELEASE_NOTES.md` (shape above; a filled example is in the repository's `RELEASE_NOTES.md`). The step, in order:
+
+1. Author the block with the notes, in plain user-facing language: what a customer sees, not what changed in code.
+2. Commit it with the notes. The `release-native-windows.yml` job `publish-release` fails closed, with an `::error`
+   naming the file, when the block is missing; that is late (after the build), so check for it before dispatching.
+3. After the release is published, the site team turns the block into the website entry from the site repo:
+   `bun scripts/changelog-publish.ts --release desktop desktop-v<version>` (dry run: validates and prints), then
+   `--create` for a draft or `--publish`. Never publish the entry before the GitHub release is published.
 
 The release workflow enforces these rules (`node scripts/release-channel-checks.mjs notes <version> <channel>`,
 tested in `tests/releaseChannelChecks.test.ts`):
@@ -85,7 +112,8 @@ tested in `tests/releaseChannelChecks.test.ts`):
   workflow detects the binding `[macOS]` items automatically and passes `--no-macos` to the
   validator; `release-native-windows.yml` always passes it (a native release is Windows only).
   `scripts/test-release-blockers-check.sh` and `scripts/tests/releaseChannelChecks.test.ts`
-  cover both branches.
+  cover both branches. In both modes a sentence about updating or automatic delivery must name Windows and
+  not macOS (LD-0077); only the macOS line and the not-in-this-release line are exempt.
 
 On the 0.8.x line, Windows releases publish both NSIS (`setup.exe`) and MSI assets (a native 0.9.0 release publishes one NSIS installer and no MSI). Keep the updater manifest split
 by installer type: `windows-x86_64-nsis` must point at the NSIS asset, `windows-x86_64-msi` must
@@ -403,7 +431,7 @@ The native line's procedure is "Native Windows releases (0.9.0 and later)" below
 8. The `publish-manifest` job reads the GitHub release body into the channel manifest `notes` field, so the authored notes are what the in-app updater shows on every promoted channel.
 9. The `publish-manifest` job fails closed: every bundle a manifest entry points at, and its `.sig`, must be a fully uploaded, non-empty asset of `desktop-v<version>`, and the `.sig` must download (assets API, up to 3 attempts of at most 120 s) as a Tauri signature whose trusted comment names that bundle (`file:<bundle>`; the signing key is not checked here, so a key-rotation release still publishes). darwin is all-or-nothing: with no macOS asset at all (no dmg, no `Beebeeb.app.tar.gz`, no `.sig`, in any upload state) the manifest omits `darwin-aarch64`; any other macOS state (a dmg without the bundle, an upload still in progress, a missing, empty, unfetchable or foreign `.sig`) fails the channel manifest instead of silently dropping Macs from the update. Tested offline by `scripts/test-release-channel-manifest.sh` (CI job "Release channel manifest (fake gh test)").
 10. GitHub's "Latest" release is what beebeeb.io/download offers fresh installs, so it tracks the stable manifest: an initial `alpha`/`beta` release is created with `make_latest: false`, and a `stable` publish (new or `publish_existing=true`) marks `desktop-v<version>` as Latest.
-11. After any stable publish, run `node scripts/release-channel-checks.mjs delivery`. It compares `https://releases.beebeeb.io/desktop/latest.json` with GitHub's Latest desktop release and exits 1 on drift.
+11. After any stable publish, run the delivery drift check: `node scripts/release-channel-checks.mjs delivery`. It is a scripted check, not a judgement call: it compares `https://releases.beebeeb.io/desktop/latest.json` with GitHub's Latest desktop release, prints both values, and exits 1 on drift (or when either cannot be read). `DESKTOP_STABLE_MANIFEST_URL` and `DESKTOP_LATEST_RELEASE_API` override the two endpoints; `scripts/tests/releaseChannelChecks.test.ts` runs it against local servers (match, drift, unreadable). It is not yet a workflow step: run it by hand until a workflow job calls it, and treat a red exit as a failed release.
 
 ## Native Windows releases (0.9.0 and later)
 
