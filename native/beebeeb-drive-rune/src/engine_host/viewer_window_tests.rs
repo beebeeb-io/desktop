@@ -24,6 +24,7 @@ use crate::State;
 use crate::engine_host::LiveEngine;
 use crate::engine_host::open::Opened;
 use crate::frames::global::source::{GlobalFixture, board};
+use crate::frames::signin::setup::guide::Step;
 use crate::frames::viewers;
 use crate::frames::viewers::source::Body;
 use crate::shell::actions::{ActionError, EngineActions, HostActions};
@@ -363,6 +364,19 @@ impl Window {
         }
     }
 
+    /// Frames until the first-time guide is on for the account (its mark is read on a worker; "not done" starts it,
+    /// and brings it back after an unlock). Its first step is a window of its own by the b: nothing of it is drawn
+    /// here and it takes none of this window's keys.
+    #[track_caller]
+    fn until_the_guide_is_on(&mut self) {
+        self.settle_until(|w| w.rt.state.guide.step.is_some());
+        assert_eq!(
+            self.rt.state.guide.step,
+            Some(Step::Tray),
+            "the guide is on its first step for the signed-in account"
+        );
+    }
+
     fn press(&mut self, key: Key, mods: Mods) {
         self.rt.key(KeyEvent { key, mods });
         self.settle();
@@ -517,6 +531,10 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
     let mut w = window("lock");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
+    // The sign-in starts the first-time guide for the account, on the answer of a worker (its mark is read from
+    // the local state). This test waits for it: a lock then leaves a guide to come back to, and what that does to
+    // an open file is tested below on every run, not only when the worker happens to answer first.
+    w.until_the_guide_is_on();
 
     // Shown, then locked.
     w.open_row(NOTE_NAME);
@@ -524,13 +542,25 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
     w.engine.lock();
     w.settle();
     w.assert_nothing_of_the_file("locked, the file was shown");
+    assert_eq!(w.rt.state.guide.step, None, "a lock ends the guide");
 
     // Unlocked: the route is where it was, so the file opens again, by a new download for the new session.
     let before = w.chunk_requests();
     w.engine
         .unlock_with_phrase(Zeroizing::new(TEST_PHRASE.to_string()))
         .expect("the phrase unlocks");
+    // The guide comes back on its worker's answer, before the file is shown again or after it (it moved the window
+    // to its step's place, which closed the file whenever its answer came while the route was on the file: the
+    // file was gone in a loaded run and there in a run alone). Waited for first, so the file is asked for AFTER the
+    // guide is back, on every run: it is still the route's, open and shown.
+    w.until_the_guide_is_on();
+    assert_eq!(
+        w.route_item().as_deref(),
+        Some(NOTE),
+        "the guide came back without moving the window off the file"
+    );
     w.until_drawn(NOTE_WORDS);
+    assert!(w.rt.state.viewer.ui.is_some(), "the file is open");
     assert_eq!(w.route_item().as_deref(), Some(NOTE));
     assert!(
         w.chunk_requests() > before,
