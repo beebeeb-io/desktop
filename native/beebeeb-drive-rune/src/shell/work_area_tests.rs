@@ -30,9 +30,9 @@ fn a_1280_by_800_screen_gets_a_window_that_fits_with_its_frame() {
     let (w, h) = r.physical_size.unwrap();
     let (x, y) = r.position.unwrap();
     // The outer window (inner + frame) stays inside the work area.
-    assert!(w as i32 + 2 <= 1280 && h as i32 + 1 <= 752, "{w}x{h}");
+    assert!(w as i32 + 2 <= 1280 && (h as i32) < 752, "{w}x{h}");
     assert!(
-        x >= 0 && y >= 0 && x + w as i32 + 2 <= 1280 && y + h as i32 + 1 <= 752,
+        x >= 0 && y >= 0 && x + w as i32 + 2 <= 1280 && y + (h as i32) < 752,
         "{x},{y} {w}x{h}"
     );
     // 800 high does not fit 752: the height gives, the width (1278) is the room.
@@ -164,7 +164,7 @@ fn growing_from_first_run_to_main_stays_inside_a_752_high_work_area() {
     // The first-run window (960x640) sits centred at y=56; the main size is 1280x800.
     let ((w, h), (x, y)) = fit_on_change(MAIN, 1.0, (160, 56), &work).unwrap();
     assert_eq!((w, h), (1278.0, 751.0));
-    assert!(x >= 0 && y >= 0 && x + w as i32 + 2 <= 1280 && y + h as i32 + 1 <= 752, "{x},{y} {w}x{h}");
+    assert!(x >= 0 && y >= 0 && x + w as i32 + 2 <= 1280 && y + (h as i32) < 752, "{x},{y} {w}x{h}");
 }
 
 #[test]

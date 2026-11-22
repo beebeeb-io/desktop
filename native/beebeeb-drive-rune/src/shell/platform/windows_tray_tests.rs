@@ -351,7 +351,7 @@ fn a_session_lock_is_said_to_the_app_and_an_unlock_is_not() {
     assert_eq!(h.faults(), 0);
 }
 
-/// Review of #452 (P2-1): a sleep is time away. The suspend is noted; the resume says how long the PC was away (its
+/// a sleep is time away. The suspend is noted; the resume says how long the PC was away (its
 /// time without input at the suspend, and the sleep), once per sleep; a resume with no suspend seen says nothing.
 #[test]
 fn a_resume_says_how_long_the_pc_was_away_once_and_only_after_a_suspend() {
@@ -402,7 +402,7 @@ fn a_resume_with_no_idle_reading_at_the_suspend_says_the_longest_time_away() {
     );
 }
 
-/// Review of #452 (P2-A): the tray's window registers for the power broadcast (a Modern Standby PC sends the suspend
+/// the tray's window registers for the power broadcast (a Modern Standby PC sends the suspend
 /// only to a window that registered), and the registration ends with the window.
 #[test]
 fn the_window_registers_for_suspend_and_resume_and_ends_it_with_the_window() {

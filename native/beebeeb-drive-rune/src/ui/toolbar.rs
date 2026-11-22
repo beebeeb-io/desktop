@@ -8,6 +8,11 @@ use rune::{Color, El, Icon, col, el, row, text_input};
 
 use super::kit;
 
+/// A press on a side of the view switch; the flag is "the grid".
+type ViewPress = Box<dyn Fn(&mut State, &mut rune::Tx, bool)>;
+/// The Open in File Explorer press, shared by the button and its reveal key.
+type ExplorerPress = std::rc::Rc<dyn Fn(&mut State, &mut rune::Tx)>;
+
 /// The search field's placeholder: one string for the field and for the gate's note.
 const SEARCH_PLACEHOLDER: &str = "Search names";
 
@@ -175,7 +180,7 @@ pub struct Bar {
     pub slot_sep: bool,
     pub view: View,
     /// A press on a side of the switch; the flag is "the grid".
-    pub on_view: Option<Box<dyn Fn(&mut State, &mut rune::Tx, bool)>>,
+    pub on_view: Option<ViewPress>,
     pub sort: Sort,
     pub on_sort: Option<Press>,
     pub details: Details,
@@ -388,7 +393,7 @@ fn bar_for(bar: Bar, file: bool, t: &Theme) -> El {
     }
 
     // Open in File Explorer (board b4ffef881): the last icon button, never dimmed.
-    let on_explorer: std::rc::Rc<dyn Fn(&mut State, &mut rune::Tx)> = std::rc::Rc::from(bar.on_explorer);
+    let on_explorer: ExplorerPress = std::rc::Rc::from(bar.on_explorer);
     let on_reveal = on_explorer.clone();
     let mut explorer_btn = tool_button(
         "open-explorer",
@@ -494,15 +499,6 @@ pub fn kbd(key: &'static str, keys: &str, t: &Theme) -> El {
         .box_shadow(kit::drop(1.0, 0.0, t.separator))
         .center()
         .child(kit::label(key, keys, type_::KBD, t.text_tertiary))
-}
-
-/// A control while the gate is closed: drawn, and neither focusable nor pressable.
-fn out_of_reach(control: El, off: bool) -> El {
-    if off {
-        control.disabled(true).focusable(false)
-    } else {
-        control
-    }
 }
 
 /// What the toolbar says while the session's gate is closed (DW-0009 locked, DW-0014 no plan

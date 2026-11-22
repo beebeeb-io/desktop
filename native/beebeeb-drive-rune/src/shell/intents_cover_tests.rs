@@ -393,7 +393,7 @@ fn wake_cover_holds_a_link_until_it_lifts() {
     assert!(w.shows(Section::Photos), "the link goes on once the cover is gone");
 }
 
-/// The lead's ruling (2026-11-16 05:05): a link only opens a view, so a link that came under the cover follows the route
+/// A link only opens a view, so a link that came under the cover follows the route
 /// machine's rule when the wake locks: kept across the lock and opened after the same account unlocks, checked again;
 /// another account or a sign-out drops it. A later link, which came while locked, wins over it.
 /// Mutants: in `release_the_ask`, drop the `if link && same_account …` wait (a link goes with the lock like any ask)

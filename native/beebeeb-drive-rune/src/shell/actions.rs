@@ -118,8 +118,7 @@ pub trait EngineActions: Send + Sync {
         None
     }
     /// The engine's lock is open (core's `Open`: the key in memory, the screen not locked), whatever the window shows
-    /// (the first-run steps, the no-plan screen too): the away lock counts idle time then (review of #452, the lead's
-    /// ruling). Asked on every poll: cheap, never a wait on a worker.
+    /// (the first-run steps, the no-plan screen too): the away lock counts idle time then. Asked on every poll: cheap, never a wait on a worker.
     fn screen_open(&self) -> bool {
         false
     }

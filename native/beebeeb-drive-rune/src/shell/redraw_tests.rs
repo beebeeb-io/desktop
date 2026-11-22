@@ -1,4 +1,4 @@
-//! dc-165, on the away lock's live window (`super`): what the locked window asks to be drawn while the engine rings
+//! On the away lock's live window (`super`): what the locked window asks to be drawn while the engine rings
 //! with nothing new. The real engine runs behind it (its sync, its reports); every name and password is invented.
 
 use super::*;

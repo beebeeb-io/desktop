@@ -125,6 +125,7 @@ pub fn thumbnail(tile: El) -> El {
 }
 
 /// The registry's art for an item (folder, Backups root, or its file type).
+#[cfg(test)]
 pub fn file_type_icon(item: &DriveItem) -> &'static Icon {
     crate::theme::file_icon_art::art(icon_for_item(item).id)
 }

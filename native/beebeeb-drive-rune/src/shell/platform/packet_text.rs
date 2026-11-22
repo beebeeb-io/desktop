@@ -14,9 +14,11 @@
 //! space and a `t`, so an apostrophe or a quote could not be typed. The characters of the key that follows a dead
 //! key are taken here too, all of them (`é` as well), so that key types what Windows composed and nothing else.
 
+#[cfg(any(windows, test))]
 /// `VK_PACKET`: the virtual key of a Unicode packet.
 pub const VK_PACKET: u16 = 0xE7;
 
+#[cfg(any(windows, test))]
 /// A keyboard message of the window, as far as the rule needs it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyMessage {
@@ -28,6 +30,7 @@ pub enum KeyMessage {
     Dead,
 }
 
+#[cfg(any(windows, test))]
 /// What to do with the message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -37,6 +40,7 @@ pub enum Verdict {
     Take(Option<String>),
 }
 
+#[cfg(any(windows, test))]
 /// The messages of one window thread, in the order they are taken off the queue.
 #[derive(Debug, Default)]
 pub struct Packets {
@@ -51,6 +55,7 @@ pub struct Packets {
     high: Option<u16>,
 }
 
+#[cfg(any(windows, test))]
 impl Packets {
     pub fn on(&mut self, message: KeyMessage) -> Verdict {
         match message {
@@ -92,6 +97,7 @@ impl Packets {
     }
 }
 
+#[cfg(any(windows, test))]
 /// Shift, Ctrl, Alt, Caps Lock and the Windows keys (`VK_SHIFT`.., `VK_CAPITAL`, `VK_LWIN`/`VK_RWIN`, the
 /// left/right variants).
 fn is_modifier(vk: u16) -> bool {

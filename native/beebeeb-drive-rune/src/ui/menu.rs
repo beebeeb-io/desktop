@@ -13,6 +13,7 @@ use crate::theme::icons_files as glyphs;
 use crate::theme::tokens::{Theme, radius};
 use rune::{Color, El, TextStyle, Tx, col, el, row};
 
+#[cfg(test)]
 use super::button::Size;
 use super::kit;
 
@@ -134,6 +135,7 @@ pub fn height(entries: &[Entry]) -> f32 {
 }
 
 /// The row height of a menu size: 22 (Sm), 28 (Md), 32 (Lg). The default menu rows are [`ITEM_H`].
+#[cfg(test)]
 pub fn item_h(size: Size) -> f32 {
     match size {
         Size::Sm => 22.0,
@@ -143,6 +145,7 @@ pub fn item_h(size: Size) -> f32 {
 }
 
 /// [`height`] of a menu drawn by [`menu_sized`].
+#[cfg(test)]
 pub fn height_sized(entries: &[Entry], size: Size) -> f32 {
     height_with(entries, item_h(size))
 }
@@ -162,6 +165,7 @@ fn height_with(entries: &[Entry], item: f32) -> f32 {
 /// Where the top-left of a menu of `size` goes when it opens at the point `at` inside a window of
 /// `win`: at the point, moved back in when it would run past the right or bottom edge (flipped
 /// up or left of the point if there is room there), never past the top-left edge. `(x, y)` pairs.
+#[cfg(test)]
 pub fn place_at(at: (f32, f32), size: (f32, f32), win: (f32, f32)) -> (f32, f32) {
     let fit = |p: f32, len: f32, max: f32| {
         if p + len <= max {
@@ -177,6 +181,7 @@ pub fn place_at(at: (f32, f32), size: (f32, f32), win: (f32, f32)) -> (f32, f32)
 
 /// Where a menu of `size` goes under the element `anchor` (`x, y, w, h`): its left edge on the
 /// element's, just below it (`gap`); above it when there is no room below; shifted left to stay inside `win`.
+#[cfg(test)]
 pub fn place_under(anchor: (f32, f32, f32, f32), size: (f32, f32), win: (f32, f32), gap: f32) -> (f32, f32) {
     let (ax, ay, _aw, ah) = anchor;
     let x = ax.min(win.0 - size.0).max(0.0);
@@ -244,23 +249,6 @@ pub fn menu(
     close: fn(&mut State, &mut Tx),
 ) -> El {
     surface(true, key, name, width, entries, hot, ITEM_H, t, pick, hover, close)
-}
-
-/// [`menu`] with item rows of a theme size ([`item_h`]); `key` is the prefix of every key.
-#[allow(clippy::too_many_arguments)]
-pub fn menu_sized(
-    key: &'static str,
-    name: &'static str,
-    width: f32,
-    entries: &[Entry],
-    hot: Option<usize>,
-    size: Size,
-    t: &Theme,
-    pick: fn(&mut State, usize, &mut Tx),
-    hover: fn(&mut State, usize),
-    close: fn(&mut State, &mut Tx),
-) -> El {
-    surface(true, key, name, width, entries, hot, item_h(size), t, pick, hover, close)
 }
 
 /// A menu that opens beside another one (Sort by's choices): the same surface, not modal itself. It is

@@ -42,8 +42,6 @@ struct Live {
     engine: TestEngine,
     platform: Arc<FakePlatform>,
     rt: Runtime<State>,
-    /// dc-165: how often an engine thread asked the window to wake (the real app's hook is `shell::engine_woke`).
-    wakes: Arc<std::sync::atomic::AtomicUsize>,
     _api: FakeApi,
     _local_state: tempfile::TempDir,
 }
@@ -69,11 +67,7 @@ fn live_on(first_run: bool, wiring: Wiring) -> Live {
     account.add_item(FILE_ID, None, FILE_NAME, false, 2_048);
     let owner = Identity::new(Some(&account.user_id), Some(&account.email));
     let api = FakeApi::start(account_handler(Arc::new(account)));
-    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counted = wakes.clone();
-    let (engine_host, messages) = ChannelHost::new(move || {
-        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    });
+    let (engine_host, messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
         account_id: "away-lock-test-slot".into(),
         state_dir: crate::engine_host::tests::process_state_dir(),
@@ -141,7 +135,6 @@ fn live_on(first_run: bool, wiring: Wiring) -> Live {
         engine,
         platform,
         rt,
-        wakes,
         _api: api,
         _local_state: local_state,
     }
@@ -422,7 +415,7 @@ fn a_wake_that_lands_just_before_its_time_arms_again() {
     assert!(lock.arms > arms, "the early wake's poll arms the look again");
 }
 
-/// Review of #452 (P1-1, the lead's ruling): no first-run exception. The idle count runs while the ENGINE is open,
+/// No first-run exception. The idle count runs while the ENGINE is open,
 /// whatever the shell shows: during the first-run steps the key is in memory, and idle past the delay locks.
 #[test]
 fn idle_past_the_delay_locks_during_the_first_run_too() {
@@ -439,7 +432,7 @@ fn idle_past_the_delay_locks_during_the_first_run_too() {
     });
 }
 
-/// Review of #452 (P2-1): a sleep is time away. The PC's time without input before it slept and the sleep itself,
+/// a sleep is time away. The PC's time without input before it slept and the sleep itself,
 /// past the delay, lock at the wake (before the wake's own key press could count as input); short of it, nothing.
 #[test]
 fn a_wake_after_a_sleep_past_the_delay_locks_and_a_short_one_does_not() {
@@ -481,7 +474,7 @@ fn thirty_minutes(live: &Live) {
         .unwrap();
 }
 
-/// The poll did not run for `gap` and Windows said nothing of it (review of #452, P2-A: a Modern Standby PC sends the
+/// The poll did not run for `gap` and Windows said nothing of it (a Modern Standby PC sends the
 /// suspend only to a window that registered): the poll's last run moves back on the wall clock (which counts a
 /// sleep), the wake's key press leaves the PC's idle near zero, no resume is said, and the next look stays a minute
 /// off (as the monotonic clock of a PC that slept may say).
@@ -949,7 +942,7 @@ fn keys_behind_a_cover() -> [KeyEvent; 4] {
     ]
 }
 
-/// The lead's ruling of 2026-11-15 22:56 (privacy): while the window is covered, keys reach only the lock screen. Ctrl+A,
+/// Privacy: while the window is covered, keys reach only the lock screen. Ctrl+A,
 /// Enter, Delete and Ctrl+, change nothing in the Files window behind the cover (no selection, nothing opened, nothing
 /// moved to Trash, no Settings); lifted, the Files window has its keys again.
 #[test]
@@ -1088,6 +1081,6 @@ fn closing_to_the_tray_with_immediately_locks_and_the_reopened_window_shows_it()
     });
 }
 
-// dc-165: what the locked window and a progress burst ask to be drawn.
+// what the locked window and a progress burst ask to be drawn.
 #[path = "redraw_tests.rs"]
 mod redraw;

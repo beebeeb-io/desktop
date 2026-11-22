@@ -1060,7 +1060,7 @@ mod reread;
 #[path = "host_tests_session_gate.rs"]
 mod session_gate;
 
-/// Census row (lane signin-wipe): the window's close reaches sign-in. Closed to the notification area, the window keeps
+/// the window's close reaches sign-in. Closed to the notification area, the window keeps
 /// no typed password or code, and a code step is left as Back leaves it, the engine told (`frames::signin::wipe`).
 #[test]
 fn signin_wipe_closing_the_window_to_the_tray_wipes_what_sign_in_holds() {

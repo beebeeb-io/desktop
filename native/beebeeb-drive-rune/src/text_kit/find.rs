@@ -72,6 +72,7 @@ pub fn next_match(matches: &[Range<usize>], caret: usize, backwards: bool) -> Op
     }
 }
 
+#[cfg(test)]
 pub fn replace_range(text: &str, r: Range<usize>, with: &str) -> String {
     let mut s = String::with_capacity(text.len() + with.len());
     s.push_str(&text[..r.start]);

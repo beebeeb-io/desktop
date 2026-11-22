@@ -4,7 +4,7 @@
 //! the engine's `lock.after`) and locks through core's `lock_after_away`. No rule lives here.
 //!
 //! - **Idle.** While the engine's lock is open ([`ShellActions::screen_open`]: whatever the window shows, the first-run
-//!   steps and the no-plan screen too; review of #452), the main window's poll asks the engine with how long this PC
+//!   steps and the no-plan screen too), the main window's poll asks the engine with how long this PC
 //!   has had no input ([`Platform::idle_for`]; a platform that cannot say gives this app's own windows' last input),
 //!   counted from no earlier than the lock last opened (an unlock by face is no input). The engine answers when an idle
 //!   time could lock next; the poll arms ONE wake for then (`Tx::wake_after`, which polls a hidden window too), never
@@ -15,7 +15,7 @@
 //!   ([`TrayEvent::Resumed`]), as idle time: the PC's time without input before it slept plus the sleep, measured by
 //!   the tray at the suspend and the resume, so the wake's own key press cannot hide it.
 //! - **A gap.** Windows may not send the suspend broadcast (a Modern Standby PC sends it only to a window that
-//!   registered for it: the tray registers, `RegisterSuspendResumeNotification`; review of #452, P2-A). So the poll also
+//!   registered for it: the tray registers, `RegisterSuspendResumeNotification`). So the poll also
 //!   notes when it last ran, on two clocks, and the idle it measured then. A gap between two polls far past the look
 //!   interval ([`AWAY_GAP`]) means the app did not run: the idle seen last plus the gap is held as idle time and said
 //!   to the engine without waiting for the next look (the wake's own key press cannot hide it), as the tray's resume
@@ -145,6 +145,7 @@ impl WakeCover {
     }
 
     /// Whether both are the same one.
+    #[cfg(test)]
     pub fn same_as(&self, other: &WakeCover) -> bool {
         Arc::ptr_eq(&self.told, &other.told)
     }

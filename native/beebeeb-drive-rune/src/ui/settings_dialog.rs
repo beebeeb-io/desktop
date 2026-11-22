@@ -83,6 +83,7 @@ pub fn dialog(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<
 }
 
 /// [`dialog`] where Enter presses foot button `enter` (never a destructive one).
+#[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
 pub fn dialog_enter(
     name: &str,
     width: f32,
@@ -103,28 +104,6 @@ pub fn dialog_enter(
     scrim(0.0, dialog::dialog(d, t), t)
 }
 
-/// A dialog's foot (`.wn-dlg-foot`): the buttons at its trailing edge, or `even` (`.is-even`):
-/// each button that many points wide, side by side across the whole foot.
-pub fn foot_row(buttons: Vec<El>, even: Option<f32>, t: &Theme) -> El {
-    let mut f = row()
-        .key("dlg-foot")
-        .center_y()
-        .justify_end()
-        .gap(8.0)
-        .py(16.0)
-        .px(24.0)
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
-    for child in buttons {
-        f = f.child(match even {
-            Some(each) => child.w(each),
-            None => child,
-        });
-    }
-    f
-}
-
 /// A dialog that asks before something happens (`.wn-dlg-alert`, `role="alertdialog"`): a
 /// toned tile, the question, what it means; the two answers side by side, the same width.
 /// Keys: `dlg-title`, `dlg-sub`, the tile's own.
@@ -133,6 +112,7 @@ pub fn alert(name: &str, width: f32, tile: El, title: &str, sub: &str, foot: Vec
 }
 
 /// [`alert`] where Enter presses foot button `enter` (never a destructive one).
+#[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
 pub fn alert_enter(
     name: &str,
     width: f32,

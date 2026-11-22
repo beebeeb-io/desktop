@@ -56,8 +56,8 @@ impl FirstFrameSource for HelperFrames {
 
 /// The size to ask for: the video's own, shrunk to fit `request` and the protocol's frame limit, never zero.
 fn asked_size(w: u32, h: u32, request: FrameRequest) -> (u32, u32) {
-    let max_w = request.max_w.min(MAX_FRAME_W).max(1) as u64;
-    let max_h = request.max_h.min(MAX_FRAME_H).max(1) as u64;
+    let max_w = request.max_w.clamp(1, MAX_FRAME_W) as u64;
+    let max_h = request.max_h.clamp(1, MAX_FRAME_H) as u64;
     let (w, h) = (w.max(1) as u64, h.max(1) as u64);
     if w <= max_w && h <= max_h {
         return (w as u32, h as u32);

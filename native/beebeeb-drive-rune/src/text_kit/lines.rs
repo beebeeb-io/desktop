@@ -13,6 +13,7 @@ pub fn line_of(starts: &[usize], byte: usize) -> usize {
 }
 
 /// Digits the line-number gutter needs: at least 2.
+#[cfg(test)]
 pub fn gutter_digits(line_count: usize) -> usize {
     line_count.max(1).to_string().len().max(2)
 }
