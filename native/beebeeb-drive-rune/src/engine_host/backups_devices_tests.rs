@@ -553,6 +553,7 @@ fn settle_section(rt: &mut rune::Runtime<crate::State>, pending: &Arc<AtomicUsiz
         assert!(Instant::now() < deadline, "the worker did not finish");
         std::thread::sleep(Duration::from_millis(5));
     }
+    rt.invalidate();
     rt.frame(0.016);
     rt.settle_all();
     rt.frame(0.016);
