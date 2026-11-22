@@ -487,6 +487,9 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         // could not be. A panic must not leave the wish in flight for good.
         let (id, ask) = (&key.0, key.1);
         let session = wished_under.0;
+        // The copy's version when a thumbnail made here from it is to be sent to the server (115).
+        let mut to_send: Option<i64> = None;
+        let sent_id = key.0.clone();
         let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match ask {
             Ask::Picture(cut) => self
                 .engine
@@ -494,7 +497,7 @@ impl<C: CredentialStores> EngineThumbStore<C> {
                 // No server thumbnail: the one this PC made and kept (079), or made now from the copy here (095).
                 .or_else(|refused| match refused {
                     ThumbRefused::NoThumbnail | ThumbRefused::Unreadable => self
-                        .made_here(&wished_under, id)
+                        .made_here(&wished_under, id, server_has_none(refused).then_some(&mut to_send))
                         .map(|whole| cut_made_here(whole, cut))
                         .ok_or(refused),
                     other => Err(other),
@@ -533,6 +536,11 @@ impl<C: CredentialStores> EngineThumbStore<C> {
             inner.take_in(key, answer, at);
         }
         drop(inner);
+        // After the picture is shown: the thumbnail made here is sent once (115). The engine asks the setting, the
+        // metered and battery holds, the pause and the session; a refusal is tried again at a later look.
+        if current && let Some(version) = to_send {
+            let _ = self.engine.upload_made_thumbnail_for(session, &sent_id, version, true);
+        }
         #[cfg(test)]
         if let Some((_, _, ended)) = &hooks {
             let _ = ended.send(());
@@ -571,12 +579,16 @@ impl<C: CredentialStores> EngineThumbStore<C> {
     /// one kept for the copy's version, else decoded now through the helper and kept. Without a copy here: the one
     /// kept before, whatever its version. Nothing is ever downloaded for this. A copy that did not decode is not
     /// tried again under this stamp (a helper is not started for it at every look).
-    fn made_here(&self, wished_under: &Stamp, id: &str) -> Option<ThumbPixels> {
+    fn made_here(&self, wished_under: &Stamp, id: &str, send_version: Option<&mut Option<i64>>) -> Option<ThumbPixels> {
         let session = wished_under.0;
         let copy = match self.engine.local_picture_copy_for(session, id, MAX_IMAGE_FILE) {
             Ok(Some(copy)) => copy,
             _ => return self.engine.local_thumbnail_for(session, id),
         };
+        // With a copy here the thumbnail is of the copy's version: when the server had none, it is to be sent.
+        if let Some(out) = send_version {
+            *out = Some(copy.version);
+        }
         if let Some(kept) = self.engine.local_thumbnail_at(session, id, copy.version) {
             return Some(kept);
         }
@@ -595,6 +607,12 @@ impl<C: CredentialStores> EngineThumbStore<C> {
             }
         }
     }
+}
+
+/// Only "the server has none" lets a thumbnail made here be sent: a stored picture that does not decode
+/// (`Unreadable`) is on the server already, and any other refusal says nothing about it.
+pub(super) fn server_has_none(refused: ThumbRefused) -> bool {
+    refused == ThumbRefused::NoThumbnail
 }
 
 /// A photo with no server thumbnail whose bytes are on this PC: decoded through the helper (never in this process)

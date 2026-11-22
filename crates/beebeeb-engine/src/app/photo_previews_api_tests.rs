@@ -93,6 +93,10 @@ fn world(tag: &str, photos: &[(&str, &str, FileStatus, Vec<u8>)]) -> World {
     }
     let (routes, own) = (previews.clone(), account_handler(account.clone()));
     let api = FakeApi::start(Arc::new(move |req: &Request| {
+        // The thumbnail upload (not the preview's): stored, answered.
+        if req.method == "PUT" && req.path.ends_with("/thumbnail") {
+            return crate::test_api::Reply::ok(serde_json::json!({}));
+        }
         routes.answer(req).unwrap_or_else(|| own(req))
     }));
     let engine = engine_at(&api.base);
@@ -1014,4 +1018,75 @@ fn the_upload_speed_limit_paces_the_previews() {
         sent,
         began.elapsed()
     );
+}
+
+// ---- 115: a thumbnail made on this PC is sent once --------------------------------------------------------------
+
+use crate::app::photos_api::ThumbPixels;
+use crate::photo_previews::thumbs_upload::NotNow;
+
+impl World {
+    fn thumb_puts(&self) -> Vec<Request> {
+        self.api
+            .requests()
+            .into_iter()
+            .filter(|req| req.method == "PUT" && req.path.split('?').next().is_some_and(|p| p.ends_with("/thumbnail")))
+            .collect()
+    }
+
+    fn keep_made(&self, id: &str, version: i64) {
+        let session = self.engine.session_turn();
+        let pixels = ThumbPixels {
+            session,
+            width: 32,
+            height: 24,
+            rgba: zeroize::Zeroizing::new(vec![120u8; 32 * 24 * 4]),
+        };
+        self.engine.keep_local_thumbnail(session, id, version, &pixels).unwrap();
+    }
+
+    fn upload_made(&self, id: &str, version: i64, server_404: bool) -> MadeUpload {
+        let session = self.engine.session_turn();
+        self.run(|| self.engine.upload_made_thumbnail_for(session, id, version, server_404))
+    }
+}
+
+#[test]
+fn made_thumbnail_is_sent_once_sealed_with_the_thumbnail_recipe() {
+    let world = world("thumb1", &[(ONE, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    world.previews.set_setting(JPEG_1920);
+    world.keep_made(ONE, 0);
+    assert_eq!(world.upload_made(ONE, 0, true), MadeUpload::Sent);
+    let puts = world.thumb_puts();
+    assert_eq!(puts.len(), 1);
+    let key = beebeeb_core::kdf::derive_file_key(
+        &beebeeb_core::kdf::MasterKey::from_bytes(world.account.master_key),
+        ONE.as_bytes(),
+    );
+    let webp = beebeeb_core::encrypt::decrypt_thumbnail(&key, &puts[0].body).expect("opens as a thumbnail");
+    assert_eq!(&webp[..4], b"RIFF");
+    // Once: a later look sends nothing more.
+    assert_eq!(world.upload_made(ONE, 0, true), MadeUpload::NothingToSend);
+    assert_eq!(world.thumb_puts().len(), 1);
+}
+
+#[test]
+fn made_thumbnail_is_not_sent_unless_the_server_had_none() {
+    let world = world("thumb2", &[(ONE, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    world.previews.set_setting(JPEG_1920);
+    world.keep_made(ONE, 0);
+    assert_eq!(world.upload_made(ONE, 0, false), MadeUpload::NothingToSend);
+    assert!(world.thumb_puts().is_empty());
+}
+
+#[test]
+fn made_thumbnail_waits_while_the_setting_is_off_and_goes_when_it_is_on() {
+    let world = world("thumb3", &[(ONE, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    world.keep_made(ONE, 0);
+    assert_eq!(world.upload_made(ONE, 0, true), MadeUpload::NotNow(NotNow::SettingOff));
+    assert!(world.thumb_puts().is_empty());
+    world.previews.set_setting(JPEG_1920);
+    // The 404 was remembered: a later look without it still sends.
+    assert_eq!(world.upload_made(ONE, 0, false), MadeUpload::Sent);
+    assert_eq!(world.thumb_puts().len(), 1);
 }

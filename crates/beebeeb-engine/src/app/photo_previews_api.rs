@@ -69,6 +69,20 @@ fn from_call(error: AccountCallError) -> PreviewsRefused {
     }
 }
 
+/// What [`Engine::upload_made_thumbnail_for`] came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MadeUpload {
+    Sent,
+    /// Not a thumbnail to send: none kept for this version, the server had one, or it was sent already.
+    NothingToSend,
+    /// The setting is off, or a metered-network or battery-saver hold stands: it stays kept and is tried at a later look.
+    NotNow(crate::photo_previews::thumbs_upload::NotNow),
+    Paused,
+    SessionMoved,
+    Offline,
+    Failed,
+}
+
 /// What Thumbnails and previews shows, read for one session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewsFacts {
@@ -347,6 +361,109 @@ impl<C: CredentialStores> Engine<C> {
             "photo previews: run ended"
         );
         end
+    }
+
+    /// A thumbnail this PC made (the local thumbnail cache, 079/095) of the owner's photo `file_id` at `version`, sent
+    /// to the server once, sealed with core's thumbnail recipe, so web and phone show it and no device makes it again.
+    /// `server_404`: the caller's fetch of the server's thumbnail answered "none" (noted in the cache entry; only an
+    /// entry so noted is ever sent). Respects the account's preview setting (read now), the metered-network and
+    /// battery-saver hold, and a paused sync; every send asks the session again. Called by the host right after it kept
+    /// or looked up a thumbnail it made because the server had none. WORKER call: the network.
+    pub fn upload_made_thumbnail_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        version: i64,
+        server_404: bool,
+    ) -> MadeUpload {
+        use crate::photo_previews::thumbs_upload::{MadeThumb, NotNow, SendResult, Sent, send_all};
+        if self.acct.session.is_poisoned() || !self.acct.session_unchanged_since(session) {
+            return MadeUpload::SessionMoved;
+        }
+        let Some((entry, _)) = self.with_thumb_cache(session, |cache| {
+            if server_404 {
+                let _ = cache.mark_server_404(file_id, version);
+            }
+            cache.get_at(file_id, version)
+        }) else {
+            return MadeUpload::SessionMoved;
+        };
+        let Some(entry) = entry.filter(|entry| entry.server_404 && !entry.uploaded) else {
+            return MadeUpload::NothingToSend;
+        };
+        if self.is_paused() {
+            return MadeUpload::Paused;
+        }
+        let metered = crate::config::DesktopConfig::load_for(self.identity).ok().and_then(|c| c.metered);
+        let hold = crate::power::hold_now(metered, &crate::power::SystemPower);
+        if let Some(hold) = hold {
+            return MadeUpload::NotNow(NotNow::Hold(hold));
+        }
+        let Ok(Some((token, key))) = self.person_session(|current, generation| {
+            (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
+        }) else {
+            return MadeUpload::SessionMoved;
+        };
+        // The row's own pin, as the upload path reads it.
+        let pin = match self.local_state() {
+            Ok(state) if state.session() == session => {
+                state.with(|db| crate::engine_bridge::recorded_pin(db, &key, file_id))
+            }
+            _ => return MadeUpload::SessionMoved,
+        };
+        let Ok(Some(pin)) = pin else {
+            return MadeUpload::Failed;
+        };
+        let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
+        let setting = match self.runtime.block_on(api.photo_previews_setting()) {
+            Ok(setting) => setting,
+            Err(error) => {
+                return match super::settings_api::kind_of(&anyhow::Error::from(error)) {
+                    AccountCallError::NotSignedIn | AccountCallError::SessionEnded => MadeUpload::SessionMoved,
+                    AccountCallError::Offline => MadeUpload::Offline,
+                    _ => MadeUpload::Failed,
+                };
+            }
+        };
+        let thumb = MadeThumb {
+            file_id: file_id.to_owned(),
+            version,
+            width: entry.width,
+            height: entry.height,
+            rgba: entry.rgba,
+            pin,
+        };
+        let mut offline = false;
+        let mut send = |id: &str, sealed: &[u8]| {
+            // Right before the send: still the very session the key and the token were copied from.
+            if !self.session_is_still(session, &key) {
+                return SendResult::Stop(Stopped::Failed);
+            }
+            match self.runtime.block_on(api.upload_thumbnail(id, "medium", sealed, None)) {
+                Ok(()) => SendResult::Sent,
+                Err(error) if error.downcast_ref::<crate::api_client::DesktopApiError>().is_none() => {
+                    offline = true;
+                    SendResult::Stop(Stopped::Offline)
+                }
+                Err(_) => SendResult::Refused,
+            }
+        };
+        let mut sent = Sent::default();
+        let end = match send_all(&key, &setting, None, std::slice::from_ref(&thumb), &mut sent, &mut send) {
+            Ok(end) => end,
+            Err(why) => return MadeUpload::NotNow(why),
+        };
+        if end.sent == 1 {
+            let _ = self.with_thumb_cache(session, |cache| cache.mark_uploaded(file_id, version));
+            return MadeUpload::Sent;
+        }
+        if offline {
+            MadeUpload::Offline
+        } else if !self.acct.session_unchanged_since(session) {
+            MadeUpload::SessionMoved
+        } else {
+            MadeUpload::Failed
+        }
     }
 
     /// Whether this session's first reconcile pass has committed (the engine's queue sends nothing before it either):

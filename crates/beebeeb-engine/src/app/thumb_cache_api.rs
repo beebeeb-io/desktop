@@ -27,7 +27,7 @@ impl<C: CredentialStores> Engine<C> {
             .while_session_is(&self.writes, session, |current| Zeroizing::new(current.master_key))
     }
 
-    fn with_thumb_cache<T>(
+    pub(super) fn with_thumb_cache<T>(
         &self,
         session: SessionGeneration,
         with: impl FnOnce(&ThumbCache<'_>) -> T,

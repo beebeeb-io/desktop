@@ -522,6 +522,7 @@ use fs::*;
 pub use fs::{LocalPathVerdict, move_no_replace, path_is_engine_internal, relative_db_path};
 
 mod meta;
+pub(crate) use meta::recorded_pin;
 #[cfg(windows)]
 pub use meta::promote_fetched_content;
 use meta::*;
