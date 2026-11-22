@@ -42,7 +42,30 @@ pub const QA_PROVIDER: SyncProvider = SyncProvider {
 /// Register a TEST sync root (tests only): [`QA_PROVIDER`], today's policies.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn register_test_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
-    super::register_sync_root_with(sync_root_path, &QA_PROVIDER, HYDRATION_POLICY)
+    // 0x80070001 (ERROR_INVALID_FUNCTION) from CfRegisterSyncRoot is a transient shell/filter-driver state on a
+    // freshly created folder: retry a few times, then fail with the class named so a flake is not mistaken for a bug.
+    let mut last = None;
+    for attempt in 0..5u64 {
+        match super::register_sync_root_with(sync_root_path, &QA_PROVIDER, HYDRATION_POLICY) {
+            Ok(()) => return Ok(()),
+            Err(error) if format!("{error:?}").to_lowercase().contains("80070001") => {
+                last = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last
+        .unwrap()
+        .context("test fixture: CfRegisterSyncRoot kept failing with 0x80070001 (transient environment state, not a product failure)"))
+}
+
+/// Repeat-run harness helper (tests only): how many of `roots` still report a Cloud Files registration. A run that
+/// leaves any behind makes the next run's registration flake, so fixtures assert this is 0 after cleanup.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(dead_code)]
+pub(crate) fn leftover_sync_roots(roots: &[std::path::PathBuf]) -> usize {
+    roots.iter().filter(|root| registered_provider_name(root).is_ok()).count()
 }
 
 /// LD-0105 S7 (W1): the Win32 hydration policy. `PROGRESSIVE` completes a reader's IO as soon as its

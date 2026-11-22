@@ -208,7 +208,10 @@ async fn round7_completed_upload_retry(signout_retry: bool) {
     struct Registration(std::path::PathBuf);
     impl Drop for Registration {
         fn drop(&mut self) {
-            crate::windows_cf::unregister_any_sync_root(&self.0).unwrap();
+            // Never panic in a drop (it may run while a failed assert unwinds); report, then count leftovers.
+            if let Err(error) = crate::windows_cf::unregister_any_sync_root(&self.0) {
+                eprintln!("unregister of {:?} failed: {error}", self.0);
+            }
         }
     }
     let _registration = Registration(root.clone());

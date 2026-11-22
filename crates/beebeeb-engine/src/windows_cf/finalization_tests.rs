@@ -1055,12 +1055,22 @@ struct DeniedFolder {
 
 impl Drop for DeniedFolder {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("icacls")
+        match std::process::Command::new("icacls")
             .arg(&self.dir)
             .arg("/remove:d")
             .arg("*S-1-1-0")
             .arg("/T")
-            .output();
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => eprintln!(
+                "LD-0070: icacls /remove:d on {:?} failed ({}): {}",
+                self.dir,
+                output.status,
+                String::from_utf8_lossy(&output.stdout)
+            ),
+            Err(error) => eprintln!("LD-0070: icacls could not run on {:?}: {error}", self.dir),
+        }
         for (path, descriptor) in &self.saved {
             // Never panic in a drop (it may run while a failed assert unwinds); a DACL not written back is caught by
             // the test's own I1 comparison.
