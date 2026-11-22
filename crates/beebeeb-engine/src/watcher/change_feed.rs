@@ -8,6 +8,12 @@
 //! [`FULL_RECHECK_INTERVAL`] (an hour) as the backstop, and at once whenever the feed cannot say
 //! ([`Changes::Unknown`]: a journal gap or overflow) or the app resumes from sleep.
 //! Elsewhere, or when the journal cannot be opened, there is no feed and every pass is a full walk, as before.
+//!
+//! RC2-1: read without administrator rights (what an installed app gets), the journal's records carry no
+//! file name. A record then named only its parent folder: a file in a subfolder was found because that
+//! folder was walked, a file in the top level became "the sync root itself", which the scan passes over,
+//! so it waited for the hourly walk. A nameless record is now resolved through the file's own id; one
+//! whose file is gone names its folder, and the scan lists the top level when the root itself is named.
 
 use std::collections::BTreeSet;
 
@@ -71,9 +77,10 @@ mod usn {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_NAME_NORMALIZED,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdType,
-        GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW, OpenFileById, VOLUME_NAME_DOS,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES, FILE_ID_DESCRIPTOR,
+        FILE_ID_DESCRIPTOR_0, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FileIdType, GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW, OpenFileById,
+        VOLUME_NAME_DOS,
     };
     use windows::Win32::System::IO::DeviceIoControl;
 
@@ -249,13 +256,32 @@ mod usn {
             if let Some(known) = self.parents.get(&parent) {
                 return known.clone();
             }
-            let resolved = resolve(&self.root_dir, parent).and_then(|full| {
-                full.strip_prefix(&self.canonical_root)
-                    .ok()
-                    .map(|rel| self.sync_root.join(rel))
-            });
+            let resolved = self.under_root(resolve(&self.root_dir, parent, FILE_FLAG_BACKUP_SEMANTICS));
             self.parents.insert(parent, resolved.clone());
             resolved
+        }
+
+        /// `full` (as the system spells it) as a path under the registered sync root; the root itself for
+        /// the root. `None`: elsewhere.
+        fn under_root(&self, full: Option<PathBuf>) -> Option<PathBuf> {
+            let full = full?;
+            let rel = full.strip_prefix(&self.canonical_root).ok()?;
+            Some(if rel.as_os_str().is_empty() {
+                self.sync_root.clone()
+            } else {
+                self.sync_root.join(rel)
+            })
+        }
+
+        /// RC2-1: where the file or folder with id `file` is now, under the sync root, for a record that
+        /// carries no name. One attribute-only open that follows no link and reads no data. `None`: gone,
+        /// or elsewhere.
+        fn own_path(&self, file: u64) -> Option<PathBuf> {
+            self.under_root(resolve(
+                &self.root_dir,
+                file,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            ))
         }
     }
 
@@ -264,6 +290,8 @@ mod usn {
             let mut buf = vec![0u8; BUF];
             let mut paths = BTreeSet::new();
             let mut forget_parents = false;
+            // RC2-1: nameless records by file id, so a file with many records in one take is opened once.
+            let mut nameless: HashMap<u64, Option<PathBuf>> = HashMap::new();
             for _ in 0..MAX_READS_PER_TAKE {
                 let Some(got) = self.read(&mut buf) else {
                     // Wrapped, deleted or reset journal: what happened in between is lost.
@@ -294,6 +322,7 @@ mod usn {
                     }
                     let major = u16::from_le_bytes(rec[4..6].try_into().unwrap());
                     if major == 2 {
+                        let file = u64::from_le_bytes(rec[8..16].try_into().unwrap());
                         let parent = u64::from_le_bytes(rec[16..24].try_into().unwrap());
                         let reason = u32::from_le_bytes(rec[40..44].try_into().unwrap());
                         let attributes = u32::from_le_bytes(rec[52..56].try_into().unwrap());
@@ -307,7 +336,22 @@ mod usn {
                             // A renamed or removed folder leaves stale paths for what is cached under it.
                             forget_parents = true;
                         }
-                        if name_at + name_len <= len
+                        if name_len == 0 {
+                            // RC2-1: the read without administrator rights names no file. The file's own
+                            // id says where it is; a file that is gone names the folder it was in.
+                            let dir = self.parent_path(parent);
+                            let own = match nameless.get(&file) {
+                                Some(known) => known.clone(),
+                                None => {
+                                    let own = self.own_path(file);
+                                    nameless.insert(file, own.clone());
+                                    own
+                                }
+                            };
+                            if let Some(path) = own.or(dir) {
+                                paths.insert(path);
+                            }
+                        } else if name_at + name_len <= len
                             && let Some(dir) = self.parent_path(parent)
                         {
                             let name: Vec<u16> = rec[name_at..name_at + name_len]
@@ -358,7 +402,7 @@ mod usn {
     }
 
     /// The full path of the file or folder with NTFS file id `id` on the volume of `hint`.
-    fn resolve(hint: &std::fs::File, id: u64) -> Option<PathBuf> {
+    fn resolve(hint: &std::fs::File, id: u64, flags: FILE_FLAGS_AND_ATTRIBUTES) -> Option<PathBuf> {
         let descriptor = FILE_ID_DESCRIPTOR {
             dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
             Type: FileIdType,
@@ -372,7 +416,7 @@ mod usn {
                 FILE_READ_ATTRIBUTES.0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 None,
-                FILE_FLAG_BACKUP_SEMANTICS,
+                flags,
             )
         }
         .ok()?;
@@ -399,75 +443,6 @@ mod usn {
         // SAFETY: `handle` came from OpenFileById above and is closed once.
         let _ = unsafe { CloseHandle(handle) };
         (n > 0 && n <= buf.len()).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..n])))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use windows::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
-
-        fn id_of(dir: &std::fs::File) -> u64 {
-            let mut info = BY_HANDLE_FILE_INFORMATION::default();
-            // SAFETY: `info` is the struct the call fills; `dir` is open.
-            unsafe { GetFileInformationByHandle(HANDLE(dir.as_raw_handle()), &mut info).unwrap() };
-            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)
-        }
-
-        /// RC2-1 probe: what each way of reading the journal names for a root-level and a nested new file,
-        /// on a plain folder and on a registered Cloud Files sync root.
-        #[test]
-        fn root_level_probe() {
-            for registered in [false, true] {
-                for way in 0..3 {
-                    let temp = tempfile::tempdir().unwrap();
-                    let root = temp.path().join("root");
-                    std::fs::create_dir_all(root.join("sub")).unwrap();
-                    if registered {
-                        crate::windows_cf::register_test_sync_root(&root).unwrap();
-                    }
-                    let mut feed = match UsnFeed::open_by(&root, Some(way)) {
-                        Ok(feed) => feed,
-                        Err(why) => {
-                            println!("PROBE registered={registered} way={way}: not opened ({why})");
-                            if registered {
-                                let _ = crate::windows_cf::unregister_any_sync_root(&root);
-                            }
-                            continue;
-                        }
-                    };
-                    let _ = feed.take();
-                    let root_id = id_of(&feed.root_dir);
-                    let root_as = feed.parent_path(root_id);
-                    let raw = resolve(&feed.root_dir, root_id);
-                    std::fs::write(root.join("a.txt"), b"a").unwrap();
-                    std::fs::write(root.join("sub/b.txt"), b"b").unwrap();
-                    std::fs::create_dir(root.join("newdir")).unwrap();
-                    std::fs::write(root.join("newdir/c.txt"), b"c").unwrap();
-                    let named = match feed.take() {
-                        Changes::Paths(paths) => paths
-                            .iter()
-                            .map(|p| {
-                                p.strip_prefix(&root)
-                                    .map(|r| r.display().to_string())
-                                    .unwrap_or_else(|_| format!("OUTSIDE {}", p.display()))
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" | "),
-                        other => format!("{other:?}"),
-                    };
-                    println!(
-                        "PROBE registered={registered} way={way} mode={} root={} canonical={} raw={raw:?} root_as={root_as:?} named=[{named}]",
-                        feed.mode(),
-                        root.display(),
-                        feed.canonical_root.display(),
-                    );
-                    drop(feed);
-                    if registered {
-                        let _ = crate::windows_cf::unregister_any_sync_root(&root);
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -610,6 +585,134 @@ mod tests {
         ));
         scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
         assert_eq!(memo.visited, 0);
+    }
+
+    /// RC2-1: a new file in the top level that the feed names is queued like a nested one.
+    #[test]
+    fn root_level_new_file_named_by_the_feed_is_queued() {
+        let f = fixture();
+        let mut memo = ScanMemo::default();
+        let mut feed = Told(Default::default());
+        scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
+
+        let new = f.root.join("root-new.txt");
+        std::fs::write(&new, b"dropped in the top level").unwrap();
+        feed.0.push_back(Changes::Paths([new].into()));
+        scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
+        assert_eq!(memo.visited, 1);
+        assert!(
+            f.db.get_file_by_path("root-new.txt").unwrap().is_some(),
+            "the named top-level file is queued"
+        );
+    }
+
+    /// RC2-1 red test: a feed that can only say "something in the sync root's top level" (a nameless
+    /// journal record whose file cannot be resolved) names the root itself. The top level is listed, its
+    /// new file queued once, and no subfolder is walked.
+    #[test]
+    fn root_level_new_file_is_queued_when_the_feed_names_the_root_itself() {
+        let f = fixture();
+        let mut memo = ScanMemo::default();
+        let mut feed = Told(Default::default());
+        scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
+
+        std::fs::write(f.root.join("root-new.txt"), b"dropped in the top level").unwrap();
+        std::fs::write(f.root.join("root-two.txt"), b"and another").unwrap();
+        feed.0.push_back(Changes::Paths(
+            [f.root.clone(), f.root.join(""), f.root.join("root-two.txt")].into(),
+        ));
+        scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
+        assert!(f.db.get_file_by_path("root-new.txt").unwrap().is_some());
+        assert!(f.db.get_file_by_path("root-two.txt").unwrap().is_some());
+        assert_eq!(
+            memo.visited, 3,
+            "a.txt and the two new files, each once; nothing under Photos"
+        );
+    }
+
+    /// RC2-1 red test on a real NTFS folder: every way the journal can be read (with administrator
+    /// rights; without them on the volume or through the folder, where records carry no name) names a new
+    /// file in the top level, written, copied in or renamed in, as it names a nested one. Before the fix
+    /// the read without rights named `sub` and `newdir` and, for the top level, nothing.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn root_level_new_files_are_named_by_every_way_of_reading_the_journal() {
+        let mut opened = Vec::new();
+        for way in 0..3 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("sync-root");
+            std::fs::create_dir_all(root.join("sub")).unwrap();
+            let outside = temp.path().join("outside.txt");
+            std::fs::write(&outside, b"made elsewhere").unwrap();
+            let Ok(mut feed) = usn::UsnFeed::open_by(&root, Some(way)) else {
+                continue;
+            };
+            opened.push(way);
+            let _ = feed.take();
+            std::fs::write(root.join("written.txt"), b"written").unwrap();
+            std::fs::copy(&outside, root.join("copied.txt")).unwrap();
+            std::fs::rename(&outside, root.join("renamed-in.txt")).unwrap();
+            std::fs::write(root.join("sub/nested.txt"), b"nested").unwrap();
+            std::fs::create_dir(root.join("newdir")).unwrap();
+            std::fs::write(root.join("newdir/inside.txt"), b"inside").unwrap();
+            std::fs::write(root.join("gone.txt"), b"gone").unwrap();
+            std::fs::remove_file(root.join("gone.txt")).unwrap();
+            let Changes::Paths(named) = feed.take() else {
+                panic!("way {way}: the feed names paths");
+            };
+            for rel in [
+                "written.txt",
+                "copied.txt",
+                "renamed-in.txt",
+                "sub/nested.txt",
+                "newdir/inside.txt",
+            ] {
+                assert!(
+                    named.contains(&root.join(rel)),
+                    "way {way}: {rel} is named in {named:?}"
+                );
+            }
+            assert!(
+                named.iter().all(|p| p.starts_with(&root)),
+                "way {way}: nothing outside the root: {named:?}"
+            );
+        }
+        println!("RC2-1 ways of reading the journal opened here: {opened:?}");
+        assert!(!opened.is_empty(), "no way of reading the journal opened");
+    }
+
+    /// RC2-1 on a real NTFS folder, journal to queue: new files in the top level and in a subfolder are
+    /// queued by the tick after they appear, through every way of reading the journal.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn root_level_new_files_from_the_journal_are_queued() {
+        for way in 0..3 {
+            let f = fixture();
+            let Ok(feed) = usn::UsnFeed::open_by(&f.root, Some(way)) else {
+                continue;
+            };
+            let mut feed: Box<dyn ChangeFeed> = Box::new(feed);
+            let mut memo = ScanMemo::default();
+            scan_tick(&f.bridge, &f.root, &mut memo, feed.as_mut());
+            // Whatever the first walk's own queueing left in the journal is taken here.
+            scan_tick(&f.bridge, &f.root, &mut memo, feed.as_mut());
+
+            for n in 0..18 {
+                std::fs::write(f.root.join(format!("root-{n:02}.txt")), format!("top level {n}")).unwrap();
+            }
+            std::fs::write(f.root.join("Photos/nested-new.jpg"), b"nested").unwrap();
+            scan_tick(&f.bridge, &f.root, &mut memo, feed.as_mut());
+            for n in 0..18 {
+                assert!(
+                    f.db.get_file_by_path(&format!("root-{n:02}.txt")).unwrap().is_some(),
+                    "way {way}: top-level file {n} is queued"
+                );
+            }
+            assert!(
+                f.db.get_file_by_path("Photos/nested-new.jpg").unwrap().is_some(),
+                "way {way}: the nested file is queued"
+            );
+        }
     }
 
     /// A feed that cannot say walks everything, as does no feed at all.
