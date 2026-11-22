@@ -17,16 +17,13 @@ pub fn file_bytes_here(path: &std::path::Path) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return false;
     };
-    if !metadata.is_file() {
-        return false;
-    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::fs::MetadataExt;
-        !bytes_not_here(metadata.file_attributes())
+        metadata.is_file() && !bytes_not_here(metadata.file_attributes())
     }
     #[cfg(not(target_os = "windows"))]
     {
-        true
+        metadata.is_file()
     }
 }
