@@ -112,7 +112,10 @@ fn populate_mints_each_folder_batch_in_one_create_call() {
     // The root (2 files, 4 folders), dir0..dir2, and `big` in two (MINT_BATCH + 1 rows).
     assert_eq!(s.create_calls, 1 + 3 + 2, "one create call per folder batch: {s:?}");
     for rel in ["a.txt", "dir2", "dir2\\file39.bin", "big\\file0.bin"] {
-        assert!(placeholders::is_cloud_placeholder(&r.root.join(rel)), "{rel} is a placeholder");
+        assert!(
+            placeholders::is_cloud_placeholder(&r.root.join(rel)),
+            "{rel} is a placeholder"
+        );
     }
     let last = format!("big\\file{MINT_BATCH}.bin");
     assert!(placeholders::is_cloud_placeholder(&r.root.join(last)));
@@ -130,7 +133,12 @@ async fn populate_early_placeholders_for_a_folder_exist_before_the_pull_ends() {
     let r = Root::new();
     let (db, root) = (r.db.clone(), r.root.clone());
     let early = EarlyPasses::start_with(std::time::Duration::from_millis(10), move || {
-        Some(populate_placeholders_in(&db, &root, &mut PlacedMemo::default(), Mode::Early))
+        Some(populate_placeholders_in(
+            &db,
+            &root,
+            &mut PlacedMemo::default(),
+            Mode::Early,
+        ))
     });
 
     // The first pull: top level first (as `order_snapshot_nodes` orders it), committed every EVERY rows.
@@ -166,7 +174,10 @@ async fn populate_early_placeholders_for_a_folder_exist_before_the_pull_ends() {
     assert!(seen_at < total, "seen after {seen_at} of {total} rows");
     // No folder became a plain directory where its placeholder belongs.
     for d in 0..FOLDERS {
-        assert!(placeholders::is_cloud_placeholder(&r.root.join(format!("top{d}"))), "top{d}");
+        assert!(
+            placeholders::is_cloud_placeholder(&r.root.join(format!("top{d}"))),
+            "top{d}"
+        );
     }
     // The tick's pass after the pull places the rest.
     let s = populate_placeholders(&r.db, &r.root, &mut PlacedMemo::default());

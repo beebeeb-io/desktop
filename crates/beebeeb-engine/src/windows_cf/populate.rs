@@ -134,32 +134,38 @@ pub(super) fn populate_placeholders_in(
     // dc-164: within a depth, by folder, so one folder's rows are one run (one create call).
     entries.sort_by_cached_key(|e| {
         let rel = e.path.trim_matches('/');
-        (rel.split('/').count(), rel.rsplit_once('/').map_or("", |(parent, _)| parent).to_string())
+        (
+            rel.split('/').count(),
+            rel.rsplit_once('/').map_or("", |(parent, _)| parent).to_string(),
+        )
     });
     let placed = {
-    let mut pass = Pass {
-        db,
-        sync_root,
-        mode,
-        earlier: &memo.placed,
-        // Rebuilt every pass, so a row that left the cloud-only set leaves the memo.
-        placed: std::collections::HashMap::with_capacity(memo.placed.len()),
-        listings: Default::default(),
-        needs_identity: db.files_needing_identity().unwrap_or_default(),
-        // LD-0113: the Backups tree, read once for the pass.
-        backups: crate::backup_protect::BackupsTree::read(db),
-        // Task 2407 (core 2404): the folders this pass found to be their own names, each looked up once per pass.
-        dirs: crate::name_alias::CheckedDirs::new(sync_root),
-        stats: &mut stats,
-    };
-    let folder_of = |e: &crate::state_db::FileEntry| {
-        let rel = e.path.trim_matches('/');
-        (rel.split('/').count(), rel.rsplit_once('/').map(|(parent, _)| parent.to_string()))
-    };
-    for folder in entries.chunk_by(|a, b| folder_of(a) == folder_of(b)) {
-        pass.folder(folder);
-    }
-    pass.placed
+        let mut pass = Pass {
+            db,
+            sync_root,
+            mode,
+            earlier: &memo.placed,
+            // Rebuilt every pass, so a row that left the cloud-only set leaves the memo.
+            placed: std::collections::HashMap::with_capacity(memo.placed.len()),
+            listings: Default::default(),
+            needs_identity: db.files_needing_identity().unwrap_or_default(),
+            // LD-0113: the Backups tree, read once for the pass.
+            backups: crate::backup_protect::BackupsTree::read(db),
+            // Task 2407 (core 2404): the folders this pass found to be their own names, each looked up once per pass.
+            dirs: crate::name_alias::CheckedDirs::new(sync_root),
+            stats: &mut stats,
+        };
+        let folder_of = |e: &crate::state_db::FileEntry| {
+            let rel = e.path.trim_matches('/');
+            (
+                rel.split('/').count(),
+                rel.rsplit_once('/').map(|(parent, _)| parent.to_string()),
+            )
+        };
+        for folder in entries.chunk_by(|a, b| folder_of(a) == folder_of(b)) {
+            pass.folder(folder);
+        }
+        pass.placed
     };
     memo.placed = placed;
     stats.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -278,7 +284,11 @@ impl Pass<'_> {
         let earlier = self.earlier;
         if let Some((_, listed)) = earlier.get(&entry.file_id).filter(|(at, _)| at == rel) {
             let listed = listed.clone();
-            if self.listing(&parent_dir).as_ref().is_some_and(|names| names.contains(&listed)) {
+            if self
+                .listing(&parent_dir)
+                .as_ref()
+                .is_some_and(|names| names.contains(&listed))
+            {
                 self.placed.insert(entry.file_id.clone(), (rel.to_string(), listed));
                 return None;
             }
@@ -346,7 +356,11 @@ impl Pass<'_> {
     /// The name the folder lists for `row`'s entry, when one is there (see [`Self::prepare`]).
     fn already_there(&mut self, row: &ToMint<'_>) -> Option<std::ffi::OsString> {
         let os_name = std::ffi::OsStr::new(&row.name);
-        if self.listing(&row.parent_dir).as_ref().is_some_and(|names| names.contains(os_name)) {
+        if self
+            .listing(&row.parent_dir)
+            .as_ref()
+            .is_some_and(|names| names.contains(os_name))
+        {
             return Some(os_name.to_os_string());
         }
         placeholders::entry_name_at(&row.parent_dir, &row.name)
@@ -491,12 +505,20 @@ impl EarlyPasses {
         let root = sync_root.to_path_buf();
         Self::start_with(EARLY_EVERY, move || {
             let bridge = super::bridge()?;
-            Some(populate_placeholders_in(bridge.db(), &root, &mut super::placed_memo(), Mode::Early))
+            Some(populate_placeholders_in(
+                bridge.db(),
+                &root,
+                &mut super::placed_memo(),
+                Mode::Early,
+            ))
         })
     }
 
     /// The passes, each one `pass()`, every `every` at least, until [`Self::stop`].
-    fn start_with(every: std::time::Duration, mut pass: impl FnMut() -> Option<PopulateStats> + Send + 'static) -> Self {
+    fn start_with(
+        every: std::time::Duration,
+        mut pass: impl FnMut() -> Option<PopulateStats> + Send + 'static,
+    ) -> Self {
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let worker = tokio::task::spawn_blocking(move || {
             let mut wait = std::time::Duration::ZERO;

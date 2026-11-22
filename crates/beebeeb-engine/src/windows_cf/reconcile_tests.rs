@@ -340,7 +340,7 @@ fn t16_populate_counts_created_and_already_existing() {
     r.track("one.bin", FileStatus::CloudOnly, PinState::Inherit);
     r.track("two.bin", FileStatus::CloudOnly, PinState::Inherit);
     let first = populate_placeholders(&r.db, &r.root, &mut Default::default());
-    assert_eq!((first.create_calls, first.created), (2, 2), "{first:?}");
+    assert_eq!((first.create_calls, first.created), (1, 2), "{first:?}"); // dc-164: one folder, one create call
     r.track("three.bin", FileStatus::CloudOnly, PinState::Inherit);
     let second = populate_placeholders(&r.db, &r.root, &mut Default::default());
     assert_eq!(
