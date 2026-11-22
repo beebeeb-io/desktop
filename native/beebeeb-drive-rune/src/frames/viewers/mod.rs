@@ -16,6 +16,10 @@
 mod archive;
 mod audio;
 mod chrome;
+#[cfg(test)]
+pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
+#[cfg(test)]
+pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
 pub(crate) mod details;
 mod editor_view;
 mod editor_minimap;
