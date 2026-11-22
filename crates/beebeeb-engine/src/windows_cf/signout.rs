@@ -345,10 +345,17 @@ fn prepare(
         // ordinary directories. Only these may omit a CFAPI identity; never
         // treat a junction, symlink, or ordinary file as a clean placeholder.
         let plain_directory = metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0;
-        if !plain_directory {
-            if let Err(error) = validate_placeholder(&file, &row.file_id) {
-                let Some(keep_dir) = keep_dir else { return Err(error) };
-                if metadata.is_dir() {
+        if !plain_directory && let Err(error) = validate_placeholder(&file, &row.file_id) {
+            let Some(keep_dir) = keep_dir else { return Err(error) };
+            if metadata.is_dir() {
+                // A junction/symlink is removed, never followed; its target is not ours.
+                directories.push(file);
+            } else if let Some(entry) = keep_pending_file(file, &relative, keep_dir)? {
+                kept.push(entry);
+            }
+            continue;
+        }
+        if metadata.is_dir() {
                     // A junction/symlink is removed, never followed; its target is not ours.
                     directories.push(file);
                 } else if let Some(entry) = keep_pending_file(file, &relative, keep_dir)? {

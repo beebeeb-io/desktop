@@ -549,7 +549,8 @@ pub unsafe extern "system" fn fetch_data_callback(
         };
 
         // Tier-1: correct the placeholder + DB to the authenticated length so
-        // the NEXT open hydrates against an aligned size.         unsafe { resolve_size_mismatch(info, &bridge, &file_id, corrected_size) };
+        // the NEXT open hydrates against an aligned size.
+        unsafe { resolve_size_mismatch(info, &bridge, &file_id, corrected_size) };
         return;
     }
 
