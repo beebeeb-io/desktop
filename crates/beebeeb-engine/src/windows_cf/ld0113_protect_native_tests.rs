@@ -888,7 +888,13 @@ fn read_only_placeholder_hydrates() {
     // Another process opens it to read, as an editor does.
     let out = cmd(&qa, "read_only_placeholder_hydrates", &format!("type {}", quoted(&a)));
     let read = String::from_utf8_lossy(&out.stdout).into_owned();
-    let a_on_disk = placeholders::fully_on_disk(&a);
+    let a_on_disk = {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !placeholders::fully_on_disk(&a) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        placeholders::fully_on_disk(&a)
+    };
     // The engine's own changes.
     let hydrated = bounded(&qa, "read_only_placeholder_hydrates hydrate", || {
         placeholders::hydrate_placeholder(&b).map_err(|e| e.to_string())

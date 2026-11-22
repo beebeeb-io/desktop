@@ -21,7 +21,7 @@ type Callback = unsafe extern "system" fn(*const CF_CALLBACK_INFO, *const CF_CAL
 
 /// A registered (and optionally connected) QA root; unregistered on drop, whatever the test did.
 struct QaRoot {
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
     root: PathBuf,
     key: Option<CF_CONNECTION_KEY>,
 }
@@ -33,7 +33,7 @@ impl QaRoot {
         std::fs::create_dir(&root).unwrap();
         crate::windows_cf::register_sync_root_with(&root, &crate::windows_cf::QA_PROVIDER, hydration).unwrap();
         QaRoot {
-            _dir: dir,
+            _dir: Some(dir),
             root,
             key: None,
         }
@@ -96,6 +96,28 @@ impl Drop for QaRoot {
             let _ = unsafe { CfDisconnectSyncRoot(key) };
         }
         let _ = crate::windows_cf::unregister_any_sync_root(&self.root);
+        // The driver can hold the root for a moment after the disconnect: retry the removal
+        // instead of letting the TempDir drop race it (backlog 2448).
+        if let Some(dir) = self._dir.take() {
+            for _ in 0..50 {
+                if std::fs::remove_dir_all(dir.path()).is_ok() || !dir.path().exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+/// Polls `census_of` until it reads `want` (the platform settles a moment after a read returns).
+fn wait_census(path: &Path, want: OnDisk) -> (OnDisk, bool, bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let c = census_of(path);
+        if c.0 == want || std::time::Instant::now() > deadline {
+            return c;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
@@ -1044,7 +1066,7 @@ fn ld0105_p1_native_a_write_into_a_partly_downloaded_file_is_kept() {
     let path = qa.path("t10.bin");
     let mut one = [0u8; 1];
     let _ = std::fs::File::open(&path).and_then(|mut f| std::io::Read::read(&mut f, &mut one));
-    let partial = census_of(&path);
+    let partial = wait_census(&path, OnDisk::Partly);
     assert_eq!(partial.0, OnDisk::Partly, "a partly downloaded file: {partial:?}");
     // The session that later poisons: its key before its first transfer.
     let key_before = content_key(&path);
