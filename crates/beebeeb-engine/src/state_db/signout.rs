@@ -98,6 +98,7 @@ impl StateDb {
         fold_agreed_into_candidate_conn(&tx, file_id)?;
         tx.execute(
             "UPDATE files SET
+                 content_seq = content_seq + 1,
                  fetched_hash = CASE
                      WHEN fetched_min_version = 0 THEN ?3
                      WHEN fetched_min_version = ?2 AND fetched_hash = ?3 THEN fetched_hash

@@ -494,6 +494,8 @@ pub use types::{LocalEntry, NON_UUID, OpDone, PrunedEntry, RENAME_SETTLE_SECS, S
 pub use types::RemovedKind;
 #[cfg(all(any(test, feature = "test-support"), target_os = "windows"))]
 pub(crate) use types::engine_remove;
+#[cfg_attr(not(any(target_os = "windows", test, feature = "test-support")), allow(unused_imports))]
+pub(crate) use types::content_seq_for_wipe;
 
 // The native app's open file: the whole file in memory, nothing recorded (`app::viewer_api`).
 mod open_in_memory;

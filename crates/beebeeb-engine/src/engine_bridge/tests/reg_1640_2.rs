@@ -629,6 +629,7 @@ fn regression_1640_a_round_two_database_reads_every_row_as_unknown() {
                  DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;
                  DROP TRIGGER IF EXISTS files_unknown_marks_after_insert_any_status;
                  DROP TRIGGER IF EXISTS files_unknown_marks_after_update;
+                 DROP TRIGGER IF EXISTS files_content_seq_follows_content;
                  ALTER TABLE files DROP COLUMN fetched_min_version;
                  ALTER TABLE files ADD COLUMN fetched_version INTEGER NOT NULL DEFAULT 0;
                  INSERT INTO files (file_id, path, status) VALUES ('old', 'old.txt', 'local');",

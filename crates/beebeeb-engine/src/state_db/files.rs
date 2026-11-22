@@ -456,7 +456,8 @@ impl StateDb {
     pub fn mark_content_unknown(&self, file_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
-            "UPDATE files SET local_hash = NULL, fetched_min_version = -2, fetched_hash = NULL WHERE file_id = ?1",
+            "UPDATE files SET content_seq = content_seq + 1, local_hash = NULL, fetched_min_version = -2, fetched_hash = NULL
+             WHERE file_id = ?1",
             params![file_id],
         )?;
         Ok(())
@@ -486,6 +487,33 @@ impl StateDb {
             )
             .optional()?
             .filter(|(version, _)| *version > 0))
+    }
+    /// Task 2199 (dc-103b): the row's content sequence, read BEFORE a dehydrate whose candidate wipe
+    /// ([`Self::wipe_fetched_content_if_unchanged`]) it guards. `None`: no such row.
+    pub fn content_seq(&self, file_id: &str) -> Result<Option<i64>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT content_seq FROM files WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+    /// Task 2199 (dc-103b; design 1640 "Not done" (a)): the file's placeholder was dehydrated whole, so nothing
+    /// fetched is on disk: its agreed content and its fetch candidate are wiped to empty (`0`), so the next range
+    /// fetch records a one-version candidate instead of mixing it with versions whose bytes are gone (a false
+    /// park). Only while `content_seq` still reads `seq_before`, the value read before the dehydrate: a fetch
+    /// recorded since (an opener after the oplock broke) moved it on, and its bytes may be landing, so nothing is
+    /// wiped (I2). A row whose content is not known (`-1`, `-2`) is left as it is. `true`: wiped.
+    pub fn wipe_fetched_content_if_unchanged(&self, file_id: &str, seq_before: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE files SET local_hash = NULL, fetched_min_version = 0, fetched_hash = NULL
+             WHERE file_id = ?1 AND content_seq = ?2 AND item_kind = 'file'
+               AND (local_hash IS NOT NULL OR fetched_min_version > 0)",
+            params![file_id, seq_before],
+        )? == 1)
     }
     /// Task 1640 (review F1): the placeholder's bytes may have changed in part without a fetch (a
     /// resize, a download cut off by a stop): its agreed content joins the candidate, which is then

@@ -345,6 +345,8 @@ mod tests {
     }
 
     mod landing_and_snapshots;
+    // Task 2199 (dc-103b).
+    mod content_seq;
 
     // ── orphan-subtree + delete_file_subtree coverage (task 0806) ──────────────
 

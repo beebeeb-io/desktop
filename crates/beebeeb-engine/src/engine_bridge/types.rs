@@ -412,6 +412,22 @@ pub(super) struct FetchActivity {
 pub(super) static FETCHES_IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<HashMap<String, FetchActivity>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
+/// Task 2199 (dc-103b): the content sequence a dehydrate's candidate wipe is made against, read while no fetch of
+/// the file is in flight in this process. `None` (a fetch in flight, or no row): no wipe. A fetch in flight may have
+/// recorded its version before this read and still be transferring, so only a file with none is wiped; a fetch that
+/// starts after this read records its version (moving `content_seq` on) before it transfers anything, which the
+/// wipe's own condition sees. Read under the tracker's lock (lock order: the tracker, then the database).
+#[cfg_attr(not(any(target_os = "windows", test, feature = "test-support")), allow(dead_code))]
+pub(crate) fn content_seq_for_wipe(db: &crate::state_db::StateDb, file_id: &str) -> Option<i64> {
+    let fetches = FETCHES_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if fetches.contains_key(file_id) {
+        return None;
+    }
+    db.content_seq(file_id).ok().flatten()
+}
+
 /// Task 1640 (self-review #1): one fetch of a file, from before it records anything until its
 /// transfer ended (when it is dropped). It is "alone" when it was the file's only fetch in flight in
 /// this process when it started, and no other fetch of the file has started or ended since.
@@ -977,5 +993,44 @@ mod region_strict_tests {
     fn region_strict_refusal_is_found_through_the_error_chain() {
         let error = anyhow::Error::new(StorageCountryRefused { country: Some("Finland".into()) }).context("upload");
         assert!(crate::engine_bridge::engine_cause::<StorageCountryRefused>(&error).is_some());
+    }
+}
+
+#[cfg(test)]
+mod range_wipe_tests {
+    use super::*;
+
+    /// Task 2199 (dc-103b): no wipe sequence while a fetch of the file is in flight (it may have recorded its version
+    /// before the read and still be transferring); one once it has ended.
+    #[test]
+    fn range_wipe_is_refused_while_a_fetch_is_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        let file = "2199b000-0000-4000-8000-000000000001";
+        db.upsert_file(&crate::state_db::FileEntry {
+            file_id: file.into(),
+            path: "notes.txt".into(),
+            status: crate::state_db::FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: crate::state_db::ItemKind::File,
+        })
+        .unwrap();
+        let ticket = {
+            let mut fetches = FETCHES_IN_FLIGHT.lock().unwrap();
+            let activity = fetches.entry(file.to_string()).or_default();
+            activity.in_flight += 1;
+            activity.events += 1;
+            FetchTicket {
+                file_id: file.to_string(),
+                alone_since: None,
+            }
+        };
+        assert_eq!(content_seq_for_wipe(&db, file), None, "a fetch in flight");
+        drop(ticket);
+        assert!(content_seq_for_wipe(&db, file).is_some(), "none in flight");
     }
 }

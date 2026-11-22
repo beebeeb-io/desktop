@@ -234,6 +234,12 @@ impl StateDb {
         // no ALTER can change; that column is left unused.
         ensure_column(conn, "files", "fetched_min_version", "INTEGER NOT NULL DEFAULT -1")?;
         ensure_column(conn, "files", "fetched_hash", "TEXT")?;
+        // Task 2199 (dc-103b): a counter of every change to what the row says is on disk (the agreed content, the
+        // fetch candidate) and of every fetch recorded, whether or not it changed a column. A wipe of the candidate
+        // after a dehydrate is made only while it still reads the value from before the dehydrate
+        // (`wipe_fetched_content_if_unchanged`), so a fetch that started since is never forgotten. Forward only:
+        // 0 on every row of an older database; the trigger below and the fetch records bump it.
+        ensure_column(conn, "files", "content_seq", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(conn, "files", "cache_path", "TEXT")?;
         ensure_column(conn, "files", "cache_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(conn, "files", "pin_state", "TEXT NOT NULL DEFAULT 'inherit'")?;
@@ -469,6 +475,19 @@ impl StateDb {
                  UPDATE files SET {FOLD_AGREED_INTO_CANDIDATE} WHERE file_id = NEW.file_id;
              END;"
         ))?;
+        // Task 2199 (dc-103b): any write that changes the row's content columns moves `content_seq` on. The inner
+        // UPDATE writes only `content_seq`, so it does not fire this trigger again.
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS files_content_seq_follows_content
+             AFTER UPDATE OF local_hash, local_base_version, fetched_min_version, fetched_hash ON files
+             WHEN NEW.local_hash IS NOT OLD.local_hash
+               OR NEW.local_base_version IS NOT OLD.local_base_version
+               OR NEW.fetched_min_version IS NOT OLD.fetched_min_version
+               OR NEW.fetched_hash IS NOT OLD.fetched_hash
+             BEGIN
+                 UPDATE files SET content_seq = content_seq + 1 WHERE file_id = NEW.file_id;
+             END;",
+        )?;
         // Task 2191 (review-114 R2-P2-3): a row that joins the guarded set during the session (a
         // pull inserting a row whose 0.8.12 placeholder already exists, or a row losing its
         // agreed content) gets its "not in sync" mark at the next tick, not at the next start.

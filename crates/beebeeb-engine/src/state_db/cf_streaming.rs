@@ -215,6 +215,7 @@ impl StateDb {
         super::sql::fold_agreed_into_candidate_conn(&tx, file_id)?;
         tx.execute(
             "UPDATE files SET
+                 content_seq = content_seq + 1,
                  fetched_hash = NULL,
                  fetched_min_version = CASE
                      WHEN fetched_min_version = 0 THEN ?2
