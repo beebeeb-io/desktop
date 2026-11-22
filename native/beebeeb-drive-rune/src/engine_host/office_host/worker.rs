@@ -38,6 +38,7 @@ use restart::Cadence;
 
 /// Starts the worker of one document on a thread of its own. `false` when no thread could be made: the worker, and
 /// the bytes in it, are dropped (wiped).
+#[allow(clippy::too_many_arguments)] // the worker's whole start in one call; a parameter struct would only rename them
 pub(super) fn spawn<S: Starter>(
     starter: S,
     mode: Mode,

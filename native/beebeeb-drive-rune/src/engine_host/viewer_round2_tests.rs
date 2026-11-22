@@ -344,7 +344,9 @@ fn a_picture_that_declares_more_than_the_viewer_decodes_is_refused_from_its_head
     // A few bytes that declare a canvas far over the limits: said with its figures, not "can't read".
     fake.put("f-wide", "Invented wide.png", &png_header(SIDE_MAX + 1, 10));
     fake.put("f-many", "Invented many.png", &png_header(8_000, 7_000));
-    assert!(8_000 * 7_000 > PIXELS_MAX);
+    const {
+        assert!(8_000 * 7_000 > PIXELS_MAX);
+    }
     for (id, width, height) in [("f-wide", SIDE_MAX + 1, 10), ("f-many", 8_000, 7_000)] {
         let (source, _, body) = opened(&fake, id);
         assert_eq!(
@@ -444,8 +446,8 @@ fn a_webp_whose_last_chunk_has_no_pad_byte_is_decoded_and_shown() {
     // A 2 MiB metadata chunk, padded, with the length right.
     let mut large = still;
     large.extend_from_slice(b"EXIF");
-    large.extend_from_slice(&((2u32 << 20) as u32).to_le_bytes());
-    large.extend(std::iter::repeat(0u8).take(2 << 20));
+    large.extend_from_slice(&(2u32 << 20).to_le_bytes());
+    large.extend(std::iter::repeat_n(0u8, 2 << 20));
     restate(&mut large);
     for (which, bytes) in [("no pad byte", unpadded), ("2 MiB of metadata", large)] {
         assert!(viewer_picture::check(&bytes).is_ok(), "{which}");

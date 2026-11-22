@@ -66,7 +66,7 @@ use crate::frames::shared::parts::table::Kind;
 #[cfg(test)]
 #[path = "shared_tests.rs"]
 mod tests;
-// plan40 batch 1: Make available offline on someone else's file (slice B4).
+// Make available offline on someone else's file.
 #[path = "shared_offline.rs"]
 mod shared_offline;
 #[path = "shared_links.rs"]
@@ -116,8 +116,6 @@ pub struct EngineSharedSource<C: CredentialStores> {
     inviting: HashSet<String>,
     /// The invitations' answers of the current session and account, in order, for the view.
     invite_answers: VecDeque<(String, InviteResult)>,
-    /// Slice B4 (`shared_offline.rs`): what it keeps between a press and its answer. Empty until it binds.
-    shared_offline: shared_offline::SharedOfflineCalls,
     /// `shared_links.rs`: the links Copy link made, waiting for the clipboard.
     shared_links: shared_links::SharedLinkCalls,
     /// `shared_requests.rs`: the links a new request made, until the window takes them.
@@ -177,7 +175,6 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             rev: 0,
             inviting: HashSet::new(),
             invite_answers: VecDeque::new(),
-            shared_offline: Default::default(),
             shared_links: Default::default(),
             shared_requests: Default::default(),
             safety: Default::default(),
@@ -510,7 +507,7 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.shared_links_change_request_expiry(id, hours)
     }
 
-    // Slice B4 (`shared_offline.rs`): sent once per press for a row of "Shared with me".
+    // `shared_offline.rs`: sent once per press for a row of "Shared with me".
     fn keep_offline(&mut self, id: &str) -> bool {
         self.shared_offline_keep_offline(id)
     }
@@ -545,7 +542,7 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.change(session, id, change)
     }
 
-    // Slice w17 (`shared_leave.rs`): Leave a share someone made with the person; where a row points.
+    // `shared_leave.rs`: Leave a share someone made with the person; where a row points.
     fn leave(&mut self, id: &str) -> bool {
         self.shared_leave(id)
     }

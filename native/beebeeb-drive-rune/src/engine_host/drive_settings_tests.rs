@@ -168,7 +168,7 @@ impl Fake {
 
 impl DriveEngine for Fake {
     fn view(&self) -> SyncView {
-        self.view.lock().unwrap().clone()
+        *self.view.lock().unwrap()
     }
     fn account(&self) -> Option<String> {
         self.account.lock().unwrap().clone()

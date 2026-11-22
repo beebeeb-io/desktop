@@ -500,6 +500,7 @@ struct Held {
     wanted: u64,
     /// The newest revision the editor had reported when it was held: nothing held is older than the revision the
     /// view claims (an `Edited` drops what it names).
+    #[cfg(test)]
     revision: u64,
 }
 
@@ -910,10 +911,10 @@ impl OfficeView {
         if model.asked.iter().any(|asked| covers(asked, &range)) {
             return;
         }
-        if let Some(host) = self.host.borrow_mut().as_mut() {
-            if host.request_cells(sheet, range) {
-                model.expect(sheet, range);
-            }
+        if let Some(host) = self.host.borrow_mut().as_mut()
+            && host.request_cells(sheet, range)
+        {
+            model.expect(sheet, range);
         }
         model.remember(range);
     }
@@ -1357,10 +1358,10 @@ impl OfficeView {
                     },
                 });
                 if let Some(range) = model.block(0, 0, FIRST_ROWS, FIRST_COLS) {
-                    if let Some(host) = self.host.get_mut() {
-                        if host.request_cells(0, range) {
-                            model.expect(0, range);
-                        }
+                    if let Some(host) = self.host.get_mut()
+                        && host.request_cells(0, range)
+                    {
+                        model.expect(0, range);
                     }
                     model.remember(range);
                 }
@@ -1402,6 +1403,7 @@ impl OfficeView {
                 pixels,
                 bytes,
                 wanted: out.wanted,
+                #[cfg(test)]
                 revision: pictures.revision,
             },
         );

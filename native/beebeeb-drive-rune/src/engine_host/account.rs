@@ -52,22 +52,21 @@ use beebeeb_engine::app::{CredentialStores, Engine};
 use chrono::Utc;
 
 use super::passkeys::PasskeyCalls;
-use super::scaffold::not_wired;
 use super::stamp::{Stamp, account_of, stamp};
 use super::{app_lock::AppLockPart, log};
 use crate::frames::account::Pane;
 use crate::frames::account::approve::{Approval, Denial, Lookup, SignInRequest};
 use crate::frames::account::source::{
-    AccountSource, Answered, CallKind, CodeRefused, Count, Deletion, DeletionRefused, DeviceKind, Event, Identity,
-    NameAnswer, PaneState, Passkey, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped, Purpose, Refused,
-    Secret, SecurityFacts, Session, SignOutAnswer, StepUp, Strength, TwoFactor,
+    AccountSource, Answered, CallKind, CodeRefused, Count, Deletion, DeletionRefused, Event, Identity, NameAnswer,
+    PaneState, Passkey, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped, Purpose, Refused, Secret,
+    SecurityFacts, Session, SignOutAnswer, StepUp, Strength, TwoFactor,
 };
 
 #[path = "account_actions.rs"]
 mod actions;
 #[path = "account_activity.rs"]
 mod activity;
-// plan40 batch 1: the approval (A5) and the deletion (A6), each in its own file.
+// The approval (A5) and the deletion (A6), each in its own file.
 #[path = "account_approve.rs"]
 mod account_approve;
 #[path = "account_deletion.rs"]
@@ -135,6 +134,7 @@ struct Reads {
     asked_for: Option<SessionGeneration>,
 }
 
+#[allow(clippy::large_enum_variant)] // one value per answer, moved once through a channel: boxing would only add a hop
 enum Answer {
     Overview {
         number: u64,
@@ -240,9 +240,9 @@ pub struct EngineAccountSource<C: CredentialStores> {
     answers: mpsc::Sender<Answer>,
     inbox: mpsc::Receiver<Answer>,
     calls: twofactor::Calls,
-    /// Slice A5 (`account_approve.rs`): what it keeps between a press and its answer. Empty until it binds.
+    /// `account_approve.rs`: what it keeps between a press and its answer. Empty until it binds.
     account_approve: account_approve::ApproveCalls,
-    /// Slice A6 (`account_deletion.rs`): what it keeps between a press and its answer. Empty until it binds.
+    /// `account_deletion.rs`: what it keeps between a press and its answer. Empty until it binds.
     account_deletion: account_deletion::DeletionCalls,
 }
 
@@ -1158,7 +1158,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn stop_activity_confirmed(&mut self, password: Password<'_>) -> bool {
         super::passkeys::wiping(&password).is_some_and(|password| self.activity.stop(password))
     }
-    // Deleting the account (slice A6, `account_deletion.rs`).
+    // Deleting the account (`account_deletion.rs`).
     fn deletion(&self) -> Deletion {
         self.account_deletion_deletion()
     }
@@ -1174,7 +1174,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn undo_deletion(&mut self, confirmation: StepUp) -> Result<Deletion, Refused> {
         self.account_deletion_undo_deletion(confirmation)
     }
-    // Approving a sign-in from another device (slice A5, `account_approve.rs`).
+    // Approving a sign-in from another device (`account_approve.rs`).
     fn find_sign_in_request(&mut self, code: &str) -> Lookup {
         self.account_approve_find_sign_in_request(code)
     }

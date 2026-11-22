@@ -7,14 +7,13 @@ Modules 102–138, sorted by path.
 | Module | Purpose | Public API |
 |---|---|---|
 | `save_copy.rs` | A copy of one file at a place the person chose: the viewer's "Save a copy…" and "Download to…", and Photos' Save to PC (`shell::viewer_save` | IN_MEMORY_MAX |
-| `scaffold.rs` | The plan40 scaffold's one helper. | — |
 | `search.rs` | Search on the real engine: [`EngineSearchSource`], in the running app (`shell::state::SEARCH_ON_ENGINE`, task 2488). | — |
 | `settings.rs` | Settings on the real engine (task 2473): [`EngineSettingsSource`], the `SettingsSource` of the running app. | — |
 | `setup.rs` | The first run on the real engine: [`EngineSetupSource`], the `SetupSource` of the running app. | start_now, SetupPasskeyEngine (3) |
 | `setup_app_lock.rs` | Step 2 of the first run, "Lock Beebeeb" (DW-0202), on the real engine: the switch goes to core's rule through the engine ([`beebeeb_engine:: | — |
 | `setup_app_lock_tests.rs` | Step 2, "Lock Beebeeb", on the engine double of `setup_tests.rs`: on is written at once; off asks Windows Hello first (core wants a proof fo | — |
 | `setup_backup_tests.rs` | Step 3, "Back up your folders", on the engine double of `setup_tests.rs`: the folders are read on a worker; the step is a loading state whil | — |
-| `setup_folder.rs` | The first run's sync folder (the sync-start contract's ruling Q2, §5.1 and slice S2): the question the File Explorer step asks while the set | — |
+| `setup_folder.rs` | The first run's sync folder (the sync-start contract's ruling Q2, §5.1): the question the File Explorer step asks while the set | — |
 | `setup_folder_tests.rs` | The first run's sync folder (contract S2, ruling Q2): no start before a folder is chosen, the engine's rule decides whether a folder may be | — |
 | `setup_glue_tests.rs` | The engine's own first-run calls, once, on a real handle against the fake API: the gate the shell reads from the live engine, the settings e | — |
 | `setup_passkey.rs` | First-run step 1, "Add a passkey" (DW-0201), with the account password (owner ruling: a passkey change proves the password). | — |
@@ -26,7 +25,7 @@ Modules 102–138, sorted by path.
 | `shared_leave.rs` | Leave a share someone made with the person, and where a row of Shared points (w17-shared-items). | — |
 | `shared_links.rs` | Shared's link calls on the real engine (w17-shared-links): Copy link on a link row or a request row, Change expiry and Password on a link, C | — |
 | `shared_links_tests.rs` | Shared's link calls (w17-shared-links), against the fake accounts of `shared_tests.rs` (a child of it). | — |
-| `shared_offline.rs` | Slice B4 (plan40 batch 1): Make available offline on a file someone else shares (DW-0505 to DW-0412). | — |
+| `shared_offline.rs` | Make available offline on a file someone else shares (DW-0505 to DW-0412). | — |
 | `shared_offline_tests.rs` | Slice B4: Make available offline on a file someone else shares, on the real engine against the fake accounts of `shared_tests.rs` (a child o | — |
 | `shared_requests.rs` | New request (DW-0504) on the real engine: [`EngineSharedSource::create_request`] and `take_link`, handed here by `shared.rs`. | — |
 | `shared_safety.rs` | People's safety number, the "compared" marks and "Share anyway" on the real engine (w18-people-safety-number, DW-0513, DW-0515). | — |

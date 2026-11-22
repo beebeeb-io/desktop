@@ -384,8 +384,7 @@ fn click(rt: &mut Runtime<State>, key: &str) {
     let rect = rt
         .elements()
         .into_iter()
-        .filter(|e| !e.exiting && e.key.as_deref() == Some(key))
-        .last()
+        .rfind(|e| !e.exiting && e.key.as_deref() == Some(key))
         .unwrap_or_else(|| panic!("no element keyed {key}"))
         .rect;
     let (x, y) = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);

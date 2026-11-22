@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use beebeeb_engine::account_binding::Identity;
 use beebeeb_engine::app::{Engine, EngineConfig};
-use beebeeb_engine::drive_v2::case_place::{CaseRule, with_rule_for_test};
+use beebeeb_engine::drive_v2::case_place::{CaseRule, Clash, with_rule_for_test};
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
 use beebeeb_engine::runner::EngineRunner;
@@ -221,7 +221,7 @@ fn open_of_a_twin_never_hands_over_the_other_rows_entry() {
 #[test]
 fn show_in_file_explorer_of_a_twin_is_refused() {
     let mut set = set("t2");
-    let mut shown = |set: &mut Set, id: &str| set.source.show_in_file_explorer(&[row(id, "", false)]);
+    let shown = |set: &mut Set, id: &str| set.source.show_in_file_explorer(&[row(id, "", false)]);
     with_rule_for_test(CaseRule::Insensitive, || {
         assert_eq!(shown(&mut set, LOWER), CASE_TWIN, "the case twin");
         assert_eq!(shown(&mut set, SAME_A), SAME_NAME, "a same-name twin");

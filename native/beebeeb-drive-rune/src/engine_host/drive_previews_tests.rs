@@ -619,11 +619,7 @@ fn off_stops_a_rebuild_that_was_still_queued() {
     host.set_on(false);
     fake.permit();
     runs(&fake, 2);
-    assert_eq!(
-        fake.makes.lock().unwrap()[1].1,
-        true,
-        "the Rebuild's forced run started"
-    );
+    assert!(fake.makes.lock().unwrap()[1].1, "the Rebuild's forced run started");
     assert!(
         !fake.saw_stop.load(Ordering::SeqCst),
         "nothing stopped the forced run before the Off's write"

@@ -19,7 +19,7 @@
 //! - Other devices and Delete this backup: `engine_host::backups_devices` (`DeviceCalls`: the engine's session-bound
 //!   read of the device manifests, and the delete behind the account password).
 //! - A folder the person chose (DW-0737 "chosen by you"): listed after the six from the same read; Add a folder…
-//!   (DW-0738) and Stop backing up (DW-1410) are slice A7's (`engine_host/backup_folders.rs`).
+//!   (DW-0738) and Stop backing up (DW-1410) are in `engine_host/backup_folders.rs`.
 //! - Not bound (`wired(part)` is `false`): Mail Backup (a proposal), and a device page's "Open in Photos" / "Open in
 //!   Files" (the shell takes Backups' folder picker only).
 //!
@@ -58,7 +58,7 @@ use crate::frames::backups::source::{
 #[cfg(test)]
 #[path = "backups_tests.rs"]
 mod tests;
-// plan40 batch 1: Add a folder and Stop backing up (slice A7).
+// Add a folder and Stop backing up.
 #[path = "backup_folders.rs"]
 mod backup_folders;
 
@@ -111,7 +111,7 @@ pub trait BackupsEngine: DevicesEngine + Send + Sync + 'static {
     fn nested_words(&self, _key: &str) -> Option<String> {
         None
     }
-    /// Add a chosen folder for `session` (`Engine::add_backup_folder_for`, slice A7). BLOCKS: a worker's. The default
+    /// Add a chosen folder for `session` (`Engine::add_backup_folder_for`). BLOCKS: a worker's. The default
     /// adds nothing.
     fn add_folder_for(
         &self,
@@ -123,7 +123,7 @@ pub trait BackupsEngine: DevicesEngine + Send + Sync + 'static {
         ))
     }
     /// Stop backing up a chosen folder for `session`, its backup to Trash after the password is proven when one is
-    /// given (`Engine::remove_backup_folder_for`, slice A7). BLOCKS: a worker's. The default stops nothing.
+    /// given (`Engine::remove_backup_folder_for`). BLOCKS: a worker's. The default stops nothing.
     fn remove_folder_for(
         &self,
         _session: beebeeb_engine::account::SessionGeneration,
@@ -240,7 +240,7 @@ pub struct EngineBackupsSource<E: BackupsEngine> {
     run_out: bool,
     /// Other devices and Delete this backup (`engine_host::backups_devices`).
     devices: DeviceCalls<E>,
-    /// Slice A7 (`backup_folders.rs`): what it keeps between a press and its answer. Empty until it binds.
+    /// `backup_folders.rs`: what it keeps between a press and its answer. Empty until it binds.
     backup_folders: backup_folders::BackupFolderCalls,
 }
 
@@ -374,7 +374,7 @@ fn kept(words: String) -> &'static str {
         std::sync::Mutex::new(std::collections::BTreeSet::new());
     let mut held = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(found) = held.get(words.as_str()) {
-        return *found;
+        return found;
     }
     let words: &'static str = Box::leak(words.into_boxed_str());
     held.insert(words);
@@ -521,12 +521,12 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
                     self.run_out = false;
                     pumped.changed = true;
                     // The switch this read follows is read back: what it asked for is now what the engine has.
-                    if let Some(key) = switched {
-                        if let Some((_, out)) = self.switching.get_mut(&key) {
-                            *out = out.saturating_sub(1);
-                            if *out == 0 {
-                                self.switching.remove(&key);
-                            }
+                    if let Some(key) = switched
+                        && let Some((_, out)) = self.switching.get_mut(&key)
+                    {
+                        *out = out.saturating_sub(1);
+                        if *out == 0 {
+                            self.switching.remove(&key);
                         }
                     }
                     let mine = self.seen.0 && whose.is_some() && whose == self.seen.1;
@@ -712,7 +712,7 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
             .collect()
     }
 
-    /// Not bound: Mail Backup is another lane's.
+    /// Not bound: Mail Backup is not bound here.
     fn mail_backup_on(&self) -> bool {
         false
     }
@@ -741,17 +741,17 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
         }
     }
 
-    /// Slice A7 (`backup_folders.rs`): the folder picker's answer, asked of the engine.
+    /// `backup_folders.rs`: the folder picker's answer, asked of the engine.
     fn add_folder(&mut self, path: &str) -> bool {
         self.backup_folders_add_folder(path)
     }
 
-    /// Slice A7 (`backup_folders.rs`): "Stop and keep the backup"; a move to Trash needs the password.
+    /// `backup_folders.rs`: "Stop and keep the backup"; a move to Trash needs the password.
     fn remove_folder(&mut self, id: &str, move_copy_to_trash: bool) {
         self.backup_folders_remove_folder(id, move_copy_to_trash)
     }
 
-    /// Slice A7: the move to Trash proves the account password (DW-1410's second step).
+    /// The move to Trash proves the account password (DW-1410's second step).
     fn trash_needs_password(&self) -> bool {
         true
     }

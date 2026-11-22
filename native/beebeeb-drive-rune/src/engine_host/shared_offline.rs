@@ -1,4 +1,4 @@
-//! Slice B4 (plan40 batch 1): Make available offline on a file someone else shares (DW-0505 to DW-0412). Part of
+//! Make available offline on a file someone else shares (DW-0505 to DW-0412). Part of
 //! [`EngineSharedSource`] (`shared.rs`), which hands `keep_offline` here.
 //!
 //! - The press: for a row of the current session's "Shared with me" list only (an id that is not one sends
@@ -16,10 +16,8 @@ use beebeeb_engine::app::bindings::shared_offline::SharedKeepRefused;
 
 use super::*;
 
-/// What slice B4 keeps between a press and its answer. Nothing: its answer rides the adapter's change channel and
-/// its one-per-id rule is the adapter's `changing`. The adapter holds one (`EngineSharedSource::shared_offline`).
-#[derive(Default)]
-pub(super) struct SharedOfflineCalls {}
+// This file keeps nothing between a press and its answer: the answer rides the adapter's change channel and its
+// one-per-id rule is the adapter's `changing`.
 
 impl<C: CredentialStores> EngineSharedSource<C> {
     /// Sent once per press, for a file or folder in the current session's "Shared with me" list. `false`: not such

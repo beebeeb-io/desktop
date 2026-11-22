@@ -12,7 +12,7 @@ const OTHER: &str = "00000000-0000-4000-8000-000000000002";
 /// A fake engine store: blobs by file id as (time, base, bytes), for one session.
 #[derive(Default)]
 struct Fake {
-    blobs: Mutex<BTreeMap<String, (i64, i64, Vec<u8>)>>,
+    blobs: Mutex<BlobMap>,
     turn: u64,
 }
 
@@ -167,3 +167,6 @@ fn restore_by_the_person_does_not_say_the_editor_stopped() {
     assert!(!said.contains("stopped"), "{said}");
     assert!(said.contains("14:32") && said.contains("restored"), "{said}");
 }
+
+/// The blobs by file id: `(saved_at, session, bytes)`.
+type BlobMap = BTreeMap<String, (i64, i64, Vec<u8>)>;

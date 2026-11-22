@@ -222,6 +222,7 @@ impl Recovery {
     }
 
     /// A save landed: the blob is no longer needed.
+    #[cfg(test)]
     pub(crate) fn saved(&self, file_id: &str) {
         self.discard(file_id);
     }

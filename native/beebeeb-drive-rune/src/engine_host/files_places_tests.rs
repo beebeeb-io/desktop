@@ -311,8 +311,7 @@ fn places_of_an_earlier_account_answer_nothing() {
         None,
         "nothing of the first account's tree"
     );
-    let held = Some(THIS_PC);
-    assert_eq!(source.backup_entry(&row(held.unwrap(), Some(ROOT), true)), None);
+    assert_eq!(source.backup_entry(&row(THIS_PC, Some(ROOT), true)), None);
 }
 
 #[test]
@@ -555,7 +554,7 @@ fn the_backups_id_is_read_again_when_it_first_came_back_none() {
     assert_eq!(backups_root_of_for(&mut source, Duration::from_millis(300)), None);
     // The folder comes to be (a first sync, a first backup).
     {
-        let db = StateDb::open(&world._dir.path().join("state.db")).unwrap();
+        let db = StateDb::open(world._dir.path().join("state.db")).unwrap();
         put(&db, ROOT, "/Backups", None, ItemKind::Folder);
         db.mark_backups_root_for_test(ROOT).unwrap();
     }

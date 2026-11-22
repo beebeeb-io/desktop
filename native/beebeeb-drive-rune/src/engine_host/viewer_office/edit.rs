@@ -636,28 +636,29 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             return Settled::Said("Your new document was made. Find it in Files.".to_string());
         }
         match made.result {
-            Ok(id) => match {
+            Ok(id) => {
                 self.office.work.made_here.push((id.clone(), made.session));
-                self.begin(&id)
-            } {
-                Ok(file) => {
-                    // The window opens this file again (`Ui::open`): that open too is on these bytes.
-                    self.office.work.made_on = Some(MadeOn {
-                        file_id: file.id.clone(),
-                        session: made.session,
-                        bytes: made.bytes.clone(),
-                    });
-                    self.office_open_on_made_bytes(&file.id, made.session, made.bytes);
-                    Settled::Saved {
-                        id: file.id,
-                        name: file.name,
-                        body: file.body,
-                        version: file.version.max(1),
-                        at: hhmm(),
+                let begun = self.begin(&id);
+                match begun {
+                    Ok(file) => {
+                        // The window opens this file again (`Ui::open`): that open too is on these bytes.
+                        self.office.work.made_on = Some(MadeOn {
+                            file_id: file.id.clone(),
+                            session: made.session,
+                            bytes: made.bytes.clone(),
+                        });
+                        self.office_open_on_made_bytes(&file.id, made.session, made.bytes);
+                        Settled::Saved {
+                            id: file.id,
+                            name: file.name,
+                            body: file.body,
+                            version: file.version.max(1),
+                            at: hhmm(),
+                        }
                     }
+                    Err(_) => Settled::Said("Your new document was made, but it could not be opened here.".to_string()),
                 }
-                Err(_) => Settled::Said("Your new document was made, but it could not be opened here.".to_string()),
-            },
+            }
             Err(EditRefused::ReadOnly) => Settled::Refused("You can't add files to this folder.".to_string()),
             Err(_) => Settled::Failed,
         }

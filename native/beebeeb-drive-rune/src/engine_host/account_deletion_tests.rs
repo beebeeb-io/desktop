@@ -1,4 +1,4 @@
-//! Deleting the account on the real engine (slice A6), against the engine's fake account on loopback with Beebeeb's
+//! Deleting the account on the real engine, against the engine's fake account on loopback with Beebeeb's
 //! deletion routes added here, answered as `routes/account_delete.rs` answers them: the step-up's token is consumed
 //! BEFORE the code is read, the state is `none | requested | scheduled`, and the signed-in cancel takes a scheduled
 //! deletion only. Every name, code and password is invented.
@@ -42,7 +42,7 @@ struct Fake {
     /// The body and the confirm header of every step-up and deletion request, as text.
     seen: Arc<Mutex<Vec<String>>>,
     /// Runs once, while the next `delete-request` is answered (the call is out).
-    during_request: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    during_request: Hook,
 }
 
 impl Fake {
@@ -59,7 +59,7 @@ fn fake() -> Fake {
     let state = Arc::new(Mutex::new("none"));
     let mode = Arc::new(AtomicU8::new(ANSWER));
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
-    let during_request: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::default();
+    let during_request: Hook = Arc::default();
     let (account_in, state_in, mode_in, seen_in, during_in) = (
         account.clone(),
         state.clone(),
@@ -533,3 +533,6 @@ fn a_check_that_failed_never_says_the_link_was_not_used() {
         "nothing was read, nothing is shown as known"
     );
 }
+
+/// A one-shot hook a test sets to run during a request.
+type Hook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;

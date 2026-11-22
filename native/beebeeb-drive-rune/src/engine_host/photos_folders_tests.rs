@@ -82,7 +82,7 @@ fn photo_folders_late_answer_dropped() {
     assert_eq!(held.last.as_deref(), Some("last backup 10:00"));
 }
 
-// ---- Photo sources' folders (slice K4) ----
+// ---- Photo sources' folders ----
 
 const FOLDERS_PASSWORD: &str = "an invented password for photo folders";
 const FOLDERS_WAIT: Duration = Duration::from_secs(30);

@@ -118,13 +118,12 @@ fn writes_in_a_numbered_font_not_in_the_file(page: &Page<'_>) -> bool {
     let resources = page.resources();
     let mut operations = page.typed_operations();
     while let Some(operation) = operations.next() {
-        if let TypedInstruction::TextFont(chosen) = operation {
-            if resources
+        if let TypedInstruction::TextFont(chosen) = operation
+            && resources
                 .get_font(chosen.0)
                 .is_some_and(|font| is_numbered_and_not_in_the_file(&font))
-            {
-                return true;
-            }
+        {
+            return true;
         }
     }
     false

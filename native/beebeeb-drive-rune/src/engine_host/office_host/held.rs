@@ -22,10 +22,10 @@ enum Bytes {
 
 impl Bytes {
     fn keep(bytes: &[u8], scratch: Option<&ScratchStore>, limit: usize) -> Bytes {
-        if bytes.len() > limit {
-            if let Some(file) = scratch.and_then(|store| store.put(bytes).ok()) {
-                return Bytes::Scratch(file);
-            }
+        if bytes.len() > limit
+            && let Some(file) = scratch.and_then(|store| store.put(bytes).ok())
+        {
+            return Bytes::Scratch(file);
         }
         Bytes::Memory(Zeroizing::new(bytes.to_vec()))
     }

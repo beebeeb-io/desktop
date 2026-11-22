@@ -69,7 +69,7 @@ use beebeeb_media_protocol::KindHint;
 #[cfg(test)]
 #[path = "photos_tests.rs"]
 mod tests;
-// plan40 batch 1: Photo sources' folders and the devices' backup line (slice B1).
+// Photo sources' folders and the devices' backup line.
 #[path = "photos_folders.rs"]
 mod photos_folders;
 
@@ -277,7 +277,7 @@ pub struct EnginePhotos<C: CredentialStores> {
     /// Tests only: what the next Keep answers in the engine's place (this PC's sync folder is not a test's to set).
     #[cfg(test)]
     keep_says: Option<Result<(), ()>>,
-    /// Slice B1 (`photos_folders.rs`): what it keeps between a press and its answer: the held folder list and the calls on their way.
+    /// `photos_folders.rs`: what it keeps between a press and its answer: the held folder list and the calls on their way.
     photos_folders: photos_folders::PhotoFolderCalls,
 }
 
@@ -986,7 +986,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
             .collect()
     }
 
-    /// The folders from Files the account added, as the engine last answered (slice K4, `photos_folders.rs`).
+    /// The folders from Files the account added, as the engine last answered (`photos_folders.rs`).
     fn folders(&self) -> Vec<Folder> {
         self.photos_folders_folders()
     }
@@ -1035,7 +1035,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
     fn set_shown(&mut self, source: SourceRef, shown: bool) {
         let place = match source {
             SourceRef::Device(place) => place,
-            // A folder from Files: asked of the engine (slice K4, `photos_folders.rs`).
+            // A folder from Files: asked of the engine (`photos_folders.rs`).
             SourceRef::Folder(index) => return self.photos_folders_set_shown(index, shown),
         };
         if self.current().is_none() {
@@ -1064,7 +1064,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         totals
     }
 
-    /// The newest backup pass of the other devices (slice B1, `photos_folders.rs`).
+    /// The newest backup pass of the other devices (`photos_folders.rs`).
     fn backup_status(&self) -> Option<BackupStatus> {
         self.photos_folders_backup_status()
     }

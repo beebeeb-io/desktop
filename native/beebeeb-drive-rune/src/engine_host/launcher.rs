@@ -1,5 +1,5 @@
 //! The starts the window asks for outside Files: the tray's and the menu's Open in File Explorer, a page opened in
-//! the browser, the viewer's Open in another app (ruling R-OW1).
+//! the browser, the viewer's Open in another app.
 //!
 //! Windows' app chooser holds the launch lock for as long as it is open, so none of them starts on the window's
 //! thread: each is handed to the launch worker (`launch::Later`, FIFO with the other starts of its [`Launcher`]) and

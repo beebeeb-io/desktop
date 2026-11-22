@@ -11,8 +11,8 @@ use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use beebeeb_engine::test_api::{FakeApi, Reply};
-use chrono::{TimeZone, Timelike};
-use serde_json::{Value, json};
+use chrono::{TimeZone, Timelike, Utc};
+use serde_json::json;
 use zeroize::Zeroizing;
 
 use super::*;
@@ -23,7 +23,6 @@ struct Fake {
     api: FakeApi,
     status: Arc<AtomicU16>,
     delay_ms: Arc<AtomicU64>,
-    body: Arc<Mutex<Value>>,
     account: Arc<FakeAccount>,
     phrase: String,
 }
@@ -52,7 +51,6 @@ fn fake() -> Fake {
         api,
         status,
         delay_ms,
-        body,
         account,
         phrase,
     }

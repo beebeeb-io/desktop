@@ -713,7 +713,7 @@ fn the_backups_id_is_read_per_session_and_handed_out_for_the_account_it_was_read
 fn the_mark_of_a_row_is_read_the_way_a_listing_reads_it() {
     use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, PinState, StateDb};
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let put = |id: &str, status: FileStatus, kind: ItemKind, kept: bool| {
         let entry = FileEntry {
             file_id: id.into(),
@@ -807,7 +807,7 @@ fn the_engines_own_glue_hands_out_nothing_with_no_one_signed_in() {
 fn kept_file_with_unsent_change_reads_its_unsent_mark() {
     use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, PinState, StateDb};
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let put = |id: &str, status: FileStatus| {
         let entry = FileEntry {
             file_id: id.into(),

@@ -1,4 +1,4 @@
-//! The first run's sync folder (the sync-start contract's ruling Q2, §5.1 and slice S2): the question the File
+//! The first run's sync folder (the sync-start contract's ruling Q2, §5.1): the question the File
 //! Explorer step asks while the settings name no folder, and the start worker's part ([`start_now`]).
 //!
 //! The rule is the engine's ([`SetupEngine::check_folder`]): this file asks it for the folder the person kept or

@@ -72,7 +72,6 @@ use beebeeb_engine::state_db::{BandwidthSample, FileEntry, PinState, StateDb};
 use beebeeb_engine::sync_view::{Explorer, SyncView};
 
 use super::log;
-use super::scaffold::not_wired;
 use crate::frames::settings::Pane;
 use crate::frames::settings::bandwidth_data::{live_flows, Bandwidth, Direction, History, SpeedTest, Step};
 use crate::frames::settings::diagnostics::{Bundle, Diagnostics};
@@ -87,7 +86,7 @@ use crate::shell::platform::Platform;
 mod reads;
 #[path = "drive_settings_tools.rs"]
 pub(crate) mod tools;
-// plan40 batch 1: "Show sync status on files" (slice B3).
+// "Show sync status on files".
 #[path = "app_activity.rs"]
 pub(crate) mod app_activity;
 pub(crate) use reads::*;
@@ -141,7 +140,6 @@ pub const CHANGE_LOCKED: &str = "Unlock Beebeeb to change this.";
 pub const LIMIT_FAILED: &str = "Couldn't change the limit. Try again.";
 /// A press on a control this version does not draw: said, never done.
 pub const METERED_FAILED: &str = "Couldn't change the setting. Try again.";
-pub const METERED_NOT_AVAILABLE: &str = "Not available in this version yet.";
 /// How far back the Bandwidth pane's traffic goes, and how long one of its buckets is.
 const TRAFFIC_HOURS: i64 = 20;
 const BUCKET_MINUTES: i64 = 20;
@@ -1164,7 +1162,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             download_limit: mbps(limits.download_kib_per_s),
             history: history.unwrap_or_default(),
             test: self.speed.clone(),
-            sync_on_metered: self.metered_pause.map_or(true, |pause| !pause),
+            sync_on_metered: self.metered_pause.is_none_or(|pause| !pause),
             ..self.live(Bandwidth::default())
         }
     }

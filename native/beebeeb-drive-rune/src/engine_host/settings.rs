@@ -603,14 +603,14 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
         }
         // Words for the account that pressed: said once its session is in memory (after an unlock the engine wakes
         // the window, which polls); never to another account.
-        if let Some((account, words)) = self.told_later.take() {
-            if account == account_of(&self.engine) {
-                if self.engine.has_session() && pumped.toast.is_none() {
-                    pumped.toast = Some(words);
-                    pumped.changed = true;
-                } else {
-                    self.told_later = Some((account, words));
-                }
+        if let Some((account, words)) = self.told_later.take()
+            && account == account_of(&self.engine)
+        {
+            if self.engine.has_session() && pumped.toast.is_none() {
+                pumped.toast = Some(words);
+                pumped.changed = true;
+            } else {
+                self.told_later = Some((account, words));
             }
         }
         if self.read_wanted && !self.reading && self.engine.has_session() {

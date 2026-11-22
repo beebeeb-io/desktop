@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::drive_v2::DriveError;
-use beebeeb_engine::drive_v2::case_place::{self, Clash};
+use beebeeb_engine::drive_v2::case_place;
 use beebeeb_engine::drive_v2::model::{self, Sort as EngineSort};
 use beebeeb_engine::engine_status::EngineStatusView;
 use beebeeb_engine::file_ops;
@@ -97,8 +97,6 @@ mod launch_tests;
 mod open_with_apps;
 pub mod passkeys;
 pub mod photos;
-// plan40: `not_wired`, around every batch-1 method not bound yet.
-mod scaffold;
 pub mod search;
 pub mod settings;
 pub mod shared;
@@ -118,7 +116,7 @@ pub mod viewer;
 // "Save a copy…" and "Download to…": a copy of one file at a place the person chose (`shell::viewer_save`; Photos reuses it).
 pub mod save_copy;
 
-pub use signin::{EngineSignInSource, open_installed_file};
+pub use signin::EngineSignInSource;
 pub use sync::EngineGlobalSource;
 pub use tray::EngineTraySource;
 
@@ -482,7 +480,7 @@ impl<C: CredentialStores> LiveEngine<C> {
         let mut count = 0;
         for message in messages.try_iter() {
             fold(&mut status, &message);
-            // Slice B5: a notice of the engine as a Windows toast (`windows_toast::show`, nothing yet).
+            // A notice of the engine as a Windows toast (`windows_toast::show`, nothing yet).
             #[cfg(windows)]
             if let HostMessage::Notice(notice) = &message {
                 crate::shell::platform::windows_toast::show(notice);
@@ -844,7 +842,7 @@ pub struct EngineFilesSource<C: CredentialStores> {
     /// A start that did not happen after its press was accepted (Open, Show in File Explorer, an Open With app): said
     /// through `changes`.
     start_failed: Arc<Mutex<Vec<Change>>>,
-    /// Files' Open and Show in File Explorer start here, never on the window's thread (ruling R-OW1).
+    /// Files' Open and Show in File Explorer start here, never on the window's thread.
     later: launch::Later,
     /// The starts handed to `later` and not begun yet: a session end empties it (`forget_starts`).
     pending: files_launch::Pending,
@@ -889,11 +887,6 @@ fn local_items(items: &[DriveItem]) -> Vec<(String, bool)> {
 /// are NOT in the folder yet. `None`: it was not refused, or nothing went in (Try again sends all of it).
 fn upload_rest(files: &[PathBuf], copied: usize, refused: bool) -> Option<Vec<PathBuf>> {
     (refused && copied > 0).then(|| files.iter().skip(copied).cloned().collect())
-}
-
-fn not_wired(what: &str) -> ActionError {
-    log(format!("NotWired({what})"));
-    ActionError::Unavailable
 }
 
 /// The path the system is asked to open for the item `id`, read under the account-bound handle: below the

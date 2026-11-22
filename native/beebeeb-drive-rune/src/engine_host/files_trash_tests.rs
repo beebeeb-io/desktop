@@ -218,7 +218,7 @@ fn restored(id: &str) -> (String, &'static str) {
 }
 
 /// What the source hands the window now: per change the action and, per item, its id and why it was left.
-fn changes(source: &mut Source) -> Vec<(Action, Vec<(String, Option<ActionError>)>)> {
+fn changes(source: &mut Source) -> Changes {
     source
         .changes()
         .into_iter()
@@ -699,3 +699,6 @@ fn window_and_adapter_hold_same_undo_set() {
     );
     assert_eq!(adapter_undo(&shared), window_undo(&rt));
 }
+
+/// Per change the action and, per item, its id and why it was left.
+type Changes = Vec<(Action, Vec<(String, Option<ActionError>)>)>;

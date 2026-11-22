@@ -174,7 +174,7 @@ fn a_rendered_page_of_another_size_kills() {
 fn an_answer_that_is_not_the_oldest_kills() {
     let registry = Registry::new();
     // Two pages asked (ids 2 and 4, after the Open's 0); the helper answers the id `pick` chooses.
-    let cases: [(&str, fn(u32, u32) -> u32); 3] = [
+    let cases: [Case; 3] = [
         ("an id never sent", |_, _| 1000),
         ("the second of two answered first", |_, second| second),
         ("an odd id", |first, _| first + 1),
@@ -1184,3 +1184,6 @@ fn a_real_confined_helper_renders_page_one() {
         host.state()
     );
 }
+
+/// A named rule from two sizes to one.
+type Case = (&'static str, fn(u32, u32) -> u32);

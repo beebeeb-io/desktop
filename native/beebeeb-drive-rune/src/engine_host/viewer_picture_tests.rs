@@ -639,7 +639,7 @@ fn a_last_chunk_without_its_pad_byte_is_accepted() {
     assert_eq!(check(&cut), Err(Refused::NotAPicture));
     // (c) a plain lossless file whose one chunk has an odd length and no pad byte.
     let mut odd = LOSSLESS.to_vec();
-    if odd.len() % 2 == 0 {
+    if odd.len().is_multiple_of(2) {
         odd.push(0);
     }
     let plain = unpadded_file(&chunk_unpadded(b"VP8L", &odd));
@@ -807,7 +807,7 @@ fn the_check_does_not_allocate_in_proportion_to_the_number_of_chunks() {
     assert_eq!(asked_big, asked_small, "the same work for 4 chunks and for a million");
     // A million valid empty chunks are walked without collecting them either (no bitstream: not a picture,
     // but the walk itself asks for nothing in proportion).
-    let walk = |bytes: &[u8]| allocated_by(|| chunks(bytes, 12).into_iter().count()).1;
+    let walk = |bytes: &[u8]| allocated_by(|| chunks(bytes, 12).count()).1;
     let many = tiny(None, 1 << 20);
     assert!(many.len() > 8 << 20);
     assert_eq!(walk(&many), walk(&tiny(None, 4)));

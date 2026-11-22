@@ -75,7 +75,7 @@ impl Overview {
 pub(super) fn initials_of(name: &str) -> String {
     let mut words = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty());
     let first = words.next().and_then(|w| w.chars().next());
-    let last = words.last().and_then(|w| w.chars().next());
+    let last = words.next_back().and_then(|w| w.chars().next());
     first.into_iter().chain(last).flat_map(char::to_uppercase).collect()
 }
 

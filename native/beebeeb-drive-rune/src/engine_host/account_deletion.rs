@@ -1,4 +1,4 @@
-//! Slice A6 (plan40 batch 1): deleting the account from this PC (DW-A58, DW-A80 to DW-A83). Part of
+//! Deleting the account from this PC (DW-A58, DW-A80 to DW-A83). Part of
 //! [`EngineAccountSource`] (`account.rs`): the step-up of [`Purpose::DeleteAccount`] (one line there routes it here),
 //! the deletion's panes, its state, the request, the link's use, the cancel and the undo. The engine's calls are
 //! `beebeeb_engine::app::bindings::account_deletion` (core's flow, Beebeeb's routes).
@@ -83,7 +83,7 @@ struct Kept {
     made: Instant,
 }
 
-/// What slice A6 keeps between a press and its answer. The adapter holds one (`EngineAccountSource::account_deletion`).
+/// What this file keeps between a press and its answer. The adapter holds one (`EngineAccountSource::account_deletion`).
 #[derive(Default)]
 pub(super) struct DeletionCalls {
     /// Shared with the [`watch`] of the step-up that made it.

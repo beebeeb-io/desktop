@@ -676,7 +676,7 @@ pub(crate) fn rows_of(items: Vec<DesktopTrashItem>, now: DateTime<Local>) -> Vec
                     // Where it was: not bound (the parent's name is local state; see the module's doc).
                     extra: Extra::Words(String::new()),
                     pc: None,
-                    bytes: (!item.is_folder).then(|| bytes as u64),
+                    bytes: (!item.is_folder).then_some(bytes as u64),
                     at,
                 },
                 at: at.unwrap_or(i64::MIN),

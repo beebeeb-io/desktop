@@ -1,4 +1,4 @@
-//! Slice B1 (plan40 batch 1): the devices' backup line (DW-0601), and slice K4 (batch 2): Photo sources' folders
+//! The devices' backup line (DW-0601), and Photo sources' folders
 //! from Files (DW-0604). Part of [`EnginePhotos`] (`photos.rs`), which hands `folders`, a folder's `set_shown`,
 //! `add_folder`, `remove_folder` and `backup_status` here.
 //!
@@ -34,7 +34,7 @@ use super::*;
 #[derive(Default)]
 pub(super) struct PhotoFolderCalls {
     held: Arc<Mutex<Held>>,
-    /// Photo sources' folders (slice K4).
+    /// Photo sources' folders.
     folders: Arc<Mutex<HeldFolders>>,
 }
 
@@ -145,7 +145,7 @@ fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
