@@ -611,6 +611,7 @@ fn request_as(s: &mut State, intent: Intent, link: bool) -> Outcome {
 /// section by writing `State::sidebar_section`; this turns that write into a navigation, so
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
+    crate::log_file::crash::panic_if_test_crash_due(); // test builds with BEEBEEB_TEST_CRASH only
     poll_packet_text(s, tx);
     let mut changed = poll_screen(s, _seconds, tx);
     changed |= poll_capture(s, tx);

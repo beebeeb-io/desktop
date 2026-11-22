@@ -27,12 +27,17 @@ pub fn render(version: &str, thread: Option<&str>, file: &str, line: u32, when: 
     let thread = if thread == Some("main") { "main" } else { "other" };
     let version: String = version
         .chars()
-        .filter(|c| c.is_ascii_digit() || matches!(c, '.' | '-'))
+        .filter(|c| version_char(*c))
         .collect();
     format!(
         "{when} CRASH version={version} thread={thread} location={}:{line}\n",
         safe_file(file)
     )
+}
+
+/// What a version may hold: About's words ("1.2.3", "test build abc1234"): letters, digits, `.`, `-`, space.
+fn version_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ' ')
 }
 
 /// The last path component when it looks like `name.rs` (letters, digits, `_`), else `unknown`.
@@ -79,10 +84,15 @@ pub fn reduce(text: &str) -> String {
         .collect()
 }
 
-/// `<when> CRASH version=<digits . -> thread=main|other location=<name>.rs|unknown:<digits>`.
+/// `<when> CRASH version=<letters digits . - space> thread=main|other location=<name>.rs|unknown:<digits>`.
 fn shaped(line: &str) -> bool {
-    let parts: Vec<&str> = line.split(' ').collect();
-    let [when, "CRASH", version, thread, location] = parts[..] else {
+    let Some((when, rest)) = line.split_once(" CRASH version=") else {
+        return false;
+    };
+    // The version may hold spaces, so the fixed tokens are read from the right.
+    let mut from_right = rest.rsplitn(3, ' ');
+    let (Some(location), Some(thread), Some(version)) = (from_right.next(), from_right.next(), from_right.next())
+    else {
         return false;
     };
     let when_ok = !when.is_empty()
@@ -90,9 +100,7 @@ fn shaped(line: &str) -> bool {
         && when
             .chars()
             .all(|c| c.is_ascii_digit() || matches!(c, 'T' | 'Z' | ':' | '-' | '+' | '.'));
-    let version_ok = version
-        .strip_prefix("version=")
-        .is_some_and(|v| v.len() <= 32 && v.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '-')));
+    let version_ok = !version.is_empty() && version.len() <= 32 && version.chars().all(version_char);
     let thread_ok = matches!(thread, "thread=main" | "thread=other");
     let location_ok = location
         .strip_prefix("location=")
@@ -166,10 +174,25 @@ pub fn install_hook() {
 pub fn record_for(info: &std::panic::PanicHookInfo<'_>, when: &str) -> String {
     let (file, line) = info.location().map_or(("", 0), |l| (l.file(), l.line()));
     render(
-        env!("CARGO_PKG_VERSION"),
+        &crate::engine_host::settings::version_words(),
         std::thread::current().name(),
         file,
         line,
         when,
     )
+}
+
+/// Test builds only: set by the helper thread in `main` once the log folder exists and the delay has passed.
+static TEST_CRASH_DUE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks the UI thread to panic at its next [`panic_if_test_crash_due`].
+pub fn request_test_crash() {
+    TEST_CRASH_DUE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Called by the UI thread (once per frame): panics there when a test crash was requested.
+pub fn panic_if_test_crash_due() {
+    if TEST_CRASH_DUE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        panic!("test crash");
+    }
 }

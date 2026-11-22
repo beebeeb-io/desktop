@@ -143,3 +143,23 @@ fn the_crash_record_is_attached_to_the_support_bundle() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn crash_record_version_is_the_one_about_shows() {
+    let about = crate::engine_host::settings::version_words();
+    let t = render(&about, Some("main"), "run.rs", 1, "2026-11-22T10:00:00Z");
+    assert!(t.contains(&format!("version={about} thread=main")), "{t}");
+    let dir = std::env::temp_dir().join(format!("bb-crash-ver-{}", std::process::id()));
+    write(&dir, &t);
+    let r = take_pending(&dir).expect("a version with words still reads back");
+    assert_eq!(r.text, t);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn crash_record_version_with_spaces_keeps_its_shape() {
+    let t = render("test build abc1234", Some("x"), "a.rs", 3, "2026-11-22T10:00:00Z");
+    assert_eq!(t, "2026-11-22T10:00:00Z CRASH version=test build abc1234 thread=other location=a.rs:3\n");
+    assert_eq!(reduce(&t), t);
+    assert_eq!(reduce("2026-11-22T10:00:00Z CRASH version=1.0 thread=main location=a.rs:3 extra\n"), "");
+}
