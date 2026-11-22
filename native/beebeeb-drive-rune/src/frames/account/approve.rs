@@ -26,10 +26,10 @@ use crate::ui::au::{self, Keys, Tone};
 use crate::ui::dialog::{self, Dialog as Card, Foot, Head};
 use crate::ui::au_entry::{self, FocusedSpec};
 use crate::ui::kit;
-use crate::ui::settings_dialog::{DIALOG_TITLE, scrim_color};
+use crate::ui::settings_dialog::DIALOG_TITLE;
 use crate::ui::settings_list as lists;
 use crate::ui::settings_shell::PANE_TITLE;
-use rune::{Align, Color, El, TextEdit, Tx, col, el, row};
+use rune::{Align, El, TextEdit, Tx, col, el, row};
 
 use super::source::{AccountSource, Password};
 use super::{AccountUi, Dialog, Pane, icons};
@@ -553,7 +553,7 @@ pub fn code_pane(a: &Approve, t: &Theme) -> El {
         col()
             .key("approve-field")
             .w_full()
-            .gap(6.0)
+            .gap(crate::theme::scale::space::S6)
             .child(code_field(a, "Code on the other device", error, t));
     if error.is_none() {
         field = field.child(
@@ -591,7 +591,7 @@ pub fn code_pane(a: &Approve, t: &Theme) -> El {
                 .key("approve-actions")
                 .w_full()
                 .center_y()
-                .gap(10.0)
+                .gap(crate::theme::scale::space::S10)
                 .child(go_on)
                 .child(kit::label(
                     "row-note",
@@ -682,7 +682,7 @@ fn review_head(request: &SignInRequest, t: &Theme) -> El {
     col()
         .key("dlg-h")
         .w_full()
-        .gap(6.0)
+        .gap(crate::theme::scale::space::S6)
         .child(
             kit::label("dlg-title", question(request), PANE_TITLE, t.text)
                 .role("heading")
@@ -862,7 +862,7 @@ fn result_head(icon: &'static rune::Icon, tone: Tone, title: &str, words: &str, 
         col()
             .key("dlg-h")
             .w_full()
-            .gap(6.0)
+            .gap(crate::theme::scale::space::S6)
             .items_center()
             .child(
                 kit::label("dlg-title", title, DIALOG_TITLE, t.text)

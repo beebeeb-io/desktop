@@ -114,7 +114,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
                 .role("button")
                 .label(format!("More for {}", p.name))
                 .size(28.0, 28.0)
-                .radius(6.0)
+                .radius(crate::theme::tokens::radius::MD)
                 .center()
                 .hover(t.hover)
                 .press(t.press)
@@ -262,7 +262,7 @@ fn rename(id: &str, f: &Form, t: &Theme) -> El {
     rune::col()
         .key("rename")
         .w_full()
-        .gap(14.0)
+        .gap(crate::theme::scale::space::S14)
         .child(fm::field(
             0,
             &Field {
@@ -283,10 +283,10 @@ fn rename(id: &str, f: &Form, t: &Theme) -> El {
                 save.default_button().on_press(move |s: &mut State| {
                     let ui = &mut s.account;
                     let name = ui.form.rename.text.trim().to_string();
-                    if let Some(source) = ui.source.as_deref_mut() {
-                        if source.rename_passkey(&id, &name) {
-                            ui.form.renaming = None;
-                        }
+                    if let Some(source) = ui.source.as_deref_mut()
+                        && source.rename_passkey(&id, &name)
+                    {
+                        ui.form.renaming = None;
                     }
                 }),
                 save_b,

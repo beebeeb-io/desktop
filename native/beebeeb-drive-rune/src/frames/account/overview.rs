@@ -139,9 +139,9 @@ fn plan_card(plan: &Plan, t: &Theme) -> El {
         ))
         .w_full()
         .center_y()
-        .gap(12.0)
-        .padding(12.0)
-        .radius(10.0)
+        .gap(crate::theme::scale::space::S12)
+        .padding(crate::theme::scale::space::S12)
+        .radius(crate::theme::scale::radius::PANEL)
         .fill(t.card)
         .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -159,7 +159,7 @@ fn plan_card(plan: &Plan, t: &Theme) -> El {
                 .child(
                     row()
                         .key("card-0-line")
-                        .gap(3.4)
+                        .gap(crate::theme::scale::space::S4)
                         .child(kit::label(
                             "card-0-mono",
                             plan.used.clone(),
