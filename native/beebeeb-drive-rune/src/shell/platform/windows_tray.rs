@@ -264,7 +264,7 @@ fn animations_enabled() -> bool {
 fn make_icon(shown: Shown) -> HICON {
     let image = tray_icon::render(shown.0, shown.1, shown.2, shown.3);
     let mut bgra = image.pixels;
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     // All zero: the alpha channel decides.

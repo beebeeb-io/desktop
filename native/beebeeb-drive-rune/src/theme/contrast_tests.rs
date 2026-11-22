@@ -2,7 +2,9 @@
 //! that list is now empty and stays so.
 
 use super::contrast_ratio;
-use super::{SystemColors, system_contrast, theme_from_system, themed as theme};
+#[cfg(not(windows))]
+use super::system_contrast;
+use super::{SystemColors, theme_from_system, themed as theme};
 use crate::theme::tokens::Theme;
 use rune::Color;
 

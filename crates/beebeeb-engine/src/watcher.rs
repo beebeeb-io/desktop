@@ -444,15 +444,15 @@ pub fn dispatch_local_create_verdict(
             #[cfg(not(target_os = "windows"))]
             let _ = &local_id;
             #[cfg(target_os = "windows")]
-            if let Some(local_id) = local_id {
-                if let Err(e) = crate::windows_cf::placeholders::convert_to_unsynced_placeholder(path, &local_id) {
-                    tracing::warn!(
-                        error = %e,
-                        op_id = %op_id,
-                        source,
-                        "upload driver: could not post-queue convert new file to unsynced placeholder"
-                    );
-                }
+            if let Some(local_id) = local_id
+                && let Err(e) = crate::windows_cf::placeholders::convert_to_unsynced_placeholder(path, &local_id)
+            {
+                tracing::warn!(
+                    error = %e,
+                    op_id = %op_id,
+                    source,
+                    "upload driver: could not post-queue convert new file to unsynced placeholder"
+                );
             }
             // Zero-knowledge: log the op id, never the decrypted filename.
             tracing::info!(op_id = %op_id, size, nested, source, "upload driver: queued new local file for encrypted upload");

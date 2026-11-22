@@ -328,10 +328,11 @@ pub(crate) fn allow_listed(text: &str) -> String {
         .collect();
     for (pass, i) in order.into_iter().enumerate() {
         let next_to = if pass < pieces.len() - 1 { i - 1 } else { i + 1 };
-        if unmasked_number(&pieces[i].1) && masked_word(&pieces[next_to].1) {
-            if let Piece::Word { known, .. } = &mut pieces[i].1 {
-                *known = false;
-            }
+        if unmasked_number(&pieces[i].1)
+            && masked_word(&pieces[next_to].1)
+            && let Piece::Word { known, .. } = &mut pieces[i].1
+        {
+            *known = false;
         }
     }
 

@@ -959,7 +959,7 @@ fn ld0105_p2_native_a_pin_lost_both_ways_outlives_the_empty_and_the_next_sweep_r
     assert_eq!(lost.0, (OnDisk::Nothing, true, false), "emptied, the pin not back yet");
     assert_eq!(lost.1, None, "the poison is cleared");
     assert_eq!(lost.2, Some(CF_PIN_STATE_PINNED.0), "but the pin is kept to restore");
-    assert_eq!(restored.2, true, "the next sweep pinned it again");
+    assert!(restored.2, "the next sweep pinned it again");
     assert_eq!(db.pin_to_restore("qa-lost-pin").unwrap(), None, "and the record ends");
 }
 

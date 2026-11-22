@@ -107,6 +107,7 @@ pub fn points_at(run_value: &str, exe: &str) -> bool {
 /// program, but in the old app's shape (a bare path, no `--autostart`). A value that starts
 /// another program (another install, a development build elsewhere) is not ours to change,
 /// and "off" stays off.
+#[cfg_attr(not(test), allow(dead_code))] // no caller outside the tests yet
 pub fn needs_rewrite(run_value: Option<&str>, exe: &str) -> bool {
     run_value.is_some_and(|value| value != command_line(exe) && points_at(value, exe))
 }

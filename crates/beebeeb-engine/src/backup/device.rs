@@ -41,7 +41,7 @@ pub fn machine_id() -> Option<String> {
 }
 
 /// A machine-id file's id: its first line, trimmed; `None` when it is missing, unreadable or empty.
-#[cfg_attr(not(any(any(test, feature = "test-support"), target_os = "linux")), allow(dead_code))]
+#[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
 fn machine_id_from_file(path: &std::path::Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let id = text.lines().next()?.trim();

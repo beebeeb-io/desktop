@@ -112,6 +112,7 @@ pub(super) enum ListedKind {
     /// A symlink or a junction: never followed, never sent.
     Link,
     /// A socket, a device.
+    #[cfg_attr(target_os = "windows", allow(dead_code))] // the Windows listing has no such kind
     Other,
 }
 
@@ -209,16 +210,13 @@ pub(super) fn list_dir(dir: &std::path::Path) -> std::io::Result<Vec<Listed>> {
         // SAFETY: the same live allocation of `size` bytes, read as bytes.
         let buf = unsafe { std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), size) };
         let mut at = 0usize;
-        loop {
-            let Some(rec) = buf.get(at..).filter(|rec| rec.len() >= HEADER) else {
-                break;
-            };
+        while let Some(rec) = buf.get(at..).filter(|rec| rec.len() >= HEADER) {
             let u32_at = |o: usize| u32::from_le_bytes(rec[o..o + 4].try_into().unwrap());
             let i64_at = |o: usize| i64::from_le_bytes(rec[o..o + 8].try_into().unwrap());
             let Some(name) = rec.get(HEADER..HEADER + u32_at(60) as usize) else {
                 break;
             };
-            let name: Vec<u16> = name.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let name: Vec<u16> = name.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
             const DOT: u16 = b'.' as u16;
             if name != [DOT] && name != [DOT, DOT] {
                 let attributes = u32_at(56);

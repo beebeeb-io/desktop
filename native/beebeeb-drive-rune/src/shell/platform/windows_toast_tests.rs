@@ -73,12 +73,14 @@ fn toast_honours_the_switch() {
 
 #[test]
 fn switches_are_read_from_the_settings_the_pane_writes() {
-    let mut config = DesktopConfig::default();
-    config.notify_allow = true;
-    config.notify_sync_complete = true;
-    config.notify_needs_decision = false;
-    config.notify_local_space = true;
-    config.notify_backup_attention = false;
+    let config = DesktopConfig {
+        notify_allow: true,
+        notify_sync_complete: true,
+        notify_needs_decision: false,
+        notify_local_space: true,
+        notify_backup_attention: false,
+        ..DesktopConfig::default()
+    };
     let switches = Switches::from_config(&config);
     assert!(switches.allow && switches.sync_finished && switches.local_space);
     assert!(!switches.needs_decision && !switches.backup_attention);
@@ -175,8 +177,8 @@ fn aumid_differs_for_the_test_build() {
 /// too many), and its Security toast too. `show` reads the file with `unwrap_or_default()`.
 #[test]
 fn toast_fails_open_when_the_settings_cannot_be_read() {
-    let unreadable: Result<DesktopConfig, String> = Err("config unreadable".to_string());
-    let switches = Switches::from_config(&unreadable.unwrap_or_default());
+    // An unreadable config is read as the defaults (`show`'s fallback, pinned below).
+    let switches = Switches::from_config(&DesktopConfig::default());
     assert!(
         wanted(Kind::NeedsDecision, &switches),
         "a conflict toast is shown when the settings are unreadable"

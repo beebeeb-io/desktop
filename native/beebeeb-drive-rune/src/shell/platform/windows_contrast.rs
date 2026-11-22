@@ -47,6 +47,7 @@ fn read() -> Option<SystemColors> {
 }
 
 /// Re-read the system's contrast theme (on `WM_SETTINGCHANGE`). True if the answer changed.
+#[allow(dead_code)] // only `on_setting_change` calls it, which is not wired yet
 pub(super) fn refresh() -> bool {
     let now = read();
     let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());

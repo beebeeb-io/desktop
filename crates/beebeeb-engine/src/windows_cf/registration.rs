@@ -40,7 +40,7 @@ pub const QA_PROVIDER: SyncProvider = SyncProvider {
 };
 
 /// Register a TEST sync root (tests only): [`QA_PROVIDER`], today's policies.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn register_test_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
     // 0x80070001 (ERROR_INVALID_FUNCTION) from CfRegisterSyncRoot is a transient shell/filter-driver state on a
     // freshly created folder: retry a few times, then fail with the class named so a flake is not mistaken for a bug.
@@ -321,11 +321,11 @@ mod identity_tests {
         assert!(shell_sync_root_id(&REAL, root()).starts_with("Beebeeb!"));
         assert_eq!(
             status_ui_factory_clsid(&REAL),
-            GUID::from_u128(0xc0b3_3b33_5217_4c0a_9e3f_2f3b8d5e9fa1)
+            GUID::from_u128(0xc0b3_3b33_5217_4c0a_9e3f_2f3b_8d5e_9fa1)
         );
         assert_eq!(
             thumbnail_provider_clsid(&REAL),
-            GUID::from_u128(0xb2e0_a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44)
+            GUID::from_u128(0xb2e0_a7d4_9c61_4f3a_8d2e_7a1c_5e9b_0f44)
         );
     }
 

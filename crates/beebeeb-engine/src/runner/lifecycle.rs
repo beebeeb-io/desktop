@@ -366,6 +366,7 @@ impl EngineRunner {
                 crate::windows_cf::refuse_unconfirmed_stop();
             }
             let revoke_after = crate::windows_cf::revoke_callbacks().await;
+            #[allow(clippy::needless_return)] // the other platforms' tail follows under its own cfg
             return classify_abort_result(
                 stopped,
                 revoke_before.as_ref().err().map(|e| e.to_string()),

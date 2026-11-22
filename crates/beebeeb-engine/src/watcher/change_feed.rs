@@ -302,8 +302,10 @@ mod usn {
                             && let Some(dir) = self.parent_path(parent)
                         {
                             let name: Vec<u16> = rec[name_at..name_at + name_len]
-                                .chunks_exact(2)
-                                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|c| u16::from_le_bytes(*c))
                                 .collect();
                             paths.insert(dir.join(String::from_utf16_lossy(&name)));
                         }

@@ -474,11 +474,11 @@ fn dehydrate_these(
         // never reclaim a pinned file's bytes in the first place. A read error
         // here is non-fatal: fall through to the existing dehydrate + the
         // post-dehydrate predicate guard.
-        if let Ok(Some(contract)) = db.get_file_contract_state(&file_id) {
-            if contract.effective_pin_state() == crate::state_db::PinState::Pinned {
-                tracing::debug!(file_id = %file_id, "free_up_space: file pinned after enumeration; keeping local");
-                return;
-            }
+        if let Ok(Some(contract)) = db.get_file_contract_state(&file_id)
+            && contract.effective_pin_state() == crate::state_db::PinState::Pinned
+        {
+            tracing::debug!(file_id = %file_id, "free_up_space: file pinned after enumeration; keeping local");
+            return;
         }
         // Task 2240 (spec D2, the lead's ruling on self-review #1): confirm before evict. A pin made in Explorer
         // reaches the DB only when the tick's folder listing shows it, and a listing can lag while another process
@@ -528,10 +528,10 @@ fn dehydrate_these(
                             ..
                         }
                     );
-                if let Some(seq_before) = seq_before.filter(|_| nothing_left) {
-                    if let Err(error) = db.wipe_fetched_content_if_unchanged(&file_id, seq_before) {
-                        tracing::warn!(file_id = %file_id, error = %error, "free_up_space: could not wipe the fetch record");
-                    }
+                if let Some(seq_before) = seq_before.filter(|_| nothing_left)
+                    && let Err(error) = db.wipe_fetched_content_if_unchanged(&file_id, seq_before)
+                {
+                    tracing::warn!(file_id = %file_id, error = %error, "free_up_space: could not wipe the fetch record");
                 }
                 // Only NOW is this file genuinely cloud-only on disk — record
                 // it so the DB flip below applies ONLY to files we actually

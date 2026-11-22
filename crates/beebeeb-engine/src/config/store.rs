@@ -82,7 +82,7 @@ impl DesktopConfig {
         })?;
         let mut cfg: Self = toml::from_str(&s).map_err(|source| ConfigError::ParseFile {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         })?;
 
         // Reject relative paths defensively. Hand-editing the TOML to a

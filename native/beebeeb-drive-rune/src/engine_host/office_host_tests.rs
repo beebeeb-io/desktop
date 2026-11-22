@@ -1041,7 +1041,7 @@ fn a_real_confined_helper_renders_page_one() {
     let page_of = |events: &[Event]| -> Option<(RequestId, u32, u32, usize)> {
         events.iter().find_map(|event| match event {
             Event::Page { id, w, h, rgba, .. } => {
-                let colours: HashSet<[u8; 4]> = rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect();
+                let colours: HashSet<[u8; 4]> = rgba.as_chunks::<4>().0.iter().copied().collect();
                 Some((*id, *w, *h, colours.len()))
             }
             _ => None,

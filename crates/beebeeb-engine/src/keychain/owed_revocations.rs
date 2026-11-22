@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 /// The entry's name: after the account-scoped leaves, never one a person's account can be called.
-#[cfg_attr(test, allow(dead_code))] // a test build keeps its list in memory (`Engine::open`)
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))] // Linux has no store
 const ENTRY: &str = "owed-revocations";
 
 /// Where the sealed list lives. One entry, replaced whole.

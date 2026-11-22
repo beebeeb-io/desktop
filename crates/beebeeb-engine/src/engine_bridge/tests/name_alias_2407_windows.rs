@@ -127,7 +127,7 @@ fn a_remote_deletion_never_deletes_the_file_a_short_name_reaches() {
         return;
     };
     let state = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&state.path().join("state.db")).unwrap();
+    let db = StateDb::open(state.path().join("state.db")).unwrap();
     let file_id = "aaaa0000-0000-4000-8000-000000002407";
     db.upsert_file_with_contract(
         &FileEntry {

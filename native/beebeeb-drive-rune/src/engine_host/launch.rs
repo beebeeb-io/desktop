@@ -15,8 +15,10 @@
 
 #[cfg(any(test, windows))]
 use std::io;
+#[cfg(windows)]
+use std::process::Child;
 #[cfg(any(test, windows))]
-use std::process::{Child, Command};
+use std::process::Command;
 use std::sync::mpsc;
 
 /// The lock every start of the app holds: the one `Sandbox::spawn` takes before it starts a helper (H1-S).

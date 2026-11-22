@@ -51,7 +51,10 @@ fn an_engine_that_ends_by_itself_is_not_running() {
     assert_eq!(s.engine.view().attempt, attempt + 1, "a new attempt");
     assert!(common::wait_until(10, || s.engine.view().start != Start::Running));
     #[cfg(not(unix))]
-    let _ = other.kill();
+    {
+        let _ = other.kill();
+        let _ = other.wait();
+    }
 }
 
 #[cfg(target_os = "macos")]

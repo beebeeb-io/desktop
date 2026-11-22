@@ -139,7 +139,7 @@ fn write_menu(identity: AppIdentity, root: &Path) -> Result<(), PlatformError> {
 }
 
 /// Takes this build's four keys away, with everything under them. A key that is not there is not an error.
-fn remove_menu(identity: AppIdentity) -> Result<(), PlatformError> {
+fn remove_menu(_identity: AppIdentity) -> Result<(), PlatformError> {
     for verb in ExplorerVerb::ALL {
         reg_delete_tree(&verb_key(crate::shell::identity::engine_identity(), verb))?;
     }
