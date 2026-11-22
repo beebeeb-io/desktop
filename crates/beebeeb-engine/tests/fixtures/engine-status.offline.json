@@ -7,5 +7,6 @@
   "bytes_total": null,
   "bytes_done": null,
   "last_tick_ok_at": null,
+  "changes": 0,
   "reason": { "code": "connect", "detail": null }
 }

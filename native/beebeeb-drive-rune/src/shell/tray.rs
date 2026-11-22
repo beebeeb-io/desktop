@@ -401,6 +401,7 @@ mod tests {
             files_remaining: Some(9),
             // When the last check finished says nothing to the b.
             last_check: Some(1_000),
+            changes: Some(3),
         };
         let label = |inputs: &TrayInputs| tray_model(inputs).label;
         assert_eq!(label(&inputs), "Locked");
