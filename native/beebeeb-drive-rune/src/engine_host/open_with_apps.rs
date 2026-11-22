@@ -39,7 +39,7 @@ fn is_own(handler: &str, own_exe: &str) -> bool {
 /// The submenu's apps from the handlers Windows reported, `(GetName, GetUIName)` in its order: none whose program is
 /// `own_exe` (Beebeeb is the submenu's first line already, and is never made a type's app), none without words, at
 /// most [`MAX_APPS`].
-#[cfg(test)]
+#[cfg(any(test, windows))]
 pub(crate) fn choices(handlers: impl IntoIterator<Item = (String, String)>, own_exe: &str) -> Vec<AppChoice> {
     handlers
         .into_iter()
