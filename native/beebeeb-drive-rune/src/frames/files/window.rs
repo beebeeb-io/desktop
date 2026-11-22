@@ -4,6 +4,7 @@
 use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
 use super::{select_bar, toolbar};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::tokens::{self, Theme};
 use crate::theme::{icons, icons_files};
 use crate::ui::{button, caption, empty, file_list, kit, menu, status_line, toast};
@@ -143,7 +144,13 @@ fn pick_sort(s: &mut State, index: usize, tx: &mut Tx) {
 }
 
 /// The toast's button (`ui::button`, Sm): `<key>-action`, with the words and its name for assistive technology.
-fn toast_button(words: &'static str, name: &'static str, shortcut: Option<&'static str>, run: fn(&mut State, &mut Tx), t: &Theme) -> El {
+fn toast_button(
+    words: &'static str,
+    name: &'static str,
+    shortcut: Option<&'static str>,
+    run: fn(&mut State, &mut Tx),
+    t: &Theme,
+) -> El {
     let mut keys = button::keys("toast-action");
     keys.label = "toast-action-text".to_string();
     let b = button::button(
@@ -217,7 +224,7 @@ fn empty_folder(root: bool, t: &Theme) -> El {
         col()
             .key("empty-actions")
             .mt(8.0)
-            .gap(8.0)
+            .gap(scale::space::S8)
             .items_center()
             .child(
                 button::outline_button("empty-add", "Add files", Some(&icons::PLUS), t)
@@ -313,7 +320,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             } else {
                 details::details_pane(facts, &t)
             };
-            body = body.child(crate::ui::focus::pane(col().h_full().child(details_pane), "pane-details"));
+            body = body.child(crate::ui::focus::pane(
+                col().h_full().child(details_pane),
+                "pane-details",
+            ));
         }
     }
 

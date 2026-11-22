@@ -109,7 +109,7 @@ pub fn picture_tile(s: &State, k: &str, item: &DriveItem, t: &Theme) -> Option<E
     let mut tile = grid_tiles::sample(
         el().key(format!("{k}-tile"))
             .size(22.0, 22.0)
-            .radius(6.0)
+            .radius(crate::theme::tokens::radius::MD)
             .clip_rounded(6.0)
             .center(),
         sample,
