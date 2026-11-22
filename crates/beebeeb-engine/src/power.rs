@@ -127,7 +127,10 @@ impl Anyway {
                 *self = Anyway::Lifting { hold, connection };
                 None
             }
-            Anyway::Lifting { hold: lifted, connection: on } if *lifted == hold && *on == connection => None,
+            Anyway::Lifting {
+                hold: lifted,
+                connection: on,
+            } if *lifted == hold && *on == connection => None,
             _ => {
                 *self = Anyway::Off;
                 Some(hold)
@@ -149,7 +152,10 @@ pub fn sync_anyway() {
 /// The tick's hold: [`decide`], less what a Sync anyway lifts.
 pub fn hold_now(metered_setting: Option<bool>, os: &dyn PowerState) -> Option<PausedFor> {
     let hold = decide(metered_setting, os);
-    ANYWAY.lock().unwrap_or_else(std::sync::PoisonError::into_inner).apply(hold, os)
+    ANYWAY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .apply(hold, os)
 }
 
 // The hold the last tick decided, so the one-second status pulse does not report `idle` over it.
@@ -243,8 +249,14 @@ mod tests {
         assert_eq!(anyway.apply(decide(Some(true), &phone), &phone), None);
         // Another metered connection: the pause applies again, and stays.
         let other = on(true, false, "Train wifi");
-        assert_eq!(anyway.apply(decide(Some(true), &other), &other), Some(PausedFor::Metered));
-        assert_eq!(anyway.apply(decide(Some(true), &phone), &phone), Some(PausedFor::Metered));
+        assert_eq!(
+            anyway.apply(decide(Some(true), &other), &other),
+            Some(PausedFor::Metered)
+        );
+        assert_eq!(
+            anyway.apply(decide(Some(true), &phone), &phone),
+            Some(PausedFor::Metered)
+        );
     }
 
     #[test]
@@ -256,16 +268,25 @@ mod tests {
         let home = on(false, false, "Home");
         assert_eq!(anyway.apply(decide(Some(true), &home), &home), None);
         assert_eq!(anyway, Anyway::Off);
-        assert_eq!(anyway.apply(decide(Some(true), &phone), &phone), Some(PausedFor::Metered));
+        assert_eq!(
+            anyway.apply(decide(Some(true), &phone), &phone),
+            Some(PausedFor::Metered)
+        );
         // A Sync anyway asked while nothing held does not lift a later hold.
         let mut early = Anyway::Asked;
         assert_eq!(early.apply(None, &home), None);
-        assert_eq!(early.apply(decide(Some(true), &phone), &phone), Some(PausedFor::Metered));
+        assert_eq!(
+            early.apply(decide(Some(true), &phone), &phone),
+            Some(PausedFor::Metered)
+        );
         // Battery saver: lifted until it goes off; a metered hold under it is a change.
         let mut saver = Anyway::Asked;
         let low = on(false, true, "Home");
         assert_eq!(saver.apply(decide(None, &low), &low), None);
         assert_eq!(saver.apply(decide(None, &low), &low), None);
-        assert_eq!(saver.apply(decide(Some(true), &phone), &phone), Some(PausedFor::Metered));
+        assert_eq!(
+            saver.apply(decide(Some(true), &phone), &phone),
+            Some(PausedFor::Metered)
+        );
     }
 }

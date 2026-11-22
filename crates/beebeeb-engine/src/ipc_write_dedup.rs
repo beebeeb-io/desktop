@@ -14,11 +14,11 @@
 //!
 //! * absent      -> the caller becomes the leader and runs the work;
 //! * `InFlight`  -> the caller waits for the leader and returns the leader's result
-//!                  (the work is never run twice);
+//!   (the work is never run twice);
 //! * `Done`      -> within the TTL the stored result is returned, after the caller's
-//!                  `refresh` closure confirms it still describes reality and
-//!                  brings it up to date (a finished upload changes the item's
-//!                  version and status after the first reply was built);
+//!   `refresh` closure confirms it still describes reality and
+//!   brings it up to date (a finished upload changes the item's
+//!   version and status after the first reply was built);
 //! * a key that belongs to a different request shape (see `fingerprint`), or a
 //!   table that is full of in-flight work, runs the work without deduplication
 //!   (it fails open to the pre-1684 behaviour rather than refusing a user write).
@@ -168,6 +168,12 @@ impl<T: Clone + Send + Sync + 'static> WriteDedup<T> {
         self.lock().map.len()
     }
 
+    /// Whether no key is remembered.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn claim(self: &Arc<Self>, key: &str, fingerprint: &str, now: Instant) -> Claim<T> {
         let mut state = self.lock();
 
@@ -288,6 +294,8 @@ impl<T: Clone + Send + Sync + 'static> WriteDedup<T> {
     ///   waiters that were already attached get the result either way. A failure
     ///   is not remembered, so a retry after a failed attempt runs again.
     /// * `now` supplies the clock, so TTL behaviour is testable without sleeping.
+    // Each argument is a distinct caller-supplied piece (key, shape, clock, refresh, keep, work, panic value).
+    #[allow(clippy::too_many_arguments)]
     pub async fn run<W, V, R, N>(
         self: &Arc<Self>,
         key: &str,
@@ -314,15 +322,14 @@ impl<T: Clone + Send + Sync + 'static> WriteDedup<T> {
                     }
                     self.forget_done(key, fingerprint);
                 }
-                Claim::Wait(mut rx) => match rx.wait_for(|v| v.is_some()).await {
-                    Ok(guard) => {
-                        if let Some(value) = guard.as_ref() {
-                            return value.clone();
-                        }
+                Claim::Wait(mut rx) => {
+                    // If the leader panicked, `wait_for` fails: take over (loop and claim again).
+                    if let Ok(guard) = rx.wait_for(|v| v.is_some()).await
+                        && let Some(value) = guard.as_ref()
+                    {
+                        return value.clone();
                     }
-                    // The leader panicked: take over (loop and claim again).
-                    Err(_) => {}
-                },
+                }
                 Claim::Bypass => {
                     if let Some(work) = work.take() {
                         return work();

@@ -162,11 +162,11 @@ impl ApiClient {
                 encode(variant)
             )
         };
-        if variant == "medium" {
-            if let Some(blurhash) = blurhash.filter(|value| !value.is_empty()) {
-                url.push_str("?blurhash=");
-                url.push_str(&encode(blurhash));
-            }
+        if variant == "medium"
+            && let Some(blurhash) = blurhash.filter(|value| !value.is_empty())
+        {
+            url.push_str("?blurhash=");
+            url.push_str(&encode(blurhash));
         }
         url
     }
@@ -340,7 +340,12 @@ impl ApiClient {
                     if let Some(old) = held.take() {
                         return Self::check_status(old).await;
                     }
-                    if let Some(wait) = transport_retry_decision(transport_attempt, e.is_connect(), e.is_timeout() || e.is_request(), idempotent) {
+                    if let Some(wait) = transport_retry_decision(
+                        transport_attempt,
+                        e.is_connect(),
+                        e.is_timeout() || e.is_request(),
+                        idempotent,
+                    ) {
                         tokio::time::sleep(wait).await;
                         transport_attempt += 1;
                         continue;
@@ -350,13 +355,13 @@ impl ApiClient {
                 }
             };
             self.link.note_status(resp.status(), now_unix_secs() as i64);
-            if matches!(resp.status().as_u16(), 502 | 503 | 504) {
-                if let Some(wait) = transport_retry_decision(transport_attempt, false, true, idempotent) {
-                    tokio::time::sleep(wait).await;
-                    transport_attempt += 1;
-                    held = Some(resp);
-                    continue;
-                }
+            if matches!(resp.status().as_u16(), 502..=504)
+                && let Some(wait) = transport_retry_decision(transport_attempt, false, true, idempotent)
+            {
+                tokio::time::sleep(wait).await;
+                transport_attempt += 1;
+                held = Some(resp);
+                continue;
             }
             if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Self::check_status(resp).await;

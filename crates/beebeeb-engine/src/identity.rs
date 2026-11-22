@@ -43,7 +43,7 @@ pub static REAL: EngineIdentity = EngineIdentity {
     sync_folder_name: "Beebeeb",
     cloud_files_provider_name: "Beebeeb",
     cloud_files_provider_guid: 0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90,
-    status_ui_class_id: 0xc0b33b33_5217_4c0a_9e3f_2f3b8d5e9fa1,
+    status_ui_class_id: 0xc0b3_3b33_5217_4c0a_9e3f_2f3b_8d5e_9fa1,
     thumbnail_provider_class_id: 0xb2e0a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44,
     backup_device_salt: "",
     backup_device_name_suffix: "",
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(REAL.sync_folder_name(), "Beebeeb");
         assert_eq!(REAL.cloud_files_provider_name(), "Beebeeb");
         assert_eq!(REAL.cloud_files_provider_guid(), 0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90);
-        assert_eq!(REAL.status_ui_class_id(), 0xc0b3_3b33_5217_4c0a_9e3f_2f3b8d5e9fa1);
+        assert_eq!(REAL.status_ui_class_id(), 0xc0b3_3b33_5217_4c0a_9e3f_2f3b_8d5e_9fa1);
         assert_eq!(
             REAL.thumbnail_provider_class_id(),
             0xb2e0a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44
@@ -298,7 +298,10 @@ mod tests {
     #[test]
     fn only_the_test_build_on_macos_is_refused() {
         // `false`: a shipped (non-unit-test) build.
-        assert!(TEST.refusal("macos", false).is_some_and(|words| words.contains("macOS")));
+        assert!(
+            TEST.refusal("macos", false)
+                .is_some_and(|words| words.contains("macOS"))
+        );
         for os in ["windows", "linux", "freebsd", ""] {
             assert_eq!(TEST.refusal(os, false), None, "{os:?}");
         }
@@ -309,7 +312,7 @@ mod tests {
             }
         }
         // The exception is compile-time only: this crate's unit tests (`cfg!(test)`) or `macos-test-engine`.
-        assert!(TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS);
+        const { assert!(TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS) };
         assert_eq!(
             TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS,
             cfg!(test) || cfg!(feature = "macos-test-engine")
@@ -328,7 +331,10 @@ mod tests {
     #[test]
     fn the_start_question_never_relaxes() {
         assert_eq!(TEST.start_refusal_at("macos"), TEST.refusal("macos", false));
-        assert!(TEST.start_refusal_at("macos").is_some_and(|words| words.contains("macOS")));
+        assert!(
+            TEST.start_refusal_at("macos")
+                .is_some_and(|words| words.contains("macOS"))
+        );
         for os in ["windows", "linux", "freebsd", ""] {
             assert_eq!(TEST.start_refusal_at(os), None, "{os:?}");
         }

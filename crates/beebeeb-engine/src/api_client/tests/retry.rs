@@ -91,7 +91,8 @@ fn scripted_server(script: Vec<Option<&'static str>>) -> (String, std::sync::Arc
     (url, hits)
 }
 
-const OK_JSON: &str = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+const OK_JSON: &str =
+    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
 const UNAVAILABLE: &str = "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 4\r\nconnection: close\r\n\r\ndown";
 
 #[test]
@@ -117,7 +118,10 @@ fn a_5xx_burst_longer_than_the_bound_stops_with_the_status() {
     let client = link_client(base);
     let err = run_async(client.get_typed::<serde_json::Value>("/x")).unwrap_err();
     assert!(err.to_string().starts_with("HTTP 503"), "{err}");
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst) as u32, 1 + MAX_TRANSPORT_RETRIES);
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst) as u32,
+        1 + MAX_TRANSPORT_RETRIES
+    );
 }
 
 #[test]
@@ -136,10 +140,17 @@ fn a_hung_server_times_out_within_the_bound() {
         std::thread::sleep(Duration::from_secs(3));
     });
     let mut client = link_client(base);
-    client.client = reqwest::Client::builder().timeout(Duration::from_millis(200)).build().unwrap();
+    client.client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(200))
+        .build()
+        .unwrap();
     let started = std::time::Instant::now();
     assert!(run_async(client.get_typed::<serde_json::Value>("/x")).is_err());
-    assert!(started.elapsed() < Duration::from_secs(3), "bounded: {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "bounded: {:?}",
+        started.elapsed()
+    );
     drop(held);
 }
 
@@ -155,8 +166,14 @@ fn a_post_is_not_resent_after_a_5xx() {
 
 #[test]
 fn transport_retry_decision_is_bounded_and_method_aware() {
-    assert!(transport_retry_decision(0, true, false, false).is_some(), "connect failure retries any method");
-    assert!(transport_retry_decision(0, false, true, false).is_none(), "a POST that may have been sent is not resent");
+    assert!(
+        transport_retry_decision(0, true, false, false).is_some(),
+        "connect failure retries any method"
+    );
+    assert!(
+        transport_retry_decision(0, false, true, false).is_none(),
+        "a POST that may have been sent is not resent"
+    );
     assert!(transport_retry_decision(0, false, true, true).is_some());
     assert!(transport_retry_decision(MAX_TRANSPORT_RETRIES, true, true, true).is_none());
 }

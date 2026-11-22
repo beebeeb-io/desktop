@@ -496,6 +496,8 @@ pub mod test_support {
         }
 
         /// [`Self::start`] with this plaintext.
+        // Seals names with the legacy sealer on purpose: the fixture predates the NewItemId/WriteTarget sealers (task 2275).
+        #[allow(deprecated)]
         pub fn start_with(master_key: [u8; 32], file_id: &str, stride: u64, plain: Vec<u8>) -> Self {
             let key = file_key(master_key, file_id);
             let version = Version::new(&key, "11111111-2222-4333-8444-555555555555", stride, plain);

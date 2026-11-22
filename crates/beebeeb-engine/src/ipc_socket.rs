@@ -318,7 +318,7 @@ pub const UPLOAD_STAGING_MAX_AGE: std::time::Duration = std::time::Duration::fro
 /// is a real directory owned by this user: through a symlink, this purge
 /// would delete another folder's files. Every entry is inspected and removed
 /// through that descriptor.
-#[cfg(any(target_os = "macos", any(test, feature = "test-support")))]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn purge_stale_upload_staging(
     dir: &std::path::Path,
     max_age: std::time::Duration,
@@ -708,7 +708,7 @@ pub use protocol::{FileProviderChangePayload, FileProviderItemPayload, IpcReques
 
 mod payloads;
 pub use payloads::file_entry_payload_for_db;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use payloads::*;
 
 mod thumbnails;
@@ -733,7 +733,7 @@ pub use server::serve_ipc;
 pub use server::serve_ipc_at;
 #[cfg(any(test, feature = "test-support"))]
 pub use server::serve_ipc_at_with_ready;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use server::*;
 
 mod hydrate;

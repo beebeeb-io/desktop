@@ -121,8 +121,7 @@ pub fn disposable_cache_roots_in(
 }
 
 /// `…/Logs/<the identity's log folder>` (`Logs/Beebeeb` for the real app) anywhere in `path`: the lifecycle log's directory, in the home or in the app's
-/// container (spec 2026-10-06 §8). It survives sign-out, Repair and the account reset (lead ruling
-/// T5-⚠c), so no purge may treat anything under it as disposable, whatever root it sits in.
+/// container (spec 2026-10-06 §8). It survives sign-out, Repair and the account reset, so no purge may treat anything under it as disposable, whatever root it sits in.
 pub fn is_lifecycle_log_path(identity: &crate::identity::EngineIdentity, path: &std::path::Path) -> bool {
     let names: Vec<&str> = path.components().filter_map(|part| part.as_os_str().to_str()).collect();
     names

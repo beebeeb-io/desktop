@@ -221,7 +221,12 @@ mod tests {
         d.path().join(crate::state_paths::LOCK_FILENAME)
     }
     fn write_lock(path: &std::path::Path, pid: u32) {
-        let c = LockContents { pid, agent: "x".into(), hostname: "h".into(), started_at: Utc::now() };
+        let c = LockContents {
+            pid,
+            agent: "x".into(),
+            hostname: "h".into(),
+            started_at: Utc::now(),
+        };
         fs::write(path, serde_json::to_string(&c).unwrap()).unwrap();
     }
 
@@ -230,9 +235,15 @@ mod tests {
         let d = dir();
         fs::write(lock_path(&d), "{ not json").unwrap();
         assert!(held_by_a_live_process(d.path()));
-        let err = LockFile::acquire_at(lock_path(&d), "desktop").err().expect("must refuse");
+        let err = LockFile::acquire_at(lock_path(&d), "desktop")
+            .err()
+            .expect("must refuse");
         assert!(err.contains("cannot be read") && err.contains("held"), "{err}");
-        assert_eq!(fs::read_to_string(lock_path(&d)).unwrap(), "{ not json", "left untouched");
+        assert_eq!(
+            fs::read_to_string(lock_path(&d)).unwrap(),
+            "{ not json",
+            "left untouched"
+        );
     }
 
     #[test]

@@ -155,15 +155,15 @@ pub fn remove_foreign_key<S: AuthSecretStore>(
     // same (a read that fails must not block every sign-in while a delete would work).
     let keep = (|| -> AuthResult<Option<bool>> {
         if !key_present(vault)? {
-            return Ok(match vault.vault_key_owner()? {
-                Some(_) => Some(false),
-                None => None,
-            });
+            return Ok(vault.vault_key_owner()?.map(|_| false));
         }
         let key_owner = vault.vault_key_owner()?;
         // dc-014: a key tagged with ANOTHER account's id stays until that account's local data is cleared
         // (`app::account_switch` removes it then). It is never this account's: the loader refuses it (`Foreign`).
-        if key_owner.as_deref().is_some_and(|owner| !owner.trim().is_empty() && !tag_is_account(owner, signing_in_user_id)) {
+        if key_owner
+            .as_deref()
+            .is_some_and(|owner| !owner.trim().is_empty() && !tag_is_account(owner, signing_in_user_id))
+        {
             return Ok(Some(true));
         }
         let stored_email = vault.account_email()?;

@@ -122,7 +122,11 @@ fn staged_and_kept_copies_go_under_the_identitys_folder() {
         );
         // Only the part the engine adds is the identity's: the host's own home or cache dir may hold any name
         // (a user called `beebeeb`), so the real app's folder is looked for just above `finder-writes`.
-        assert_ne!(root.parent().and_then(|p| p.file_name()), Some(std::ffi::OsStr::new("beebeeb")), "{root:?}");
+        assert_ne!(
+            root.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new("beebeeb")),
+            "{root:?}"
+        );
     }
     assert_eq!(
         bases

@@ -30,7 +30,7 @@ impl DeletionConflict {
     }
 
     /// Read by the macOS write path and by this module's tests.
-    #[cfg(any(any(test, feature = "test-support"), target_os = "macos"))]
+    #[cfg(any(test, target_os = "macos"))]
     pub(super) fn is_conflicted(self) -> bool {
         matches!(self, Self::Conflicted)
     }

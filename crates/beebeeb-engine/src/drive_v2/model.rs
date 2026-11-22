@@ -103,7 +103,7 @@ pub fn has_thumbnail(name: &str) -> bool {
 pub fn initials(name: &str) -> String {
     let base = name.split('@').next().unwrap_or(name);
     let mut out: String = base
-        .split(|c: char| c == '.' || c == ' ' || c == '_' || c == '-')
+        .split(['.', ' ', '_', '-'])
         .filter_map(|part| part.chars().next())
         .take(2)
         .flat_map(char::to_uppercase)

@@ -90,7 +90,7 @@ impl IpcError {
         match self {
             Self::DestinationNotAllowed { .. } => "destination_not_allowed",
             Self::Stage { .. } => "stage_failed",
-            Self::RetryLater { category, .. } | Self::Failed { category, .. } => *category,
+            Self::RetryLater { category, .. } | Self::Failed { category, .. } => category,
             Self::UnknownItem { .. } => "unknown_item",
         }
     }

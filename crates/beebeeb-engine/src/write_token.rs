@@ -219,6 +219,18 @@ pub fn decide_base(facts: &BaseFacts, incoming: Option<&str>) -> BaseDecision {
     }
 }
 
+/// The base version a version identifier leads with (`"<version>:..."`), when it is a positive number. Moved from
+/// `engine_bridge/meta_2.rs` unchanged.
+pub fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
+    version_identifier.and_then(|value| {
+        value
+            .split(':')
+            .next()
+            .and_then(|part| part.parse::<i64>().ok())
+            .filter(|version| *version > 0)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,16 +353,4 @@ mod tests {
             "the File Provider's writes, as before"
         );
     }
-}
-
-/// The base version a version identifier leads with (`"<version>:..."`), when it is a positive number. Moved from
-/// `engine_bridge/meta_2.rs` unchanged.
-pub fn parse_base_version_number(version_identifier: Option<&str>) -> Option<i64> {
-    version_identifier.and_then(|value| {
-        value
-            .split(':')
-            .next()
-            .and_then(|part| part.parse::<i64>().ok())
-            .filter(|version| *version > 0)
-    })
 }

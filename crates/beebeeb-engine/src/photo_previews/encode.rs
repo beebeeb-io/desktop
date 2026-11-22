@@ -231,14 +231,17 @@ fn jpeg(picture: &Upright, quality: u8) -> Result<Zeroizing<Vec<u8>>, EncodeRefu
     Ok(out.0)
 }
 
+/// JPEG bytes (wiped on drop) and the pixel size they encode.
+pub type Encoded = (Zeroizing<Vec<u8>>, (u32, u32));
+
 /// A JPEG preview of `upright` with its long edge at `min(px, own)`: quality 85, or 70 once when 85 is over the
 /// server's cap; over that, refused.
-pub fn preview_jpeg(upright: &Upright, px: u32) -> Result<(Zeroizing<Vec<u8>>, (u32, u32)), EncodeRefused> {
+pub fn preview_jpeg(upright: &Upright, px: u32) -> Result<Encoded, EncodeRefused> {
     jpeg_fitting(&scaled(upright, px))
 }
 
 /// `picture` as it is, as JPEG: quality 85, or 70 once when 85 is over the server's cap; over that, refused.
-pub fn jpeg_fitting(picture: &Upright) -> Result<(Zeroizing<Vec<u8>>, (u32, u32)), EncodeRefused> {
+pub fn jpeg_fitting(picture: &Upright) -> Result<Encoded, EncodeRefused> {
     let size = picture.size();
     let first = jpeg(picture, QUALITY)?;
     if first.len() <= MAX_PLAINTEXT {
@@ -253,7 +256,7 @@ pub fn jpeg_fitting(picture: &Upright) -> Result<(Zeroizing<Vec<u8>>, (u32, u32)
 }
 
 /// `original` (encoded) to a JPEG preview at `px`: [`decode`] then [`preview_jpeg`].
-pub fn encode_preview(original: &[u8], px: u32) -> Result<(Zeroizing<Vec<u8>>, (u32, u32)), EncodeRefused> {
+pub fn encode_preview(original: &[u8], px: u32) -> Result<Encoded, EncodeRefused> {
     let upright = decode(original)?;
     preview_jpeg(&upright, px)
 }

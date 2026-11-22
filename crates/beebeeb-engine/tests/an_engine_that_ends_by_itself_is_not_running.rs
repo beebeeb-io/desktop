@@ -22,7 +22,10 @@ fn an_engine_that_ends_by_itself_is_not_running() {
     #[cfg(unix)]
     let other_live_pid = std::os::unix::process::parent_id();
     #[cfg(not(unix))]
-    let mut other = std::process::Command::new("cmd").args(["/C", "ping", "-n", "60", "127.0.0.1"]).spawn().unwrap();
+    let mut other = std::process::Command::new("cmd")
+        .args(["/C", "ping", "-n", "60", "127.0.0.1"])
+        .spawn()
+        .unwrap();
     #[cfg(not(unix))]
     let other_live_pid = other.id();
     let lock = format!(

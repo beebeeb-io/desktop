@@ -21,10 +21,13 @@ use crate::api_client::MAX_SEARCH_SHARD_BLOB_BYTES;
 const SHARDS: &str = "/api/v1/search-index/shards";
 
 /// The stored shards of one account (one field of [`FakeAccount`]).
+/// A shard's version and bytes.
+type VersionedShard = (i64, Vec<u8>);
+
 #[derive(Default)]
 pub(super) struct SearchShardState {
     next_version: Mutex<i64>,
-    shards: Mutex<BTreeMap<(u32, u32), (i64, Vec<u8>)>>,
+    shards: Mutex<BTreeMap<(u32, u32), VersionedShard>>,
 }
 
 impl FakeAccount {

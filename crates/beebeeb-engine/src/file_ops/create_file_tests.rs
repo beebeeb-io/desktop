@@ -320,7 +320,11 @@ fn new_file_is_listed_and_queued_at_once_without_a_scan() {
 
     let (rows, _) = db.children_paged(None, 0, i64::MAX).unwrap();
     let listed: Vec<&str> = rows.iter().map(|(entry, _, _)| entry.path.as_str()).collect();
-    assert_eq!(listed, ["Beebeeb typing test.txt"], "the folder's rows hold it, with no scan");
+    assert_eq!(
+        listed,
+        ["Beebeeb typing test.txt"],
+        "the folder's rows hold it, with no scan"
+    );
     assert_eq!(rows[0].0.status, FileStatus::Uploading);
     assert_eq!(rows[0].0.size_bytes, 0, "an empty file is a file");
     let queued = db.list_due_operations(i64::MAX).unwrap();

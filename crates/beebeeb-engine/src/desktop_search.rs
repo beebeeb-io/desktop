@@ -232,7 +232,12 @@ impl IncrementalLocalIndex {
             return Ok(changed);
         };
         let mut changed = 0usize;
-        let gone: Vec<String> = local.records.keys().filter(|id| !fresh.contains_key(*id)).cloned().collect();
+        let gone: Vec<String> = local
+            .records
+            .keys()
+            .filter(|id| !fresh.contains_key(*id))
+            .cloned()
+            .collect();
         for id in gone {
             local.index.remove(&id);
             local.records.remove(&id);
@@ -311,7 +316,7 @@ pub fn query_local_index(
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 async fn load_remote_index_from_store(store: &impl SearchShardStore) -> anyhow::Result<Option<SearchIndex>> {
     let manifest = store.fetch_manifest().await?;
     if manifest.is_empty() {
@@ -487,11 +492,7 @@ fn rank_name(name: &str, query: &str) -> u8 {
 
 fn leaf_name(path: &str) -> String {
     let trimmed = path.trim_matches(|c| c == '/' || c == '\\');
-    trimmed
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(trimmed)
-        .to_string()
+    trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).to_string()
 }
 
 #[cfg(test)]
@@ -562,7 +563,12 @@ mod tests {
         let db = StateDb::open(dir.path().join("state.db")).expect("state db");
         let n = crate::test_api::large_account::LargeAccount::GUUS.files / 10;
         for i in 0..n {
-            seed_file(&db, &format!("f{i}"), &format!("Dir{}/file number {i}.txt", i % 50), ItemKind::File);
+            seed_file(
+                &db,
+                &format!("f{i}"),
+                &format!("Dir{}/file number {i}.txt", i % 50),
+                ItemKind::File,
+            );
         }
         let started = std::time::Instant::now();
         let mut cache = super::IncrementalLocalIndex::new();
@@ -766,7 +772,11 @@ mod tests {
             .build()
             .expect("runtime");
         let summary = rt
-            .block_on(super::sync_local_index_to_store(&db, &super::build_local_index(&db).unwrap(), &store))
+            .block_on(super::sync_local_index_to_store(
+                &db,
+                &super::build_local_index(&db).unwrap(),
+                &store,
+            ))
             .expect("sync local index");
 
         assert_eq!(summary.indexed_file_count, 2);

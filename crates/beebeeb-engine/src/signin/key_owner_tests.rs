@@ -251,7 +251,11 @@ fn account_switch_a_key_tagged_with_another_account_stays_but_is_never_loaded() 
     let store = signed_in_as_a();
     store.vault().clear_session_token().unwrap();
     assert_eq!(token_only_sign_in(&store, "tok-b", "user-b", "b@beebeeb.io"), Ok(false));
-    assert_eq!(store.vault().vault_key_owner(), Ok(Some("user-a".to_string())), "A's key keeps A's tag");
+    assert_eq!(
+        store.vault().vault_key_owner(),
+        Ok(Some("user-a".to_string())),
+        "A's key keeps A's tag"
+    );
     assert_eq!(stored_key_ownership(&store.vault()), Ok(KeyOwnership::Foreign));
     assert_eq!(stored_key_state(&store.vault()), StoredKey::NotThisAccounts);
     assert_eq!(
@@ -271,7 +275,10 @@ fn account_switch_the_first_account_signs_back_in_without_the_twelve_words() {
     assert!(load(&store).is_err(), "B never gets A's key");
     store.vault().clear_session_token().unwrap();
 
-    assert_eq!(token_only_sign_in(&store, "tok-a2", "user-a", "a@beebeeb.io"), Ok(false));
+    assert_eq!(
+        token_only_sign_in(&store, "tok-a2", "user-a", "a@beebeeb.io"),
+        Ok(false)
+    );
     assert_eq!(stored_key_state(&store.vault()), StoredKey::Usable);
     let session = load(&store).unwrap().expect("A's session, with A's key");
     assert_eq!((session.token.as_str(), session.master_key), ("tok-a2", KEY_A));

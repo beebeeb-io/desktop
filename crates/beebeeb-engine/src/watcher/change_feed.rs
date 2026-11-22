@@ -425,7 +425,7 @@ mod tests {
         {
             std::fs::write(root.join(rel), vec![b'x'; 10 + i]).unwrap();
         }
-        let db = Arc::new(StateDb::open(&state.join("state.db")).unwrap());
+        let db = Arc::new(StateDb::open(state.join("state.db")).unwrap());
         // The first file list is in, so folders are scaffolded and no pass is owed for them.
         db.set_sync_cursor(1).unwrap();
         let api = Arc::new(ApiClient::new(

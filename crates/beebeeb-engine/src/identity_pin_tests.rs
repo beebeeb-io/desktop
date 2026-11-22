@@ -15,6 +15,7 @@
 //!    script. Everything else is handed its identity. A third identity cannot
 //!    be made anywhere else: the struct's fields are private
 //!    (`the_identity_type_cannot_be_built_outside_its_file`).
+//!
 //! 2b. **Tests run as TEST** ([`test_real_hits`]): the engine's test code (test files, test-gated items and
 //!    everything under `crates/beebeeb-engine/tests/`) names `TEST`, never `REAL`, so a test can never touch the
 //!    names the installed app uses. A test that needs `REAL` on purpose stands in [`TEST_REAL_ALLOWED`], with its

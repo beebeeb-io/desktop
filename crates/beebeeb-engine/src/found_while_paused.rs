@@ -1,4 +1,4 @@
-//! Task 2267 (fix round 2): what the person decides about the changes Beebeeb found while sync was paused. The
+//! Task 2267: what the person decides about the changes Beebeeb found while sync was paused. The
 //! ownership proof (`own_data_proof.rs`) holds every queued change it cannot tie to the account's proven data as
 //! `found_while_paused`; Settings › Sync shows them in one entry with two actions, and neither deletes anything:
 //!

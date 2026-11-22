@@ -7,7 +7,7 @@
 //! and a session stored before the email was kept has none, so the window closed with no owner recorded. From then on
 //! every start saw unowned data and decided `Reset`, which Windows refuses (R10).
 //!
-//! This module settles such a refusal with evidence instead of a guess (fix round 2, the lead's review of the PR):
+//! This module settles such a refusal with evidence instead of a guess:
 //! - ONE listing of this account's own tree (`GET /api/v1/sync/snapshot`, the account's non-trashed files only).
 //! - EVERY local My Files row the server named must be in that tree with its name opening under THIS session's master
 //!   key, or be gone from a folder that is (no sampling). Another account's My Files rows are not in this account's
@@ -235,6 +235,8 @@ mod tests {
         }
     }
 
+    // Seals with the legacy sealer on purpose: the fixture predates the NewItemId/WriteTarget sealers (task 2275).
+    #[allow(deprecated)]
     fn sealed_name(owner_key: [u8; 32], file_id: &str) -> String {
         let mk = beebeeb_core::kdf::MasterKey::from_bytes(owner_key);
         beebeeb_core::encrypt::encrypt_name(&mk, file_id, "notes.txt", Some("text/plain")).unwrap()

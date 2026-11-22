@@ -188,7 +188,7 @@ pub fn plan(
 
     // D8: an op re-pointed off a remapped ghost (its unit carries it) or under a ghost kept for replay, whose last error
     // is a parent 404, given up or still retrying. A park, a pause the pass owns (`auth`, `needs_review`) and any other
-    // error stay as they are. D8 amendment (lead ruling 2026-10-29): an op paused for the person gets its retry budget
+    // error stay as they are. D8 amendment: an op paused for the person gets its retry budget
     // back and keeps its pause, so "Upload to my Beebeeb" (which only clears the pause) sends it; it is never re-labelled,
     // so a superseded one is left as it is.
     let mut rearmed: HashSet<&str> = HashSet::new();
