@@ -544,7 +544,7 @@ mod tests {
         .keys()
         .cloned()
         .collect();
-        assert_eq!(keys.len(), 10, "nine status keys and startup_guard: {keys:?}");
+        assert_eq!(keys.len(), 11, "ten status keys (RC2-6b added `changes`) and startup_guard: {keys:?}");
     }
 
     /// Review of PR 290, P3-4: a name, a path or a refusal's words never reach a `{:?}`.

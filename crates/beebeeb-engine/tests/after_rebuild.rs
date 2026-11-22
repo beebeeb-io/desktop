@@ -57,7 +57,7 @@ async fn rebuilt(on_disk: &[u8]) -> Rebuilt {
         account.session_token.clone(),
         account.master_key,
     ));
-    let bridge = EngineBridge::new(&beebeeb_engine::identity::REAL, db, api);
+    let bridge = EngineBridge::new(&beebeeb_engine::identity::TEST, db, api);
     let ticked = STATE_DIR_OVERRIDE
         .scope(state_dir.clone(), sync_tick(&bridge, &sync_root))
         .await;

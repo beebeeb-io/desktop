@@ -1017,8 +1017,8 @@ mod windows_credentials {
 mod forget_sign_in_tests {
     use super::{forget_sign_in_is_own, forget_sign_in_targets};
 
-    const REAL: &str = "io.beebeeb.app";
-    const TEST: &str = "io.beebeeb.app.test";
+    const REAL_SERVICE: &str = "io.beebeeb.app";
+    const TEST_SERVICE: &str = "io.beebeeb.app.test";
     const NAMES: &[&str] = &[
         "io.beebeeb.app/acct-1/session_token",
         "io.beebeeb.app/acct-1/wrapped_master_key",
@@ -1038,7 +1038,7 @@ mod forget_sign_in_tests {
     #[test]
     fn forget_sign_in_real_keeps_test_identity_and_look_alikes() {
         assert_eq!(
-            forget_sign_in_targets(REAL, NAMES.iter().copied()),
+            forget_sign_in_targets(REAL_SERVICE, NAMES.iter().copied()),
             vec![
                 "io.beebeeb.app/acct-1/session_token",
                 "io.beebeeb.app/acct-1/wrapped_master_key",
@@ -1050,31 +1050,31 @@ mod forget_sign_in_tests {
     #[test]
     fn forget_sign_in_test_keeps_real_identity_and_look_alikes() {
         assert_eq!(
-            forget_sign_in_targets(TEST, NAMES.iter().copied()),
+            forget_sign_in_targets(TEST_SERVICE, NAMES.iter().copied()),
             vec!["io.beebeeb.app.test/acct-9/session_token", "io.beebeeb.app.test/acct-9/account_email"]
         );
     }
 
     #[test]
     fn forget_sign_in_matches_without_case_and_never_on_a_bare_service() {
-        assert!(forget_sign_in_is_own(REAL, "IO.Beebeeb.App/acct/session_token"));
-        assert!(!forget_sign_in_is_own(REAL, "io.beebeeb.app"));
-        assert!(!forget_sign_in_is_own(REAL, "io.beebeeb.app/"));
-        assert!(!forget_sign_in_is_own(REAL, "io.beebeeb.ap"));
-        assert!(!forget_sign_in_is_own(REAL, ""));
+        assert!(forget_sign_in_is_own(REAL_SERVICE, "IO.Beebeeb.App/acct/session_token"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.app"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.app/"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.ap"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, ""));
         // A multi-byte character at the service's length never panics.
-        assert!(!forget_sign_in_is_own(REAL, "io.beebeeb.apé/x"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.apé/x"));
     }
 
     #[test]
     fn forget_sign_in_names_the_store_writes_are_its_own() {
         use super::{AccountId, KeychainAccount, account_path, item_name};
         let id = AccountId::new("acct-1");
-        for service in [REAL, TEST] {
+        for service in [REAL_SERVICE, TEST_SERVICE] {
             for account in [KeychainAccount::SessionToken, KeychainAccount::WrappedMasterKey] {
                 let name = item_name(service, &account_path(Some(&id), account));
                 assert!(forget_sign_in_is_own(service, &name));
-                let other = if service == REAL { TEST } else { REAL };
+                let other = if service == REAL_SERVICE { TEST_SERVICE } else { REAL_SERVICE };
                 assert!(!forget_sign_in_is_own(other, &name));
             }
         }
