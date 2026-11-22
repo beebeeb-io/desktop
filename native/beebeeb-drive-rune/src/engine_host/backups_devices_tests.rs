@@ -472,11 +472,11 @@ fn the_engine_glue_sends_nothing_without_a_session() {
 }
 
 /// The section on [`DeviceCalls`]: nothing else of this PC; Try again reads the devices again (`opened`).
-struct DevicesOnly(DeviceCalls<Fake>);
+struct DevicesOnly(std::rc::Rc<std::cell::RefCell<DeviceCalls<Fake>>>);
 
 impl crate::frames::backups::source::BackupsSource for DevicesOnly {
     fn pump(&mut self) -> crate::frames::backups::source::Pumped {
-        let pumped = self.0.pump();
+        let pumped = self.0.borrow_mut().pump();
         crate::frames::backups::source::Pumped {
             changed: pumped.changed,
             busy: pumped.busy,
@@ -484,10 +484,10 @@ impl crate::frames::backups::source::BackupsSource for DevicesOnly {
         }
     }
     fn opened(&mut self) {
-        self.0.opened();
+        self.0.borrow_mut().opened();
     }
     fn devices_note(&self) -> Option<&'static str> {
-        self.0.note()
+        self.0.borrow().note()
     }
     fn root(&self) -> crate::frames::backups::source::BackupsRoot {
         crate::frames::backups::source::BackupsRoot {
@@ -507,7 +507,7 @@ impl crate::frames::backups::source::BackupsSource for DevicesOnly {
         Vec::new()
     }
     fn devices(&self) -> Vec<Device> {
-        self.0.devices()
+        self.0.borrow().devices()
     }
     fn not_backed_up(&self) -> Vec<crate::frames::backups::source::NotBackedUp> {
         Vec::new()
@@ -578,7 +578,8 @@ fn backups_devices_try_again() {
 
     let mut state = crate::shell::state::init();
     crate::frames::settings::go(&mut state, "DW-0737");
-    state.backups = crate::frames::backups::BackupsUi::new(Some(Box::new(DevicesOnly(calls))));
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(calls));
+    state.backups = crate::frames::backups::BackupsUi::new(Some(Box::new(DevicesOnly(calls.clone()))));
     let env = rune::Env {
         system_dark: false,
         scale: 2.0,
@@ -612,10 +613,13 @@ fn backups_devices_try_again() {
     assert!(find_key(&rt, RETRY).is_none());
     assert!(has_text(&rt, "Invented Studio"), "the devices show after Try again");
 
-    // A read that fails while a list is held keeps it, Try again under it; a failed read is never fresh.
+    // A delete that may have reached Beebeeb reads the list again and that read fails: the older list stays, with Try
+    // again under it, and a failed read is never fresh (Try again reads again at once).
     *fake.read_error.lock().unwrap() = Some(DevicesRefused::Call(AccountCallError::Offline));
-    rt.state.backups.read_again();
+    *fake.delete_answer.lock().unwrap() = Err(DeleteBackupError::Offline);
+    assert!(calls.borrow_mut().delete("mac", PASSWORD));
     settle_section(&mut rt, &pending);
+    assert_eq!(calls.borrow().note(), Some(NOT_READ));
     assert!(has_text(&rt, "Invented Studio"), "the older list stays");
     assert!(find_key(&rt, RETRY).is_some());
     let reads = fake.reads.load(Ordering::SeqCst);
