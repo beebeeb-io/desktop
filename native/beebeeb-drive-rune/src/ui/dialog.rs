@@ -13,7 +13,6 @@
 //! Callers write `Dialog { head: .., foot: .., ..Dialog::new("dlg", name, 380.0) }`.
 
 use crate::theme::tokens::Theme;
-#[cfg(test)]
 use rune::el;
 use rune::{Color, El, col, row};
 
@@ -154,7 +153,6 @@ pub fn modal_from<S: 'static>(
 /// Two return layers: Rune walks the removed nodes innermost first and skips one whose key is
 /// gone. The opener's layer is a zero-size leaf inside the scrim (its scope is the scrim), the
 /// fallback's is the scrim itself.
-#[cfg(test)]
 pub fn modal_back<S: 'static>(
     top: f32,
     card: El,

@@ -275,7 +275,6 @@ pub fn list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>
 /// [`list`] whose rows are each the control: one Tab stop (the selected row, else the first),
 /// Up, Down, Home, End, Page Up and Page Down rove between the rows, and typing picks the row
 /// whose name starts with what was typed.
-#[cfg(test)]
 pub fn roving_list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>, t: &Theme) -> El {
     build(index, title, rows, foot, true, t)
 }
