@@ -2,6 +2,7 @@
 //! each time it answers "already exists": 500 calls, +500 handles on Windows 11 23H2 and 25H2) and did about 19
 //! metadata operations per row. On real Windows: the handle count and the I/O of an idle tick do not grow with the rows.
 use super::*;
+use std::os::windows::ffi::OsStrExt;
 use crate::state_db::{FileContractState, FileEntry, FileStatus, ItemKind, Namespace, PinState, StateDb};
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount, GetProcessIoCounters, IO_COUNTERS};
 

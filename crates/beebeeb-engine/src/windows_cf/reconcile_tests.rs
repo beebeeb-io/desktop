@@ -5,6 +5,7 @@
 //! drop, as in `signout_tests.rs`. A root is connected (with no callbacks) only where a test dehydrates: T12, T15 and
 //! T18 (spec premise P5's outcome).
 use super::*;
+use std::os::windows::ffi::OsStrExt;
 use crate::os_state_reconcile::{Delta, OS_STATE_MASK};
 use crate::source_pin::squeeze;
 use crate::state_db::{FileContractState, FileEntry, FileStatus, ItemKind, Namespace, PinState, StateDb};
