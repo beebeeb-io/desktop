@@ -10,7 +10,8 @@ use super::EditorView;
 use super::super::{Ui, style};
 use crate::State;
 use crate::text_kit::find::{self, FindQuery};
-use crate::theme::tokens::Theme;
+use crate::theme::scale;
+use crate::theme::tokens::{self, Theme};
 use crate::ui::{kit, pill};
 
 thread_local! {
@@ -241,8 +242,8 @@ fn field(key: &'static str, edit: &rune::TextEdit, t: &Theme) -> El {
         .caret(t.accent_deep, t.selection)
         .w(220.0)
         .h(26.0)
-        .px(8.0)
-        .radius(6.0)
+        .px(scale::space::S8)
+        .radius(tokens::radius::MD)
         .fill(t.paper)
         .border(1.0, t.card_border)
         .border_layout();
@@ -261,7 +262,7 @@ pub fn bar(view: &EditorView, t: &Theme) -> Option<El> {
     let q = &view.find.query;
     let line1 = row()
         .key("find-row")
-        .gap(6.0)
+        .gap(scale::space::S6)
         .center_y()
         .child(field("find-needle", &view.find.needle, t))
         .child(kit::label("find-status", status(view), style::SUB, t.text_secondary))
@@ -282,12 +283,12 @@ pub fn bar(view: &EditorView, t: &Theme) -> Option<El> {
             })
         }))
         .child(chip("find-close", "\u{00d7}", false, t).on_press_tx(close_to_field));
-    let mut b = rune::col().key("find-bar-box").mx(14.0).mt(10.0).px(12.0).py(8.0).gap(6.0).radius(10.0).fill(style::banner(t)).child(line1);
+    let mut b = rune::col().key("find-bar-box").mx(14.0).mt(10.0).px(scale::space::S12).py(scale::space::S8).gap(scale::space::S6).radius(tokens::radius::LG).fill(style::banner(t)).child(line1);
     if view.find.replace_open {
         b = b.child(
             row()
                 .key("find-replace-row")
-                .gap(6.0)
+                .gap(scale::space::S6)
                 .center_y()
                 .child(field("find-replacement", &view.find.replacement, t))
                 .child(chip("find-replace", "Replace", false, t).on_press(|s: &mut State| {

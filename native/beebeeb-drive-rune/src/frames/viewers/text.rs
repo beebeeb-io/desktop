@@ -8,7 +8,8 @@ use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::source::{Cut, Ink, Keep, OpenFile, Run, TextDoc, count_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
-use crate::theme::tokens::Theme;
+use crate::theme::scale;
+use crate::theme::tokens::{self, Theme};
 use crate::ui::toolbar::{ToolState, tool_button};
 use crate::ui::view_state::{self, ViewState};
 use crate::ui::{au, kit};
@@ -65,7 +66,7 @@ pub fn line(i: usize, runs: &[Run], current: bool, t: &Theme) -> El {
                 if current { t.text_secondary } else { t.text_tertiary },
             )
             .w(GUTTER_W)
-            .px(16.0)
+            .px(scale::space::S16)
             .align(Align::End),
         )
         .child(text);
@@ -90,7 +91,7 @@ fn wrapped_line(i: usize, runs: &[Run], t: &Theme) -> El {
         .child(
             kit::label(format!("ln-{i}"), (i + 1).to_string(), style::CODE, t.text_tertiary)
                 .w(GUTTER_W)
-                .px(16.0)
+                .px(scale::space::S16)
                 .align(Align::End)
                 .absolute(0.0, 0.0),
         );
@@ -116,7 +117,7 @@ pub fn body(doc: &TextDoc, wrap: bool, t: &Theme) -> El {
         .grow(1.0)
         .shrink()
         .h_full()
-        .py(12.0)
+        .py(scale::space::S12)
         .fill(t.bg)
         .clip_rounded(0.0)
         // A file longer than the window is read by scrolling (the wheel, a touchpad).
@@ -140,7 +141,7 @@ fn seg_tab(key: String, label: &str, on: bool, t: &Theme) -> El {
         .label(label)
         .checked(on)
         .h(24.0)
-        .px(10.0)
+        .px(scale::space::S10)
         .center()
         .radius(8.0)
         .focusable(true)
@@ -169,8 +170,8 @@ pub fn seg(name: &str, tabs: [(&str, bool); 2], t: &Theme) -> (El, [El; 2]) {
         .key("seg")
         .role("tablist")
         .label(name)
-        .padding(2.0)
-        .radius(10.0)
+        .padding(scale::space::S2)
+        .radius(tokens::radius::LG)
         .fill(t.field)
         .box_shadow(kit::ring_inset(t.separator));
     let [a, b] = tabs;
@@ -191,10 +192,10 @@ pub fn tool_action(key: &str, label: &str, icon: Option<&'static Icon>, hint: Op
         .role("button")
         .label(label)
         .h(22.0)
-        .px(12.0)
-        .gap(7.0)
+        .px(scale::space::S12)
+        .gap(scale::space::S7)
         .center()
-        .radius(6.0)
+        .radius(tokens::radius::MD)
         .fill(t.paper)
         .border(1.0, t.card_border)
         .border_layout()
@@ -209,7 +210,7 @@ pub fn tool_action(key: &str, label: &str, icon: Option<&'static Icon>, hint: Op
     let mut words = row()
         .key(format!("{key}-words"))
         .items_end()
-        .gap(4.0)
+        .gap(scale::space::S4)
         .child(style::fitted(format!("{key}-label"), label, style::BUTTON_SM, t.text));
     if let Some(hint) = hint {
         b = b.shortcut_hint(hint);
@@ -304,7 +305,7 @@ pub fn editor(editor: &super::Editor, file_name: &str, spans: Vec<Span>, t: &The
         .shrink()
         .min_w(0.0)
         .h_full()
-        .py(12.0)
+        .py(scale::space::S12)
         .fill(t.bg)
         .clip_rounded(0.0)
         .min_h(0.0)
@@ -430,10 +431,10 @@ fn banner_of(icon: &'static Icon, sentence: El, action: Option<El>, t: &Theme) -
         .mt(10.0)
         .pl(12.0)
         .pr(10.0)
-        .py(9.0)
-        .gap(10.0)
+        .py(scale::space::S9)
+        .gap(scale::space::S10)
         .center_y()
-        .radius(10.0)
+        .radius(tokens::radius::LG)
         .fill(style::banner(t))
         .child(kit::glyph("banner-icon", icon, 16.0, t.text_secondary))
         .child(sentence);

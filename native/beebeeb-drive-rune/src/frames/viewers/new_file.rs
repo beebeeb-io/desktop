@@ -17,6 +17,7 @@ use super::{Intent, style};
 use crate::State;
 use crate::frames::files::names::{self, NameError};
 use crate::shell::app::{Screen, Section};
+use crate::theme::scale;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::dialog::{self, Sub};
 use crate::ui::settings_dialog::{Weight, button};
@@ -425,9 +426,9 @@ fn ext_edit(s: &mut State) -> &mut TextEdit {
 /// The extension inside a type's document outline: mono 10px on a 17px line.
 const DOC_EXT: TextStyle = TextStyle::new(10.0, 400.0).family(rune::tok::Family::Mono).lh(17.0);
 /// The extension's field (`.kit-field-value.font-mono`): mono 11.5px on a 17px line.
-const EXT_VALUE: TextStyle = TextStyle::new(11.5, 400.0).family(rune::tok::Family::Mono).lh(17.0);
+const EXT_VALUE: TextStyle = scale::text::META_MONO_LOOSE;
 /// A suggested extension (`.kit-chip`): 12px/600 on a 17px line.
-const CHIP: TextStyle = TextStyle::new(12.0, 600.0).lh(17.0);
+const CHIP: TextStyle = scale::text::BODY_SEMI_LOOSE;
 /// A type's tile: the dialog's 512 across five, 12 apart.
 const TILE_W: f32 = (512.0 - 4.0 * 12.0) / 5.0;
 /// The outline of a document in a type's tile.
@@ -512,7 +513,7 @@ fn type_tile(kind: Kind, on: bool, x: f32, t: &Theme) -> El {
         .key(format!("{key}-doc"))
         .size(DOC_W, 54.0)
         .ml(doc_left - tile_left)
-        .radius(4.0)
+        .radius(tokens::radius::SM)
         .center()
         .child(ring_under_clip(format!("{key}-doc-ring"), 1.5, 4.0, t.text_tertiary))
         .child(kit::label(format!("{key}-ext"), kind.ext(), DOC_EXT, t.text_secondary).offset(doc_x - doc_left, 0.0));
@@ -523,10 +524,10 @@ fn type_tile(kind: Kind, on: bool, x: f32, t: &Theme) -> El {
         .label(format!("{}, {}", kind.word(), kind.ext()))
         .checked(on)
         .h(101.0)
-        .py(12.0)
-        .gap(8.0)
+        .py(scale::space::S12)
+        .gap(scale::space::S8)
         .items_start()
-        .radius(10.0)
+        .radius(tokens::radius::LG)
         .focusable(true)
         .focus_ring(2.0, 2.0, t.accent_deep)
         .cursor(rune::Cursor::Pointer)
@@ -627,9 +628,9 @@ fn ext_field(nf: &NewFile, t: &Theme) -> El {
         .key("field-1")
         .w(90.0)
         .h(28.0)
-        .px(8.0)
+        .px(scale::space::S8)
         .center_y()
-        .radius(6.0)
+        .radius(tokens::radius::MD)
         .fill(if focused { t.card } else { t.field })
         .border(1.0, if focused { t.accent_deep } else { Color::TRANSPARENT })
         .border_layout()
@@ -678,7 +679,7 @@ fn name(nf: &NewFile, t: &Theme) -> El {
     let fields = row()
         .key("name-row")
         .w_full()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .items_start()
         .child(el().key("name-cell").grow(1.0).min_w(0.0).child(name_field))
         .child(ext_field(nf, t));

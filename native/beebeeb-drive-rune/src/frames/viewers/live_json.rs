@@ -10,6 +10,7 @@ use serde_json::Value;
 use super::super::{Ui, style};
 use crate::theme::file_icon_colors::tint_color;
 use crate::theme::file_icons::Tint;
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 
@@ -128,7 +129,7 @@ pub fn view(source: &str, _ui: &Ui, t: &Theme) -> El {
         .shrink()
         .min_w(0.0)
         .h_full()
-        .padding(16.0)
+        .padding(scale::space::S16)
         .fill(t.bg)
         .min_h(0.0)
         .scroll(rune::ScrollSpec { stick_bottom: false })

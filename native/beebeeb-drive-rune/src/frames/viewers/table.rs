@@ -10,6 +10,7 @@ use super::media::TABLE_KEY;
 use super::source::TableDoc;
 use super::{Intent, Ui, details, icons, style, text, ui};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 
@@ -166,7 +167,7 @@ pub fn body_in(ui: &Ui, doc: &TableDoc, t: &Theme, root_key: &str, table_rows: V
         .grow(1.0)
         .min_w(0.0)
         .h_full()
-        .padding(16.0)
+        .padding(scale::space::S16)
         .fill(style::stage(t))
         .clip_rounded(0.0)
         .child(table)
