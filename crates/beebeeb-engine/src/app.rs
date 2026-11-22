@@ -829,7 +829,8 @@ impl<C: CredentialStores> Engine<C> {
     fn start_on(&self, sync_root: PathBuf, port: &dyn SyncRootPort) -> Result<SyncStart, SyncStartRefused> {
         let outcome = self.start_holding_step(sync_root, port);
         if let Err(refused) = outcome {
-            tracing::warn!(kind = refused.kind(), "sync did not start");
+            // One line, the kind only, in words the log's vocabulary writes as they are (`other accounts data`).
+            tracing::warn!(kind = %refused.kind().replace('_', " "), "sync did not start");
             self.view.write(|view| {
                 view.start = Start::Refused(refused);
                 view.attempt += 1;

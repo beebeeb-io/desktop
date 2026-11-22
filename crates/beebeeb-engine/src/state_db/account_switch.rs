@@ -29,6 +29,41 @@ impl StateDb {
         Ok(None)
     }
 
+    /// RC2-5: the waiting work of [`Self::work_waiting_for_a_person`] whose every byte is an item in the sync folder,
+    /// by the path of that item: a new file or an edit queued while sync was paused, a new
+    /// folder queued, an edit held for review (a rebuilt state.db holds every file of unknown content so), and the
+    /// staged copies of those queued changes. A person's answer about those items (keep them aside, or discard them)
+    /// settles all of it. `None` when any other work waits (another kind of change, an upload the server may already
+    /// hold, a file of unknown content at another path, a conflict, an error, a trash): that needs its account.
+    pub fn work_in_the_folder(&self) -> Result<Option<Vec<String>>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0));
+        let other_work = [
+            "SELECT COUNT(*) FROM operation_queue WHERE kind NOT IN ('upload_file', 'upload_version', 'create_folder')",
+            "SELECT COUNT(*) FROM operation_queue o WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.file_id = o.file_id)",
+            "SELECT COUNT(*) FROM staged_payloads s
+               WHERE NOT EXISTS (SELECT 1 FROM operation_queue o WHERE o.payload_path = s.path)",
+            "SELECT COUNT(*) FROM upload_finalizations",
+            "SELECT COUNT(*) FROM unknown_orphans",
+            "SELECT COUNT(*) FROM files WHERE status IN ('conflict', 'error', 'trashing')",
+            "SELECT COUNT(*) FROM files f WHERE f.status = 'uploading'
+               AND NOT EXISTS (SELECT 1 FROM operation_queue o WHERE o.file_id = f.file_id)
+               AND NOT EXISTS (SELECT 1 FROM held_edits h WHERE h.file_id = f.file_id)",
+        ];
+        for sql in other_work {
+            if count(sql)? != 0 {
+                return Ok(None);
+            }
+        }
+        let mut items = conn.prepare(
+            "SELECT f.path FROM operation_queue o JOIN files f ON f.file_id = o.file_id
+             UNION SELECT f.path FROM held_edits h JOIN files f ON f.file_id = h.file_id
+             ORDER BY 1",
+        )?;
+        let items = items.query_map([], |row| row.get::<_, String>(0))?;
+        items.collect::<Result<Vec<_>>>().map(Some)
+    }
+
     /// Where each file row of unknown content is, as the database writes paths (w27). Such a row alone is no work of
     /// a person's: a document made in the app is one, with nothing of it in the folder. It keeps another account out
     /// only while the item there may hold bytes on this PC, which the OS answers (`SyncRootPort::may_hold_bytes`).
