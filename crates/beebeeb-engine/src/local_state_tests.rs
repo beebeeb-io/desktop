@@ -145,3 +145,33 @@ fn the_real_config_path_is_never_under_a_disposable_cache_root() {
         "the real config {real_config:?} is under the disposable root(s) {holding:?}: a sign-out purge would delete it"
     );
 }
+
+#[test]
+fn a_corrupt_state_db_is_moved_aside_and_the_next_open_is_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    std::fs::write(&db, vec![0xABu8; 8192]).unwrap();
+    let StateDbCheck::MovedAside(aside) = move_corrupt_state_db_aside(dir.path()).unwrap() else {
+        panic!("a corrupt state.db is moved aside");
+    };
+    assert!(!db.exists() && aside.exists());
+    assert_eq!(move_corrupt_state_db_aside(dir.path()).unwrap(), StateDbCheck::Sound);
+    assert!(crate::state_db::StateDb::open(&db).is_ok(), "a fresh database opens");
+}
+
+#[test]
+fn a_sound_or_missing_state_db_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(move_corrupt_state_db_aside(dir.path()).unwrap(), StateDbCheck::Sound);
+    crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+    assert_eq!(move_corrupt_state_db_aside(dir.path()).unwrap(), StateDbCheck::Sound);
+    assert!(dir.path().join("state.db").exists());
+}
+
+#[test]
+fn a_state_db_that_is_a_directory_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("state.db")).unwrap();
+    assert!(move_corrupt_state_db_aside(dir.path()).is_err());
+    assert!(dir.path().join("state.db").is_dir());
+}

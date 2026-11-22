@@ -785,7 +785,9 @@ impl StateDb {
         conn.execute("DELETE FROM sync_state WHERE key = ?1", params![FINDER_DOMAIN_GONE_KEY])?;
         Ok(())
     }
-    /// Is a Finder domain removal owed before any engine may start?
+    /// Is a Finder domain removal owed before any engine may start? Read by tests only: no shell reads the debt
+    /// here (backlog 1868), so a build without tests does not carry the reader.
+    #[cfg(test)]
     pub fn finder_removal_owed(&self) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let owed: Option<String> = conn

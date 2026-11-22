@@ -103,6 +103,7 @@ pub fn prepare_beebeeb_state_dir_at(sync_root: &Path, state_dir: &Path) -> Resul
     let legacy_lock = sync_root.join(LOCK_FILENAME);
     let legacy_device_identity = sync_root.join(DEVICE_IDENTITY_FILENAME);
     let new_state_db = state_db_path_from_state_dir(state_dir);
+    ensure_state_dir_is_not_a_file(state_dir)?;
 
     if new_state_db.exists() {
         fs::create_dir_all(state_dir).map_err(|e| format!("create state dir {}: {e}", state_dir.display()))?;
@@ -150,6 +151,15 @@ pub fn prepare_beebeeb_state_dir_at(sync_root: &Path, state_dir: &Path) -> Resul
             "No legacy Beebeeb metadata found in sync root; initialized app-local state dir"
         );
         Ok(StateDirMigration::FreshInstall)
+    }
+}
+
+/// A state dir that exists as a file (any platform; Windows reports it differently from a missing one) fails
+/// closed: nothing is created beside it, moved into it or deleted (backlog 1868).
+pub fn ensure_state_dir_is_not_a_file(state_dir: &Path) -> Result<(), String> {
+    match fs::metadata(state_dir) {
+        Ok(meta) if !meta.is_dir() => Err(format!("state path {} exists but is not a directory", state_dir.display())),
+        _ => Ok(()),
     }
 }
 
@@ -433,5 +443,20 @@ mod tests {
 
         assert_eq!(outcome, StateDirMigration::SkippedExistingState);
         assert_eq!(fs::read(state_dir.join(STATE_DB_FILENAME)).unwrap(), b"new-state");
+    }
+
+    #[test]
+    fn a_state_dir_that_is_a_file_fails_closed_and_the_legacy_state_stays() {
+        let temp = tempfile::tempdir().unwrap();
+        let sync_root = temp.path().join("sync-root");
+        let legacy = sync_root.join(LEGACY_STATE_DIR_NAME);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join(STATE_DB_FILENAME), b"legacy-state").unwrap();
+        let state_dir = temp.path().join("state");
+        fs::write(&state_dir, b"i am a file").unwrap();
+
+        assert!(prepare_beebeeb_state_dir_at(&sync_root, &state_dir).is_err());
+        assert_eq!(fs::read(&state_dir).unwrap(), b"i am a file");
+        assert_eq!(fs::read(legacy.join(STATE_DB_FILENAME)).unwrap(), b"legacy-state");
     }
 }
