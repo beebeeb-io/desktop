@@ -1431,7 +1431,7 @@ mod refetch_streaming_tests {
     fn bridge(dir: &Path, server: &Server) -> EngineBridge {
         let db = Arc::new(StateDb::open(dir.join("state.db")).unwrap());
         let api = Arc::new(ApiClient::new(server.base.clone(), "token".into(), KEY));
-        EngineBridge::new(&crate::identity::REAL, db, api)
+        EngineBridge::new(&crate::identity::TEST, db, api)
     }
 
     fn content(len: usize) -> Vec<u8> {
