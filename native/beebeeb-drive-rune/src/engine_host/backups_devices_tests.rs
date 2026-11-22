@@ -540,23 +540,28 @@ fn has_text(rt: &rune::Runtime<crate::State>, words: &str) -> bool {
         .any(|e| !e.exiting && e.text.as_deref().is_some_and(|t| t.contains(words)))
 }
 
-/// Poll the section until the device workers are done, then draw.
+/// Poll and draw until no device worker runs and nothing more came in (a frame polls the section too, and may start a
+/// read of its own).
 fn settle_section(rt: &mut rune::Runtime<crate::State>, pending: &Arc<AtomicUsize>) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut tx = rune::Tx::default();
     loop {
-        crate::frames::backups::poll(&mut rt.state, &mut tx);
-        if pending.load(Ordering::SeqCst) == 0 {
-            crate::frames::backups::poll(&mut rt.state, &mut tx);
-            break;
+        let changed = crate::frames::backups::poll(&mut rt.state, &mut tx);
+        rt.invalidate();
+        rt.frame(0.016);
+        rt.settle_all();
+        rt.frame(0.016);
+        if !changed && pending.load(Ordering::SeqCst) == 0 {
+            let changed = crate::frames::backups::poll(&mut rt.state, &mut tx);
+            if !changed && pending.load(Ordering::SeqCst) == 0 {
+                rt.invalidate();
+                rt.frame(0.016);
+                return;
+            }
         }
         assert!(Instant::now() < deadline, "the worker did not finish");
         std::thread::sleep(Duration::from_millis(5));
     }
-    rt.invalidate();
-    rt.frame(0.016);
-    rt.settle_all();
-    rt.frame(0.016);
 }
 
 const RETRY: &str = "backups-devices-failed-retry";
