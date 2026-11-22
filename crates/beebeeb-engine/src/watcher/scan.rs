@@ -489,6 +489,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// RC-d measure, by hand on Windows (a number, not a check):
+    /// `cargo test --locked --lib rc_d_measure -- --ignored --nocapture --test-threads 1`.
+    /// The process's file operations per scan pass over a tenth of the 41,510-item account (4,110
+    /// online-only files in 274 folders, rows in the state DB), with the change journal and without.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "a measurement: prints file operations per pass"]
+    fn rc_d_measure_file_operations_per_pass() {
+        use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+        const DIRS: usize = 274;
+        const PER_DIR: usize = 15;
+        fn io_ops() -> [u64; 3] {
+            use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessIoCounters, IO_COUNTERS};
+            let mut c = IO_COUNTERS::default();
+            // SAFETY: `c` is the struct the call fills; the pseudo handle of this process needs no close.
+            unsafe { GetProcessIoCounters(GetCurrentProcess(), &mut c).unwrap() };
+            [c.ReadOperationCount, c.WriteOperationCount, c.OtherOperationCount]
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sync-root");
+        let db = Arc::new(StateDb::open(temp.path().join("state.db")).unwrap());
+        db.set_sync_cursor(1).unwrap();
+        for d in 0..DIRS {
+            let dir = root.join(format!("d{d:04}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in 0..PER_DIR {
+                std::fs::write(dir.join(format!("f{f:02}.bin")), [b'x'; 64]).unwrap();
+                db.upsert_file(&FileEntry {
+                    file_id: format!("00000000-0000-4000-8000-{:012}", d * 100 + f),
+                    path: format!("d{d:04}/f{f:02}.bin"),
+                    status: FileStatus::CloudOnly,
+                    size_bytes: 64,
+                    modified_at: 0,
+                    content_hash: None,
+                    remote_updated_at: 0,
+                    parent_id: None,
+                    item_kind: ItemKind::File,
+                })
+                .unwrap();
+            }
+        }
+        let api = Arc::new(crate::api_client::ApiClient::new(
+            "https://api.beebeeb.io".into(),
+            "token".into(),
+            [17u8; 32],
+        ));
+        let bridge = EngineBridge::new(&crate::identity::TEST, db.clone(), api);
+        let files = (DIRS * PER_DIR) as f64;
+        let pass = |what: &str, memo: &mut ScanMemo, feed: &mut dyn crate::watcher::ChangeFeed| {
+            let (before, at) = (io_ops(), Instant::now());
+            scan_tick(&bridge, &root, memo, feed);
+            let after = io_ops();
+            let [r, w, o] = [0, 1, 2].map(|i| after[i] - before[i]);
+            println!(
+                "RC-d {what}: read {r} write {w} other {o} = {:.2} a file | visited {} classified {} skipped {} | {} ms",
+                (r + w + o) as f64 / files,
+                memo.visited,
+                memo.classified,
+                memo.skipped,
+                at.elapsed().as_millis()
+            );
+        };
+        // The tip: the change journal (a tick that visits 0 shows it is followed).
+        let mut memo = ScanMemo::default();
+        let mut feed = crate::watcher::change_feed::open(&root);
+        pass("journal, first walk (folders scaffolded)", &mut memo, feed.as_mut());
+        for n in 1..=3 {
+            pass(&format!("journal, idle tick {n}"), &mut memo, feed.as_mut());
+        }
+        memo.age_by(FULL_RECHECK_INTERVAL);
+        pass("journal, 10-minute backstop walk", &mut memo, feed.as_mut());
+        pass("journal, idle tick after it", &mut memo, feed.as_mut());
+        memo.age_by(FULL_RECHECK_INTERVAL);
+        pass("journal, second backstop walk", &mut memo, feed.as_mut());
+        // No journal (build c54280089, or a volume without one): every pass walks.
+        let mut memo = ScanMemo::default();
+        for n in 1..=4 {
+            pass(&format!("no journal, walk {n}"), &mut memo, &mut crate::watcher::NoFeed);
+        }
+        memo.age_by(FULL_RECHECK_INTERVAL);
+        pass("no journal, 10-minute walk", &mut memo, &mut crate::watcher::NoFeed);
+        pass("no journal, walk after it", &mut memo, &mut crate::watcher::NoFeed);
+    }
+
     /// macOS/Linux supply no identity: an unchanged file is still skipped there.
     #[cfg(not(target_os = "windows"))]
     #[test]
