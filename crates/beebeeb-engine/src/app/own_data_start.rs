@@ -1,4 +1,4 @@
-//! Task 2267 in the engine (plan wave 3, slice S2a; census S2: "Unowned local data on a Windows PC" and "Found while
+//! Task 2267 in the engine ("Unowned local data on a Windows PC" and "Found while
 //! paused"). A Windows start refused with `OtherAccountsData` over local data that has no owner record, or one recorded
 //! only by an old email, proves in the background that the data is the signed-in account's own (`own_data_proof`: ONE
 //! listing of this account's tree, every server-named My Files row opening under this session's key) and then starts
@@ -17,7 +17,7 @@
 //! - No answer at all (offline, a time-out) turns the refusal into `IdentityUnknown` ("connect and open Beebeeb
 //!   again"). A token the server refused is not "offline", so that sentence is not shown for it.
 //!
-//! The upgrade from a release before the binding (R10 ruling 8; lead rulings 2026-11-15 17:35), on every OS: the first
+//! The upgrade from a release before the binding (The binding rule), on every OS: the first
 //! startup of this build ([`Engine::fix_upgrade_candidate_at_startup`], from `restore`) fixes the adoption candidate,
 //! the account whose vault key the credential store holds then, and shuts the adoption window on disk, even with no
 //! key. That startup writes nothing but the window's one `user_version` mark into a `state.db` that exists, and never
@@ -28,8 +28,8 @@
 //!
 //! A "Keep on this PC only" that a crash interrupted is finished or undone before an engine exists
 //! ([`Engine::settle_an_interrupted_keep`], step 7 of the start, after the binding). The decisions the card needs
-//! (review, upload, keep, show the kept folder) are the `found_while_paused_*_for` calls, stamped with the session turn
-//! ([`Engine::session_turn`]); the window binds them (slice S2b).
+//!  are the `found_while_paused_*_for` calls, stamped with the session turn
+//! ([`Engine::session_turn`]); the window binds them.
 //!
 //! The proof's hooks the start, the Lock and the sign-out call exist on every OS and do nothing where no start is
 //! refused over local data a proof could settle (the same gate as `own_data_proof` in `lib.rs`).
@@ -174,7 +174,7 @@ struct SeatState {
     test: TestSeams,
 }
 
-/// R10 ruling 8: the adoption window as the first startup found it. `candidate` is set only when that startup found
+/// The binding rule: the adoption window as the first startup found it. `candidate` is set only when that startup found
 /// the window open (or no `state.db` yet), and holds the account whose vault key the credential store held then.
 #[derive(Default)]
 struct Startup {
@@ -450,7 +450,7 @@ impl<C: CredentialStores> Engine<C> {
         drop(data);
     }
 
-    /// R10 ruling 8, from `restore` (under the step lock, after the stored key was or was not loaded): the first
+    /// The binding rule, from `restore` (under the step lock, after the stored key was or was not loaded): the first
     /// startup of this handle fixes the upgrade's adoption candidate and shuts the adoption window on disk. The window
     /// is open on a `state.db` that a release before the binding wrote, and nothing else: whatever this startup finds,
     /// it shuts it, even with no key, so a later startup (whatever key it finds) never adopts by this route. The

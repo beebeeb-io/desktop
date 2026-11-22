@@ -1,4 +1,4 @@
-//! Task 2530 (wave 2, slice S3): a way out of a parked upload, chosen on This PC's Sync history › Problems row, for the
+//! Task 2530: a way out of a parked upload, chosen on This PC's Sync history › Problems row, for the
 //! session a person pressed under and no other ([`Engine::settle_parked_for`]). Declared from `owned_state.rs`, the
 //! module that hands This PC its local state.
 //!

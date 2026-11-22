@@ -103,7 +103,7 @@ fn world(tag: &str, photos: &[(&str, &str, FileStatus, Vec<u8>)]) -> World {
     signed_in(&engine, &account);
     let root = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&db_dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(db_dir.path().join("state.db")).unwrap();
     std::fs::create_dir_all(root.path().join("Photos")).unwrap();
     for (at, (id, name, status, picture)) in photos.iter().enumerate() {
         let rel = format!("Photos/{name}");

@@ -1,7 +1,7 @@
 //! The recent searches of Search (slice A8) against a real state database of each test's own
 //! (`Engine::use_local_state_for_test`), recorded as an invented account's: kept per account and per session, newest
 //! first, once, at most `SEARCHES_KEPT`; Clear deletes the row; the sign-out deletes the row of the account that signs
-//! out (lead ruling 2026-11-15 17:25), and a second account reads none; the account purge wipes them; nothing is kept
+//! out, and a second account reads none; the account purge wipes them; nothing is kept
 //! where nothing has synced. Every search and every account is invented.
 
 use std::path::{Path, PathBuf};
@@ -310,7 +310,7 @@ fn open_lock(engine: &TestEngine) {
 /// none of the account's recent searches on this computer, as a sign-out. Through the CONFIRMED close (a 401 that a
 /// second question confirmed, `confirmed_at`). The close after the refusal run (the session watcher's
 /// `close_ended_session`) is `tests/a_session_the_watcher_closes_leaves_no_recent_searches.rs`; a sign-out pressed
-/// before the watcher fires is `tests/a_sign_out_before_the_watcher_fires_leaves_no_recent_searches.rs` (CP2 row 2.1).
+/// before the watcher fires is `tests/a_sign_out_before_the_watcher_fires_leaves_no_recent_searches.rs`.
 #[test]
 fn a_session_the_server_ended_leaves_no_recent_searches() {
     let engine = engine();
@@ -435,7 +435,7 @@ fn a_screen_lock_keeps_the_recent_searches() {
     assert_eq!(on_disk(&path, A.0), kept, "the vault lock kept them");
 }
 
-// ── CP2 row 2.1, ruling 2: a session end's delete that fails is logged, and made at the next open ──────────────────
+// ── a session end's delete that fails is logged, and made at the next open ──────────────────
 
 /// The log line of a session end whose delete of the recent searches failed.
 const NOT_DELETED: &str = "search query row not deleted at session end";
@@ -623,7 +623,7 @@ fn a_delete_that_works_at_the_watchers_close_logs_nothing_and_leaves_nothing_due
     assert_eq!(logs.matches(DELETED_AT_OPEN).count(), 0, "nothing was due: {logs}");
 }
 
-// ── CP2 row 2.1, lead ruling 23:03: an engine start with nobody signed in wipes every recent search on this PC ──────
+// ── CP2 row 2.1: an engine start with nobody signed in wipes every recent search on this PC ──────
 
 /// An engine on `credentials` (as [`engine`]): a restart of the app, when the credentials are the ones it stored.
 fn engine_with(credentials: MemoryCredentials) -> Arc<TestEngine> {

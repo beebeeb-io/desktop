@@ -49,7 +49,7 @@ fn a_session_from_before_the_owner_tag(tag: &str) -> (Engine<MemoryCredentials>,
     (engine, api, account)
 }
 
-/// Review of desktop#424 (delta 2 P2): the owner is learned from Beebeeb's answer for this session's own token,
+/// The owner is learned from Beebeeb's answer for this session's own token,
 /// recorded in memory and as the stored session's owner tag, without moving the session's turn; once known, nothing
 /// more is asked.
 #[test]
@@ -109,7 +109,7 @@ fn the_watchers_ask_records_the_owner_off_its_own_thread() {
     );
 }
 
-/// Census row (lane signin-wipe): a session that comes back with no email beside it (none stored, as after an email
+/// A session that comes back with no email beside it (none stored, as after an email
 /// write that failed at the sign-in) is named by the same answer that names its owner: the session in memory, the
 /// account label a window reads, and the credential store, which still holds the token that was asked about. The email
 /// is there before the id, so a window that reads "the email, else the id" never sees the id in between.

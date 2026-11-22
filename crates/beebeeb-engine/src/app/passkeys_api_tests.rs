@@ -441,8 +441,7 @@ fn a_passkey_sign_in_with_prf_opens_the_vault_and_without_it_asks_for_the_words(
         .expect("the passkey signs in");
     assert_eq!(next, NextAfterSignIn::Drive);
     assert_eq!(engine.gate(), GateState::Ready);
-    // A PRF passkey that opened the vault key is the strong proof (lead decision 2026-11-14, as the twelve words
-    // are): the lock is Open, the screen can be locked, and a session the server ended closes the vault.
+    // A PRF passkey that opened the vault key is the strong proof ): the lock is Open, the screen can be locked, and a session the server ended closes the vault.
     assert_eq!(engine.lock_state(), super::super::lock_api::LockState::Open);
     engine.lock_screen().expect("an open lock can lock the screen");
     assert_eq!(engine.lock_state(), super::super::lock_api::LockState::ScreenLocked);
@@ -604,7 +603,7 @@ fn a_passkey_is_renamed_for_its_own_session_with_the_servers_refusals_as_kinds()
     );
 }
 
-/// Review of desktop#424 (engine P2-1, crypto P2-2): a locked screen refuses the passkey list, add, remove and rename
+/// A locked screen refuses the passkey list, add, remove and rename
 /// before anything is sent, also for a turn read while it was locked (an unlock does not move the turn).
 #[test]
 fn a_locked_screen_refuses_every_passkey_call_and_sends_nothing() {

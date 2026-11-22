@@ -1,6 +1,6 @@
 //! The first-time guide's "done" mark, as a shell reaches it: for the session's own account and no other.
 //!
-//! Owner ruling 2026-11-13: the guide is done once per ACCOUNT on each computer (an account that finished or
+//! The guide is done once per ACCOUNT on each computer (an account that finished or
 //! skipped it does not get it again here, also after a sign-out and a sign-in; another account on the same computer
 //! gets it once). The mark is a row of the account's local state keyed by the account's own user id
 //! (`state_db::guide_mark`); a sign-out keeps it. The owner proof below is `Engine::owned_state`'s, with one case

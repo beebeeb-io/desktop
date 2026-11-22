@@ -20,6 +20,8 @@ use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::test_api::{ConfirmTokens, FakeApi, OpaqueAccount, Reply, Request};
 
+type Seen = Arc<Mutex<Vec<(bool, bool)>>>;
+
 type TestEngine = Engine<MemoryCredentials>;
 
 const PASSWORD: &str = "correct horse battery staple";
@@ -56,7 +58,7 @@ fn account() -> Arc<OpaqueAccount> {
 }
 
 /// The fake server. `taken` is what the change's finish carried: (the recovery check was sent, the public key was).
-fn server(mode: &'static AtomicU8) -> (FakeApi, Arc<Mutex<Vec<(bool, bool)>>>) {
+fn server(mode: &'static AtomicU8) -> (FakeApi, Seen) {
     let account = account();
     let tokens = Arc::new(ConfirmTokens::default());
     let setup = opaque::create_server_setup();
@@ -372,7 +374,7 @@ fn the_strength_is_cores_and_needs_no_network() {
     assert_eq!(password_strength("Mixed Case Letters 42"), PasswordStrength::Strong);
 }
 
-/// Review of desktop#423, P2 #9: an answer lost on the change's first leg and one lost on its finish are not the
+/// An answer lost on the change's first leg and one lost on its finish are not the
 /// same answer: after the first leg nothing changed, after the finish the password may have (here it did).
 #[test]
 fn an_answer_lost_after_the_finish_is_not_the_answer_of_nothing_changed() {
@@ -406,7 +408,7 @@ fn an_answer_lost_after_the_finish_is_not_the_answer_of_nothing_changed() {
     }
 }
 
-/// Review of desktop#423, P2 #9: the finish was taken (the password changed) and the session moved on before the new
+/// The finish was taken (the password changed) and the session moved on before the new
 /// token could be kept. That is never the answer of a press that changed nothing.
 #[test]
 fn a_change_taken_after_the_session_moved_on_is_not_the_answer_of_nothing_changed() {

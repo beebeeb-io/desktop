@@ -340,7 +340,7 @@ impl<C: CredentialStores> Engine<C> {
         let Some(recorded) = on_this_pc(&entry.status) else {
             return Ok(LocalCopy::NotHere);
         };
-        // Review of desktop#432 (P1-2): a copy of an older version than the one the local state holds is never
+        // A copy of an older version than the one the local state holds is never
         // read: the viewer labels what it shows with that version, and an edit saved from older bytes under it
         // would replace the newer version without the two-versions question. Before the size check below: the
         // pull has already moved the row's size to the newer version's. Its own answer, never `not_read()`: a
@@ -455,7 +455,7 @@ fn copy_is_behind(db: &crate::state_db::StateDb, file_id: &str) -> rusqlite::Res
     }
     let copy = match contract.local_hash {
         Some(_) => Some(contract.local_base_version).filter(|version| *version > 0),
-        // A mixed candidate (no hash) is not one version's bytes (delta check of desktop#432).
+        // A mixed candidate (no hash) is not one version's bytes.
         None => db
             .fetched_content(file_id)?
             .and_then(|(version, hash)| hash.map(|_| version)),
@@ -481,7 +481,7 @@ fn is_read_here(is_dir: bool, is_link: bool, not_local: bool) -> bool {
 /// disk.
 fn wholly_here(path: &Path) -> Option<u64> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
-    is_plain_and_wholly_here(&metadata).then(|| metadata.len())
+    is_plain_and_wholly_here(&metadata).then_some(metadata.len())
 }
 
 /// Opens `path` for the read. Unix: a link is never followed, and the open never waits (a pipe put where the
@@ -635,7 +635,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
-/// CP2 row 10.3 (L266.4): a 403 and a version that kept changing are named, never said as a failed decryption.
+/// a 403 and a version that kept changing are named, never said as a failed decryption.
 #[cfg(test)]
 mod refusal_words_tests {
     use super::*;

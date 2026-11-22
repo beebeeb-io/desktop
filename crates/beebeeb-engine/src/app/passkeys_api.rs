@@ -33,6 +33,9 @@ use crate::session::Session;
 use crate::signin::gate::NextAfterSignIn;
 use crate::signin::key_owner;
 
+/// The proof string and, when the ceremony gave one, the key.
+type ProvedKey = (Zeroizing<String>, Option<Zeroizing<[u8; 32]>>);
+
 /// The production relying party (the server's `WEBAUTHN_RP_ID`).
 const PRODUCTION_RP_ID: &str = "beebeeb.io";
 
@@ -192,7 +195,7 @@ impl<C: CredentialStores> Engine<C> {
         &self,
         session: SessionGeneration,
         with_key: bool,
-    ) -> Result<(Zeroizing<String>, Option<Zeroizing<[u8; 32]>>), PasskeyProblem> {
+    ) -> Result<ProvedKey, PasskeyProblem> {
         if self.acct.session.is_poisoned() {
             return Err(PasskeyProblem::NotSignedIn);
         }
@@ -405,7 +408,7 @@ impl<C: CredentialStores> Engine<C> {
     /// PRF key and the key another device sent (`bindings::device_request`), as the twelve words' key is
     /// (`unlock_with_phrase`). Nothing is stored when the vault is already open (a key of this computer was loaded:
     /// a re-sign-in) or when the stored session is not `token`'s any more; the key is then simply dropped. Both ways
-    /// are a strong proof (a PRF passkey: lead decision 2026-11-14, review of desktop#424; keys handed over by a
+    /// are a strong proof (a PRF passkey; keys handed over by a
     /// device the account's owner approved with a fresh step-up), so the lock opens in the same hold as the key's
     /// install. `true`: the vault is open.
     pub(super) fn keep_handed_over_key(&self, token: &str, key: &Zeroizing<[u8; 32]>) -> bool {

@@ -1,4 +1,4 @@
-//! Whose session is this? The backfill of task 2447's owner record for the native engine (review of desktop#424).
+//! Whose session is this? The backfill of task 2447's owner record for the native engine.
 //!
 //! A session stored before the owner tag (2026-11-11) comes back from a restart with no recorded owner id
 //! (`restore` reads the tag, and there is none). The Tauri app records it at its startup probe

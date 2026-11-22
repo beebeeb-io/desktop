@@ -237,9 +237,9 @@ pub fn chosen_rows(
         .iter()
         .map(|folder| {
             let key = folder.key();
-            let switched_on = enabled.iter().any(|k| *k == key);
+            let switched_on = enabled.contains(&key);
             let present = folder.path.is_absolute() && folder.path.is_dir();
-            let stopped = state.stopped.iter().any(|k| *k == key);
+            let stopped = state.stopped.contains(&key);
             let folder_state = match (present, switched_on, stopped) {
                 (false, _, _) => FolderState::Unavailable,
                 (true, true, _) => FolderState::On,
@@ -405,7 +405,7 @@ fn switch_in_order<W: Copy>(
 /// The switch as one step: `write` changes the settings file first (and says what it was), then `database` does the
 /// state database's part (off purges the folder's pending uploads, on clears a stop). When the database part does not
 /// happen (a failed purge, or the session changed in between) `undo` puts the settings file back, so a folder is
-/// never left "off" with its uploads still queued (review of desktop#384). Nothing here names a folder.
+/// never left "off" with its uploads still queued. Nothing here names a folder.
 fn switched_or_undone<W: Copy>(
     write: impl FnOnce() -> Result<W, BackupsError>,
     database: impl FnOnce() -> Result<(), BackupsError>,

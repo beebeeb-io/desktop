@@ -236,7 +236,7 @@ fn the_old_mirrors_folder_of_this_pc_is_left_out_while_no_layout_names_this_pcs_
     assert_eq!(devices[0].read, DeviceRead::NoStatusFile);
 }
 
-/// Review of desktop#425: while no layout names this PC's folder, a folder of this PC's device-folder name (bare or
+/// While no layout names this PC's folder, a folder of this PC's device-folder name (bare or
 /// suffixed, any case) whose manifest does not name another device may be this PC's: listed as it reads, marked, and
 /// never offered for delete. A name that does not open is marked too. With a layout, no row is.
 #[test]
@@ -705,7 +705,7 @@ fn a_device_this_pc_has_not_synced_yet_and_the_root_are_refused_with_nothing_sen
     assert_eq!(routes(&rig), Vec::<String>::new(), "nothing was sent");
 }
 
-// ---- review of desktop#425: a locked screen, and this PC's own folder ----------------------------------------------
+// ---- a locked screen, and this PC's own folder ----------------------------------------------
 
 /// Red at 073aeafb by the refusal's KIND (and the census in `lock_api_tests`): the base copied the token with
 /// `while_session_is`, which does not ask the screen lock, and only `local_state()` refused after it (the delete as
@@ -781,7 +781,7 @@ fn a_folder_that_may_be_this_pcs_is_not_deleted_while_no_layout_names_it() {
         },
         false,
     );
-    let db = StateDb::open(&rig._dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(rig._dir.path().join("state.db")).unwrap();
     row(&db, DEV_NAMED, &format!("Backups/{named}"), Some(GLUE_ROOT));
     drop(db);
     assert!(matches!(

@@ -171,7 +171,7 @@ fn the_answer_of_each_status_is_read_without_the_servers_words() {
         Some(PurgeError::Failed)
     );
     assert_eq!(r(403, serde_json::json!({})).error, Some(PurgeError::Failed));
-    // A gateway error after the bulk delete left: the proxy may have passed it on (review of desktop#424).
+    // A gateway error after the bulk delete left: the proxy may have passed it on.
     for status in [502, 503, 504] {
         assert_eq!(
             format!("{:?}", r(status, serde_json::json!({})).error),
@@ -183,7 +183,7 @@ fn the_answer_of_each_status_is_read_without_the_servers_words() {
     assert_eq!(r(401, serde_json::json!({})).error, Some(PurgeError::SessionEnded));
 }
 
-/// Review of desktop#424: the bulk DELETE is sent only after the proof, so a connection that drops after it left is
+/// The bulk DELETE is sent only after the proof, so a connection that drops after it left is
 /// "not confirmed" (the items may be gone), never "offline".
 #[test]
 fn a_connection_that_drops_after_the_bulk_delete_left_is_not_confirmed() {
@@ -214,7 +214,7 @@ fn a_connection_that_drops_after_the_bulk_delete_left_is_not_confirmed() {
     );
 }
 
-/// Review of desktop#424 (engine P2-1, crypto P2-2): a locked screen refuses the bulk permanent delete before
+/// A locked screen refuses the bulk permanent delete before
 /// anything is sent, also for a turn read while it was locked (an unlock does not move the turn).
 #[test]
 fn a_locked_screen_deletes_nothing_and_sends_nothing() {

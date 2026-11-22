@@ -38,7 +38,7 @@ pub enum PurgeError {
     /// Beebeeb could not be reached: nothing was sent that deletes (the proof did not go through).
     Offline,
     /// The delete request LEFT and no answer came back (the connection dropped after it was sent): the item may be
-    /// gone for good. Never worded as "nothing was deleted" (review of desktop#424).
+    /// gone for good. Never worded as "nothing was deleted".
     NotConfirmed,
     /// The id is not a file id, or Beebeeb refused or answered something else.
     Failed,

@@ -136,7 +136,7 @@ impl<C: CredentialStores> Engine<C> {
         // The owner record goes in this transaction: until it commits, B is still refused, and A's settings, share
         // pins and key are all still here (dc-014), so A signs back in to exactly what it left.
         if db.clear_account_data(false).is_err() {
-            // The purge forgot the owner record (a sign-out's R10 step); A's rows are still here, so it is put back:
+            // The purge forgot the owner record; A's rows are still here, so it is put back:
             // A signs in again to its own data, and B stays refused as before.
             if db.set_owner(previous).is_err() {
                 tracing::warn!("account switch: the previous account's owner record could not be put back");
@@ -812,6 +812,7 @@ fn park<S: AuthSecretStore, P: AuthSecretStore>(
 
 /// Every item of a parked slot; every removal is tried.
 fn clear_parked<P: AuthSecretStore>(parked: &P) -> crate::keychain::AuthResult<()> {
+    #[allow(clippy::manual_try_fold)] // every removal must be tried, so the first error must not stop the loop
     let flags = LockFlag::ALL
         .into_iter()
         .fold(Ok(()), |done, flag| done.and(parked.delete_lock_flag(flag)));

@@ -106,7 +106,8 @@ fn every_door(engine: &TestEngine) -> [bool; 3] {
 fn whose_the_local_state_is_decides_every_read() {
     let a = (Some("user-a"), Some("a@example.eu"));
     type Who<'a> = (Option<&'a str>, Option<&'a str>);
-    let cases: [(&str, Option<Who>, bool, Who, Option<LocalStateRefused>); 12] = [
+    type Case<'a> = (&'a str, Option<Who<'a>>, bool, Who<'a>, Option<LocalStateRefused>);
+    let cases: [Case; 12] = [
         ("the owner, by id and email", Some(a), true, a, None),
         (
             "the owner after an email change: the id decides",
@@ -545,7 +546,7 @@ fn frees<'a>(db: &'a StateDb, these: &'a [&'a str]) -> impl FnOnce(Vec<(String, 
 fn a_selection_reclaims_its_own_files_and_answers_per_item() {
     use crate::free_up_space::free_selection;
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     local(&db, "d-a", "/A", ItemKind::Folder);
     local(&db, "f-1", "/A/one.txt", ItemKind::File);
     local(&db, "f-2", "/A/two.txt", ItemKind::File);
@@ -597,7 +598,7 @@ fn a_selection_reclaims_its_own_files_and_answers_per_item() {
 fn what_could_not_be_freed_is_never_answered_as_freed() {
     use crate::free_up_space::free_selection;
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     held(&db, "f-up", "/up.txt", ItemKind::File, FileStatus::Uploading, false);
     held(&db, "f-conf", "/conf.txt", ItemKind::File, FileStatus::Conflict, false);
     held(&db, "f-err", "/err.txt", ItemKind::File, FileStatus::Error, false);
@@ -657,12 +658,12 @@ fn what_could_not_be_freed_is_never_answered_as_freed() {
 }
 
 /// A file in error here (its download failed) is answered as in error, never as a change that waits to be sent; in a
-/// folder the reason is the one that says most, whatever the order of its rows (review of 2468, L256.1).
+/// folder the reason is the one that says most, whatever the order of its rows.
 #[test]
 fn error_row_is_not_answered_as_unsent() {
     use crate::free_up_space::free_selection;
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     held(&db, "f-err", "/err.txt", ItemKind::File, FileStatus::Error, false);
     // A folder: one file in error, one the reclaim could not free (open in an app).
     local(&db, "d-e", "/E", ItemKind::Folder);
