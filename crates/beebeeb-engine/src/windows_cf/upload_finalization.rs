@@ -13,13 +13,13 @@ use std::{path::Path, sync::Mutex};
 // proof unlink ordered, including retries after process restart.
 static FINALIZING: Mutex<()> = Mutex::new(());
 
-/// Tasks 2270 / 2280 (spec R1): the sync roots whose rows in review this process has already tried again. A row in
+/// Tasks 2270 / 2280: the sync roots whose rows in review this process has already tried again. A row in
 /// review is tried again once per engine start, by the first `retry` for its root.
 static REVIEW_RETRIED: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
 
 /// Tests only: as if the engine started again for `root`.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn forget_review_retry(root: &Path) {
+pub fn forget_review_retry(root: &Path) {
     REVIEW_RETRIED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -35,7 +35,7 @@ pub fn mark_review_retried(root: &Path) {
         .push(root.to_path_buf());
 }
 
-/// Whether this is the first `retry` for `root` in this process (spec R1), and from now on it is not.
+/// Whether this is the first `retry` for `root` in this process, and from now on it is not.
 fn first_retry_of(root: &Path) -> bool {
     let mut retried = REVIEW_RETRIED.lock().unwrap_or_else(|e| e.into_inner());
     if retried.iter().any(|seen| seen == root) {
@@ -45,7 +45,7 @@ fn first_retry_of(root: &Path) -> bool {
     true
 }
 
-/// How one attempt at a row ended (spec I4).
+/// How one attempt at a row ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     Done,
@@ -65,26 +65,26 @@ pub fn retry(db: &StateDb, root: &Path) {
     };
     let with_review = first_retry_of(root);
     for row in rows {
-        // Spec R1: a row in review is left alone until the next engine start.
+        // A row in review is left alone until the next engine start.
         if row.review.is_some() && !with_review {
             continue;
         }
         match finish(db, root, &row) {
             Ok(Outcome::Done) => {}
             Ok(Outcome::Pending) => {
-                // Spec F8 ("no review"): a row in review that meets a transient error leaves review, so the next tick
-                // tries it again instead of the next start (self-review of #195).
-                if row.review.is_some() {
-                    if let Err(error) = db.clear_upload_finalization_review(&row.op_id) {
-                        tracing::warn!(
-                            reason = crate::engine_bridge::error_category(&error),
-                            "cannot clear an upload finalization review"
-                        );
-                    }
+                // A row in review that meets a transient error leaves review, so the next tick
+                // tries it again instead of the next start.
+                if row.review.is_some()
+                    && let Err(error) = db.clear_upload_finalization_review(&row.op_id)
+                {
+                    tracing::warn!(
+                        reason = crate::engine_bridge::error_category(&error),
+                        "cannot clear an upload finalization review"
+                    );
                 }
                 tracing::debug!(file_id = %row.server_file_id, "upload identity finalization pending");
             }
-            // Spec R2: one warn when a row enters review (or its reason changes), never one per tick.
+            // One warn when a row enters review (or its reason changes), never one per tick.
             Ok(Outcome::Review(reason)) if row.review.as_deref() != Some(reason.as_str()) => {
                 if let Err(error) = db.mark_upload_finalization_review(&row.op_id, reason.as_str(), now_secs()) {
                     tracing::warn!(
@@ -124,7 +124,7 @@ fn finish(db: &StateDb, root: &Path, row: &UploadFinalization) -> anyhow::Result
     Ok(Outcome::Done)
 }
 
-/// Spec F0-F9 for a row not stamped yet. `Done` once nothing is left to stamp. The platform's view of the file is read
+/// The steps for a row not stamped yet. `Done` once nothing is left to stamp. The platform's view of the file is read
 /// first, through a handle that fetches nothing; a file is opened for its data only when it is plain or wholly on
 /// disk. `Err` only for the journal's own reads, which leave the row pending.
 fn stamp(db: &StateDb, root: &Path, row: &UploadFinalization) -> anyhow::Result<Outcome> {
@@ -150,7 +150,7 @@ fn stamp(db: &StateDb, root: &Path, row: &UploadFinalization) -> anyhow::Result<
                     .and_then(|contract| contract.local_hash)
             };
             // The staged copy, as large as the upload, is read only once the file itself is open for its hash (0.8.19's
-            // order; self-review of #195): a file open in another program stays pending without reading it.
+            // order): a file open in another program stays pending without reading it.
             let payload = Path::new(&row.payload_path);
             placeholders::finalize_wholly_local(&on_disk, &row.local_file_id, &row.server_file_id, &mut |bytes| {
                 Ok(judge(bytes, payload_hash(payload)?.as_deref(), agreed.as_deref()))
@@ -170,8 +170,8 @@ fn stamp(db: &StateDb, root: &Path, row: &UploadFinalization) -> anyhow::Result<
     })
 }
 
-/// Spec F8 / F3 / F9: how an error of the platform steps ends the attempt. A file (or its folder) gone since its view
-/// was read is pending: the next tick reads the view again, and F2 ends the row (self-review of #195).
+/// How an error of the platform steps ends the attempt. A file (or its folder) gone since its view
+/// was read is pending: the next tick reads the view again, and F2 ends the row.
 fn after_error(error: &anyhow::Error, file_id: &str) -> Outcome {
     use super::placeholders;
     if placeholders::is_transient(error) || placeholders::is_gone(error) {
@@ -222,7 +222,7 @@ fn now_secs() -> i64 {
 mod tests {
     use super::*;
 
-    /// Spec F8 (self-review of #195): a file that is gone, or whose folder is gone, since its view was read (os 2,
+    /// A file that is gone, or whose folder is gone, since its view was read (os 2,
     /// os 3 from the open) is pending: the next tick reads the view again and ends the row (F2). Never review.
     #[test]
     fn a_file_gone_since_its_view_was_read_is_pending() {

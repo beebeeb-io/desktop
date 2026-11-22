@@ -54,7 +54,7 @@ pub mod placeholders;
 pub mod poison;
 // Dc-009: Zone.Identifier (ZoneId=3) on files landed from another account's share.
 pub mod mark_of_web;
-// Task 2523: a copy behind the current version, emptied in the measured order and given the new size.
+// A copy behind the current version, emptied in the measured order and given the new size.
 pub mod stale_copy;
 // dc-103c: a placeholder holding ranges of a version the server moved past, emptied so the next open fetches the new one.
 pub mod stale_ranges;
@@ -84,7 +84,7 @@ mod ld0113_protect_native_tests;
 mod sync_root_owner_native_tests; // a folder registered to another provider is read and refused // LD-0113 Amendment 9: a folder OneDrive moved, on a QA sync root.
 // LD-0113 Amendments 7 and 8a: files under Backups are read-only; the "Read-only" badge on the root.
 pub mod read_only;
-// Backlog 1658: Windows Search and Defender pass over a cloud-only file without hydrating it.
+// Windows Search and Defender pass over a cloud-only file without hydrating it.
 pub mod scan_safety;
 // plan40 batch 1: refusing a service folder's move or delete (slice A9), "Show sync status on files" (slice B3).
 pub mod refuse_service_folders;
@@ -93,7 +93,6 @@ pub mod status_on_files;
 pub mod status_ui;
 pub mod thumbnail_provider;
 
-use std::os::windows::ffi::OsStrExt;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -249,10 +248,10 @@ pub fn set_bridge(bridge: Arc<EngineBridge>) {
     if bridge.is_stopping() || ensure_reactivation_allowed().is_err() {
         return;
     }
-    if let Some(connection) = connection.as_ref() {
-        if let Err(error) = BRIDGE.install(connection.generation, bridge) {
-            tracing::error!(%error, "callback reactivation refused");
-        }
+    if let Some(connection) = connection.as_ref()
+        && let Err(error) = BRIDGE.install(connection.generation, bridge)
+    {
+        tracing::error!(%error, "callback reactivation refused");
     }
 }
 
@@ -1000,7 +999,7 @@ pub fn register_status_ui_for_sync_root(identity: &'static EngineIdentity, sync_
 ///   registered `CF_POPULATION_POLICY_ALWAYS_FULL` +
 ///   `DISABLE_ON_DEMAND_POPULATION_ON_ROOT`), so Windows never asks us for
 ///   placeholders on demand and no `FETCH_PLACEHOLDERS` callback is required.
-/// - `NOTIFY_FILE_CLOSE_COMPLETION` — the **UPLOAD** trigger (task 0780). Fires
+/// - `NOTIFY_FILE_CLOSE_COMPLETION` — the **UPLOAD** trigger. Fires
 ///   AFTER a handle that wrote a new/modified file in the connected root closes.
 ///   Unlike a `notify`/ReadDirectoryChanges watcher (which the CF filter starves
 ///   on a connected root), this DOES fire, so it is the create/modify hook for
@@ -1221,7 +1220,7 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
     set_bridge(bridge.clone());
     crate::backup_protect::reconcile_backups_tree_soon(bridge.db_arc(), sync_root); // LD-0113 review #4
     let created = populate_placeholders(bridge.db(), sync_root, &mut placed_memo()).created;
-    // Zero-knowledge (task 2240 slice 2): a count, never the sync root's path.
+    // Zero-knowledge: a count, never the sync root's path.
     tracing::info!(placeholders = created, "Cloud Files placeholders seeded");
 }
 
@@ -1250,7 +1249,7 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
         tracing::debug!("refresh_placeholders called before bridge was set; skipping");
         return;
     };
-    // Task 2240 slice 2 (spec D6): what the refresh costs, measured every tick before anyone optimises it.
+    // Task 2240 slice 2: what the refresh costs, measured every tick before anyone optimises it.
     // Counts and milliseconds only, never a path.
     let s = populate_placeholders(bridge.db(), sync_root, &mut placed_memo());
     tracing::debug!(
@@ -1303,7 +1302,7 @@ fn placed_memo() -> std::sync::MutexGuard<'static, populate::PlacedMemo> {
 /// written. Engine-owned statuses (`Uploading`/`Downloading`/`Conflict`/`Error`)
 /// are never overridden — `decode_os_state` returns `None` for them.
 ///
-/// ## Task 2240 slice 2: one listing per folder, and confirm before write
+/// ## One listing per folder, and confirm before write
 ///
 /// Each file row's attribute word comes from one listing of its parent folder, not one
 /// `GetFileAttributesW` per file (1.45–1.95 s of kernel time per tick on 37k files). A row whose
@@ -1323,7 +1322,7 @@ pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
     reconcile_placeholder_state_with(bridge.db(), sync_root, &RECONCILE_CURSOR);
 }
 
-/// Where the next tick's sentinel window starts (spec D4). Only the sync tick touches it.
+/// Where the next tick's sentinel window starts. Only the sync tick touches it.
 #[cfg(target_os = "windows")]
 static RECONCILE_CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -1655,7 +1654,7 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
             continue;
         }
         checked += 1;
-        // Task 1640: only agreed content is marked in sync, under one exclusive handle (P2-4).
+        // Only agreed content is marked in sync, under one exclusive handle (P2-4).
         // An edit the person made (the platform cleared its in-sync state), or a file whose
         // upload is queued, stays out of sync, so neither this engine nor Explorer's "Free up
         // space" can discard its bytes. Before, every `Local` row was stamped on every tick.

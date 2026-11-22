@@ -470,8 +470,8 @@ async fn server_calls_after_deletes(qa: &QaRoot, rels: &[&str]) -> usize {
     .count()
 }
 
-/// A permanent delete of the whole folder (Shift+Delete, `rmdir /S`) goes bottom-up: the owner's ruling
-/// (2026-11-06 17:49, "Protect the whole tree") refuses each item under the root, so nothing goes, and
+/// A permanent delete of the whole folder (Shift+Delete, `rmdir /S`) goes bottom-up: the rule
+/// "protect the whole tree" refuses each item under the root, so nothing goes, and
 /// nothing reaches the server. The 7a0def6 rung, which protected the root only, left 0 children.
 #[tokio::test]
 async fn explorer_delete_of_backups_refused() {

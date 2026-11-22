@@ -1,5 +1,5 @@
 //! LD-0105 W2: the streaming fetch on Windows. Every `FETCH_DATA` of a placeholder whose version is
-//! pinned becomes a demand on the process's ONE range session for that file (spec S3), served as
+//! pinned becomes a demand on the process's ONE range session for that file, served as
 //! core authenticates each chunk (I1), in 4 KiB pieces (D-3), with progress reports (S0). The rules
 //! are in `crate::cf_range`; this is the Cloud Files half:
 //!
@@ -11,8 +11,8 @@
 //!   requester has one left, stops the session, between two reads too), and the idle limit (desktop
 //!   #225: no request for 30 s ends the session, releasing its lease, ticket and row, "not whole");
 //! - the transport gate (`cf_range::GatedIo`): read-ahead reaches Windows only under a pending
-//!   request's own keys, never on `CF_REQUEST_KEY_DEFAULT` and never after a close (lead ruling,
-//!   2026-11-06);
+//!   request's own keys, never on `CF_REQUEST_KEY_DEFAULT` and never after a close (see
+//!   `cf_range`);
 //! - `CANCEL_FETCH_DATA`, `NOTIFY_FILE_OPEN_COMPLETION` and W3's per-app decline (spec §6.4).
 //!
 //! Plaintext lives in core's `Zeroizing` buffers and goes straight to `CfExecute`; nothing is written
@@ -61,7 +61,7 @@ static SESSIONS: LazyLock<Mutex<HashMap<String, Arc<Session>>>> = LazyLock::new(
 /// The kill switch as read at engine start (`cf_range::W2_STREAMING`, desktop #225).
 static SWITCH_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Engine start: read the streaming kill switch once (lead ruling 2026-11-06).
+/// Engine start: read the streaming kill switch once.
 pub fn read_switch_at_engine_start() {
     let on = crate::cf_range::W2_STREAMING;
     SWITCH_ON.store(on, std::sync::atomic::Ordering::SeqCst);
@@ -189,7 +189,7 @@ fn join_or_start(
                 return Start::Joined(session.clone(), demand(session));
             }
             // Ending (its poison may not be recorded yet): wait for it to leave, then start afresh
-            // (self-review: an idle or a withheld end must not fail the next read); 2 s at most.
+            //; 2 s at most.
             drop(sessions);
             waits += 1;
             if waits > 100 {
@@ -245,7 +245,7 @@ fn join_or_start(
             match end_why {
                 crate::engine_bridge::PrepEnd::WholeFilePath => Start::WholeFilePath,
                 crate::engine_bridge::PrepEnd::ResolveSize(size) => {
-                    // Task 0783: fail this fetch first (the placeholder cannot be resized mid-fetch).
+                    // Fail this fetch first (the placeholder cannot be resized mid-fetch).
                     fail(fetch);
                     super::callbacks::resolve_size_mismatch_by_id(bridge, &fetch.file_id, size as i64);
                     Start::Answered
@@ -318,15 +318,17 @@ struct CfOut(CF_CONNECTION_KEY, Option<u32>);
 /// 1 MiB calls copy. So a piece goes out in calls of at most this: the whole-file path's call size,
 /// the one constant both paths use.
 pub const CF_TRANSFER_MAX: usize = super::callbacks::TRANSFER_CHUNK as usize;
-// Delta review P3-3: every call but a piece's last starts and ends on a page.
-const _: () = assert!(CF_TRANSFER_MAX > 0 && CF_TRANSFER_MAX as u64 % crate::cf_range::PAGE == 0);
+// Every call but a piece's last starts and ends on a page.
+const _: () = assert!(CF_TRANSFER_MAX > 0 && (CF_TRANSFER_MAX as u64).is_multiple_of(crate::cf_range::PAGE));
 
 /// `CfExecute(TRANSFER_DATA)` of one piece at `offset`, in calls of at most [`CF_TRANSFER_MAX`]. A piece
 /// starts 4 KiB-aligned and 1 MiB is a multiple of 4 KiB, so every call's offset is aligned and only the
 /// last call's length may be short (the piece's own end). The first refusal ends it, with the offset
 /// of the call that was refused (the calls before it landed).
 ///
-/// SAFETY: `transfer_key`/`request_key` are a live request's on `connection`.
+/// # Safety
+///
+/// `transfer_key`/`request_key` are a live request's on `connection`.
 pub unsafe fn transfer_piece(
     connection: CF_CONNECTION_KEY,
     keys: RequestKeys,
@@ -359,7 +361,7 @@ impl PieceOut for CfOut {
         // SAFETY: the keys of the live request the sink chose for this piece.
         unsafe { transfer_piece(self.0, keys, offset, plain) }.map_err(|(refused_at, e)| {
             let code = e.code().0 as u32;
-            // Delta review P3-9: a cancel is not the refusal a later poison should name.
+            // A cancel is not the refusal a later poison should name.
             if !crate::cf_range::request_gone(code) {
                 self.1 = Some(code);
             }
@@ -434,7 +436,7 @@ async fn run_session(
         session.ended.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     match after_session(&result) {
-        // I6 and the lead's rulings (desktop #225): every byte ON DISK (the range query, never "sent"),
+        // Every byte ON DISK (the range query, never "sent"),
         // then the read-back's hash under the content-key guard, and only then IN_SYNC and agreed content.
         AfterSession::Promote => {
             let (check_path, check_id) = (path.clone(), file_id.clone());
@@ -451,7 +453,7 @@ async fn run_session(
                     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
                     // SAFETY: NUL-terminated, alive for the call.
                     unsafe { super::callbacks::mark_in_sync(&wide) };
-                    // Self-review: a write that landed between the read-back and the mark is not ours.
+                    // A write that landed between the read-back and the mark is not ours.
                     if super::poison::content_key(&path) == key_before {
                         bridge.finish_whole_range(&file_id, file_size, version_number, Some(hash), &ticket);
                         if let Ok(board) = Arc::try_unwrap(board) {
@@ -610,7 +612,7 @@ fn declined(
         excluded_origin: shared || bridge.is_request_row(&fetch.file_id),
     };
     // Review P1: asked last, only when all else says decline (it may make the discovery call).
-    // Bounded, and cut short by a sign-out (self-review): the open waits on it.
+    // Bounded, and cut short by a sign-out: the open waits on it.
     let can_stream = || {
         handle.block_on(async {
             tokio::select! {
@@ -661,7 +663,7 @@ fn devices() -> &'static [(String, String)] {
     &DEVICES
 }
 
-/// `OpenProcess(SYNCHRONIZE)` on the requester (spec S5), so a reused PID cannot fool the wait. The
+/// `OpenProcess(SYNCHRONIZE)` on the requester, so a reused PID cannot fool the wait. The
 /// handle's value is kept as a number, so the session (and its watch task) can hold it.
 struct Requester(Option<isize>);
 
@@ -731,6 +733,10 @@ unsafe fn decline(fetch: &Fetch) {
 
 /// `CANCEL_FETCH_DATA`: the demands it names are cancelled (their callers return without a
 /// transfer); with no demand left, core stops read-ahead.
+///
+/// # Safety
+///
+/// `info` is the callback info the Cloud Files API passed to this call.
 pub unsafe extern "system" fn cancel_fetch_data_callback(
     info: *const CF_CALLBACK_INFO,
     params: *const CF_CALLBACK_PARAMETERS,
@@ -759,6 +765,10 @@ pub unsafe extern "system" fn cancel_fetch_data_callback(
 }
 
 /// `NOTIFY_FILE_OPEN_COMPLETION`: arms W3's "first whole-remainder fetch after an open" for the opener.
+///
+/// # Safety
+///
+/// `info` is the callback info the Cloud Files API passed to this call.
 pub unsafe extern "system" fn notify_file_open_completion_callback(
     info: *const CF_CALLBACK_INFO,
     _params: *const CF_CALLBACK_PARAMETERS,

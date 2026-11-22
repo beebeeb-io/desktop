@@ -15,7 +15,7 @@ use std::path::Path;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::{CloudFilters::*, FileSystem::*};
 
-/// Task 2191 (spec D11; Decision (lead, 2026-10-26)): what sign-out does with files of unknown
+/// What sign-out does with files of unknown
 /// content (synced before task 1640) that hold bytes on this PC. The person chose it in the
 /// sign-out confirmation; nothing is decided from the platform's in-sync state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,18 +77,18 @@ pub struct KeptAtSignOut {
     pub dir: Option<std::path::PathBuf>,
 }
 
-/// Slice 11: unsent work a sign-out cannot keep is refused in the person's words, with one plain
+/// Unsent work a sign-out cannot keep is refused in the person's words, with one plain
 /// way forward. Never our internals: no unlock, no syncing, no resolving, no "failed changes".
 const UNSENT_WORK_REFUSAL: &str =
     "Some files you changed haven’t been sent yet. Move them out of the Beebeeb folder and sign out again.";
 
-/// Slice 11: a copy that cannot be made stops the sign-out with what the person can do about it.
+/// A copy that cannot be made stops the sign-out with what the person can do about it.
 const KEEP_COPY_FAILED: &str =
     "Beebeeb couldn’t keep a copy of a file on this PC, so it didn’t sign out. Free some space, then sign out again.";
 
 /// Task 2191 (D11): what the database says is at each path that may hold unknown bytes (keyed as
 /// `prepare` keys paths, `\`-joined): a file of unknown content's own path, or a place recorded
-/// as possibly holding another file's. Never trusted without the identity there (self-review).
+/// as possibly holding another file's. Never trusted without the identity there.
 fn unknown_paths(db: &StateDb) -> anyhow::Result<HashMap<String, crate::unknown_check::ExpectedAt>> {
     use crate::unknown_check::ExpectedAt;
     let mut paths = HashMap::new();
@@ -118,15 +118,15 @@ pub fn purge(
     if let Some(root) = root {
         super::upload_finalization::retry(db, root);
     }
-    // Tasks 2270 / 2280 (spec X1): a row held for review does not block sign-out; the person cannot act on it. Its
+    // Tasks 2270 / 2280: a row held for review does not block sign-out; the person cannot act on it. Its
     // staged copy goes with every other staged copy below (`staged_payloads`, not this journal, lists them), and the
     // row itself with the account data once the sign-out goes ahead (`finish_windows_signout`), never before: a
-    // sign-out refused below keeps it for the tray and the next start (self-review of #195).
+    // sign-out refused below keeps it for the tray and the next start.
     anyhow::ensure!(
         db.upload_finalizations()?.iter().all(|row| row.review.is_some()),
         "An uploaded file is still open in another app. Close it and sign out again."
     );
-    // Slice 11: the pass above first tries to settle what it can. If work remains, a sign-out that
+    // The pass above first tries to settle what it can. If work remains, a sign-out that
     // may keep copies keeps them and goes ahead; one that may not says so plainly. It never sends
     // the person away with our homework.
     let keep_dir = match (db.windows_signout_preflight().is_ok(), unknown) {
@@ -142,7 +142,7 @@ pub fn purge(
                 .map(|state| state.and_then(|state| state.cache_path))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    // Slice 11: a keeping sign-out copies every queued plaintext below before anything goes, so
+    // A keeping sign-out copies every queued plaintext below before anything goes, so
     // the inventory it needs is the plain list. A deleting sign-out keeps the older protection:
     // an upload whose only copy is the staged one refuses before any deletion.
     let staged: Vec<(String, Option<String>, bool)> = db.staged_payloads_for_signout()?;
@@ -184,7 +184,7 @@ pub fn purge(
             } else if !rows.is_empty() {
                 anyhow::bail!("Beebeeb can’t find its folder on this PC. Restore its location and sign out again.");
             }
-            // Slice 11: the queued plaintext copies are the only copy of some unsent work. Keep
+            // The queued plaintext copies are the only copy of some unsent work. Keep
             // them before the queue's rows are cleared.
             let staged_kept = match keep_dir.as_deref() {
                 Some(dir) => keep_staged_payloads(&staged, dir)?,
@@ -219,17 +219,16 @@ pub fn purge(
                 // Close each child before marking its parent for deletion.
                 drop(directory);
             }
-            if let Some(root) = root {
-                if root.exists() && std::fs::read_dir(root)?.next().is_some() {
-                    anyhow::bail!(
-                        "New files appeared in the Beebeeb folder during sign-out. Sign out again to keep them."
-                    );
-                }
+            if let Some(root) = root
+                && root.exists()
+                && std::fs::read_dir(root)?.next().is_some()
+            {
+                anyhow::bail!("New files appeared in the Beebeeb folder during sign-out. Sign out again to keep them.");
             }
             Ok(())
         },
         || {
-            // Slice 11: keeping unsent work means the queue and its copies may still be here. Their
+            // Keeping unsent work means the queue and its copies may still be here. Their
             // bytes are in the kept folder now, so clear the rows before the account data goes.
             if keep_dir.is_some() {
                 let purged = db.purge_all_local_state().map_err(|_| {
@@ -259,7 +258,7 @@ pub fn purge(
             })
         },
     )
-    // Self-review: a sign-out that stops after copying says where the copies are, so the person
+    // A sign-out that stops after copying says where the copies are, so the person
     // is never left with unencrypted copies nobody told them about.
     .map_err(|e| match unknown {
         UnknownFiles::Keep { dir } if dir.is_dir() => {
@@ -309,13 +308,13 @@ fn prepare(
             // Anything else may be a person's unsent work: the purge refuses before it deletes anything. What holds
             // nothing is then judged by the ordinary rules below (its identity, in sync, no changes).
             anyhow::ensure!(placeholder_holds_nothing(&path), "{}", SWITCH_BYTES_HELD);
-        } else if let Some(expected) = unknown_set.get(&relative).filter(|_| !path.is_dir()) {
-            if prepare_unknown(db, &path, &relative, expected, unknown, kept, handles)? {
-                continue;
-            }
+        } else if let Some(expected) = unknown_set.get(&relative).filter(|_| !path.is_dir())
+            && prepare_unknown(db, &path, &relative, expected, unknown, kept, handles)?
+        {
+            continue;
         }
         let Some(row) = known.get(&relative) else {
-            // Slice 11: with a keep folder, a file or folder the account has no row for is kept
+            // With a keep folder, a file or folder the account has no row for is kept
             // and removed; without one, the person is told one plain way forward.
             if let Some(keep_dir) = keep_dir {
                 keep_untracked(&path, &relative, keep_dir, kept, directories)?;
@@ -346,17 +345,15 @@ fn prepare(
         // ordinary directories. Only these may omit a CFAPI identity; never
         // treat a junction, symlink, or ordinary file as a clean placeholder.
         let plain_directory = metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0;
-        if !plain_directory {
-            if let Err(error) = validate_placeholder(&file, &row.file_id) {
-                let Some(keep_dir) = keep_dir else { return Err(error) };
-                if metadata.is_dir() {
-                    // A junction/symlink is removed, never followed; its target is not ours.
-                    directories.push(file);
-                } else if let Some(entry) = keep_pending_file(file, &relative, keep_dir)? {
-                    kept.push(entry);
-                }
-                continue;
+        if !plain_directory && let Err(error) = validate_placeholder(&file, &row.file_id) {
+            let Some(keep_dir) = keep_dir else { return Err(error) };
+            if metadata.is_dir() {
+                // A junction/symlink is removed, never followed; its target is not ours.
+                directories.push(file);
+            } else if let Some(entry) = keep_pending_file(file, &relative, keep_dir)? {
+                kept.push(entry);
             }
+            continue;
         }
         if metadata.is_dir() {
             directories.push(file);
@@ -379,7 +376,7 @@ fn prepare(
     Ok(())
 }
 
-/// Slice 11: keep a file the account has no row for (a folder the engine has not seen yet, or its
+/// Keep a file the account has no row for (a folder the engine has not seen yet, or its
 /// children) and remove it with the rest. A junction or symlink is removed, never followed.
 fn keep_untracked(
     path: &Path,
@@ -411,7 +408,7 @@ fn keep_untracked(
     Ok(())
 }
 
-/// Slice 11: copy one unsent file out of the sync folder before anything is deleted. `Ok(None)`
+/// Copy one unsent file out of the sync folder before anything is deleted. `Ok(None)`
 /// means it holds no bytes on this PC, so there is nothing to keep. Any failure is a plain
 /// sentence about space; no byte is touched before the copy is verified.
 fn keep_pending_file(mut file: std::fs::File, relative: &str, keep_dir: &Path) -> anyhow::Result<Option<Kept>> {
@@ -463,7 +460,7 @@ fn keep_pending_file(mut file: std::fs::File, relative: &str, keep_dir: &Path) -
     }))
 }
 
-/// Slice 11: the queued plaintext copies hold work that never reached the server. Keep them in
+/// The queued plaintext copies hold work that never reached the server. Keep them in
 /// the same folder before the queue clears, so the sign-out never drops a byte.
 fn keep_staged_payloads(staged: &[(String, Option<String>, bool)], keep_dir: &Path) -> anyhow::Result<usize> {
     let mut kept = 0;
@@ -532,7 +529,7 @@ fn prepare_unknown(
         .share_mode(0)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
         .open(path)?;
-    // Self-review: the database is trusted only when the identity there agrees; otherwise the
+    // The database is trusted only when the identity there agrees; otherwise the
     // path goes through the ordinary rules, which refuse unsent changes.
     let (placeholder, identity) = super::placeholders::handle_identity(&file);
     let owner = match identity.as_deref() {

@@ -148,7 +148,7 @@ pub fn delete_placeholder(path: &std::path::Path, is_dir: bool) -> anyhow::Resul
 /// in-sync Cloud Files placeholder, so Explorer shows it with the synced
 /// (green check) overlay rather than as an ordinary always-local file.
 ///
-/// Called by the upload watcher path (task 0780) right after a NEW
+/// Called by the upload watcher path right after a NEW
 /// user-created file under the sync root has been encrypted + uploaded and
 /// the server has assigned it a `file_id`. The point is two-fold:
 ///
@@ -170,7 +170,7 @@ pub fn delete_placeholder(path: &std::path::Path, is_dir: bool) -> anyhow::Resul
 /// Existing placeholders require CfUpdatePlaceholder: conversion is a no-op
 /// for a placeholder and cannot replace its pre-upload temporary identity.
 ///
-/// Tasks 2270 / 2280: tests only now. An upload's finalization goes through [`finalize_wholly_local`] (F7) or
+/// Tests only now. An upload's finalization goes through [`finalize_wholly_local`] (F7) or
 /// [`restamp_cloud_only`] (F5), which judge the bytes before the in-sync mark; this marks without judging, as test
 /// setup. Through [`open_exclusive_without_write_data`], so a read-only file converts too. Open it only on a file
 /// wholly on disk: on a cloud-only placeholder that open fetches it.
@@ -225,8 +225,11 @@ fn open_exclusive_without_data(path: &std::path::Path) -> std::io::Result<std::f
 // Task 2284 (tests only): run once, right before the data open of `finalize_wholly_local`, `stamp_if_agreed` or
 // `promote_fetched_content`, so a native test can dehydrate the file between the state check and that open.
 #[cfg(any(test, feature = "test-support"))]
+type BeforeDataOpenHook = Box<dyn FnMut(&std::path::Path)>;
+
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub static BEFORE_DATA_OPEN: std::cell::RefCell<Option<Box<dyn FnMut(&std::path::Path)>>> =
+    pub static BEFORE_DATA_OPEN: std::cell::RefCell<Option<BeforeDataOpenHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -281,7 +284,7 @@ pub(super) fn read_standard_info(handle: windows::Win32::Foundation::HANDLE) -> 
 
 /// Give the file behind `handle` the identity `file_id`: `CfUpdatePlaceholder` on a placeholder,
 /// `CfConvertToPlaceholder` on a plain file. In sync only when `in_sync`; otherwise NOT in sync: a placeholder's
-/// in-sync mark is cleared (spec F7c, I3; self-review of #195: one marked earlier would otherwise keep claiming the
+/// in-sync mark is cleared (one marked earlier would otherwise keep claiming the
 /// server holds bytes it may not), and a converted plain file is not marked.
 fn stamp_identity(
     handle: windows::Win32::Foundation::HANDLE,
@@ -330,8 +333,8 @@ fn stamp_identity(
 fn names_this_upload(identity: &[u8], local_id: &str, server_id: &str) -> bool {
     identity.is_empty() || identity == local_id.as_bytes() || identity == server_id.as_bytes()
 }
-
-/// Spec F5's outcome.
+/// The outcome of restamping a cloud-only placeholder of an upload.
+/// The outcome of [`stamp_identity`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Restamped {
     /// The server identity, marked in sync.
@@ -342,7 +345,7 @@ pub enum Restamped {
     OtherFile,
 }
 
-/// Tasks 2270 / 2280, spec F5: give a cloud-only placeholder of this upload the server identity, marked in sync,
+/// Give a cloud-only placeholder of this upload the server identity, marked in sync,
 /// through [`open_exclusive_without_data`]: nothing is read, nothing is fetched (probe K1), and its attributes and
 /// times are kept. The placeholder's state is read again through that handle, so bytes that arrived since the
 /// caller's view are never marked.
@@ -365,19 +368,19 @@ pub fn restamp_cloud_only(path: &std::path::Path, local_id: &str, server_id: &st
     Ok(Restamped::Done)
 }
 
-/// Spec F7's outcome.
+/// The outcome of finalizing a wholly local file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Local {
     /// The server identity, in sync or not as judged.
     Finalized(crate::upload_finalization_plan::Judged),
-    /// Not every byte is on disk: nothing was read (spec F6). Also when it changed since the view (dehydrated, its
-    /// fetch refused inside the no-fetch scope): pending (Task 2284 F7d).
+    /// Not every byte is on disk: nothing was read. Also when it changed since the view (dehydrated, its
+    /// fetch refused inside the no-fetch scope): pending.
     NotWhollyLocal,
-    /// A placeholder whose identity names another file: nothing was changed (spec F4).
+    /// A placeholder whose identity names another file: nothing was changed.
     OtherFile,
 }
 
-/// Tasks 2270 / 2280, spec F7: a plain file, or a placeholder of this upload wholly on disk. Under ONE
+/// A plain file, or a placeholder of this upload wholly on disk. Under ONE
 /// [`open_exclusive_without_write_data`] handle: the bytes are checked to be wholly on disk again, the identity is
 /// checked again, the bytes are hashed and `judge`d, and the server identity is stamped, in sync or not
 /// (`CfConvertToPlaceholder` on a plain file, `CfUpdatePlaceholder` on a placeholder). The file's attributes, times
@@ -432,7 +435,7 @@ pub fn finalize_wholly_local(
     Ok(Local::Finalized(judged))
 }
 
-/// Spec F8: an error that passes by itself (the file is open elsewhere, locked, or busy with a Cloud Files
+/// An error that passes by itself (the file is open elsewhere, locked, or busy with a Cloud Files
 /// operation): the row stays pending and the next tick tries again.
 pub fn is_transient(error: &anyhow::Error) -> bool {
     use windows::Win32::Foundation::{ERROR_CLOUD_FILE_IN_USE, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
@@ -444,13 +447,13 @@ pub fn is_transient(error: &anyhow::Error) -> bool {
     win32_code(error).is_some_and(|code| codes.contains(&code))
 }
 
-/// Spec F8: the file, or its folder, is gone (os 2, os 3), since the caller's view of it was read.
+/// The file, or its folder, is gone (os 2, os 3), since the caller's view of it was read.
 pub fn is_gone(error: &anyhow::Error) -> bool {
     use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
     win32_code(error).is_some_and(|code| code == ERROR_FILE_NOT_FOUND.0 || code == ERROR_PATH_NOT_FOUND.0)
 }
 
-/// Spec F3: access denied (a file this account may not open as these handles do).
+/// Access denied (a file this account may not open as these handles do).
 pub fn is_access_denied(error: &anyhow::Error) -> bool {
     win32_code(error) == Some(windows::Win32::Foundation::ERROR_ACCESS_DENIED.0)
 }
@@ -464,7 +467,7 @@ fn win32_code(error: &anyhow::Error) -> Option<u32> {
     (code & 0xFFFF_0000 == 0x8007_0000).then_some(code & 0xFFFF)
 }
 
-/// Task 028: open `path` for a CF call with the least access it needs. A placeholder that is not wholly on disk is
+/// Open `path` for a CF call with the least access it needs. A placeholder that is not wholly on disk is
 /// opened with no oplock and no write access (an EXCLUSIVE+WRITE open of a cloud-only file asks the provider for
 /// the whole file first); a file on disk is opened EXCLUSIVE and only gets write access when that is refused
 /// (a read-only file).
@@ -472,21 +475,24 @@ unsafe fn open_cf_least_access(
     path: &std::path::Path,
     path_wide: &[u16],
 ) -> windows::core::Result<windows::Win32::Foundation::HANDLE> {
-    if is_cloud_placeholder(path) && !fully_on_disk(path) {
-        return CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE);
-    }
-    match CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_EXCLUSIVE) {
-        Err(e) if e.code() == windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult() => CfOpenFileWithOplock(
-            PCWSTR(path_wide.as_ptr()),
-            CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
-        ),
-        other => other,
+    // SAFETY: `path_wide` is the NUL-terminated wide form of `path`, alive for every call below.
+    unsafe {
+        if is_cloud_placeholder(path) && !fully_on_disk(path) {
+            return CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_NONE);
+        }
+        match CfOpenFileWithOplock(PCWSTR(path_wide.as_ptr()), CF_OPEN_FILE_FLAG_EXCLUSIVE) {
+            Err(e) if e.code() == windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult() => CfOpenFileWithOplock(
+                PCWSTR(path_wide.as_ptr()),
+                CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS,
+            ),
+            other => other,
+        }
     }
 }
 
 /// Convert a brand-new plain local file at `path` into a Cloud Files
 /// placeholder WITHOUT marking it in-sync, called the moment we decide to upload
-/// it (task 0780) and BEFORE the upload completes.
+/// it and BEFORE the upload completes.
 ///
 /// Why convert pre-upload at all: a plain file the user just dropped into a
 /// CF-connected root is NOT a placeholder, so it has no Cloud Files identity and
@@ -583,7 +589,7 @@ pub fn convert_to_unsynced_placeholder(path: &std::path::Path, local_id: &str) -
 /// via `CfCloseHandle` before returning.
 pub fn dehydrate_placeholder(path: &std::path::Path) -> anyhow::Result<u64> {
     super::refuse_alias(path)?;
-    // Task 028: a placeholder not wholly on disk has nothing to free; open nothing (no fetch, no write access).
+    // A placeholder not wholly on disk has nothing to free; open nothing (no fetch, no write access).
     if is_cloud_placeholder(path) && !fully_on_disk(path) {
         return Ok(0);
     }
@@ -837,7 +843,7 @@ const _: () = {
     assert!(FILE_ATTRIBUTE_UNPINNED.0 == 0x0010_0000);
 };
 
-/// Task 1640: whether every byte of the placeholder at `path` is on disk (no
+/// Whether every byte of the placeholder at `path` is on disk (no
 /// `RECALL_ON_DATA_ACCESS`). Reading one that is not would fetch the rest of it.
 pub fn fully_on_disk(path: &std::path::Path) -> bool {
     read_os_placeholder_state(path).is_some_and(|attrs| attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 == 0)
@@ -871,7 +877,7 @@ pub fn open_for_state(path: &std::path::Path) -> std::io::Result<std::fs::File> 
         .open(path)
 }
 
-/// Task 2232: what a file's modification time cannot show. Windows moves `ChangeTime` on every write
+/// What a file's modification time cannot show. Windows moves `ChangeTime` on every write
 /// and on every change of the file's times, and an ordinary tool cannot set it back; a file renamed
 /// over the path has another file index.
 pub struct ChangeStamp {
@@ -922,7 +928,7 @@ fn filetime_ticks_to_system_time(ticks: i64) -> std::time::SystemTime {
         .unwrap_or(std::time::UNIX_EPOCH)
 }
 
-/// Task 1640: the Cloud Files in-sync state of the placeholder at `path`, or `None` when it is
+/// The Cloud Files in-sync state of the placeholder at `path`, or `None` when it is
 /// not a placeholder (a plain file an atomic save left) or cannot be read. The platform clears
 /// it when the file's bytes change; this engine sets it only on content it agrees with the
 /// server on. Opened as the reparse point with attribute access only ([`open_for_state`]), so
@@ -950,7 +956,7 @@ pub fn placeholder_in_sync(path: &std::path::Path) -> Option<bool> {
     Some(info.InSyncState == CF_IN_SYNC_STATE_IN_SYNC)
 }
 
-/// Task 1640: whether the engine may mark the placeholder at `path` in sync or free its bytes:
+/// Whether the engine may mark the placeholder at `path` in sync or free its bytes:
 /// they are the content this device last agreed with the server on. A placeholder in sync is;
 /// one that is not is agreed only when it is wholly on disk and its hash is the agreed one.
 /// Anything not known to be agreed (an unsent edit, a queued upload, no agreed content
@@ -969,7 +975,7 @@ pub fn local_bytes_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &s
 /// Task 1640 (review N2, N6): what the entry at `path` holds, as the platform reports it: in sync
 /// with no modified data, no data on disk, every byte on disk (also a plain file, which is what an
 /// atomic save leaves), or only some. Opened as the reparse point, so nothing is fetched. Anything
-/// that cannot be read reports "unreadable" (self-review #5), which keeps the entry and retries it.
+/// that cannot be read reports "unreadable", which keeps the entry and retries it.
 pub fn placeholder_local_entry(path: &std::path::Path) -> crate::engine_bridge::LocalEntry {
     placeholder_local_entry_trusting(path, true)
 }
@@ -1043,7 +1049,7 @@ pub fn promote_fetched_content(
     if !fully_on_disk(path) {
         return Ok(false);
     }
-    // Task 2270 (spec S2): without write-data access, so a read-only file is promoted too. Exclusive: while this
+    // Task 2270: without write-data access, so a read-only file is promoted too. Exclusive: while this
     // handle is open no other handle can be opened to write.
     before_data_open(path);
     let Ok(mut file) = open_exclusive_without_write_data(path) else {
@@ -1120,7 +1126,7 @@ pub fn stamp_if_agreed(db: &crate::state_db::StateDb, file_id: &str, path: &std:
     if before.0 != agreed {
         return Ok(false);
     }
-    // Task 2270 (spec S1): without write-data access, so a read-only file is marked too. Exclusive: while this
+    // Task 2270: without write-data access, so a read-only file is marked too. Exclusive: while this
     // handle is open no other handle can be opened to write.
     let Ok(file) = open_exclusive_without_write_data(path) else {
         return Ok(false);
@@ -1186,7 +1192,7 @@ pub fn read_os_placeholder_state(path: &std::path::Path) -> Option<u32> {
     Some(attrs)
 }
 
-/// Task 2240 slice 2: every entry of `dir` by its exact name, with the attribute word the folder listing
+/// Every entry of `dir` by its exact name, with the attribute word the folder listing
 /// carries (`FindFirstFile`/`FindNextFile` data: no file is opened). An entry whose name is not valid
 /// Unicode or whose metadata cannot be read is left out, so its row falls back to
 /// [`read_os_placeholder_state`]. An error listing `dir` itself is returned.
@@ -1250,7 +1256,7 @@ pub fn resize_placeholder(path: &std::path::Path, true_size_bytes: i64) -> anyho
     // LD-0113 Amendment 7: the engine's own change of a read-only Backups file (the open needs write access; the
     // update writes FILE_ATTRIBUTE_NORMAL, so the attribute is set again after it).
     let _read_only = super::read_only::Lifted::new(path);
-    // Task 1640: marked in sync only when it already was. A placeholder out of sync may hold
+    // Marked in sync only when it already was. A placeholder out of sync may hold
     // local writes in ranges the failed fetch did not cover; marking it in sync would let the
     // platform free them.
     let flags = if placeholder_in_sync(path) == Some(true) {
@@ -1483,7 +1489,7 @@ pub fn on_disk_ranges(file: &std::fs::File, size: u64) -> anyhow::Result<Vec<(u6
     let mut buffer = vec![CF_FILE_RANGE::default(); 4096];
     let end = i64::try_from(size).unwrap_or(i64::MAX);
     let mut from = 0i64;
-    // Self-review: a file can have more ranges than one buffer holds; read on from the last one.
+    // A file can have more ranges than one buffer holds; read on from the last one.
     while from < end {
         let mut returned = 0u32;
         // SAFETY: `file` is open for the call; the buffer's byte length is passed.
@@ -1517,7 +1523,7 @@ pub fn on_disk_ranges(file: &std::fs::File, size: u64) -> anyhow::Result<Vec<(u6
     Ok(out)
 }
 
-/// Task 2191 (D11, self-review): whether `file` is a placeholder, and the file id its identity
+/// Whether `file` is a placeholder, and the file id its identity
 /// names, read through the handle sign-out holds.
 pub fn handle_identity(file: &std::fs::File) -> (bool, Option<String>) {
     use std::os::windows::io::AsRawHandle;
@@ -1548,7 +1554,7 @@ pub fn handle_identity(file: &std::fs::File) -> (bool, Option<String>) {
     )
 }
 
-/// Task 2283: what the entry at `path` is, by its placeholder's identity: a remote deletion removes an entry only when
+/// What the entry at `path` is, by its placeholder's identity: a remote deletion removes an entry only when
 /// that identity names the deleted file. Read through a handle opened for its attributes only, on the entry itself
 /// (never a recall), sharing every access. An entry that is not a reparse point is an ordinary file or folder (never
 /// asked of the Cloud Files API); nothing there reads as not a placeholder too (the caller finds it gone).

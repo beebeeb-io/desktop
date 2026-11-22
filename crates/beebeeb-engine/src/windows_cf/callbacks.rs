@@ -113,7 +113,9 @@ fn decide_size_action(plaintext_len: i64, file_size: i64) -> SizeDecision {
 /// in [`super::connect_callbacks`]. Windows fires this when a user opens
 /// a cloud-only placeholder and the requested range isn't hydrated yet.
 ///
-/// SAFETY: `callback_info` and `callback_parameters` are valid for the
+/// # Safety
+///
+/// `callback_info` and `callback_parameters` are valid for the
 /// duration of this call per the Cloud Files API contract. We copy the
 /// scalar fields we need into owned values before doing any blocking
 /// work, so nothing borrowed from Windows is held across the
@@ -453,7 +455,7 @@ pub unsafe extern "system" fn fetch_data_callback(
                         required_length,
                     )
                 };
-                unsafe { resolve_size_mismatch(info, &*bridge, &file_id, *true_size) };
+                unsafe { resolve_size_mismatch(info, &bridge, &file_id, *true_size) };
                 return;
             }
             // Do NOT log the error's inner content at info+ if it could carry
@@ -547,9 +549,8 @@ pub unsafe extern "system" fn fetch_data_callback(
         };
 
         // Tier-1: correct the placeholder + DB to the authenticated length so
-        // the NEXT open hydrates against an aligned size. `&*bridge` derefs the
-        // Arc to a plain `&EngineBridge` (a `&Arc<_>` would not coerce here).
-        unsafe { resolve_size_mismatch(info, &*bridge, &file_id, corrected_size) };
+        // the NEXT open hydrates against an aligned size.
+        unsafe { resolve_size_mismatch(info, &bridge, &file_id, corrected_size) };
         return;
     }
 
@@ -609,18 +610,18 @@ pub unsafe extern "system" fn fetch_data_callback(
                 // it, which only moves down). A failure leaves that candidate: never too high.
                 // The download's ticket goes with it; a fetch served the same download later finds
                 // it taken, and the record already made.
-                if let (Some(fetched), Some(ticket)) = (downloaded.version.as_ref(), downloaded.take_ticket()) {
-                    if let Err(e) = bridge.record_whole_fetch(&file_id, fetched, &ticket) {
-                        tracing::warn!(file_id = %file_id, error = %e, "could not record the fetched file as agreed");
-                    }
+                if let (Some(fetched), Some(ticket)) = (downloaded.version.as_ref(), downloaded.take_ticket())
+                    && let Err(e) = bridge.record_whole_fetch(&file_id, fetched, &ticket)
+                {
+                    tracing::warn!(file_id = %file_id, error = %e, "could not record the fetched file as agreed");
                 }
                 if let Some(path) = normalized_path(info) {
                     unsafe { mark_in_sync(&path) };
                 }
-                if let Some(path) = db_placeholder_path(&bridge, &file_id) {
-                    if let Err(e) = super::mark_of_web::mark_if_foreign_share(bridge.db(), &file_id, &path) {
-                        tracing::warn!(file_id = %file_id, error = %e, "could not write the Mark of the Web");
-                    }
+                if let Some(path) = db_placeholder_path(&bridge, &file_id)
+                    && let Err(e) = super::mark_of_web::mark_if_foreign_share(bridge.db(), &file_id, &path)
+                {
+                    tracing::warn!(file_id = %file_id, error = %e, "could not write the Mark of the Web");
                 }
             }
         }
@@ -639,7 +640,7 @@ pub unsafe extern "system" fn fetch_data_callback(
             };
         }
     }
-    // Task 1640 (self-review #1): this fetch's transfer has ended. The download's ticket (when no
+    // This fetch's transfer has ended. The download's ticket (when no
     // whole transfer took it) ends with the download itself: when the last fetch served it lets go
     // and its short reuse window has passed; then another fetch's agreed content may be recorded.
     drop(downloaded);
@@ -1044,7 +1045,7 @@ unsafe fn resolve_size_mismatch(
     resolve_size_with_path(normalized_path(info), bridge, file_id, true_size);
 }
 
-/// [`resolve_size_mismatch`] for a range session's 0783 check (spec S9), which has no callback info:
+/// [`resolve_size_mismatch`] for a range session's 0783 check, which has no callback info:
 /// the path comes from the state DB.
 pub(super) fn resolve_size_mismatch_by_id(bridge: &crate::engine_bridge::EngineBridge, file_id: &str, true_size: i64) {
     resolve_size_with_path(None, bridge, file_id, true_size);
@@ -1174,6 +1175,7 @@ pub(super) fn db_placeholder_path(
 /// `trim_matches('/')` → `replace('/', MAIN_SEPARATOR)` mapping, but rejects:
 ///   - an empty rel path (would resolve to the root itself),
 ///   - any segment that is empty, `.`, or `..` (traversal),
+///
 /// then re-checks lexical containment as belt-and-suspenders. Returns `None` on
 /// any rejection so the caller falls through to Tier-2 (visible error).
 fn safe_join_under_root(sync_root: &std::path::Path, rel_path: &str) -> Option<std::path::PathBuf> {
@@ -1195,7 +1197,7 @@ fn safe_join_under_root(sync_root: &std::path::Path, rel_path: &str) -> Option<s
     Some(candidate)
 }
 
-// ── Upload triggers — Cloud Files NOTIFY callbacks (task 0780) ───────────────
+// ── Upload triggers — Cloud Files NOTIFY callbacks ───────────────
 //
 // These three `NOTIFY_*_COMPLETION` callbacks are the Windows UPLOAD path. They
 // fire AFTER the corresponding local operation completes on a CfConnectSyncRoot'd
@@ -1222,7 +1224,9 @@ fn safe_join_under_root(sync_root: &std::path::Path, rel_path: &str) -> Option<s
 /// happen in the debounce loop's `handle_settled_path`, immediately before
 /// queueing — so a path that gets filtered out is never converted.
 ///
-/// SAFETY: `callback_info`/`callback_parameters` are valid for the duration of
+/// # Safety
+///
+/// `callback_info`/`callback_parameters` are valid for the duration of
 /// this call per the Cloud Files contract. We copy the path out before
 /// returning; nothing borrowed from Windows is retained.
 pub unsafe extern "system" fn notify_file_close_completion_callback(
@@ -1248,7 +1252,7 @@ pub unsafe extern "system" fn notify_file_close_completion_callback(
         }
     }
 
-    // Task 1640: a close by this process (the upload driver reading a synced file to compare
+    // A close by this process (the upload driver reading a synced file to compare
     // it with its agreed content, or staging its copy) is not an edit. `ProcessInfo` is filled
     // because the root is connected with `CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO`.
     if !info.ProcessInfo.is_null() && unsafe { (*info.ProcessInfo).ProcessId } == std::process::id() {
@@ -1278,7 +1282,9 @@ pub unsafe extern "system" fn notify_file_close_completion_callback(
 /// `Delete` event; the debounce loop resolves the path to a known server file
 /// and enqueues the trash op (no-op if the path is untracked / engine-internal).
 ///
-/// SAFETY: as [`notify_file_close_completion_callback`].
+/// # Safety
+///
+/// As [`notify_file_close_completion_callback`].
 pub unsafe extern "system" fn notify_delete_completion_callback(
     callback_info: *const CF_CALLBACK_INFO,
     _callback_parameters: *const CF_CALLBACK_PARAMETERS,
@@ -1305,7 +1311,9 @@ pub unsafe extern "system" fn notify_delete_completion_callback(
 /// event; the debounce loop resolves the source to a known server file and
 /// enqueues a move (changed parent) or rename (name-only) via `queue_finder_modify`.
 ///
-/// SAFETY: as above. `SourcePath` is a NUL-terminated PCWSTR valid for the
+/// # Safety
+///
+/// As [`notify_file_close_completion_callback`]. `SourcePath` is a NUL-terminated PCWSTR valid for the
 /// duration of the call; we copy it into an owned path before returning.
 pub unsafe extern "system" fn notify_rename_completion_callback(
     callback_info: *const CF_CALLBACK_INFO,
@@ -1355,7 +1363,9 @@ mod pre_op;
 
 /// `NOTIFY_DELETE` (pre-operation): refuse deleting a protected item.
 ///
-/// SAFETY: as [`notify_file_close_completion_callback`].
+/// # Safety
+///
+/// As [`notify_file_close_completion_callback`].
 pub unsafe extern "system" fn notify_delete_callback(
     callback_info: *const CF_CALLBACK_INFO,
     callback_parameters: *const CF_CALLBACK_PARAMETERS,
@@ -1382,7 +1392,9 @@ pub unsafe extern "system" fn notify_delete_callback(
 /// `NOTIFY_RENAME` (pre-operation): refuse renaming or moving a protected item, the move into the
 /// Recycle Bin (Explorer's Delete) included.
 ///
-/// SAFETY: as [`notify_file_close_completion_callback`].
+/// # Safety
+///
+/// As [`notify_file_close_completion_callback`].
 pub unsafe extern "system" fn notify_rename_callback(
     callback_info: *const CF_CALLBACK_INFO,
     callback_parameters: *const CF_CALLBACK_PARAMETERS,
