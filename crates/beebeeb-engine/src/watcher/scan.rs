@@ -140,6 +140,14 @@ pub struct ScanMemo {
     pub classified: usize,
     /// Files the last pass skipped as settled and unchanged.
     pub skipped: usize,
+    /// dc-166: folders and files the last pass looked at (0: it opened nothing).
+    pub visited: usize,
+    /// dc-166: files the last pass queued nothing for and must ask again (a change feed would not name them).
+    pub(super) retry: std::collections::HashSet<PathBuf>,
+    /// dc-166: the last pass left work only a full walk finds (the per-pass upload cap, a folder not scaffolded yet).
+    pub(super) owe_full: bool,
+    /// dc-166: the enabled backup folders the last pass saw; a change (a folder enabled again) walks everything.
+    pub(super) backup_keys: Option<std::collections::HashSet<String>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -182,6 +190,8 @@ pub(super) async fn scan_loop(
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let mut memo = ScanMemo::default();
+    // dc-166: opened on the first pass (blocking I/O), kept across passes.
+    let mut feed: Option<Box<dyn super::change_feed::ChangeFeed>> = None;
     loop {
         // Wait one interval OR a shutdown signal. We sleep FIRST so the very
         // first scan happens one interval after startup — by then the initial
@@ -201,16 +211,104 @@ pub(super) async fn scan_loop(
         let bridge_for_scan = bridge.clone();
         let root_for_scan = sync_root.clone();
         let mut memo_for_scan = std::mem::take(&mut memo);
+        let feed_for_scan = feed.take();
         match tokio::task::spawn_blocking(move || {
-            run_one_scan_with(&bridge_for_scan, &root_for_scan, &mut memo_for_scan);
-            memo_for_scan
+            let mut feed = feed_for_scan.unwrap_or_else(|| super::change_feed::open(&root_for_scan));
+            scan_tick(&bridge_for_scan, &root_for_scan, &mut memo_for_scan, feed.as_mut());
+            (memo_for_scan, feed)
         })
         .await
         {
-            Ok(kept) => memo = kept,
+            Ok((kept, kept_feed)) => {
+                memo = kept;
+                feed = Some(kept_feed);
+            }
             // The blocking task panicked — log and continue. Never let one bad
-            // scan kill the loop. The memo is lost: the next pass classifies every file.
+            // scan kill the loop. The memo and the feed are lost: the next pass classifies every file.
             Err(e) => tracing::warn!(error = %e, "enumeration scan task panicked; continuing"),
+        }
+    }
+}
+
+/// dc-166: one tick of [`scan_loop`]. A full walk when the backstop is due ([`FULL_RECHECK_INTERVAL`]),
+/// when the last pass owes one, when the enabled backup folders changed, or when `feed` cannot say what
+/// changed; otherwise only what `feed` named plus the files left to ask again, and, when that is nothing,
+/// no pass at all: an idle tick opens no file under the sync root.
+pub fn scan_tick(
+    bridge: &EngineBridge,
+    sync_root: &std::path::Path,
+    memo: &mut ScanMemo,
+    feed: &mut dyn super::change_feed::ChangeFeed,
+) {
+    use super::change_feed::Changes;
+    // Taken before the walk, so a change made while it runs is named next tick.
+    let changes = feed.take();
+    let backstop = memo
+        .since
+        .is_none_or(|since| since.elapsed() >= FULL_RECHECK_INTERVAL);
+    let full = backstop || memo.owe_full || changes == Changes::Unknown || backup_keys_changed(bridge, memo);
+    if full {
+        return run_scan(bridge, sync_root, memo, None);
+    }
+    let mut paths = match changes {
+        Changes::Paths(paths) => paths,
+        _ => std::collections::BTreeSet::new(),
+    };
+    paths.extend(memo.retry.drain());
+    if paths.is_empty() {
+        memo.classified = 0;
+        memo.skipped = 0;
+        memo.visited = 0;
+        return;
+    }
+    run_scan(bridge, sync_root, memo, Some(&paths));
+}
+
+/// The enabled backup folders differ from the ones the last pass saw (one config read, outside the sync root).
+fn backup_keys_changed(bridge: &EngineBridge, memo: &ScanMemo) -> bool {
+    let now: Option<std::collections::HashSet<String>> = crate::config::DesktopConfig::load_for(bridge.identity)
+        .ok()
+        .map(|cfg| cfg.known_folder_backup.iter().cloned().collect());
+    now != memo.backup_keys
+}
+
+/// dc-166: visit each of `paths` (sorted, so a folder comes before what is in it): a folder is
+/// scaffolded and walked, a file handed to `on_file`; a path gone, outside the root or engine-internal
+/// is passed over (deletes ride the Cloud Files callbacks).
+pub(super) fn visit_paths(
+    sync_root: &std::path::Path,
+    paths: &std::collections::BTreeSet<PathBuf>,
+    on_dir: &mut dyn FnMut(&std::path::Path),
+    on_file: &mut dyn FnMut(&std::path::Path, &std::fs::Metadata),
+) {
+    let mut walked: Option<&std::path::Path> = None;
+    for path in paths {
+        if walked.is_some_and(|dir| path.starts_with(dir)) {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(sync_root) else { continue };
+        if rel.as_os_str().is_empty() || crate::engine_bridge::path_is_engine_internal(sync_root, path) {
+            continue;
+        }
+        if path
+            .ancestors()
+            .skip(1)
+            .take_while(|a| *a != sync_root)
+            .any(|a| crate::engine_bridge::path_is_engine_internal(sync_root, a))
+        {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(path) else { continue };
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            on_dir(path);
+            walk_dir(sync_root, path, rel.components().count(), on_dir, on_file);
+            walked = Some(path);
+        } else if ft.is_file() {
+            on_file(path, &meta);
         }
     }
 }

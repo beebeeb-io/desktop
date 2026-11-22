@@ -122,7 +122,10 @@ pub use driver::{NotifyEvent, spawn};
 
 mod scan;
 use scan::*;
-pub use scan::{DiskStamp, ScanMemo};
+pub use scan::{DiskStamp, ScanMemo, scan_tick};
+
+mod change_feed;
+pub use change_feed::{ChangeFeed, Changes, NoFeed};
 
 mod suppression;
 use suppression::*;
@@ -141,22 +144,40 @@ pub fn run_one_scan(bridge: &EngineBridge, sync_root: &std::path::Path) {
 
 /// [`run_one_scan`] remembering, in `memo`, the files earlier passes found settled (task 2229).
 pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, memo: &mut ScanMemo) {
+    run_scan(bridge, sync_root, memo, None);
+}
+
+/// One pass: the whole tree (`only: None`), or (dc-166) only the paths a [`ChangeFeed`] named and the
+/// files the last pass left to ask again ([`ScanMemo`]).
+pub(crate) fn run_scan(
+    bridge: &EngineBridge,
+    sync_root: &std::path::Path,
+    memo: &mut ScanMemo,
+    only: Option<&std::collections::BTreeSet<PathBuf>>,
+) {
     // Task 2240: the pass looks up every row by path. With SQLite's default page cache those lookups re-read the
     // state DB from disk on every pass; sized to the DB, the second pass reads nothing.
     if let Err(e) = bridge.db().fit_page_cache() {
         tracing::debug!(error = %e, "enumeration scan: could not size the page cache; scanning with the current one");
     }
     let now = Instant::now();
-    if memo
-        .since
-        .is_none_or(|since| now.duration_since(since) >= FULL_RECHECK_INTERVAL)
+    if only.is_none()
+        && memo
+            .since
+            .is_none_or(|since| now.duration_since(since) >= FULL_RECHECK_INTERVAL)
     {
         memo.settled.clear();
         memo.untracked.clear();
         memo.since = Some(now);
     }
+    if only.is_none() {
+        memo.owe_full = false;
+        memo.retry.clear();
+    }
     memo.classified = 0;
     memo.skipped = 0;
+    let visited = std::cell::Cell::new(0usize);
+    let owe_full = std::cell::Cell::new(false);
     let mut dispatched = 0usize;
     tracing::debug!(sync_root = %sync_root.display(), "enumeration scan: starting pass");
 
@@ -174,6 +195,7 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
         crate::config::DesktopConfig::load_for(bridge.identity)
             .ok()
             .map(|cfg| cfg.known_folder_backup.iter().cloned().collect());
+    memo.backup_keys = enabled_backup_keys.clone();
 
     // `true` if `rel`-derived path belongs to a backup folder that is currently
     // DISABLED (so its mirrored-but-orphaned files must not be (re)enqueued).
@@ -190,17 +212,15 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
         }
     };
 
-    walk_dir(
-        sync_root,
-        sync_root,
-        0,
+    let mut on_dir = 
         // on_dir (PRE-ORDER, parents before children): scaffold a server vault
         // folder for every directory that has no row yet, so a nested file
         // dispatched just after resolves THIS folder as its parent and the server
         // vault mirrors the on-disk `Backup/<device>/<folder>/<sub>` hierarchy
         // (task 0811 — without this, nested files uploaded FLAT to the root).
         // Idempotent: `ensure_local_folder` returns the existing id on later scans.
-        &mut |dir_path| {
+        |dir_path: &std::path::Path| {
+            visited.set(visited.get() + 1);
             // Don't scaffold (enqueue CreateFolder for) a disabled backup folder's
             // subtree — same disable-race gate as files.
             if backup_disabled(dir_path) {
@@ -212,11 +232,14 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
             // R3: no scaffold while the account's first file list is owed: the pull writes the folders'
             // rows, and 2,741 CreateFolder ops queued first held the first backup tick for minutes.
             if matches!(bridge.db().get_sync_cursor(), Ok(None)) {
+                // dc-166: a pass the feed does not ask for must come back for it.
+                owe_full.set(true);
                 return;
             }
             bridge.ensure_local_folder(sync_root, dir_path);
-        },
-        &mut |file_path, meta| {
+        };
+    let mut on_file = |file_path: &std::path::Path, meta: &std::fs::Metadata| {
+            visited.set(visited.get() + 1);
             tracing::debug!(
                 "enumeration scan: found file"
             );
@@ -249,6 +272,7 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
                 match disk.check(&seen, || DiskStamp::default_identity(file_path)) {
                     Ok(()) => {
                         memo.skipped += 1;
+                        memo.retry.remove(file_path);
                         return;
                     }
                     Err(stamp) => disk = stamp,
@@ -260,6 +284,7 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
             // walking (so parent folders keep getting scaffolded) but stop
             // dispatching files — the next pass picks up the remainder.
             if dispatched >= MAX_NEW_UPLOADS_PER_SCAN {
+                owe_full.set(true);
                 tracing::debug!(
                     max_new_uploads = MAX_NEW_UPLOADS_PER_SCAN,
                     "enumeration scan: skipped file due to per-scan upload cap"
@@ -273,6 +298,7 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
             memo.classified += 1;
             match (dispatch_local_create_verdict(bridge, sync_root, file_path, "scan"), row) {
                 (ScanDispatch::Settled, Some(row)) => {
+                    memo.retry.remove(file_path);
                     memo.settled.insert(file_path.to_path_buf(), (disk, row));
                 }
                 (verdict, _) => {
@@ -284,6 +310,12 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
                             .is_some_and(|rel| bridge.db().has_unknown_orphan(&rel).unwrap_or(false))
                     {
                         memo.untracked.insert(file_path.to_path_buf(), disk);
+                        memo.retry.remove(file_path);
+                    } else if verdict == ScanDispatch::NotQueued {
+                        // dc-166: "ask again next pass" holds with a change feed too: asked by path.
+                        memo.retry.insert(file_path.to_path_buf());
+                    } else {
+                        memo.retry.remove(file_path);
                     }
                     if verdict == ScanDispatch::Queued {
                         dispatched += 1;
@@ -294,8 +326,13 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
                     }
                 }
             }
-        },
-    );
+        };
+    match only {
+        None => walk_dir(sync_root, sync_root, 0, &mut on_dir, &mut on_file),
+        Some(paths) => visit_paths(sync_root, paths, &mut on_dir, &mut on_file),
+    }
+    memo.visited = visited.get();
+    memo.owe_full |= owe_full.get();
 
     if dispatched > 0 {
         tracing::debug!(dispatched, "enumeration scan queued new local files");
