@@ -3,12 +3,12 @@
 //! Both honour the attributes Cloud Files puts on a dehydrated placeholder: the indexer
 //! (SearchProtocolHost) indexes a file with `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` by its properties only,
 //! and a Defender scheduled or full scan skips its content (it scans the bytes when they land, through
-//! real-time protection). Both also open with `FILE_FLAG_OPEN_NO_RECALL`, which never asks the provider for
-//! data. What would make them hydrate is a placeholder WITHOUT the recall bit, or one the user pinned
+//! real-time protection). The skip rests on that attribute: `FILE_FLAG_OPEN_NO_RECALL` does not stop a
+//! Cloud Files placeholder's data read from fetching (measured by the native test). What would make them hydrate is a placeholder WITHOUT the recall bit, or one the user pinned
 //! ("Always keep on this device"), which the platform hydrates by itself. So a cloud-only placeholder is
 //! minted with no pin of its own (`placeholder_create.rs`: it inherits its folder's) and the platform marks
-//! it recall-on-data-access; [`scanners_skip_contents`] is the rule, and the native test below checks a
-//! minted placeholder against it and that a scanner-style crawl asks for no bytes.
+//! it recall-on-data-access (and offline); [`scanners_skip_contents`] is the rule, and the native test below
+//! checks minted placeholders against it and that a crawl of what scanners read of them asks for no bytes.
 
 #![cfg(target_os = "windows")]
 
@@ -99,13 +99,23 @@ mod tests {
         }
     }
 
+    /// How many FETCH_DATA requests `probe` caused.
+    fn fetches_of(probe: impl FnOnce()) -> usize {
+        let before = FETCHES.load(Ordering::SeqCst);
+        probe();
+        FETCHES.load(Ordering::SeqCst) - before
+    }
+
     /// Backlog 1658 on a scratch sync root connected with a counting provider: minted cloud-only
-    /// placeholders carry the bits the indexer and Defender honour, and a crawl that reads them the way
-    /// those scanners do (attributes, properties, an `OPEN_NO_RECALL` read) asks for 0 bytes. The control,
-    /// a plain read, does ask: it shows the counter sees a hydrating read.
+    /// placeholders carry the bits the indexer and Defender honour, and a crawl that reads what those
+    /// scanners read of a recall-on-data-access file (the listing, attributes, size and times, an
+    /// attributes-only handle) asks for 0 bytes. A data read is not skipped by `FILE_FLAG_OPEN_NO_RECALL`
+    /// on a Cloud Files placeholder (measured: it fetches), so the skip rests on the attribute; that read
+    /// is printed as a probe. The control, a plain read, asks: the counter sees a hydrating read.
     #[test]
     fn task_1658_a_scanner_crawl_hydrates_no_cloud_only_file() {
         const FILE_FLAG_OPEN_NO_RECALL: u32 = 0x0010_0000;
+        const FILE_READ_ATTRIBUTES: u32 = 0x80;
         const FILES: usize = 40;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("root");
@@ -140,39 +150,33 @@ mod tests {
         }
 
         let mut files = Vec::new();
-        walk(&root, &mut files);
-        assert_eq!(files.len(), FILES, "the crawl sees every placeholder");
         let mut offline = 0;
-        for path in &files {
-            let attributes = placeholders::read_os_placeholder_state(path).unwrap();
-            assert!(
-                scanners_skip_contents(attributes),
-                "a minted cloud-only placeholder is recall-on-data-access and not pinned: {attributes:#x}"
-            );
-            offline += usize::from(attributes & OFFLINE != 0);
-            // Properties, as the indexer reads them.
-            let meta = std::fs::metadata(path).unwrap();
-            assert_eq!(
-                meta.len(),
-                64 * 1024,
-                "the size is the placeholder's, without its bytes"
-            );
-            // A scanner's read: OPEN_NO_RECALL never asks the provider for data.
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(FILE_FLAG_OPEN_NO_RECALL)
-                .open(path)
-            {
-                let mut buf = [0u8; 4096];
-                let _ = std::io::Read::read(&mut file, &mut buf);
+        let crawl = fetches_of(|| {
+            walk(&root, &mut files);
+            for path in &files {
+                let attributes = placeholders::read_os_placeholder_state(path).unwrap();
+                assert!(
+                    scanners_skip_contents(attributes),
+                    "a minted cloud-only placeholder is recall-on-data-access and not pinned: {attributes:#x}"
+                );
+                offline += usize::from(attributes & OFFLINE != 0);
+                let meta = std::fs::metadata(path).unwrap();
+                assert_eq!(
+                    meta.len(),
+                    64 * 1024,
+                    "the size is the placeholder's, without its bytes"
+                );
+                assert!(meta.modified().is_ok());
+                let handle = std::fs::OpenOptions::new()
+                    .access_mode(FILE_READ_ATTRIBUTES)
+                    .share_mode(0x7)
+                    .open(path)
+                    .unwrap();
+                assert_eq!(handle.metadata().unwrap().len(), 64 * 1024);
             }
-        }
-        println!("task_1658 files={} offline={offline}", files.len());
-        assert_eq!(
-            FETCHES.load(Ordering::SeqCst),
-            0,
-            "a scanner-style crawl asked for bytes"
-        );
+        });
+        assert_eq!(files.len(), FILES, "the crawl sees every placeholder");
+        assert_eq!(crawl, 0, "a scanner-style crawl asked for bytes");
         for path in &files {
             let attributes = placeholders::read_os_placeholder_state(path).unwrap();
             assert!(
@@ -180,6 +184,24 @@ mod tests {
                 "still cloud-only after the crawl: {attributes:#x}"
             );
         }
+
+        // Probes, printed only: a read-access open with no read, and an OPEN_NO_RECALL read.
+        let open_only = fetches_of(|| {
+            let _ = std::fs::File::open(&files[1]);
+        });
+        let no_recall = fetches_of(|| {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_NO_RECALL)
+                .open(&files[2])
+            {
+                let _ = std::io::Read::read(&mut file, &mut [0u8; 4096]);
+            }
+        });
+        println!(
+            "task_1658 files={} offline={offline} crawl={crawl} open_only={open_only} no_recall_read={no_recall}",
+            files.len()
+        );
 
         // The control: a plain read asks the provider (which refuses), so the counter sees hydration.
         let control = std::fs::File::open(&files[0]).and_then(|mut f| std::io::Read::read(&mut f, &mut [0u8; 1]));
