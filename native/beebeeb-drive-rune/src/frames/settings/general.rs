@@ -159,15 +159,16 @@ lists::item(
 
     let menu = super::menu_overlay(ui, MenuKind::Theme, t);
     let overlay = match ui.dialog {
-        Some(Dialog::ReportProblem) => Some(report_problem(t)),
+        Some(Dialog::ReportProblem) => Some(report_problem(ui.crash_record.as_ref(), t)),
         _ => menu,
     };
     (shell::pane(children, t), overlay)
 }
 
 /// Report a problem (DW-0782): what the support bundle holds and leaves out, before it is
-/// saved; the person sends the email themselves.
-fn report_problem(t: &Theme) -> El {
+/// saved; the person sends the email themselves. `crash`: the record "Send a report" attached after a crash
+/// (`shell::crash_notice`), shown here word for word before it goes into the bundle.
+fn report_problem(crash: Option<&crate::log_file::crash::CrashRecord>, t: &Theme) -> El {
     const WORDS: &str = "Beebeeb saves a support bundle on this PC and opens an email to support@beebeeb.io in your email app. Read the file, then attach it and send the email yourself.";
     const ADDRESS: &str = "support@beebeeb.io";
     let at = WORDS.find(ADDRESS).unwrap_or(0);
@@ -178,8 +179,20 @@ fn report_problem(t: &Theme) -> El {
         }
         lists::item(l, i, &it, t)
     };
-    let body = vec![
-        dialogs::para_rich(0, WORDS, &[at..at + ADDRESS.len()], t),
+    let mut body = vec![dialogs::para_rich(0, WORDS, &[at..at + ADDRESS.len()], t)];
+    if let Some(record) = crash {
+        let text = crate::shell::crash_notice::attached_text(record);
+        body.push(lists::list(
+            7,
+            Some("Attached: why Beebeeb closed last time"),
+            text.lines().enumerate().map(|(i, line)| lists::item(7, i, &Item::new(None, line), t)).collect(),
+            Some(
+                "The app version, which part stopped and where in Beebeeb's own code. No file names, paths, email address, keys or tokens.",
+            ),
+            t,
+        ));
+    }
+    body.extend([
         lists::list(
             4,
             Some("In the bundle"),
@@ -215,14 +228,18 @@ fn report_problem(t: &Theme) -> El {
             None,
             t,
         ),
-    ];
+    ]);
     let foot = vec![
         dialogs::button(0, "Save and write email", Weight::Primary, t)
             .default_button()
             .on_press(|s: &mut State| {
                 s.settings.ask(Intent::SaveBundleAndWriteEmail);
-                // The press exports, once; showing the page (`go`) never does.
-                s.settings.drive.export_bundle();
+                // The press exports, once; showing the page (`go`) never does. An attached crash record goes in the
+                // bundle, and its file is deleted once the bundle is saved.
+                match s.settings.crash_record.take() {
+                    Some(record) => s.settings.drive.export_bundle_with_crash(record),
+                    None => s.settings.drive.export_bundle(),
+                }
                 super::go(s, "DW-0790b");
             }),
         dialogs::button(1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),

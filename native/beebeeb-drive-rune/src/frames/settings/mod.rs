@@ -204,6 +204,8 @@ pub struct SettingsUi {
     pub more: more::MoreUi,
     /// What Thumbnails and previews holds open: a drafted choice, the compare view.
     pub previews: previews::PreviewsUi,
+    /// The crash record "Send a report" attached to Report a problem (`shell::crash_notice`), until a bundle holds it.
+    pub crash_record: Option<crate::log_file::crash::CrashRecord>,
 }
 
 impl Default for SettingsUi {
@@ -221,6 +223,7 @@ impl Default for SettingsUi {
             bandwidth: bandwidth::Held::default(),
             more: more::MoreUi::default(),
             previews: previews::PreviewsUi::default(),
+            crash_record: None,
         }
     }
 }

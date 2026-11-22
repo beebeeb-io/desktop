@@ -29,6 +29,9 @@ pub mod away;
 // The transport is Windows-only (`platform/windows_control.rs`); the protocol is tested everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod control;
+pub(crate) mod crash_notice;
+#[cfg(test)]
+mod crash_notice_tests;
 pub mod deeplink;
 pub mod files_frame;
 pub mod flyout;
@@ -640,6 +643,10 @@ fn open_engine(
     let _ = writeln!(std::io::stdout(), "{}", api_base.start_line());
     // The local log file (`log_file/mod.rs`), before the engine starts so its first warning is kept. Best effort.
     let _ = crate::log_file::install(&local_data_of(&dirs, std::env::consts::OS));
+    // drive-complete-138b: the crash record a previous run left, read before this run can write one.
+    if let Some(dir) = crate::log_file::dir() {
+        crate::log_file::crash::remember_pending(dir);
+    }
     // Slice B5: what Windows needs to show this app's toasts (`platform::windows_toast`). Nothing yet.
     #[cfg(windows)]
     platform::windows_toast::start(identity);
