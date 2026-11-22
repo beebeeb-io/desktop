@@ -208,8 +208,6 @@ fn ld0105_f2b_native_robocopy_matrix() {
 }
 
 static FIX_SERVED: Mutex<Vec<(i64, i64)>> = Mutex::new(Vec::new());
-/// The ranges a worker is transferring right now (DC-162).
-static FIX_INFLIGHT: Mutex<Vec<(i64, i64)>> = Mutex::new(Vec::new());
 static FIX_READY_AT: Mutex<Option<Instant>> = Mutex::new(None);
 /// The workers serving a run, joined before its root goes (delta review P3-3).
 static FIX_WORKERS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
@@ -290,40 +288,22 @@ unsafe extern "system" fn session_piece_fetch(info: *const CF_CALLBACK_INFO, par
 fn serve_session_piece(r: Request, ready: Instant) {
     std::thread::sleep(ready.saturating_duration_since(Instant::now()));
     let data = F2B_DATA.get().expect("initialised before robocopy starts");
+    let mut served = FIX_SERVED.lock().unwrap();
+    if served.iter().any(|&(s, e)| s <= r.offset && r.offset + r.length <= e) {
+        fix_note(format!(
+            "  [{}, +{}) rkey {} already served: no transfer",
+            r.offset, r.length, r.request
+        ));
+        return;
+    }
     const CHUNK: i64 = 16 << 20;
     let start = r.offset / CHUNK * CHUNK;
     let end = ((r.offset + r.length + CHUNK - 1) / CHUNK * CHUNK).min(data.len() as i64);
-    // DC-162 (robocopy exit 8 / ERROR 379 about 1 run in 17 under the full suite's load): Windows times a FETCH out
-    // (CANCEL flags 0x2, then ERROR 379 for the reader) when its range gets no bytes for about 2 s. This provider used
-    // to hold the `served` lock across a whole 16 MiB transfer, so the FETCH of chunk 1 waited behind chunk 0's
-    // transfer (prep 1.7 s + the transfer, which under load ran past the timeout) and was cancelled before it was
-    // answered. A session answers every request on its own: the lock covers only the bookkeeping, and a FETCH waits
-    // only for a transfer of ITS bytes already in flight.
-    let again = loop {
-        let mut served = FIX_SERVED.lock().unwrap();
-        if served.iter().any(|&(s, e)| s <= r.offset && r.offset + r.length <= e) {
-            fix_note(format!(
-                "  [{}, +{}) rkey {} already served: no transfer",
-                r.offset, r.length, r.request
-            ));
-            return;
-        }
-        let mut inflight = FIX_INFLIGHT.lock().unwrap();
-        if inflight.iter().any(|&(s, e)| s < end && start < e) {
-            drop(inflight);
-            drop(served);
-            std::thread::sleep(Duration::from_millis(2));
-            continue;
-        }
-        // Whether this transfer sends bytes a run already sent (a FETCH across a chunk's end): the timeline says so.
-        let again = if served.iter().any(|&(s, e)| s < end && start < e) {
-            " (overlaps a range already sent)"
-        } else {
-            ""
-        };
-        inflight.push((start, end));
-        drop(served);
-        break again;
+    // Whether this transfer sends bytes a run already sent (a FETCH across a chunk's end): the timeline says so.
+    let again = if served.iter().any(|&(s, e)| s < end && start < e) {
+        " (overlaps a range already sent)"
+    } else {
+        ""
     };
     let keys = crate::cf_range::RequestKeys {
         transfer_key: r.transfer,
@@ -331,19 +311,17 @@ fn serve_session_piece(r: Request, ready: Instant) {
     };
     fix_note(format!("  TRANSFER [{start}, {end}) tkey {} begins", r.transfer));
     // SAFETY: the keys of a request Windows has not completed or cancelled (a refusal returns an error).
-    let result = unsafe {
+    match unsafe {
         crate::windows_cf::streaming::transfer_piece(
             r.connection,
             keys,
             start as u64,
             &data[start as usize..end as usize],
         )
-    };
-    FIX_INFLIGHT.lock().unwrap().retain(|&range| range != (start, end));
-    match result {
+    } {
         Ok(()) => {
             fix_note(format!("  TRANSFER [{start}, {end}) rkey {} ok{again}", r.request));
-            FIX_SERVED.lock().unwrap().push((start, end));
+            served.push((start, end));
         }
         Err((at, e)) => {
             let code = e.code().0 as u32;
@@ -376,7 +354,6 @@ fn ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces(
         let mut qa = QaRoot::new(crate::windows_cf::HYDRATION_POLICY);
         qa.connect_with(session_piece_fetch, Some(fix_cancel));
         FIX_SERVED.lock().unwrap().clear();
-        FIX_INFLIGHT.lock().unwrap().clear();
         *FIX_READY_AT.lock().unwrap() = None;
         FIX_REFUSED.store(0, std::sync::atomic::Ordering::SeqCst);
         FIX_LOG.lock().unwrap().clear();
