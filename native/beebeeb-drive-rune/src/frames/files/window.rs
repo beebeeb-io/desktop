@@ -6,7 +6,7 @@ use super::{select_bar, toolbar};
 use crate::State;
 use crate::theme::scale;
 use crate::theme::tokens::{self, Theme};
-use crate::theme::{icons, icons_files};
+use crate::theme::icons;
 use crate::ui::{button, caption, empty, file_list, kit, menu, status_line, toast};
 use rune::{Cx, El, Tx, col, el, row};
 

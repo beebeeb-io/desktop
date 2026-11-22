@@ -1133,7 +1133,7 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
         s.show_detail_pane = false;
         let names: Vec<&str> = s.listing.items.iter().map(|i| i.name.as_str()).collect();
         let original = s.listing.items[6].clone();
-        if s.actions.source.duplicate(&[original.clone()], &names).is_ok() && s.take_changes().0 {
+        if s.actions.source.duplicate(std::slice::from_ref(&original), &names).is_ok() && s.take_changes().0 {
             s.open_rename(7);
             let mut edit = rune::TextEdit::new(original.name.clone());
             edit.set_caret(names::stem_len(&original.name, false));

@@ -14,11 +14,11 @@ use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
 use crate::theme::scale;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{Theme, type_};
 use crate::ui::file_list::{COLUMNS, PcState, ROW_H, file_tile, format_date, pc_glyph, shared_cell};
 use crate::ui::file_row::{self, RowLook};
 use crate::ui::kit;
-use rune::{Align, Color, Cx, El, PointerPress, Tx, col, el, row};
+use rune::{Align, Cx, El, PointerPress, Tx, col, el};
 
 const COL_DATE_W: f32 = 132.0;
 const COL_SIZE_W: f32 = 84.0;
@@ -237,6 +237,7 @@ pub fn column_headers(sort: super::Sort, t: &Theme) -> El {
 /// "Two versions" where a date stands (`.mk-row` with `modSans`): 12/400 on a 14.5 pt line.
 pub(super) const TWO_VERSIONS: rune::TextStyle = rune::TextStyle::new(12.0, 400.0).lh(14.5);
 
+#[allow(dead_code)] // kept for the ratchet family and fixtures
 pub fn file_row(
     i: usize,
     item: &DriveItem,
@@ -250,6 +251,7 @@ pub fn file_row(
 }
 
 /// [`file_row`], with the tile to draw in place of the kind's own (a fixture's picture).
+#[allow(dead_code)]
 pub fn file_row_with(
     i: usize,
     item: &DriveItem,
