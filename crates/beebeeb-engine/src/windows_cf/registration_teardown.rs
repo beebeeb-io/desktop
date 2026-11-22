@@ -22,7 +22,7 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::Storage::CloudFilters::*;
-use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_REPARSE_POINT};
+use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
 
 use crate::identity::EngineIdentity;
 
@@ -65,17 +65,20 @@ pub struct TeardownReport {
 /// What the keep walk does with one entry, from what a reparse-point open reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EntryAction {
-    /// Not a placeholder, or a link: leave it.
+    /// A link: leave it, never follow it.
     Leave,
-    /// A placeholder wholly on disk (or a folder): make it plain.
+    /// Make it plain if it is a placeholder (a plain file answers "not a cloud file" and is left as it is). A
+    /// placeholder wholly on disk does not show the reparse bit to an ordinary process (Windows disguises it), so
+    /// the attempt is the test.
     Revert,
-    /// A file placeholder not wholly on disk: remove it.
+    /// A file whose bytes are not all on this PC (`RECALL_ON_DATA_ACCESS`, set only by the Cloud Files filter):
+    /// remove it, its content is on the server.
     RemoveCloudOnly,
 }
 
 /// Pure: the action for an entry with these attributes. `is_link` is a symlink or a junction (never followed).
 pub(crate) fn entry_action(is_dir: bool, is_link: bool, attributes: u32) -> EntryAction {
-    if is_link || attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 {
+    if is_link {
         return EntryAction::Leave;
     }
     if !is_dir && attributes & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.0 != 0 {
@@ -289,8 +292,28 @@ pub fn uninstall(identity: &'static EngineIdentity, choice: SyncFolderChoice) ->
 mod tests {
     use super::*;
     use crate::windows_cf::placeholders::{
-        convert_to_in_sync_placeholder, convert_to_unsynced_placeholder, create_placeholder, is_cloud_placeholder,
+        convert_to_in_sync_placeholder, convert_to_unsynced_placeholder, create_placeholder,
     };
+
+    /// Whether Windows holds a placeholder at `path` (read through `CfGetPlaceholderInfo`: a placeholder wholly on
+    /// disk hides its reparse bit from the attributes).
+    fn is_cloud_placeholder(path: &Path) -> bool {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES.0)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(path)
+            .unwrap();
+        crate::windows_cf::placeholders::read_standard_info(windows::Win32::Foundation::HANDLE(file.as_raw_handle()))
+            .unwrap()
+            .is_some()
+    }
     use crate::windows_cf::{HYDRATION_POLICY, QA_PROVIDER, register_sync_root_with, registered_provider_name};
 
     const REPARSE: u32 = 0x400;
@@ -298,8 +321,9 @@ mod tests {
 
     #[test]
     fn registration_teardown_keeps_what_is_here_and_removes_what_is_not() {
-        assert_eq!(entry_action(false, false, 0x20), EntryAction::Leave, "a plain file made here");
+        assert_eq!(entry_action(false, false, 0x20), EntryAction::Revert, "tried; a plain file answers no");
         assert_eq!(entry_action(false, false, REPARSE), EntryAction::Revert, "downloaded");
+        assert_eq!(entry_action(false, false, RECALL), EntryAction::RemoveCloudOnly, "cloud-only, disguised");
         assert_eq!(entry_action(false, false, REPARSE | RECALL), EntryAction::RemoveCloudOnly);
         assert_eq!(entry_action(true, false, REPARSE | RECALL), EntryAction::Revert, "a folder is never removed");
         assert_eq!(entry_action(true, true, REPARSE), EntryAction::Leave, "a junction is not followed");
