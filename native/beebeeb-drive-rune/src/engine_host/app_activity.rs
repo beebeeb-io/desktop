@@ -202,7 +202,7 @@ mod tests {
         fn read(&mut self) -> Reading {
             self.0 += 1;
             Reading {
-                cpu_percent: 3.2,
+                cpu_percent: 3.1,
                 memory_bytes: 212_000_000 + self.0,
                 ..Reading::default()
             }
