@@ -19,14 +19,14 @@
 //! - [`Engine::choose_backup_source_for`] (S11): the answer to "which folder do you want to back up?" for a moved
 //!   known folder, written to `known_folder_source`; its question is settled and the protection follows.
 //!
-//! Per account (review of #463, P3-8): the settings file is the PC's, so each chosen folder carries its owner's tag
+//! Per account: the settings file is the PC's, so each chosen folder carries its owner's tag
 //! ([`owner_tag`], a digest of the account's id, never an email or an id in clear; never made from an address, P3-5).
 //! Only that account backs it up ([`chosen_for`]: the runner, [`runner_chosen`], and the protection read the folders of
 //! the account the local data is bound to), lists it and removes it; nothing is written for another account. A folder
 //! without a tag (written by a test build before folders were per account; no released build wrote one) is nobody's:
-//! passed, listed and removable for no account, the local data's owner included (lead ruling 2026-11-16 01:04: fail
+//! passed, listed and removable for no account, the local data's owner included : fail
 //! closed, the person adds the folder again). One an earlier build tagged by its address is nobody's too, until its own
-//! account's next start tags it by that account's id ([`retag_at_start`], lead ruling 2026-11-16 05:47). Names stay
+//! account's next start tags it by that account's id ([`retag_at_start`]). Names stay
 //! unique across every folder in the file, untagged ones included (their `custom:<name>` switch keys share the one
 //! backup set).
 //!
@@ -276,8 +276,7 @@ fn tag_of(owner_key: &str) -> String {
 }
 
 /// The tag a chosen folder carries for `owner` (P3-8): the digest of `user:<id>` (the owner key the backup's own rows
-/// use), so the PC's settings file never holds an id in clear. Never made from an address (P3-5, lead ruling
-/// 2026-11-16 05:47: an address can be guessed and checked against its digest). `None`: the id is not known (nothing
+/// use), so the PC's settings file never holds an id in clear. Never made from an address (an address can be guessed and checked against its digest). `None`: the id is not known (nothing
 /// is added then).
 pub fn owner_tag(owner: &Identity) -> Option<String> {
     owner.user_id.as_deref().map(|id| tag_of(&format!("user:{id}")))
@@ -299,7 +298,7 @@ pub fn is_owners(folder: &ChosenFolder, owner: Option<&Identity>) -> bool {
     }
 }
 
-/// P3-5 (lead ruling 2026-11-16 05:47): the folders an earlier build tagged by `owner`'s OWN address carry `owner`'s
+/// The folders an earlier build tagged by `owner`'s OWN address carry `owner`'s
 /// id tag from now on, so a re-tagged entry no longer holds a digest of an address. Only an entry whose tag is the
 /// digest of `owner`'s canonical address is changed, once: another account's (by id or by its own address), an
 /// untagged one and one tagged by id stay as they are. One that would back `owner`'s folder up twice (it is, holds or

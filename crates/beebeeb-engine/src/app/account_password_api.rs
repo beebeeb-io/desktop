@@ -74,7 +74,7 @@ pub enum PasswordChangeError {
     /// The finish was sent and no answer said it was refused: no answer came, the server answered an error of its
     /// own (5xx) or something this client could not read; or the server took it and the session moved on before the
     /// new session could be kept. The password MAY have changed (in the last case it did): never "nothing changed".
-    /// Review of desktop#423, P2 #9.
+    /// The answer to a lost reply.
     Unconfirmed,
 }
 

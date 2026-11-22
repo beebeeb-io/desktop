@@ -438,7 +438,7 @@ fn only_a_poison_in_this_accounts_own_state_reaches_the_step() {
 }
 
 /// A discard that ended the row takes it out of the kept rows, and a read that started before it does not bring it
-/// back (review P3-6 of desktop #225); a refused discard leaves the kept rows as they were. The process's kept rows
+/// back; a refused discard leaves the kept rows as they were. The process's kept rows
 /// are shared, so this test keeps its own generation. Red on the mutant "no forget after the discard".
 #[test]
 fn a_discard_that_ended_the_row_takes_it_out_of_the_kept_rows() {

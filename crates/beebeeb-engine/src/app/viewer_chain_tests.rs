@@ -1,4 +1,4 @@
-//! The viewer's save and the write queue (review of desktop#432, delta 3): a save never queues behind a write of the
+//! The viewer's save and the write queue: a save never queues behind a write of the
 //! file that is not its own opening's. On the engine of `viewer_api_tests.rs`, against the local state alone (sync
 //! does not run: every save is stored here and answers at once). Every name and byte is invented.
 
@@ -16,7 +16,7 @@ fn writable_note_at_4(engine: &TestEngine, fake: &Fake) -> (tempfile::TempDir, t
     (dir, root, db)
 }
 
-/// The P1 of the delta check: the first opening's save is stored here (Queued from 4) and has not landed. The file is
+/// The first opening's save is stored here (Queued from 4) and has not landed. The file is
 /// opened again, shows version 4, and the person saves another edit of it from 4. That save is never queued behind the
 /// first one (both would land, 5 then 6, and nobody was asked): nothing is queued for it, the file's write is still
 /// the first save's, and the row is as the first save left it.

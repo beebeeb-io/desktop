@@ -11,7 +11,7 @@
 //! - An answer writes. Keep here uploads this PC's file as a new version (the server's stays in the history); Keep
 //!   both renames this PC's file beside the original and downloads the server's; Keep there REPLACES this PC's
 //!   file, whose edit was never sent and is in no history: its bytes are copied first to where nothing syncs, the
-//!   engine's own app data, per account and one folder per file ([`REPLACED_FOLDER`], review of desktop#423, P2 #8),
+//!   engine's own app data, per account and one folder per file ([`REPLACED_FOLDER`]),
 //!   and when that copy cannot be made nothing is replaced. When Keep there works the copy stays there (a later Keep
 //!   there of the same file adds its copy beside it, and the same bytes are kept once); when it fails the copy stays
 //!   there too (data safety over disk: a failure may have replaced the file first). No earlier copy is ever deleted.
@@ -203,7 +203,6 @@ impl SafetyCopy {
     /// not touched yet. An incoming copy a run that ended early left behind goes only when it holds what `file` still
     /// is; otherwise it is the only copy of a version that was replaced, and it becomes the kept copy first.
     fn make(file: &Path, folder: &Path) -> std::io::Result<Self> {
-        use sha2::Digest as _;
         use std::io::{Read, Write};
         let name = file
             .file_name()
@@ -255,7 +254,7 @@ impl SafetyCopy {
     }
 
     /// Keep there ran (it worked or failed): this copy becomes one of the file's kept copies. NOTHING kept earlier is
-    /// ever deleted (review of desktop#424, P1: an earlier copy can be the only copy of an edit that is in no
+    /// ever deleted (an earlier copy can be the only copy of an edit that is in no
     /// history). A copy of the same bytes as one already kept is not kept twice (the incoming one goes); a different
     /// edit is kept beside the earlier ones under a free name. Returns where the bytes are kept.
     fn keep(self) -> std::io::Result<PathBuf> {

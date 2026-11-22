@@ -125,7 +125,7 @@ fn every_person_accessor_goes_through_the_choke_point() {
                 // (account_actions and account_password: the 401 run's note and an in-memory check after the call;
                 // conflicts and share_link: a token copy whose `local_state*()` read, before anything is sent,
                 // refuses a locked screen). Passkeys and the Trash deletes copy their token through `person_session`
-                // itself (review of desktop#424): no admission here.
+                // itself: no admission here.
                 ("account_actions_api.rs", 2),
                 ("account_password_api.rs", 1),
                 ("conflicts_api.rs", 2),

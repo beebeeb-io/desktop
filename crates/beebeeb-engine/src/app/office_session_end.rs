@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -96,10 +96,10 @@ fn set_grant(state_dir: &Slot, grant: Option<ScreenFlushGrant>) {
 /// The bound is past: drop the grant of the turn `to` (a later lock's own grant stays).
 fn end_grant_of(state_dir: &Slot, to: SessionGeneration) {
     let mut all = GRANTS.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(all) = all.as_mut() {
-        if all.get(state_dir).is_some_and(|g| g.to == to) {
-            all.remove(state_dir);
-        }
+    if let Some(all) = all.as_mut()
+        && all.get(state_dir).is_some_and(|g| g.to == to)
+    {
+        all.remove(state_dir);
     }
 }
 

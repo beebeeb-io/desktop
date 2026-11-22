@@ -454,7 +454,7 @@ fn recovery_meter_reads_the_servers_minimum_and_a_short_password_sends_nothing()
 }
 
 // ---------------------------------------------------------------------------
-// The wipe (census row, lane signin-wipe): the held recovery, which holds the key the words derived and the server's
+// The wipe: the held recovery, which holds the key the words derived and the server's
 // recovery token, ends with the flow: when the flow is left, when a sign-in replaces it, and when its engine goes.
 // ---------------------------------------------------------------------------
 

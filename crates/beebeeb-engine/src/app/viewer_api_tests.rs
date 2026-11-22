@@ -505,7 +505,7 @@ fn set_current_version(db: &StateDb, id: &str, version: i64) {
     db.set_file_contract_state(&contract).unwrap();
 }
 
-/// Review of desktop#432 (P1-2): another device's version was pulled (the row's version raised, the copy here not
+/// Another device's version was pulled (the row's version raised, the copy here not
 /// replaced: nothing re-fetches a `Local` file's bytes on that raise). The copy is never read as that version: the
 /// viewer labels what it shows with the version the local state holds, and an edit saved from older bytes under it
 /// would replace the newer version.
@@ -540,7 +540,7 @@ fn a_copy_of_a_version_older_than_the_one_beebeeb_has_now_is_not_read() {
     assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)));
 }
 
-/// Review of desktop#432 (P1-2), the viewer's own save: it lands as the version it became, but nothing writes its
+/// It lands as the version it became, but nothing writes its
 /// bytes into the account's folder on this computer (the Windows finalization is a create's only). Since task 2523
 /// (F2) the landing knows it did not write that copy, so the copy stays agreed at the version before the save,
 /// behind the new one; it is never read as the new one (and the stale-copy pass brings it up to date).
@@ -664,7 +664,7 @@ fn land_viewer_save(db: &StateDb, op_id: &str, base: i64, version: i64) {
     assert!(db.apply_landing(&input, &rekey).unwrap().is_some(), "it lands");
 }
 
-/// Delta check of desktop#432, round 3: the viewer's own save is stored here (Queued from 4) and lands as 5. The next
+/// The viewer's own save is stored here (Queued from 4) and lands as 5. The next
 /// save of the SAME opening, from the 4 on screen, continues from 5: it goes out from 5 and its Queued answer names
 /// 5 (the label of the text on screen). A new opening of the file holds none of it: a save from 4 answers Conflict.
 #[test]
@@ -716,7 +716,7 @@ fn a_save_after_the_own_landed_one_goes_out_from_it_and_a_new_opening_answers_co
     );
 }
 
-/// Delta check of desktop#432: no agreed content, but the fetches served bytes. One version's bytes, equal to the
+/// No agreed content, but the fetches served bytes. One version's bytes, equal to the
 /// version the local state holds: read. Below it: declined. Bytes of more than one version (mixed): declined, they
 /// are none of them.
 #[test]

@@ -26,6 +26,8 @@ use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace};
 use crate::test_api::{FakeApi, Handler, Reply, Request};
 
+type RouteHook = (&'static str, Box<dyn FnOnce() + Send>);
+
 thread_local! {
     /// Test seam: the next custody writes on this thread fail (`remember_custody`).
     pub(super) static CUSTODY_WRITE_FAILS: Cell<bool> = const { Cell::new(false) };
@@ -73,7 +75,7 @@ struct Server {
     /// Not 200: a revoke answers this status.
     revoke_status: u16,
     /// Runs once when the first request of this route arrives, before it is answered.
-    on_route: Option<(&'static str, Box<dyn FnOnce() + Send>)>,
+    on_route: Option<RouteHook>,
     /// Every request: its route, and whether the device remembered FOLDER's custody when it arrived.
     seen: Vec<(String, bool)>,
 }

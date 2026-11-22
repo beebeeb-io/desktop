@@ -287,7 +287,7 @@ fn cancel_for_a_session_that_moved_on_changes_nothing() {
     assert_eq!(db.unsent_changes(0, 10, unix_now()).unwrap().total, 3);
 }
 
-/// Review of desktop#423, P1 #2: the runner's own claim, on its own connection, at the moment the copy goes to the
+/// The runner's own claim, on its own connection, at the moment the copy goes to the
 /// bin (the `recycle` closure is the hook between the cancel's steps). It must find nothing it can run: the cancel
 /// holds the queued change, or has dropped it, before the copy moves. A claim that waited would only find it gone,
 /// so the connection waits for nothing (no timing in the test).
@@ -334,7 +334,7 @@ fn on_the_admin_share(path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(format!(r"\\localhost\{drive}${rest}"))
 }
 
-/// Review of desktop#423, P1 #1 (Windows rung): a file whose volume has no Recycle Bin is never deleted for good.
+/// A file whose volume has no Recycle Bin is never deleted for good.
 /// The share is the computer's own `C$`, which the build VM serves; elsewhere it may not be reachable.
 #[cfg(target_os = "windows")]
 #[test]

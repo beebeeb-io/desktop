@@ -402,6 +402,8 @@ impl<C: CredentialStores> Engine<C> {
     /// count that cannot be written refuses the try. A judged wrong password keeps the count; a success resets it;
     /// an outcome that judged nothing (the server's limit, an ended session, no record offline, an error) restores
     /// what it was.
+    // The guard is held across the awaits on purpose: that is what keeps a second check out.
+    #[allow(clippy::await_holding_lock)]
     async fn counted_password_check(
         &self,
         password: &Zeroizing<String>,

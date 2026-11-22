@@ -58,7 +58,7 @@ struct QueuedSave {
 /// is not known yet, and every version its saves became, with the base each was saved from. Each version is one
 /// write's own landing, so keeping them is safe: a version another device made is never one of them.
 ///
-/// The record belongs to ONE opening (`epoch`, delta checks of desktop#432): a new opening of the file
+/// The record belongs to ONE opening (`epoch`): a new opening of the file
 /// ([`Engine::viewer_opening`]) replaces it with an empty one of a new epoch, and every write to it
 /// ([`remember_queued`], [`note_landed`], the read in [`own_versions`]) is refused unless it carries the record's own
 /// session and epoch. A save or a read of an earlier opening, however late it runs, can never create, extend or change
@@ -172,10 +172,10 @@ fn own_versions(
     epoch: u64,
     landed_as: impl Fn(&QueuedSave) -> Option<i64>,
 ) -> BTreeMap<i64, i64> {
-    if let Some(record) = record_of(store, file_id, session, epoch, |saves| saves.queued.clone()).flatten() {
-        if let Some(version) = landed_as(&record).filter(|version| *version > record.base) {
-            note_landed(store, file_id, &record, version);
-        }
+    if let Some(record) = record_of(store, file_id, session, epoch, |saves| saves.queued.clone()).flatten()
+        && let Some(version) = landed_as(&record).filter(|version| *version > record.base)
+    {
+        note_landed(store, file_id, &record, version);
     }
     record_of(store, file_id, session, epoch, |saves| saves.became.clone()).unwrap_or_default()
 }
@@ -198,8 +198,8 @@ fn landed_version(db: &crate::state_db::StateDb, file_id: &str, queued: &QueuedS
 
 /// The base a save from `base` continues from: `base`, or, when `current` (read by the caller from the local state)
 /// is a version a save of this same opening (`epoch`) made from `base` became, that version. Anything else stays
-/// `base`, so the save answers Conflict: another device's version after the own one (review of desktop#424), an op
-/// that left the queue without landing, a save of an earlier opening (delta checks of desktop#432).
+/// `base`, so the save answers Conflict: another device's version after the own one, an op
+/// that left the queue without landing, a save of an earlier opening.
 fn base_after_own_landed_save(
     store: &ViewerSavesStore,
     file_id: &str,
@@ -247,7 +247,7 @@ pub enum EditRefused {
     Failed,
     /// An earlier change to this file on this PC that is not this opening's own (an earlier opening's save, a File
     /// Provider save) has not been sent yet. Queued after it, this save would replace it unasked once both land
-    /// (review of desktop#432, delta 3). Nothing is stored; the edit stays with the viewer.
+    /// . Nothing is stored; the edit stays with the viewer.
     EarlierChangeNotSent,
     /// As [`Self::EarlierChangeNotSent`], but the earlier change to this file on this PC is held back (parked: its
     /// write used up its tries; or a held edit of task 2524): it is not sent until it is settled in Sync history.
@@ -321,7 +321,7 @@ impl<C: CredentialStores> Engine<C> {
 
     /// A new opening of `file_id` in the viewer (open, Try again, Show it), for `session`: its epoch, which it passes
     /// with every save and every read of the version. It holds none of the earlier openings' saves, so none of them is
-    /// its own (delta checks of desktop#432). While an earlier opening's save is still unsent (queued, or held back),
+    /// its own. While an earlier opening's save is still unsent (queued, or held back),
     /// a save of the new opening is refused ([`EditRefused::EarlierChangeNotSent`]), never queued after it. Once that
     /// save has landed, the version it became is announced as a newer version, and a save from the new opening's
     /// version answers Conflict, never continued from it. No write of an earlier opening reaches its record, whenever
@@ -426,7 +426,7 @@ impl<C: CredentialStores> Engine<C> {
             Some(_) => None,
             None => Some(anonymous_file(bytes).ok_or(EditRefused::Failed)?),
         };
-        // Delta 3 of desktop#432: queued after this opening's own latest unsent save alone. Another unsent write of
+        // queued after this opening's own latest unsent save alone. Another unsent write of
         // the file (an earlier opening's save, a File Provider save) is not what the text on screen is based on:
         // after it, both would land one after the other and nobody would be asked. The accept checks it inside its
         // own transaction, so a write queued after this look cannot slip in.
@@ -471,7 +471,7 @@ impl<C: CredentialStores> Engine<C> {
             op_id,
             token: write_token,
         };
-        // Remembered before the wait (review of desktop#432): a landing at any moment from here on is told apart as
+        // Remembered before the wait: a landing at any moment from here on is told apart as
         // this viewer's own by its read of the version (`EditFacts::own`), also one between the last look below and
         // the Queued answer.
         remember_queued(saves, file_id, queued.clone());
@@ -721,7 +721,7 @@ mod queued_save_tests {
         assert_eq!(base_after_own_landed_save(&store, "f", s, e, 4, 6, |_| Some(6)), 4);
     }
 
-    /// Review of desktop#424 (engine P2-3): the viewer's queued save landed as base + 1, then another device saved
+    /// The viewer's queued save landed as base + 1, then another device saved
     /// base + 2 and the tick recorded it. The next save from the viewer is a conflict: only the version the viewer's
     /// own op became is adopted, never a version past it.
     #[test]
@@ -756,7 +756,7 @@ mod queued_save_tests {
         );
     }
 
-    /// Delta check of #432, P2 (a): the save found its landing and answers Saved. From the moment it found it, a
+    /// the save found its landing and answers Saved. From the moment it found it, a
     /// read of the version finds it the view's own, also before the answer reached the view (the landing itself is
     /// not asked again: `|_| None`).
     #[test]
@@ -770,7 +770,7 @@ mod queued_save_tests {
         assert_eq!(own_versions(&store, "f", s, e, |_| None).get(&5), Some(&4));
     }
 
-    /// Delta check of #432, P2 (b): the first queued save landed as 5, and the next save continued from it and waits
+    /// the first queued save landed as 5, and the next save continued from it and waits
     /// to land. Every read in that wait finds 5 the view's own: no banner about the person's own save.
     #[test]
     fn two_saves_in_a_row_keep_the_first_ones_version_their_own() {
@@ -785,7 +785,7 @@ mod queued_save_tests {
         assert!(own_versions(&store, "f", s, e, landed).contains_key(&5));
     }
 
-    /// Delta check of #432 round 2, P1 (a): the file opened again while the earlier opening's save waited to land.
+    /// the file opened again while the earlier opening's save waited to land.
     /// The save then lands and notes its version under its own (earlier) opening: refused. The new opening has no own
     /// version, and a save from 4 is never continued from 5 (it answers Conflict).
     #[test]
@@ -800,7 +800,7 @@ mod queued_save_tests {
         assert_eq!(base_after_own_landed_save(&store, "f", s, now, 4, 5, |_| Some(5)), 4);
     }
 
-    /// Delta check of #432 round 2, P1 (b): the file opened again before the earlier opening's save remembered its
+    /// the file opened again before the earlier opening's save remembered its
     /// queued write. The late remember is refused; its landing is nobody's own in the new opening.
     #[test]
     fn a_save_remembered_after_the_file_opened_again_is_not_the_new_openings() {
@@ -816,7 +816,7 @@ mod queued_save_tests {
         assert_eq!(base_after_own_landed_save(&store, "f", s, now, 4, 5, landed), 4);
     }
 
-    /// Delta check of #432 round 2, P1 (c): a read of the earlier opening copied its queued save out, the file opened
+    /// a read of the earlier opening copied its queued save out, the file opened
     /// again while it read the landing, and the read then notes the version: refused. Nothing of it is the new
     /// opening's.
     #[test]
@@ -841,7 +841,7 @@ mod queued_save_tests {
         );
     }
 
-    /// Delta check of #432 round 2: the record is read for its own opening only. A save of the later opening lands
+    /// the record is read for its own opening only. A save of the later opening lands
     /// 4 → 5; a late read or save of the earlier opening finds none of it (no own version, no adoption: Conflict).
     #[test]
     fn an_earlier_opening_reads_nothing_of_a_later_ones_saves() {
@@ -863,7 +863,7 @@ mod queued_save_tests {
         );
     }
 
-    /// Delta check of #432 round 2, P3: a new opening drops the records of other sessions; a session transition of
+    /// a new opening drops the records of other sessions; a session transition of
     /// the account's runtime empties them all; a queued save keeps only its latest record.
     #[test]
     fn the_records_go_with_their_session_and_keep_the_latest_queued_save() {
@@ -993,7 +993,7 @@ mod queued_save_tests {
         };
         assert!(db.apply_landing(&input, &rekey).unwrap().is_some(), "it lands");
         assert_eq!(landed_version(&db, "f", &record()), Some(5));
-        // Review of desktop#432: the viewer's read of the version learns that 5 is its own save, as often as it
+        // The viewer's read of the version learns that 5 is its own save, as often as it
         // asks, and forgets nothing: the next save from the viewer still continues from 5.
         remember_queued(&store, "f", record());
         let read = |q: &QueuedSave| landed_version(&db, "f", q);
@@ -1013,7 +1013,7 @@ mod queued_save_tests {
             5,
             "still continued from: the reads forgot nothing"
         );
-        // Delta check of #432, P1-1: the file opened again (open, Try again, Show it). The new opening holds none of
+        // the file opened again (open, Try again, Show it). The new opening holds none of
         // the earlier saves: the landing is not its own, and a save from the version it shows is a conflict.
         let reopened = open_saves(&store, "f", session);
         assert!(

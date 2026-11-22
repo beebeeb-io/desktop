@@ -307,7 +307,7 @@ fn the_platform_flat_layout_is_asked_on_windows_and_macos_only() {
     );
 }
 
-// ── CP1 rows S1 and S2 (batch 3, `b3-engine-credentials`) ─────────────────────────────────────────────────────────────
+// ── Credential stores ─────────────────────────────────────────────────────────────
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

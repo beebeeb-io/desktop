@@ -1,4 +1,4 @@
-//! The wipe of a half-done password sign-in (census row, lane signin-wipe): what the engine holds between the password
+//! The wipe of a half-done password sign-in: what the engine holds between the password
 //! and the end of the sign-in goes when the sign-in ends, however it ends. Two copies are held: the proven password's
 //! code challenge (`pending_2fa`: core's partial token, and the email beside it) and the password's stretch for the
 //! screen-lock check (`lock_password`: core's check key). Each wipes as it drops, so "gone" here is "dropped".

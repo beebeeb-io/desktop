@@ -634,6 +634,11 @@ impl MediaReader {
         self.len
     }
 
+    /// Whether the file is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Where the bytes come from (Beebeeb's after a fallback).
     pub fn origin(&self) -> MediaOrigin {
         self.origin

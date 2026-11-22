@@ -3,7 +3,7 @@
 //! still belong to an EARLIER account while another one is signed in (task 2488). Such a reader asks this first and
 //! shows nothing when the answer is `false`.
 //!
-//! Compares the owner the engine start recorded (`StateDb::owner`, ruling R10) with the signed-in account through
+//! Compares the owner the engine start recorded (`StateDb::owner`) with the signed-in account through
 //! the binding's own rule (`account_binding::same_account`). Changes nothing: it never records, adopts or resets an
 //! owner (that stays `account_binding::bind_before_engine_start`'s). Must not: log a name, an email or an id.
 
@@ -14,7 +14,7 @@ use crate::state_db::StateDb;
 #[path = "state_owner_tests.rs"]
 mod tests;
 
-/// Task 2267 and R10 ruling 8 in the engine (plan wave 3, slice S2a): whose this PC's local data is when no owner is
+/// Task 2267 and The binding rule in the engine : whose this PC's local data is when no owner is
 /// recorded. The upgrade's candidate, fixed at the first startup and adopted in the start; the ownership proof a
 /// refused Windows start runs in the background; an interrupted keep settled before an engine exists; the card's
 /// decisions about the changes found while sync was paused.

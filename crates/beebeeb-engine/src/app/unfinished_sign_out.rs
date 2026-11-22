@@ -10,7 +10,7 @@
 //!   sees the same answer (a vault lock reports it; File Explorer's Repair and turn-off refuse on it). 0.8.x kept this
 //!   gate in its sign-out (`stop_engine_for_sign_out`).
 //! - **A Windows stop whose task ended, but whose File Explorer callbacks were not revoked**
-//!   (`AbortOutcome::RevokeFailed`) is not that record (lead ruling 2026-11-16 08:28, 0.8.x's predicate): nothing holds
+//!   (`AbortOutcome::RevokeFailed`) is not that record: nothing holds
 //!   the keys, so a sign-out goes on and clears them (refusing would only keep them on the PC longer), and so does the
 //!   strong unlock. The callbacks may still be registered, so no start runs until a restart (`windows_cf`'s fence, read
 //!   at a start's step 1), and the stop still answers `Unconfirmed` to the callers that need File Explorer let go.

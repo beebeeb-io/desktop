@@ -1,4 +1,4 @@
-//! The move of ONE file to the Recycle Bin for Cancel upload, never a delete for good (review of desktop#423, P1 #1).
+//! The move of ONE file to the Recycle Bin for Cancel upload, never a delete for good.
 //!
 //! The file is the only copy (it was never uploaded), so the shell's own answer decides, per item, at the moment of
 //! the delete: the operation is asked to recycle (`FOFX_RECYCLEONDELETE`, `FOF_ALLOWUNDO`) with no UI at all, and a

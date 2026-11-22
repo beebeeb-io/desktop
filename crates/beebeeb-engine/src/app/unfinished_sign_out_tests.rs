@@ -1,7 +1,6 @@
 //! What a stop records, by what the engine's abort achieved (`record_the_stop`), and which session ends it refuses
 //! (`a_task_may_hold_the_keys`). `AbortOutcome::RevokeFailed` happens on Windows only, so it is made here by hand: the
-//! start's fence is given as a counter, never the process-wide one (a Windows test process stays unfenced). Lead ruling
-//! 2026-11-16 08:28: only a task that may still run refuses a sign-out; a revoke failure fences the start alone.
+//! start's fence is given as a counter, never the process-wide one (a Windows test process stays unfenced). Only a task that may still run refuses a sign-out; a revoke failure fences the start alone.
 
 use std::cell::Cell;
 use std::sync::atomic::Ordering;

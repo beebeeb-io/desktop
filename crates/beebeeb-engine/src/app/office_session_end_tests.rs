@@ -6,6 +6,7 @@ use crate::host::ChannelHost;
 use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use beebeeb_api::flows::LockState;
 use zeroize::Zeroizing;

@@ -321,7 +321,7 @@ fn a_closed_port_ends_the_revoke_at_once() {
     let absent = TestServer::start(Server::Absent, None);
     let (took, ended) = timed_revoke(&absent.base, &invented_token());
     assert!(ended);
-    // Windows itself retries a refused loopback connect for about 2 s (CP1 row R1): there the absent port gets the bound.
+    // Windows itself retries a refused loopback connect for about 2 s: there the absent port gets the bound.
     let absent_within = if cfg!(windows) {
         REVOKE_BOUND
     } else {

@@ -11,13 +11,12 @@
 //! the migration failed; this engine does not. The engine signs in, locks, re-authenticates and signs out on the
 //! account's slot only: a session that lived only in a store the engine never writes could not be cleared or replaced
 //! correctly. What a failed migration leaves: the person opens signed out (or, when the token was written and its key
-//! was not, asked for the twelve words), signs in once, and their local data (kept on Windows) is bound again by R10
+//! was not, asked for the twelve words), signs in once, and their local data (kept on Windows) is bound again
 //! for the same account. The next open's migration short-circuits (new token and key present) and sweeps the flat
 //! items.
 //!
 //! Two cases where the flat session is never moved, and is deleted instead (the move writes nothing into the slot):
-//! - A sign-in of this engine is stored in the slot (a token with its owner tag; CP1 row S1, lead ruling 2026-11-15
-//!   18:34: "once a native sign-in exists, a legacy migration retry must never replace it, and the legacy copy is
+//! - A sign-in of this engine is stored in the slot (a token with its owner tag: "once a native sign-in exists, a legacy migration retry must never replace it, and the legacy copy is
 //!   discarded"). Without this, a move that failed before its token write, then a password sign-in and a quit before
 //!   the twelve words, let the next open's move take its "partial write" path and write the flat session over it.
 //! - The flat layout is retired (decision D-B3-1, lead 2026-11-15 20:16). Every clear of the stored session writes
@@ -36,6 +35,8 @@ use std::sync::Arc;
 
 use crate::identity::EngineIdentity;
 use crate::keychain::{self, AuthResult, AuthSecretStore, AuthStoreError, LockFlag, SecretBytes, SessionToken};
+
+type SlotMaker<S> = Arc<dyn Fn(&str) -> S + Send + Sync>;
 
 /// Where the handle keeps an account's session token and vault key. The handle names the app on every call
 /// (`identity` is the one [`Engine::open`](super::Engine::open) was given): a store has no identity of its own to
@@ -100,7 +101,7 @@ impl CredentialStores for crate::signin::memory_store::MemoryCredentials {
 /// [`keychain::AuthVault`]'s rule.
 pub struct AccountSlots<S> {
     slot: S,
-    account_key_slot: Option<Arc<dyn Fn(&str) -> S + Send + Sync>>,
+    account_key_slot: Option<SlotMaker<S>>,
 }
 
 impl<S> AccountSlots<S> {

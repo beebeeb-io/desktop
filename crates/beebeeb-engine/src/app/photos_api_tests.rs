@@ -597,7 +597,7 @@ fn video_seconds_of_a_dehydrated_placeholder_reads_nothing() {
 #[test]
 fn large_library_reads_without_a_query_per_photo() {
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     for i in 0..10_816 {
         let (name, folder) = if i < 8_816 { ("jpg", "Camera") } else { ("txt", "Docs") };
         row(

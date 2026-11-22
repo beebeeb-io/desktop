@@ -58,11 +58,11 @@ impl OwedPayingHost {
 
 impl EngineHost for OwedPayingHost {
     fn event(&self, event: EngineEvent) {
-        if let EngineEvent::Status(status) = &event {
-            if self.watch.note(status.status.state) {
-                let _enter = self.runtime.enter();
-                super::session_revoke::pay_owed_detached(self.client.clone(), self.base.clone(), self.owed.clone());
-            }
+        if let EngineEvent::Status(status) = &event
+            && self.watch.note(status.status.state)
+        {
+            let _enter = self.runtime.enter();
+            super::session_revoke::pay_owed_detached(self.client.clone(), self.base.clone(), self.owed.clone());
         }
         self.inner.event(event);
     }

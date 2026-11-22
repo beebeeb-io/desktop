@@ -9,17 +9,17 @@
 //! computer where nothing has synced yet no database is made for them ([`LocalStateRefused::NothingSynced`]): nothing
 //! is kept, and the host shows none.
 //!
-//! When they go (lead ruling 2026-11-15 17:25, privacy): DELETED at every session end that keeps the local state,
+//! When they go: DELETED at every session end that keeps the local state,
 //! not only dropped from memory: both sign-outs ([`Engine::sign_out_for`], the sign-out that keeps the local data)
 //! and the close of a session the server ended (the session watcher's, after the refusal run, and the close a
 //! confirmed 401 asks) call [`Engine::delete_own_recent_searches_at_session_end`] while the session is still in memory.
 //! After the refusal run the account-bound handle refuses the ended session everywhere but for that one delete of its
-//! own row (CP2 row 2.1, `owned_state`), so a sign-out pressed before the watcher closes the session deletes it too.
+//! own row (`owned_state`), so a sign-out pressed before the watcher closes the session deletes it too.
 //! A delete that fails (the state could not be opened or written: the sync engine held it, for one) is logged once and
 //! made at the account's next open for changes; until then this account's recent searches are neither shown nor added
 //! to (`LocalStateRefused::Unreadable`). A screen lock and a vault lock keep them (the same person unlocks). The purge
 //! of an account's rows (`StateDb::clear_account_data`) wipes them as well; Clear deletes the row. An engine start with
-//! nobody signed in deletes every account's recent searches (lead ruling 23:03: a signed-out start owns nobody's), which
+//! nobody signed in deletes every account's recent searches, which
 //! covers a restart after a failed delete (the due delete is held in memory). Kept: by a start under a stored session
 //! (the same person); then a row a crash or a failed delete left stays until that account's next session end, Clear
 //! or purge, and another account never reads it (the row is keyed by user id).
@@ -82,7 +82,7 @@ impl<C: CredentialStores> Engine<C> {
             .map_err(|_| LocalStateRefused::Unreadable)
     }
 
-    /// `Err(Unreadable)` while a session end's delete of the recent searches of `user_id` is still due (CP2 row 2.1):
+    /// `Err(Unreadable)` while a session end's delete of the recent searches of `user_id` is still due:
     /// the old list is neither shown nor added to until that delete is made.
     fn recent_searches_not_due(&self, user_id: &str) -> Result<(), LocalStateRefused> {
         if self.recent_searches_due(user_id) {

@@ -33,7 +33,7 @@
 //! - A request is sent only while the session it was asked under is still the session in memory. One exception, the
 //!   withdrawal of an invite this run claimed: after a turn that moved for the SAME account (a screen lock, a session
 //!   write; the session in memory still holds the run's vault key) it goes out on the run's token, so a session
-//!   change mid-invite never leaves a claimed invite behind (review of desktop#424). Another account, a sign-out or a
+//!   change mid-invite never leaves a claimed invite behind. Another account, a sign-out or a
 //!   closed vault: nothing is sent.
 //! - The outcome's key bytes are recorded as the share's sealed key (or a changed key's offered key), so a safety
 //!   number is later computed from exactly those bytes. A claimed invite this engine could not finish holds no key
@@ -484,7 +484,7 @@ impl<C: CredentialStores> Engine<C> {
                 }
             }
             InviteOutcome::AwaitingApproval { invite_id, .. } => {
-                // The session moved before the approval left (review of desktop#424): withdrawn all the same.
+                // The session moved before the approval left: withdrawn all the same.
                 let moved = !self.session_is_still(run.session, &run.key);
                 match self.withdraw(run, &invite_id) {
                     Ok(()) if moved => InviteAnswer::Refused(InviteRefused::SessionEnded),

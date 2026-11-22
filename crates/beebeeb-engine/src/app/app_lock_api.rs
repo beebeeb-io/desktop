@@ -1,4 +1,4 @@
-//! App lock, the screen level's per-device switch (core #117; the owner's ruling of 2026-11-14: off, the app never
+//! App lock, the screen level's per-device switch (core #117: off, the app never
 //! locks by itself and opens directly for anyone signed in to this PC; on, the default, it opens screen-locked).
 //!
 //! As its parent (`lock_password_api.rs`, DECISION 2509) copies the order of core's password path, this file copies
@@ -89,7 +89,7 @@ pub enum AppLockRefused {
 static LOCK_AFTER_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// "Locks again after" (DW-S03, DW-0202): how long the person may be away before an open app locks its screen by
-/// itself, while app lock is on (decision 2519; app lock off never locks, the owner's ruling of 2026-11-14). The
+/// itself, while app lock is on (decision 2519; app lock off never locks). The
 /// menu's order, strictest first: a later choice is a longer delay, a weaker lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LockAfter {
@@ -104,7 +104,7 @@ pub enum LockAfter {
 impl LockAfter {
     /// While nothing is stored (decision 2519).
     pub const DEFAULT: Self = Self::Minutes5;
-    /// For an entry that is not one of the choices, or that cannot be read (review of #452, P3-4): the strictest, so a
+    /// For an entry that is not one of the choices, or that cannot be read: the strictest, so a
     /// stored "Immediately" that reads back as anything else never becomes a longer delay, and no change from it skips
     /// the proof a longer one needs.
     pub const STRICTEST: Self = Self::Immediately;
@@ -303,7 +303,7 @@ impl<C: CredentialStores> Engine<C> {
         if let (true, Some(AppLockProof::Password(password))) = (longer, proof) {
             self.password_proof_checked(session, password, now_ms)?;
         }
-        // One delay write at a time (review of #452, P3-6): the read of what is stored and the write below are one
+        // One delay write at a time: the read of what is stored and the write below are one
         // step, so a write judged against an older value never lands after a newer one.
         let _one_at_a_time = LOCK_AFTER_WRITES.lock().unwrap_or_else(|p| p.into_inner());
         let _writes = self.writes.read().unwrap_or_else(|p| p.into_inner());

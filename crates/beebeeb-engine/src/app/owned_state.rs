@@ -6,12 +6,12 @@
 //! the one the handle was made for: a lock, a sign-out, another sign-in or a session the server ended turns the
 //! handle into a refusal, and an answer that was read across such a change is dropped.
 //!
-//! One step is let through for a session the server ended (CP2 row 2.1, privacy): a session end (either sign-out, or
+//! One step is let through for a session the server ended (privacy): a session end (either sign-out, or
 //! the close of that session) deletes the session's OWN recent searches
 //! ([`Engine::delete_own_recent_searches_at_session_end`]). The owner is proven and the session checked as for every
 //! handle; only the server's refusal is not asked, and that handle never leaves this module. A delete that fails is
 //! logged and made at the account's next open for changes. An engine start with nobody signed in deletes every
-//! account's recent searches (lead ruling 2026-11-15 23:03): the one write here with no owner proven.
+//! account's recent searches: the one write here with no owner proven.
 //!
 //! What a state that is not the session's means is decided here, once, for every window: nothing is read, and the
 //! reason is a fixed word ([`LocalStateRefused`]).
@@ -101,7 +101,7 @@ enum Ended {
     /// Every handle and every identity this module answers: refused as [`LocalStateRefused::SessionEnded`].
     Refused,
     /// Only [`Engine::delete_own_recent_searches_at_session_end`], a session end's wipe of the session's own recent
-    /// searches (CP2 row 2.1): it removes that row and writes nothing else.
+    /// searches: it removes that row and writes nothing else.
     OwnSearchesWipe,
 }
 
@@ -294,9 +294,7 @@ impl<C: CredentialStores> Engine<C> {
     /// WRITES, one step of every session end that keeps the local state: both sign-outs ([`Engine::sign_out_for`],
     /// [`Engine::sign_out_keeping_local_data`]) and the close of a session the server ended
     /// ([`Engine::close_ended_session`], the session watcher's, and the close a confirmed 401 asks). The recent
-    /// searches of the account of `session` are deleted from this computer while the session is still in memory (lead
-    /// ruling 2026-11-15 17:25). The one step the account-bound handle lets through after the refusal run (CP2 row
-    /// 2.1): it deletes that session's OWN row (keyed by its user id, never an email) and writes nothing else. Every
+    /// searches of the account of `session` are deleted from this computer while the session is still in memory. The one step the account-bound handle lets through after the refusal run: it deletes that session's OWN row (keyed by its user id, never an email) and writes nothing else. Every
     /// other check is the handle's: the owner proven on a read-only connection first, `session` still the session in
     /// memory before and after. A locked screen does not refuse it (the step's own work, not a person's read).
     ///
@@ -339,7 +337,7 @@ impl<C: CredentialStores> Engine<C> {
         deleted
     }
 
-    /// WRITES, at the engine's start ([`Engine::restore`]; lead ruling 2026-11-15 23:03, CP2 row 2.1): a start with
+    /// WRITES, at the engine's start ([`Engine::restore`]): a start with
     /// nobody signed in (`session_stored` false, no session in memory) deletes EVERY account's recent searches still on
     /// this computer: a signed-out start owns nobody's searches. That covers a restart after a session end whose delete
     /// failed (its due mark lived in memory). A start with a stored session keeps them: the same person, and the owner
@@ -383,7 +381,7 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
-    /// Whether a session end's delete of the recent searches of `user_id` is still due (CP2 row 2.1): it failed, and
+    /// Whether a session end's delete of the recent searches of `user_id` is still due: it failed, and
     /// no open made it since. Held in memory: a restart forgets it, and a start with nobody signed in deletes every
     /// recent search ([`Self::delete_recent_searches_at_signed_out_start`]).
     pub(super) fn recent_searches_due(&self, user_id: &str) -> bool {
@@ -448,7 +446,7 @@ impl<C: CredentialStores> Engine<C> {
                 LocalStateRefused::NothingSynced
             });
         };
-        // The binding's own rule (R10), with data assumed: an owner is recorded.
+        // The binding's own rule, with data assumed: an owner is recorded.
         match account_binding::decide(Some(&owner), &session, BindingKind::LocalData) {
             Binding::Proceed => {}
             Binding::Reset => return Err(LocalStateRefused::OtherAccount),
@@ -469,7 +467,7 @@ impl<C: CredentialStores> Engine<C> {
             ended,
         };
         state.still_this_session()?;
-        // A delete a session end could not make is made at the account's next open for changes (CP2 row 2.1).
+        // A delete a session end could not make is made at the account's next open for changes.
         if mode == Mode::Change
             && ended == Ended::Refused
             && let Some(user_id) = session.user_id.as_deref()

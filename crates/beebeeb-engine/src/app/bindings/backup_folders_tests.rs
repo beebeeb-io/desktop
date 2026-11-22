@@ -640,7 +640,7 @@ fn a_folder_inside_or_holding_a_backed_up_folder_cannot_be_chosen() {
 
 /// P3-8: a chosen folder is its account's alone. Only that account's folders are passed, listed and removed; a tagged
 /// folder of A is never passed for B. An untagged folder (written by a test build before folders were per account) is
-/// nobody's, and its folder can be added again under a name of its own (lead ruling 2026-11-16 01:04). The tag holds
+/// nobody's, and its folder can be added again under a name of its own. The tag holds
 /// neither the id nor the email in clear.
 #[test]
 fn chosen_folders_are_the_choosing_accounts_alone() {
@@ -1002,7 +1002,7 @@ fn a_known_folder_is_not_switched_on_over_a_chosen_folder_that_is_backed_up() {
     );
 }
 
-/// P3-5 (c) (lead ruling 2026-11-16 05:47): no tag is made from an address, and an earlier build's address tag is
+/// No tag is made from an address, and an earlier build's address tag is
 /// nobody's on every read. Its own account's start re-tags it by that account's id, once; another account's start
 /// never does; a folder it would back up twice stays nobody's. A re-tagged entry holds no digest of the address, so a
 /// guessed address no longer confirms its account; an entry left as it was keeps its digest and stays nobody's.

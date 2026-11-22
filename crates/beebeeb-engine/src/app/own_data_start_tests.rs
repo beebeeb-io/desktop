@@ -1,4 +1,4 @@
-//! Slice S2a's tests (plan wave 3: task 2267 and R10 ruling 8 in the engine), at the engine: the upgrade's candidate
+//! Tests of task 2267 in the engine, at the engine: the upgrade's candidate
 //! fixed at the first startup and adopted inside the start, the ownership proof a refused start owes, the Lock and
 //! the sign-out stopping it, an interrupted keep settled before an engine exists, and the card's decisions.
 //!
@@ -307,6 +307,8 @@ fn due(db: &StateDb) -> Vec<String> {
 }
 
 /// A node of this account's tree, its name sealed under `key` as every client seals it.
+// The fixture needs the name sealed under a chosen id; the new sealers mint the id themselves.
+#[allow(deprecated)]
 fn node(key: [u8; 32], file_id: &str) -> serde_json::Value {
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(key);
     serde_json::json!({
@@ -862,7 +864,7 @@ fn every_decision_refuses_another_accounts_data_and_a_moved_turn() {
     assert!(pc.root().join("Trip").is_dir(), "nothing moved");
 }
 
-// ---- the upgrade from a release before the binding (R10 ruling 8; lead rulings 2026-11-15 17:35) ----
+// ---- the upgrade from a release before the binding (The binding rule) ----
 
 /// Ruling (1) (mutant MU1: the startup hook returns at once; MU2: the window's mark not written). The first startup,
 /// with this account's key loaded, fixes the candidate and shuts the window on disk, and writes nothing else: no owner,
