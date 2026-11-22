@@ -470,3 +470,147 @@ fn the_engine_glue_sends_nothing_without_a_session() {
         DeleteBackupError::SignedOut
     );
 }
+
+/// The section on [`DeviceCalls`]: nothing else of this PC; Try again reads the devices again (`opened`).
+struct DevicesOnly(DeviceCalls<Fake>);
+
+impl crate::frames::backups::source::BackupsSource for DevicesOnly {
+    fn pump(&mut self) -> crate::frames::backups::source::Pumped {
+        let pumped = self.0.pump();
+        crate::frames::backups::source::Pumped {
+            changed: pumped.changed,
+            busy: pumped.busy,
+            ..Default::default()
+        }
+    }
+    fn opened(&mut self) {
+        self.0.opened();
+    }
+    fn devices_note(&self) -> Option<&'static str> {
+        self.0.note()
+    }
+    fn root(&self) -> crate::frames::backups::source::BackupsRoot {
+        crate::frames::backups::source::BackupsRoot {
+            id: String::new(),
+            is_protected: true,
+            device_folder: String::new(),
+        }
+    }
+    fn status(&self) -> crate::frames::backups::source::Status {
+        crate::frames::backups::source::Status::Plain {
+            title: String::new(),
+            sub: String::new(),
+            can_run: false,
+        }
+    }
+    fn folders(&self) -> Vec<crate::frames::backups::source::Folder> {
+        Vec::new()
+    }
+    fn devices(&self) -> Vec<Device> {
+        self.0.devices()
+    }
+    fn not_backed_up(&self) -> Vec<crate::frames::backups::source::NotBackedUp> {
+        Vec::new()
+    }
+    fn mail_backup_on(&self) -> bool {
+        false
+    }
+    fn back_up_now(&mut self) {}
+    fn set_folder(&mut self, _id: &str, _on: bool) {}
+    fn add_folder(&mut self, _path: &str) -> bool {
+        false
+    }
+    fn remove_folder(&mut self, _id: &str, _move_copy_to_trash: bool) {}
+    fn retry(&mut self, _id: &str) {}
+    fn retry_all(&mut self) {}
+    fn delete_device_backup(&mut self, _id: &str, _code: &str) -> bool {
+        false
+    }
+}
+
+fn find_key(rt: &rune::Runtime<crate::State>, key: &str) -> Option<rune::ElementInfo> {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+}
+
+fn has_text(rt: &rune::Runtime<crate::State>, words: &str) -> bool {
+    rt.elements()
+        .into_iter()
+        .any(|e| !e.exiting && e.text.as_deref().is_some_and(|t| t.contains(words)))
+}
+
+/// Poll the section until the device workers are done, then draw.
+fn settle_section(rt: &mut rune::Runtime<crate::State>, pending: &Arc<AtomicUsize>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut tx = rune::Tx::default();
+    loop {
+        crate::frames::backups::poll(&mut rt.state, &mut tx);
+        if pending.load(Ordering::SeqCst) == 0 {
+            crate::frames::backups::poll(&mut rt.state, &mut tx);
+            break;
+        }
+        assert!(Instant::now() < deadline, "the worker did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    rt.frame(0.016);
+    rt.settle_all();
+    rt.frame(0.016);
+}
+
+const RETRY: &str = "backups-devices-failed-retry";
+
+#[test]
+fn backups_devices_try_again() {
+    let fake = Fake::new();
+    *fake.read_error.lock().unwrap() = Some(DevicesRefused::Call(AccountCallError::Offline));
+    let mut calls = DeviceCalls::new(fake.clone());
+    calls.opened();
+    settle(&mut calls);
+    assert_eq!(calls.note(), Some(NOT_READ));
+    let pending = calls.pending.clone();
+
+    let mut state = crate::shell::state::init();
+    crate::frames::settings::go(&mut state, "DW-0737");
+    state.backups = crate::frames::backups::BackupsUi::new(Some(Box::new(DevicesOnly(calls))));
+    let env = rune::Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = rune::Runtime::new(state, crate::shell::registry::view, (958.0, 958.0), env);
+    rt.frame(0.0);
+    settle_section(&mut rt, &pending);
+    assert!(
+        find_key(&rt, RETRY).is_some(),
+        "a failed devices read draws Try again, as the other views"
+    );
+    let reads = fake.reads.load(Ordering::SeqCst);
+
+    // The API is back: pressing Try again asks again and the list shows.
+    *fake.read_error.lock().unwrap() = None;
+    let r = find_key(&rt, RETRY).unwrap().rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle_section(&mut rt, &pending);
+    assert!(
+        fake.reads.load(Ordering::SeqCst) > reads,
+        "Try again asks the engine again"
+    );
+    assert!(find_key(&rt, RETRY).is_none());
+    assert!(has_text(&rt, "Invented Studio"), "the devices show after Try again");
+
+    // A read that fails while a list is held keeps it, Try again under it; a failed read is never fresh.
+    *fake.read_error.lock().unwrap() = Some(DevicesRefused::Call(AccountCallError::Offline));
+    rt.state.backups.read_again();
+    settle_section(&mut rt, &pending);
+    assert!(has_text(&rt, "Invented Studio"), "the older list stays");
+    assert!(find_key(&rt, RETRY).is_some());
+    let reads = fake.reads.load(Ordering::SeqCst);
+    rt.state.backups.read_again();
+    settle_section(&mut rt, &pending);
+    assert!(
+        fake.reads.load(Ordering::SeqCst) > reads,
+        "Try again reads again at once"
+    );
+}

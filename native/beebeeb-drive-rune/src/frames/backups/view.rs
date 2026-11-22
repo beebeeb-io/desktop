@@ -341,12 +341,31 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
         ));
     }
 
-    let (devices, note) = if source.wired(Part::Devices) {
-        (source.devices(), source.devices_note())
+    let (devices, note, failed) = if source.wired(Part::Devices) {
+        (source.devices(), source.devices_note(), source.devices_failed())
     } else {
-        (Vec::new(), None)
+        (Vec::new(), None, false)
     };
-    if !devices.is_empty() {
+    let devices_retry = || try_again("backups-devices-failed", t).on_press(|s: &mut State| s.backups.read_again());
+    if failed && devices.is_empty() {
+        // Could not be read and nothing older is held: the failed state with Try again, as the other views.
+        children.push(lists::list(
+            1,
+            Some("Other devices"),
+            vec![view_state(
+                ViewState::Failed {
+                    key: "backups-devices-failed",
+                    title: "Couldn't read your other devices",
+                    why: "The list could not be read just now.",
+                    retry: Some(devices_retry()),
+                },
+                t,
+            )],
+            None,
+            t,
+        ));
+        buttons += 1;
+    } else if !devices.is_empty() {
         children.push(lists::list(
             1,
             Some("Other devices"),
@@ -354,6 +373,11 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
             note,
             t,
         ));
+        if failed {
+            // The older list stays, said under it; Try again reads it again.
+            children.push(row().px(14.0).child(devices_retry()));
+            buttons += 1;
+        }
     } else if let Some(note) = note {
         // Still reading, or why there is no list: said in the list's place, never an empty card.
         children.push(lists::list(
