@@ -334,9 +334,10 @@ pub(super) fn shared_name_from_metadata(
 ) -> String {
     if let (Some(key), Some(name_encrypted)) = (file_key, f["name_encrypted"].as_str())
         && let Some(name) = decrypt_shared_name_with_key(key, name_encrypted)
-            && let Some(leaf) = safe_shared_leaf_name(&name) {
-                return leaf;
-            }
+        && let Some(leaf) = safe_shared_leaf_name(&name)
+    {
+        return leaf;
+    }
 
     shared_placeholder_name(item_kind).to_string()
 }

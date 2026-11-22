@@ -51,7 +51,10 @@ mod tests {
         assert_eq!(std::fs::read(&file).unwrap(), b"<html>");
         let own = dir.path().join("own.txt");
         std::fs::write(&own, b"x").unwrap();
-        assert!(std::fs::read_to_string(zone_stream_path(&own)).is_err(), "an own file carries no mark");
+        assert!(
+            std::fs::read_to_string(zone_stream_path(&own)).is_err(),
+            "an own file carries no mark"
+        );
     }
 
     #[test]

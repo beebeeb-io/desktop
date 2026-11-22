@@ -1053,7 +1053,10 @@ impl World {
 
 #[test]
 fn made_thumbnail_is_sent_once_sealed_with_the_thumbnail_recipe() {
-    let world = world("thumb1", &[(ONE, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    let world = world(
+        "thumb1",
+        &[(ONE, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))],
+    );
     world.previews.set_setting(JPEG_1920);
     world.keep_made(ONE, 0);
     assert_eq!(world.upload_made(ONE, 0, true), MadeUpload::Sent);
@@ -1073,7 +1076,10 @@ fn made_thumbnail_is_sent_once_sealed_with_the_thumbnail_recipe() {
 const M1: &str = "d0000000-0000-4000-8000-000000000101";
 #[test]
 fn made_thumbnail_is_not_sent_unless_the_server_had_none() {
-    let world = world("thumb2", &[(M1, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    let world = world(
+        "thumb2",
+        &[(M1, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))],
+    );
     world.previews.set_setting(JPEG_1920);
     world.keep_made(M1, 0);
     assert_eq!(world.upload_made(M1, 0, false), MadeUpload::NothingToSend);
@@ -1083,7 +1089,10 @@ fn made_thumbnail_is_not_sent_unless_the_server_had_none() {
 const M2: &str = "d0000000-0000-4000-8000-000000000102";
 #[test]
 fn made_thumbnail_waits_while_the_setting_is_off_and_goes_when_it_is_on() {
-    let world = world("thumb3", &[(M2, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    let world = world(
+        "thumb3",
+        &[(M2, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))],
+    );
     world.keep_made(M2, 0);
     assert_eq!(world.upload_made(M2, 0, true), MadeUpload::NotNow(NotNow::SettingOff));
     assert!(world.thumb_puts().is_empty());
@@ -1098,7 +1107,10 @@ const M9: &str = "d0000000-0000-4000-8000-000000000199";
 
 #[test]
 fn a_hundred_looks_read_the_setting_once_and_a_local_change_reads_it_again() {
-    let world = world("thumb9", &[(M9, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    let world = world(
+        "thumb9",
+        &[(M9, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))],
+    );
     world.keep_made(M9, 0);
     let gets = |world: &World| {
         world

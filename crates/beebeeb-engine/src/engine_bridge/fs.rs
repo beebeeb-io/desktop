@@ -401,15 +401,23 @@ mod canonical_root_tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &via).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&real, &via).or_else(|_| {
-            std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"]).arg(&via).arg(&real)
-                .output().map(|_| ())
-        }).unwrap();
+        std::os::windows::fs::symlink_dir(&real, &via)
+            .or_else(|_| {
+                std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(&via)
+                    .arg(&real)
+                    .output()
+                    .map(|_| ())
+            })
+            .unwrap();
         let file = real.join("a").join("f.txt");
         assert_eq!(relative_db_path(&real, &file).as_deref(), Some("a/f.txt"));
         assert_eq!(relative_db_path(&via, &file).as_deref(), Some("a/f.txt"));
-        assert_eq!(relative_db_path(&real, &via.join("a").join("f.txt")).as_deref(), Some("a/f.txt"));
+        assert_eq!(
+            relative_db_path(&real, &via.join("a").join("f.txt")).as_deref(),
+            Some("a/f.txt")
+        );
         assert_eq!(relative_db_path(&real, &dir.join("other")), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -423,8 +431,15 @@ mod rel_under_tests {
     #[test]
     fn rel_under_agrees_with_relative_db_path() {
         let root = std::path::PathBuf::from("/sync");
-        for path in [root.join("a.txt"), root.join("d").join("b.md"), std::path::PathBuf::from("/other/c")] {
-            assert_eq!(rel_under(&root, &path), relative_db_path(&root, &path).unwrap_or_default());
+        for path in [
+            root.join("a.txt"),
+            root.join("d").join("b.md"),
+            std::path::PathBuf::from("/other/c"),
+        ] {
+            assert_eq!(
+                rel_under(&root, &path),
+                relative_db_path(&root, &path).unwrap_or_default()
+            );
         }
         assert_eq!(rel_under(&root, &root.join("d").join("b.md")), "d/b.md");
         assert_eq!(rel_under(&root, &std::path::PathBuf::from("/other/c")), "");

@@ -143,13 +143,12 @@ impl StateDb {
     /// The pin to restore for `file_id`, if one is waiting.
     pub fn pin_to_restore(&self, file_id: &str) -> Result<Option<i32>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn
-            .query_row(
-                "SELECT pin FROM cf_pin_restore WHERE file_id = ?1",
-                params![file_id],
-                |row| row.get(0),
-            )
-            .optional()
+        conn.query_row(
+            "SELECT pin FROM cf_pin_restore WHERE file_id = ?1",
+            params![file_id],
+            |row| row.get(0),
+        )
+        .optional()
     }
 
     /// Every pin waiting to be restored, `(file_id, pin)`.

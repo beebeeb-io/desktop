@@ -901,9 +901,10 @@ impl crate::engine_bridge::EngineBridge {
             if let Some((key, _)) = candidate.as_ref()
                 && record.foreign_added
                 && record.owner_wrap.is_none()
-                && record.pending_owner_wrap.is_none() {
-                    record.pending_owner_wrap = Some(keys::wrap_owner_file_key(&master, id, key)?);
-                }
+                && record.pending_owner_wrap.is_none()
+            {
+                record.pending_owner_wrap = Some(keys::wrap_owner_file_key(&master, id, key)?);
+            }
             let tree_or_content_changed = self.db().get_file_contract_state(id)?.is_some_and(|previous| {
                 previous.parent_id.as_deref() != row["parent_id"].as_str()
                     || row["version_number"]
@@ -1011,9 +1012,10 @@ impl crate::engine_bridge::EngineBridge {
                 continue;
             }
             if let Ok((key, _)) = record_key(&master, &record, kind_in_db(self.db(), &record.file_id))
-                && adopt(&scope, &mut record, &key, true).await.unwrap_or(false) {
-                    confirmed += 1;
-                }
+                && adopt(&scope, &mut record, &key, true).await.unwrap_or(false)
+            {
+                confirmed += 1;
+            }
         }
         scope.check()?;
         Ok(confirmed)

@@ -719,7 +719,10 @@ fn w28_switch_purge_keeps_a_file_made_in_a_synced_folder() {
     f.folder("Plans");
     std::fs::write(f.root.join("Plans").join("late.txt"), b"made during the switch").unwrap();
     assert!(switch_purge(&f, &[]).is_err());
-    assert_eq!(std::fs::read(f.root.join("Plans").join("late.txt")).unwrap(), b"made during the switch");
+    assert_eq!(
+        std::fs::read(f.root.join("Plans").join("late.txt")).unwrap(),
+        b"made during the switch"
+    );
     assert_eq!(f.db.list_files().unwrap().len(), 1);
 }
 
@@ -732,11 +735,24 @@ fn w29_an_unfetched_placeholder_of_unknown_content_holds_nothing_and_the_switch_
     use crate::sync_root_port::SyncRootPort;
     let registered = RegisteredRoot::new();
     let f = &registered.0;
-    assert!(crate::windows_cf::placeholders::create_placeholder(&f.root, "Old.docx", "Old.docx", 4096, 1_700_000_000, false).unwrap());
+    assert!(
+        crate::windows_cf::placeholders::create_placeholder(
+            &f.root,
+            "Old.docx",
+            "Old.docx",
+            4096,
+            1_700_000_000,
+            false
+        )
+        .unwrap()
+    );
     f.track_unknown("Old.docx", ItemKind::File, FileStatus::CloudOnly);
     let os = crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST);
 
-    assert!(!os.may_hold_bytes(&f.root, "/Old.docx"), "a placeholder with nothing on disk holds nothing");
+    assert!(
+        !os.may_hold_bytes(&f.root, "/Old.docx"),
+        "a placeholder with nothing on disk holds nothing"
+    );
     switch_purge(f, &[]).unwrap();
 
     assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);

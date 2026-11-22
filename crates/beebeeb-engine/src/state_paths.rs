@@ -158,7 +158,10 @@ pub fn prepare_beebeeb_state_dir_at(sync_root: &Path, state_dir: &Path) -> Resul
 /// closed: nothing is created beside it, moved into it or deleted (backlog 1868).
 pub fn ensure_state_dir_is_not_a_file(state_dir: &Path) -> Result<(), String> {
     match fs::metadata(state_dir) {
-        Ok(meta) if !meta.is_dir() => Err(format!("state path {} exists but is not a directory", state_dir.display())),
+        Ok(meta) if !meta.is_dir() => Err(format!(
+            "state path {} exists but is not a directory",
+            state_dir.display()
+        )),
         _ => Ok(()),
     }
 }

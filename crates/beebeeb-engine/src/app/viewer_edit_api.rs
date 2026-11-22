@@ -475,7 +475,10 @@ impl<C: CredentialStores> Engine<C> {
         // this viewer's own by its read of the version (`EditFacts::own`), also one between the last look below and
         // the Queued answer.
         remember_queued(saves, file_id, queued.clone());
-        tracing::debug!(queued_after_ms = began.elapsed().as_millis() as u64, "viewer save queued");
+        tracing::debug!(
+            queued_after_ms = began.elapsed().as_millis() as u64,
+            "viewer save queued"
+        );
         // The runner sends it now, not at its next tick (w26, v5 bug 3: a save waited for the tick, 20 s).
         self.nudge_runner();
         // Wait, bounded, for the upload to land: the op leaves the queue, and the version it became is the one the
@@ -500,7 +503,10 @@ impl<C: CredentialStores> Engine<C> {
                 Ok(Ok(Fate::Landed(version))) => {
                     // Noted, never forgotten: a read between here and the answer finds it the view's own.
                     note_landed(saves, file_id, &queued, version);
-                    tracing::debug!(landed_after_ms = began.elapsed().as_millis() as u64, "viewer save landed");
+                    tracing::debug!(
+                        landed_after_ms = began.elapsed().as_millis() as u64,
+                        "viewer save landed"
+                    );
                     return Ok(SaveEnd::Saved { version });
                 }
                 Ok(Ok(Fate::Conflict { theirs })) => {
@@ -527,7 +533,9 @@ impl<C: CredentialStores> Engine<C> {
                     // save in the next look, so the person is asked at once.
                     if asked.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
                         asked = Some(Instant::now());
-                        head = self.server_head(&asking.0, &asking.1, file_id).filter(|(v, _)| *v > base);
+                        head = self
+                            .server_head(&asking.0, &asking.1, file_id)
+                            .filter(|(v, _)| *v > base);
                         if head.is_some() {
                             continue;
                         }
@@ -564,8 +572,14 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The link monitor's latest failure (the runner's), `None`: none since its last good answer, or no runner.
     fn link_failure(&self) -> Option<(crate::link_health::LinkFailure, i64)> {
-        self.runtime
-            .block_on(async { self.acct.engine.lock().await.as_ref().and_then(|runner| runner.send_phase().link_failure()) })
+        self.runtime.block_on(async {
+            self.acct
+                .engine
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|runner| runner.send_phase().link_failure())
+        })
     }
 
     /// Ask the runner for a queue step now (it would otherwise send the save at its next tick). No runner: nothing.
@@ -653,7 +667,10 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// The token and the key of the session `session` is, copied while it still is.
-    pub(in crate::app) fn edit_credentials(&self, session: SessionGeneration) -> Result<(String, Zeroizing<[u8; 32]>), EditRefused> {
+    pub(in crate::app) fn edit_credentials(
+        &self,
+        session: SessionGeneration,
+    ) -> Result<(String, Zeroizing<[u8; 32]>), EditRefused> {
         self.person_session(|current, generation| {
             (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
         })

@@ -23,11 +23,16 @@ impl RunMode {
 
 /// The tick's power/network hold (task dc-031). `None` while the person paused sync (that pause says it
 /// all). Also records the hold for the status pulse.
-pub(super) fn power_hold(identity: &'static crate::identity::EngineIdentity, user_paused: bool) -> Option<crate::power::PausedFor> {
+pub(super) fn power_hold(
+    identity: &'static crate::identity::EngineIdentity,
+    user_paused: bool,
+) -> Option<crate::power::PausedFor> {
     let hold = if user_paused {
         None
     } else {
-        let metered = crate::config::DesktopConfig::load_for(identity).ok().and_then(|c| c.metered);
+        let metered = crate::config::DesktopConfig::load_for(identity)
+            .ok()
+            .and_then(|c| c.metered);
         crate::power::hold_now(metered, &crate::power::SystemPower)
     };
     crate::power::set_current(hold);
@@ -35,7 +40,10 @@ pub(super) fn power_hold(identity: &'static crate::identity::EngineIdentity, use
 }
 
 /// The `paused` status, with the reason in words when a power hold caused it.
-pub(super) fn paused_payload(tracker: &StatusTracker, hold: Option<crate::power::PausedFor>) -> crate::engine_status::StatusPayload {
+pub(super) fn paused_payload(
+    tracker: &StatusTracker,
+    hold: Option<crate::power::PausedFor>,
+) -> crate::engine_status::StatusPayload {
     let mut p = tracker.paused();
     if let Some(h) = hold {
         p.reason = Some(crate::engine_status::Reason {
@@ -182,9 +190,7 @@ pub(super) async fn run_status_pulse(
         ticker.tick().await;
         let transfer_in_flight = !transfers.active().is_empty();
         let paused = sync_paused.load(Ordering::Relaxed) || crate::power::current().is_some();
-        let payload = tracker.pulse(paused, transfer_in_flight, || {
-            current_activity(&db, &transfers)
-        });
+        let payload = tracker.pulse(paused, transfer_in_flight, || current_activity(&db, &transfers));
         if let Some(payload) = payload {
             let going_quiet = payload.state == crate::engine_status::State::Idle;
             emit_payload(&app, payload);
@@ -302,9 +308,10 @@ pub(super) fn handle_new_conflict(app: &Host, c: &ConflictDetected) {
         is_text: c.is_text,
     };
     if app.conflict_opens_window()
-        && let Err(e) = app.open_conflict(&notice) {
-            tracing::warn!(error = %e, file_id = %c.file_id, "open_conflict_window failed");
-        }
+        && let Err(e) = app.open_conflict(&notice)
+    {
+        tracing::warn!(error = %e, file_id = %c.file_id, "open_conflict_window failed");
+    }
     if let Err(e) = app.notify(Notice::Conflict {
         file_name: c.file_name.clone(),
     }) {

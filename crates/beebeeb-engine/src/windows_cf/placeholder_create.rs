@@ -244,7 +244,10 @@ pub(in crate::windows_cf) struct MintSpec<'a> {
 /// call per row was 41,510 calls for 41,510 rows, task dc-086). One result per spec, in order, as [`mint`] gives it:
 /// `Ok(true)` created, `Ok(false)` already there, `Err` this entry failed. An entry Windows did not reach (the call
 /// failed before it) reads as failed, never as created: each entry's result starts as `E_PENDING`.
-pub(in crate::windows_cf) fn mint_batch(parent_dir: &std::path::Path, specs: &[MintSpec<'_>]) -> Vec<anyhow::Result<bool>> {
+pub(in crate::windows_cf) fn mint_batch(
+    parent_dir: &std::path::Path,
+    specs: &[MintSpec<'_>],
+) -> Vec<anyhow::Result<bool>> {
     const ALREADY_EXISTS: windows::core::HRESULT = windows::core::HRESULT(0x800700B7u32 as i32);
     const NOT_REACHED: windows::core::HRESULT = windows::core::HRESULT(0x8000000Au32 as i32); // E_PENDING
     if specs.is_empty() {

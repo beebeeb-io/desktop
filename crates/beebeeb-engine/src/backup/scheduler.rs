@@ -164,9 +164,10 @@ impl BackupScheduler {
         let changed = Arc::clone(&self.changed);
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if event.is_ok_and(|e| !e.kind.is_access())
-                && let Ok(mut at) = changed.lock() {
-                    *at = Some(Instant::now());
-                }
+                && let Ok(mut at) = changed.lock()
+            {
+                *at = Some(Instant::now());
+            }
         });
         let Ok(mut watcher) = watcher else {
             tracing::warn!("backup: no file watcher; passes run on the 10-minute cadence only");

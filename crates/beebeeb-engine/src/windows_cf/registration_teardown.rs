@@ -262,7 +262,11 @@ pub fn uninstall(identity: &'static EngineIdentity, choice: SyncFolderChoice) ->
     let config_root = crate::config::DesktopConfig::load_for(identity)
         .ok()
         .and_then(|config| config.sync_root);
-    let roots = roots_to_tear_down(identity.cloud_files_provider_name(), &shell_roots(), config_root.as_deref());
+    let roots = roots_to_tear_down(
+        identity.cloud_files_provider_name(),
+        &shell_roots(),
+        config_root.as_deref(),
+    );
     let known: Vec<PathBuf> = crate::known_folder::KNOWN_FOLDERS
         .iter()
         .filter_map(|folder| crate::known_folder::resolve_known_folder_current(folder.key))
@@ -291,9 +295,7 @@ pub fn uninstall(identity: &'static EngineIdentity, choice: SyncFolderChoice) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::windows_cf::placeholders::{
-        convert_to_in_sync_placeholder, create_placeholder,
-    };
+    use crate::windows_cf::placeholders::{convert_to_in_sync_placeholder, create_placeholder};
 
     /// Whether Windows holds a placeholder at `path` (read through `CfGetPlaceholderInfo`: a placeholder wholly on
     /// disk hides its reparse bit from the attributes).
@@ -321,21 +323,50 @@ mod tests {
 
     #[test]
     fn registration_teardown_keeps_what_is_here_and_removes_what_is_not() {
-        assert_eq!(entry_action(false, false, 0x20), EntryAction::Revert, "tried; a plain file answers no");
+        assert_eq!(
+            entry_action(false, false, 0x20),
+            EntryAction::Revert,
+            "tried; a plain file answers no"
+        );
         assert_eq!(entry_action(false, false, REPARSE), EntryAction::Revert, "downloaded");
-        assert_eq!(entry_action(false, false, RECALL), EntryAction::RemoveCloudOnly, "cloud-only, disguised");
-        assert_eq!(entry_action(false, false, REPARSE | RECALL), EntryAction::RemoveCloudOnly);
-        assert_eq!(entry_action(true, false, REPARSE | RECALL), EntryAction::Revert, "a folder is never removed");
-        assert_eq!(entry_action(true, true, REPARSE), EntryAction::Leave, "a junction is not followed");
-        assert_eq!(entry_action(false, true, REPARSE | RECALL), EntryAction::Leave, "a symlink");
+        assert_eq!(
+            entry_action(false, false, RECALL),
+            EntryAction::RemoveCloudOnly,
+            "cloud-only, disguised"
+        );
+        assert_eq!(
+            entry_action(false, false, REPARSE | RECALL),
+            EntryAction::RemoveCloudOnly
+        );
+        assert_eq!(
+            entry_action(true, false, REPARSE | RECALL),
+            EntryAction::Revert,
+            "a folder is never removed"
+        );
+        assert_eq!(
+            entry_action(true, true, REPARSE),
+            EntryAction::Leave,
+            "a junction is not followed"
+        );
+        assert_eq!(
+            entry_action(false, true, REPARSE | RECALL),
+            EntryAction::Leave,
+            "a symlink"
+        );
     }
 
     #[test]
     fn registration_teardown_finds_only_this_providers_roots_once() {
         let shell = vec![
             ("Beebeeb!00aa".to_string(), PathBuf::from(r"C:\Users\a\Beebeeb")),
-            ("BeebeebTest!00bb".to_string(), PathBuf::from(r"C:\Users\a\Beebeeb Test")),
-            ("OneDrive!S-1!Personal".to_string(), PathBuf::from(r"C:\Users\a\OneDrive")),
+            (
+                "BeebeebTest!00bb".to_string(),
+                PathBuf::from(r"C:\Users\a\Beebeeb Test"),
+            ),
+            (
+                "OneDrive!S-1!Personal".to_string(),
+                PathBuf::from(r"C:\Users\a\OneDrive"),
+            ),
         ];
         assert_eq!(
             roots_to_tear_down("Beebeeb", &shell, Some(Path::new(r"c:\users\a\beebeeb"))),
@@ -354,9 +385,18 @@ mod tests {
     #[test]
     fn registration_teardown_never_removes_a_folder_holding_a_known_folder() {
         let root = Path::new(r"C:\Users\a\Beebeeb");
-        assert!(remove_would_take_known_folder(root, &[PathBuf::from(r"c:\users\a\beebeeb\Documents")]));
-        assert!(!remove_would_take_known_folder(root, &[PathBuf::from(r"C:\Users\a\Documents")]));
-        assert!(!remove_would_take_known_folder(root, &[PathBuf::from(r"C:\Users\a\Beebeeb Docs")]));
+        assert!(remove_would_take_known_folder(
+            root,
+            &[PathBuf::from(r"c:\users\a\beebeeb\Documents")]
+        ));
+        assert!(!remove_would_take_known_folder(
+            root,
+            &[PathBuf::from(r"C:\Users\a\Documents")]
+        ));
+        assert!(!remove_would_take_known_folder(
+            root,
+            &[PathBuf::from(r"C:\Users\a\Beebeeb Docs")]
+        ));
     }
 
     /// A QA sync root with a downloaded file in a downloaded folder, a cloud-only file and a file made here.

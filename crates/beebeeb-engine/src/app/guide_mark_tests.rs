@@ -201,7 +201,11 @@ fn a_sign_out_that_clears_the_accounts_rows_keeps_the_mark_and_no_other_account_
     // An account switch removes the leaving account's mark only (dc-014).
     let db = StateDb::open(&path).unwrap();
     db.forget_share_trust_rows(A.0.unwrap()).unwrap();
-    assert_eq!(guide_rows(&path), ["guide_done:user-b"], "only that account's mark goes");
+    assert_eq!(
+        guide_rows(&path),
+        ["guide_done:user-b"],
+        "only that account's mark goes"
+    );
     db.forget_share_trust_rows(B.0.unwrap()).unwrap();
     assert!(guide_rows(&path).is_empty());
     let other = signed_in(&engine, B);

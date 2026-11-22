@@ -1075,20 +1075,48 @@ async fn upload_ack_lost_and_session_gone(master_key: [u8; 32], restart: bool) {
 
     let state = server.finish();
     let count = |method: &str, path: &str| state.requests.iter().filter(|(m, p)| m == method && p == path).count();
-    assert_eq!(count("POST", "/api/v1/uploads/init"), 1, "one session: {:?}", state.requests);
-    assert_eq!(count("PUT", "/api/v1/uploads/session-1/chunks/0"), 1, "the chunk is sent once");
-    assert_eq!(count("POST", "/api/v1/uploads/session-1/complete"), 2, "complete, and one repeat");
-    assert_eq!(count("GET", &format!("/api/v1/files/{id}/versions")), 1, "the server is asked once");
     assert_eq!(
-        state.requests.iter().filter(|(_, p)| p.ends_with("/upload/abandon")).count(),
+        count("POST", "/api/v1/uploads/init"),
+        1,
+        "one session: {:?}",
+        state.requests
+    );
+    assert_eq!(
+        count("PUT", "/api/v1/uploads/session-1/chunks/0"),
+        1,
+        "the chunk is sent once"
+    );
+    assert_eq!(
+        count("POST", "/api/v1/uploads/session-1/complete"),
+        2,
+        "complete, and one repeat"
+    );
+    assert_eq!(
+        count("GET", &format!("/api/v1/files/{id}/versions")),
+        1,
+        "the server is asked once"
+    );
+    assert_eq!(
+        state
+            .requests
+            .iter()
+            .filter(|(_, p)| p.ends_with("/upload/abandon"))
+            .count(),
         0,
         "a committed upload is never abandoned"
     );
     assert!(state.trashes.is_empty(), "and never trashed");
     assert_eq!(state.files[&id].versions.len(), 1, "one version, not two");
     assert_eq!(state.latest_plaintext(&id, master_key), bytes);
-    assert_eq!(bridge.db.highest_file_version(&id).unwrap(), Some(1), "landed as version 1");
-    assert!(bridge.db.list_operations_for_file(&id).unwrap().is_empty(), "the op is done");
+    assert_eq!(
+        bridge.db.highest_file_version(&id).unwrap(),
+        Some(1),
+        "landed as version 1"
+    );
+    assert!(
+        bridge.db.list_operations_for_file(&id).unwrap().is_empty(),
+        "the op is done"
+    );
     assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty());
 }
 
@@ -1134,8 +1162,16 @@ async fn an_upload_whose_session_is_gone_before_any_commit_is_sent_again() {
     }
     drain_upload_queue(&bridge, &sync_root).await;
     let state = server.finish();
-    let inits = state.requests.iter().filter(|(_, p)| p == "/api/v1/uploads/init").count();
-    assert_eq!(inits, 2, "a fresh upload after the reaped session: {:?}", state.requests);
+    let inits = state
+        .requests
+        .iter()
+        .filter(|(_, p)| p == "/api/v1/uploads/init")
+        .count();
+    assert_eq!(
+        inits, 2,
+        "a fresh upload after the reaped session: {:?}",
+        state.requests
+    );
     let ids = state.files_with_content();
     assert_eq!(ids.len(), 1);
     assert_eq!(state.files[&ids[0]].versions.len(), 1, "one version");

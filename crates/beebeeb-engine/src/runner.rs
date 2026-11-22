@@ -383,9 +383,7 @@ async fn run(
     // instant `abort()` sets it, not just at this loop's next tick boundary.
     // Task 1683 slice 2: the board the popover snapshot reads (managed app state),
     // or a private one when this runner has no app state (tests).
-    let transfers = app
-        .transfer_board()
-        .unwrap_or_default();
+    let transfers = app.transfer_board().unwrap_or_default();
     // Spec D11: the bridge's queue reads the account's pass requests, so it sends nothing while a release
     // waits for a pass.
     let bridge = Arc::new(

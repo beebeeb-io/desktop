@@ -412,20 +412,23 @@ impl<C: CredentialStores> Engine<C> {
         // known (an older row, another version): the cache entry's 404 decides, as before. A 404 the caller saw just
         // now is newer than the row and wins.
         let server_has = match self.local_state() {
-            Ok(state) if state.session() == session => {
-                state.with(|db| db.server_has_thumbnail(file_id, version).ok().flatten()).ok().flatten()
-            }
+            Ok(state) if state.session() == session => state
+                .with(|db| db.server_has_thumbnail(file_id, version).ok().flatten())
+                .ok()
+                .flatten(),
             _ => None,
         };
-        let Some(entry) = entry.filter(|entry| {
-            !entry.uploaded && (server_404 || server_has.map_or(entry.server_404, |has| !has))
-        }) else {
+        let Some(entry) =
+            entry.filter(|entry| !entry.uploaded && (server_404 || server_has.map_or(entry.server_404, |has| !has)))
+        else {
             return MadeUpload::NothingToSend;
         };
         if self.is_paused() {
             return MadeUpload::Paused;
         }
-        let metered = crate::config::DesktopConfig::load_for(self.identity).ok().and_then(|c| c.metered);
+        let metered = crate::config::DesktopConfig::load_for(self.identity)
+            .ok()
+            .and_then(|c| c.metered);
         let hold = crate::power::hold_now(metered, &crate::power::SystemPower);
         if let Some(hold) = hold {
             return MadeUpload::NotNow(NotNow::Hold(hold));

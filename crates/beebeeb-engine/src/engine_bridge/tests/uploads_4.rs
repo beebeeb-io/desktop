@@ -353,10 +353,16 @@ fn flow7_two_renames_in_one_batch_land_final_name_on_local_row() {
     );
 
     let row = bridge.db().get_file(file).unwrap().unwrap();
-    assert_eq!(row.path, "final.txt", "second rename in the same batch must not be dropped");
+    assert_eq!(
+        row.path, "final.txt",
+        "second rename in the same batch must not be dropped"
+    );
     assert_eq!(row.status, FileStatus::Local, "a rename is metadata-only");
     assert_eq!(row.content_hash.as_deref(), Some("local-hash-abc"));
-    assert!(conflicts.is_empty(), "a metadata-only op never raises a content conflict");
+    assert!(
+        conflicts.is_empty(),
+        "a metadata-only op never raises a content conflict"
+    );
 }
 
 #[test]
@@ -373,7 +379,11 @@ fn flow7_move_then_rename_in_one_batch_lands_under_dest_on_local_row() {
         &bridge,
         dir.path(),
         &[
-            (31, "file_move", serde_json::json!({ "id": file, "new_parent_id": dest })),
+            (
+                31,
+                "file_move",
+                serde_json::json!({ "id": file, "new_parent_id": dest }),
+            ),
             (
                 32,
                 "file_rename",
@@ -465,7 +475,10 @@ fn flow7_rename_with_undecryptable_name_keeps_path_and_schedules_resnapshot() {
             serde_json::json!({ "id": file, "new_name_encrypted": "not-a-valid-encrypted-blob" }),
         )],
     );
-    assert!(!bridge.db().take_needs_resnapshot().unwrap(), "a name that stays unreadable is no loop");
+    assert!(
+        !bridge.db().take_needs_resnapshot().unwrap(),
+        "a name that stays unreadable is no loop"
+    );
 
     // A name that decrypts (the keys changed, another client fixed it) is applied and clears the mark.
     flow7_apply_batch(
@@ -595,7 +608,10 @@ async fn a_seeded_upload_writes_chunks_of_at_most_32_mib() {
         .filter(|r| r.method == "PUT" && r.path.contains("/chunks/"))
         .map(|r| r.body.len() as u64)
         .collect();
-    assert!(sizes.len() >= 3, "70 MiB cannot fit in fewer than three 32 MiB chunks: {sizes:?}");
+    assert!(
+        sizes.len() >= 3,
+        "70 MiB cannot fit in fewer than three 32 MiB chunks: {sizes:?}"
+    );
     let overhead = beebeeb_core::chunk_stream::CHUNK_OVERHEAD;
     for size in &sizes {
         assert!(

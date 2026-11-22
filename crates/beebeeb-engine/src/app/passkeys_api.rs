@@ -191,11 +191,7 @@ impl<C: CredentialStores> Engine<C> {
     /// while that is the session in memory, asked through `person_session` (a person's call: a locked screen
     /// refuses it, also for a turn read while it was locked) with no session change half done. A session Beebeeb no
     /// longer accepts: `SessionEnded`, nothing is asked.
-    fn passkey_secrets(
-        &self,
-        session: SessionGeneration,
-        with_key: bool,
-    ) -> Result<ProvedKey, PasskeyProblem> {
+    fn passkey_secrets(&self, session: SessionGeneration, with_key: bool) -> Result<ProvedKey, PasskeyProblem> {
         if self.acct.session.is_poisoned() {
             return Err(PasskeyProblem::NotSignedIn);
         }

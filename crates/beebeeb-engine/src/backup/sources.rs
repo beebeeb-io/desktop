@@ -55,9 +55,10 @@ fn spellings(path: &Path) -> Option<Vec<Vec<String>>> {
     let clean = |p: &Path| p.is_absolute() && !p.components().any(|c| c == Component::ParentDir);
     let mut found = Vec::new();
     if let Ok(given) = std::path::absolute(path)
-        && clean(&given) {
-            found.push(keys(&given));
-        }
+        && clean(&given)
+    {
+        found.push(keys(&given));
+    }
     if let Ok(real) = std::fs::canonicalize(path) {
         let real = keys(&real);
         if !found.contains(&real) {
@@ -97,13 +98,16 @@ pub fn pass_excludes(sync_root: &Path) -> Option<Vec<PathBuf>> {
     let clean = |p: &Path| p.is_absolute() && !p.components().any(|c| c == Component::ParentDir);
     let mut excludes = Vec::new();
     if let Ok(given) = std::path::absolute(sync_root)
-        && clean(&given) {
-            excludes.push(given);
-        }
+        && clean(&given)
+    {
+        excludes.push(given);
+    }
     if let Ok(real) = std::fs::canonicalize(sync_root)
-        && clean(&real) && !excludes.contains(&real) {
-            excludes.push(real);
-        }
+        && clean(&real)
+        && !excludes.contains(&real)
+    {
+        excludes.push(real);
+    }
     if excludes.is_empty() {
         return None;
     }
@@ -119,7 +123,9 @@ pub fn pass_excludes(sync_root: &Path) -> Option<Vec<PathBuf>> {
 /// `%ProgramData%\Microsoft\Windows\Containers` (`C:\ProgramData` when the variable is unset). Not absolute off
 /// Windows, so [`pass_excludes`] drops it there.
 fn containers_folder() -> PathBuf {
-    let base = std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let base = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
     base.join("Microsoft").join("Windows").join("Containers")
 }
 

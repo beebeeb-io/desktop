@@ -276,9 +276,8 @@ impl StateDb {
     /// R3: the recorded orphans whose mark is still pending, oldest first, at most `limit`.
     pub fn list_pending_unknown_orphans(&self, limit: usize) -> Result<Vec<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT path FROM unknown_orphans WHERE mark_pending = 1 ORDER BY updated_at, path LIMIT ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT path FROM unknown_orphans WHERE mark_pending = 1 ORDER BY updated_at, path LIMIT ?1")?;
         let rows = stmt.query_map(params![limit as i64], |r| r.get(0))?;
         rows.collect()
     }
@@ -286,7 +285,9 @@ impl StateDb {
     pub fn has_unknown_orphan(&self, path: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(conn
-            .query_row("SELECT 1 FROM unknown_orphans WHERE path = ?1", params![path], |_| Ok(()))
+            .query_row("SELECT 1 FROM unknown_orphans WHERE path = ?1", params![path], |_| {
+                Ok(())
+            })
             .optional()?
             .is_some())
     }
@@ -492,13 +493,12 @@ impl StateDb {
     /// ([`Self::wipe_fetched_content_if_unchanged`]) it guards. `None`: no such row.
     pub fn content_seq(&self, file_id: &str) -> Result<Option<i64>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn
-            .query_row(
-                "SELECT content_seq FROM files WHERE file_id = ?1",
-                params![file_id],
-                |row| row.get(0),
-            )
-            .optional()
+        conn.query_row(
+            "SELECT content_seq FROM files WHERE file_id = ?1",
+            params![file_id],
+            |row| row.get(0),
+        )
+        .optional()
     }
     /// Task 2199 (dc-103b; design 1640 "Not done" (a)): the file's placeholder was dehydrated whole, so nothing
     /// fetched is on disk: its agreed content and its fetch candidate are wiped to empty (`0`), so the next range

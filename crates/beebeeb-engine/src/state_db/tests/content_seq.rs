@@ -61,7 +61,11 @@ fn content_seq_is_added_to_a_0_8_25_database_once() {
     for _ in 0..3 {
         let db = StateDb::open(&path).unwrap();
         assert_eq!(seq(&db), 0, "an older row starts at 0");
-        assert_eq!(db.fetched_content(FILE).unwrap(), Some((3, Some("h3".into()))), "its content kept");
+        assert_eq!(
+            db.fetched_content(FILE).unwrap(),
+            Some((3, Some("h3".into()))),
+            "its content kept"
+        );
     }
     let db = StateDb::open(&path).unwrap();
     db.record_fetched_version(FILE, 4, "h4").unwrap();

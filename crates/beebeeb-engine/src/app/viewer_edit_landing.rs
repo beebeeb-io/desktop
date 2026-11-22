@@ -61,7 +61,9 @@ pub(super) fn look(db: &StateDb, file_id: &str, queued: &QueuedSave, base: i64) 
     if op.last_error.as_deref() != Some(STALE_BASE) {
         return Ok(Fate::Failed);
     }
-    let theirs = db.get_file_contract_state(file_id)?.map_or(0, |contract| contract.current_version);
+    let theirs = db
+        .get_file_contract_state(file_id)?
+        .map_or(0, |contract| contract.current_version);
     if theirs <= base {
         return Ok(Fate::ParkedStale);
     }

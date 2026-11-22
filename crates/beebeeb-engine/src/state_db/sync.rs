@@ -450,11 +450,7 @@ impl StateDb {
     /// consumes the same monotonic cursor, so a client that stops mid-window
     /// resumes exactly where it stopped, and a client that never resumes
     /// cannot lose data (the anchor only advances when it re-polls from nil).
-    pub fn list_file_changes_paged(
-        &self,
-        since_anchor: Option<&[u8]>,
-        limit: usize,
-    ) -> Result<Option<ChangePage>> {
+    pub fn list_file_changes_paged(&self, since_anchor: Option<&[u8]>, limit: usize) -> Result<Option<ChangePage>> {
         let limit = limit.max(1);
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let since: i64 = match since_anchor {

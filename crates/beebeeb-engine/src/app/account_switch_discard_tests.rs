@@ -60,7 +60,10 @@ impl SyncRootPort for DiscardPort {
 }
 
 fn kept_root(pc: &Pc) -> PathBuf {
-    pc.engine.config.state_dir.join(crate::sign_out::kept_names::KEPT_FOLDER_NAME)
+    pc.engine
+        .config
+        .state_dir
+        .join(crate::sign_out::kept_names::KEPT_FOLDER_NAME)
 }
 
 /// Every file under the kept folder, as `name=bytes`, sorted.
@@ -84,7 +87,10 @@ fn kept_files(root: &Path) -> Vec<String> {
 }
 
 fn expected_copies(count: usize) -> Vec<String> {
-    let mut want: Vec<String> = UNSENT[..count].iter().map(|name| format!("{name}=typed by A: {name}")).collect();
+    let mut want: Vec<String> = UNSENT[..count]
+        .iter()
+        .map(|name| format!("{name}=typed by A: {name}"))
+        .collect();
     want.sort();
     want
 }
@@ -98,15 +104,26 @@ fn a_left_unsent(pc: &Pc, a: &Identity, count: usize) {
     drop(db);
     rusqlite::Connection::open(pc.state_db())
         .unwrap()
-        .execute("UPDATE files SET local_hash = 'h', fetched_min_version = 0 WHERE item_kind = 'file'", [])
+        .execute(
+            "UPDATE files SET local_hash = 'h', fetched_min_version = 0 WHERE item_kind = 'file'",
+            [],
+        )
         .unwrap();
     std::fs::write(pc.root().join("Synced.txt"), b"ten bytes!").unwrap();
     for (n, name) in UNSENT[..count].iter().enumerate() {
-        row(&pc.db(), &format!("0b000000-0000-4000-8000-00000000000{n}"), name, false, 1);
+        row(
+            &pc.db(),
+            &format!("0b000000-0000-4000-8000-00000000000{n}"),
+            name,
+            false,
+            1,
+        );
         std::fs::write(pc.root().join(name), format!("typed by A: {name}")).unwrap();
     }
     let vault = pc.engine.vault();
-    vault.store_wrapped_master_key(SecretBytes::new_master_key(&A_KEY)).unwrap();
+    vault
+        .store_wrapped_master_key(SecretBytes::new_master_key(&A_KEY))
+        .unwrap();
     vault.bind_vault_key_owner(a.user_id.as_deref().unwrap()).unwrap();
     pc.store()
         .save_account_key(other().user_id.as_deref().unwrap(), SecretBytes::new_master_key(&B_KEY))
@@ -116,7 +133,9 @@ fn a_left_unsent(pc: &Pc, a: &Identity, count: usize) {
 
 impl Pc {
     fn store(&self) -> <MemoryCredentials as CredentialStores>::Store {
-        self.engine.stores.for_account(self.engine.identity, &self.engine.config.account_id)
+        self.engine
+            .stores
+            .for_account(self.engine.identity, &self.engine.config.account_id)
     }
 
     fn account_key(&self, who: &Identity) -> Option<Vec<u8>> {
@@ -128,7 +147,10 @@ impl Pc {
 }
 
 fn a_with(tag: &str) -> Identity {
-    Identity::new(Some(&format!("user-dc111-{tag}")), Some(&format!("dc111-{tag}@example.eu")))
+    Identity::new(
+        Some(&format!("user-dc111-{tag}")),
+        Some(&format!("dc111-{tag}@example.eu")),
+    )
 }
 
 /// The refusal this task starts from, so the tests below are about the state a person really meets.
@@ -172,7 +194,11 @@ fn cancel_changes_nothing() {
     assert_eq!(listing(&pc.root()), files);
     assert_eq!(kept_files(&kept_root(&pc)), Vec::<String>::new(), "nothing kept");
     assert_eq!(port.removals.load(Ordering::SeqCst), 0);
-    assert_eq!(pc.engine.vault().vault_key_owner().unwrap(), a.user_id.clone(), "A's key as it was");
+    assert_eq!(
+        pc.engine.vault().vault_key_owner().unwrap(),
+        a.user_id.clone(),
+        "A's key as it was"
+    );
     refused_for_unsent(&pc, &port);
 }
 
@@ -194,12 +220,20 @@ fn every_copy_exists_before_the_purge_and_the_switch_goes_on() {
         "the copies were there when the purge began"
     );
     assert_eq!(done.kept, 3);
-    assert_eq!(done.start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+    assert_eq!(
+        done.start,
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
     assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
     assert_eq!(listing(&pc.root()), Vec::<String>::new());
     assert_eq!(kept_files(&kept_root(&pc)), expected_copies(3), "the copies stay");
     // desktop.toml is one file for every test, so only that a folder was recorded is asserted here.
-    assert!(crate::config::DesktopConfig::load_for(&TEST).unwrap().kept_unsent_folder.is_some());
+    assert!(
+        crate::config::DesktopConfig::load_for(&TEST)
+            .unwrap()
+            .kept_unsent_folder
+            .is_some()
+    );
 }
 
 /// R4: a discard-and-switch is a switch. A's key stays in A's own slot and B's in B's.
@@ -275,9 +309,14 @@ fn a_switch_removes_the_previous_accounts_thumb_cache() {
         &master,
         crate::thumb_cache::DEFAULT_CAP_MB,
     );
-    cache.put("0190d8a6-1b2c-7d3e-8f40-0123456789ab", 1, 2, 2, &[1u8; 16]).unwrap();
+    cache
+        .put("0190d8a6-1b2c-7d3e-8f40-0123456789ab", 1, 2, 2, &[1u8; 16])
+        .unwrap();
     assert!(cache.get("0190d8a6-1b2c-7d3e-8f40-0123456789ab").is_some());
     let ask = pc.engine.discard_and_switch_ask_with(&pc.root(), &port).unwrap();
     pc.engine.discard_and_switch_with(&ask, pc.root(), &port).unwrap();
-    assert!(cache.get("0190d8a6-1b2c-7d3e-8f40-0123456789ab").is_none(), "A's thumbnail is gone");
+    assert!(
+        cache.get("0190d8a6-1b2c-7d3e-8f40-0123456789ab").is_none(),
+        "A's thumbnail is gone"
+    );
 }

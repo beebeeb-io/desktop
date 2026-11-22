@@ -740,12 +740,16 @@ async fn review_p3_1_an_unresolvable_envelope_never_clears_the_fact() {
     );
     assert!(bridge.is_request_row(ROW), "the in-memory view keeps it too");
     // P1-1: a blocked request row is not writable, not even by a rename.
-    let error =
-        match crate::engine_bridge::meta::owned_metadata_for_rename(bridge.db(), &[7u8; 32], ROW, "renamed.txt", None)
-        {
-            Ok(_) => panic!("a blocked request row refuses a rename"),
-            Err(error) => error.to_string(),
-        };
+    let error = match crate::engine_bridge::meta::owned_metadata_for_rename(
+        bridge.db(),
+        &[7u8; 32],
+        ROW,
+        "renamed.txt",
+        None,
+    ) {
+        Ok(_) => panic!("a blocked request row refuses a rename"),
+        Err(error) => error.to_string(),
+    };
     assert!(error.contains("item key is unavailable"), "{error}");
 }
 

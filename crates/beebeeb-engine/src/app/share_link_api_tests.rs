@@ -733,7 +733,11 @@ fn a_refused_choice_is_invalid_and_never_sent() {
         Err(ShareLinkError::NotFound)
     );
     assert_eq!(patches(&fake), 0);
-    assert!(engine.share_link_change_for(turn, &id, &hours(MAX_EXPIRES_IN_HOURS)).is_ok());
+    assert!(
+        engine
+            .share_link_change_for(turn, &id, &hours(MAX_EXPIRES_IN_HOURS))
+            .is_ok()
+    );
 }
 
 #[test]
@@ -745,7 +749,10 @@ fn a_revoked_or_unknown_link_is_not_found() {
         passphrase: None,
     };
     fake.first.revoke_links();
-    assert_eq!(engine.share_link_change_for(turn, &id, &change), Err(ShareLinkError::NotFound));
+    assert_eq!(
+        engine.share_link_change_for(turn, &id, &change),
+        Err(ShareLinkError::NotFound)
+    );
     assert_eq!(
         engine.share_link_change_for(turn, "a0000000-0000-4000-8000-0000000009ff", &change),
         Err(ShareLinkError::NotFound)

@@ -1166,7 +1166,12 @@ async fn flow7_a_cut_upload_restarts_in_a_fresh_session_and_never_continues_the_
     let seen = Arc::clone(&server.requests);
     let chunk_received = async move {
         for _ in 0..6000 {
-            if seen.lock().unwrap().iter().any(|r| r.method == "PUT" && r.path.contains("/chunks/")) {
+            if seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.method == "PUT" && r.path.contains("/chunks/"))
+            {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 return;
             }

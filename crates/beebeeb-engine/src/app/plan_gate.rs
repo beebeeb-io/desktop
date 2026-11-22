@@ -8,7 +8,7 @@
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
 use crate::api_client::ApiClient;
-use crate::signin::gate::{has_no_plan, GateState};
+use crate::signin::gate::{GateState, has_no_plan};
 
 #[derive(Default)]
 pub(super) struct PlanKnown {
@@ -54,7 +54,12 @@ impl<C: CredentialStores> Engine<C> {
             return;
         };
         let api = ApiClient::new(self.config.api_base.clone(), std::mem::take(&mut *token), [0; 32]);
-        let (plan, acct, view, host) = (self.plan.clone(), self.acct.clone(), self.view.clone(), self.host.clone());
+        let (plan, acct, view, host) = (
+            self.plan.clone(),
+            self.acct.clone(),
+            self.view.clone(),
+            self.host.clone(),
+        );
         self.runtime.spawn(async move {
             // No answer in time changes nothing: the gate never blocks without one.
             let Ok(Ok(subscription)) = tokio::time::timeout(PLAN_TIMEOUT, api.subscription()).await else {

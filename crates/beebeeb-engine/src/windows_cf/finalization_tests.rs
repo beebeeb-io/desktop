@@ -1388,14 +1388,21 @@ fn stamp_if_agreed_hashes_beside_another_reader_and_marks_after_it_lets_go() {
     std::fs::write(&path, bytes).unwrap();
     placeholders::convert_to_unsynced_placeholder(&path, "n4-id").unwrap();
     track(&db, "n4-id", Some(sha256(bytes)));
-    let reader = std::fs::OpenOptions::new().read(true).share_mode(7).open(&path).unwrap();
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(7)
+        .open(&path)
+        .unwrap();
     assert!(
         !placeholders::stamp_if_agreed(&db, "n4-id", &path).unwrap(),
         "not marked while another reader holds the file"
     );
     drop(reader);
     assert!(placeholders::stamp_if_agreed(&db, "n4-id", &path).unwrap());
-    assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "n4-id"));
+    assert_eq!(
+        placeholders::platform_view(&path),
+        placeholder(OnDisk::Wholly, true, "n4-id")
+    );
     settle();
 }
 

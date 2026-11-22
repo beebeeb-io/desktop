@@ -11,8 +11,10 @@ use crate::keychain::SecretBytes;
 const SYNCED: &str = "Synced by A.txt";
 const A_KEY: [u8; 32] = [0xA1; 32];
 /// What A left, by path under the sync folder, with its bytes.
-const LEFT: [(&str, &str); 2] =
-    [("Drafts/Plan of A.txt", "typed by A, never sent"), ("Notes of A.txt", "A's own notes")];
+const LEFT: [(&str, &str); 2] = [
+    ("Drafts/Plan of A.txt", "typed by A, never sent"),
+    ("Notes of A.txt", "A's own notes"),
+];
 
 /// Windows' answers for this switch: a file is a synced copy only when it is [`SYNCED`]; the removal refuses,
 /// deleting nothing, at any other file and at a folder no row names (the Windows purge's rule), else it deletes
@@ -23,7 +25,9 @@ struct AsidePort {
 
 impl AsidePort {
     fn new() -> Self {
-        Self { removals: AtomicU32::new(0) }
+        Self {
+            removals: AtomicU32::new(0),
+        }
     }
 }
 
@@ -48,7 +52,11 @@ impl SyncRootPort for AsidePort {
         for path in listing(folder) {
             let path = path.replace('\\', "/");
             let on_the_list = db.get_file_by_path(&path).unwrap().is_some();
-            let ours = if folder.join(&path).is_dir() { on_the_list } else { path == SYNCED };
+            let ours = if folder.join(&path).is_dir() {
+                on_the_list
+            } else {
+                path == SYNCED
+            };
             if !ours {
                 return Err("an item that is not on the list".to_string());
             }
@@ -77,7 +85,10 @@ fn a_signed_out(pc: &Pc, left: bool) {
     drop(db);
     rusqlite::Connection::open(pc.state_db())
         .unwrap()
-        .execute("UPDATE files SET local_hash = 'h', fetched_min_version = 0 WHERE item_kind = 'file'", [])
+        .execute(
+            "UPDATE files SET local_hash = 'h', fetched_min_version = 0 WHERE item_kind = 'file'",
+            [],
+        )
         .unwrap();
     std::fs::write(pc.root().join(SYNCED), b"ten bytes!").unwrap();
     if left {
@@ -88,7 +99,9 @@ fn a_signed_out(pc: &Pc, left: bool) {
         }
     }
     let vault = pc.engine.vault();
-    vault.store_wrapped_master_key(SecretBytes::new_master_key(&A_KEY)).unwrap();
+    vault
+        .store_wrapped_master_key(SecretBytes::new_master_key(&A_KEY))
+        .unwrap();
     vault.bind_vault_key_owner(a().user_id.as_deref().unwrap()).unwrap();
     pc.sign_in(&other());
 }
@@ -96,7 +109,9 @@ fn a_signed_out(pc: &Pc, left: bool) {
 /// The folder "Keep them aside" makes for A today, beside the sync folder.
 fn aside(pc: &Pc) -> PathBuf {
     let day = chrono::Local::now().date_naive().format("%Y-%m-%d");
-    pc.temp.path().join(format!("Beebeeb files from rc-b-a@example.eu ({day})"))
+    pc.temp
+        .path()
+        .join(format!("Beebeeb files from rc-b-a@example.eu ({day})"))
 }
 
 fn a_key_in_its_slot(pc: &Pc) -> Option<Vec<u8>> {
@@ -150,11 +165,27 @@ fn keep_aside_moves_every_file_byte_for_byte_and_the_start_goes_on() {
     for (path, bytes) in LEFT {
         assert_eq!(std::fs::read_to_string(aside(&pc).join(path)).unwrap(), bytes, "{path}");
     }
-    assert_eq!(listing(&aside(&pc)).len(), 3, "the two files and A's folder, nothing else");
-    assert_eq!(done.start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }), "past the binding");
+    assert_eq!(
+        listing(&aside(&pc)).len(),
+        3,
+        "the two files and A's folder, nothing else"
+    );
+    assert_eq!(
+        done.start,
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }),
+        "past the binding"
+    );
     assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
-    assert_eq!(listing(&pc.root()), Vec::<String>::new(), "nothing of A's is left in the sync folder");
-    assert_eq!(a_key_in_its_slot(&pc), Some(A_KEY.to_vec()), "R4: A's key is kept in A's slot");
+    assert_eq!(
+        listing(&pc.root()),
+        Vec::<String>::new(),
+        "nothing of A's is left in the sync folder"
+    );
+    assert_eq!(
+        a_key_in_its_slot(&pc),
+        Some(A_KEY.to_vec()),
+        "R4: A's key is kept in A's slot"
+    );
 }
 
 /// Never into a folder that is already there: one with today's name keeps what it holds, and the files go to a new
@@ -170,9 +201,15 @@ fn a_folder_of_that_name_is_never_written_into() {
     let done = pc.engine.keep_aside_and_switch_with(pc.root(), &port).unwrap();
 
     assert_ne!(done.kept_in, aside(&pc));
-    assert_eq!(std::fs::read(aside(&pc).join("Notes of A.txt")).unwrap(), b"kept before");
+    assert_eq!(
+        std::fs::read(aside(&pc).join("Notes of A.txt")).unwrap(),
+        b"kept before"
+    );
     assert_eq!(listing(&aside(&pc)).len(), 1);
-    assert_eq!(std::fs::read_to_string(done.kept_in.join("Notes of A.txt")).unwrap(), "A's own notes");
+    assert_eq!(
+        std::fs::read_to_string(done.kept_in.join("Notes of A.txt")).unwrap(),
+        "A's own notes"
+    );
 }
 
 /// The discard of 111 takes the files A left too: a copy of each in the kept folder first, then the switch.
@@ -182,22 +219,42 @@ fn the_discard_keeps_a_copy_of_each_left_file_and_switches() {
     a_signed_out(&pc, true);
     let port = AsidePort::new();
     let ask = pc.engine.discard_and_switch_ask_with(&pc.root(), &port).unwrap();
-    assert_eq!(ask.names, vec!["Notes of A.txt".to_string(), "Plan of A.txt".to_string()], "names, never paths");
+    assert_eq!(
+        ask.names,
+        vec!["Notes of A.txt".to_string(), "Plan of A.txt".to_string()],
+        "names, never paths"
+    );
 
     let done = pc.engine.discard_and_switch_with(&ask, pc.root(), &port).unwrap();
 
     assert_eq!(done.kept, 2);
-    assert!(done.kept_in.starts_with(pc.engine.config.state_dir.join(crate::sign_out::kept_names::KEPT_FOLDER_NAME)));
+    assert!(
+        done.kept_in.starts_with(
+            pc.engine
+                .config
+                .state_dir
+                .join(crate::sign_out::kept_names::KEPT_FOLDER_NAME)
+        )
+    );
     let mut kept: Vec<String> = listing(&done.kept_in)
         .into_iter()
         .filter(|path| done.kept_in.join(path).is_file())
         .map(|path| std::fs::read_to_string(done.kept_in.join(path)).unwrap())
         .collect();
     kept.sort();
-    assert_eq!(kept, vec!["A's own notes".to_string(), "typed by A, never sent".to_string()]);
-    assert_eq!(done.start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+    assert_eq!(
+        kept,
+        vec!["A's own notes".to_string(), "typed by A, never sent".to_string()]
+    );
+    assert_eq!(
+        done.start,
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
     assert_eq!(listing(&pc.root()), Vec::<String>::new());
-    assert!(!aside(&pc).exists(), "the discard makes no folder beside the sync folder");
+    assert!(
+        !aside(&pc).exists(),
+        "the discard makes no folder beside the sync folder"
+    );
 }
 
 /// With nothing of a person's in the folder there is nothing to keep aside: asked anyway, it changes nothing, and
@@ -209,7 +266,10 @@ fn nothing_left_means_nothing_is_moved() {
     let port = AsidePort::new();
     let (contents, files) = (pc.contents(), listing(&pc.root()));
 
-    assert_eq!(pc.engine.keep_aside_and_switch_with(pc.root(), &port), Err(DiscardRefused::NothingToDiscard));
+    assert_eq!(
+        pc.engine.keep_aside_and_switch_with(pc.root(), &port),
+        Err(DiscardRefused::NothingToDiscard)
+    );
 
     assert_eq!((pc.contents(), listing(&pc.root())), (contents, files));
     assert_eq!(port.removals.load(Ordering::SeqCst), 0);
@@ -233,8 +293,14 @@ fn a_queued_change_of_the_previous_account_is_not_kept_aside() {
     let port = AsidePort::new();
     let files = listing(&pc.root());
 
-    assert_eq!(pc.engine.start_sync_with(pc.root(), &port), Err(SyncStartRefused::OtherAccountsData));
-    assert_eq!(pc.engine.keep_aside_and_switch_with(pc.root(), &port), Err(DiscardRefused::OtherWork));
+    assert_eq!(
+        pc.engine.start_sync_with(pc.root(), &port),
+        Err(SyncStartRefused::OtherAccountsData)
+    );
+    assert_eq!(
+        pc.engine.keep_aside_and_switch_with(pc.root(), &port),
+        Err(DiscardRefused::OtherWork)
+    );
 
     assert_eq!(listing(&pc.root()), files);
     assert!(!aside(&pc).exists());
@@ -252,8 +318,15 @@ fn empty_folders_the_previous_account_left_do_not_stop_the_switch() {
 
     let start = pc.engine.start_sync_with(pc.root(), &port);
 
-    assert_eq!(start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }), "past the binding");
+    assert_eq!(
+        start,
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }),
+        "past the binding"
+    );
     assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
     assert_eq!(listing(&pc.root()), Vec::<String>::new());
-    assert!(!aside(&pc).exists(), "nothing was kept aside: there was nothing to keep");
+    assert!(
+        !aside(&pc).exists(),
+        "nothing was kept aside: there was nothing to keep"
+    );
 }

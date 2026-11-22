@@ -402,7 +402,11 @@ async fn a_claimed_invite_is_listed_with_the_opening_placeholder() {
     let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [111u8; 32]);
     let outcome = bridge.refresh_shared_roots().await.unwrap();
     assert_eq!(outcome.active_shared_root_ids, vec!["claimed-folder".to_string()]);
-    let row = bridge.db.get_file("claimed-folder").unwrap().expect("claimed row is listed");
+    let row = bridge
+        .db
+        .get_file("claimed-folder")
+        .unwrap()
+        .expect("claimed row is listed");
     assert_eq!(row.path, "Shared with me/Opening shared folder…");
     let contract = bridge.db.get_file_contract_state("claimed-folder").unwrap().unwrap();
     assert_eq!(contract.namespace, Namespace::SharedWithMe);

@@ -70,7 +70,10 @@ impl SyncRootPort for SwitchPort {
         if self.removal == Removal::Fails {
             return Err("refused".to_string());
         }
-        if unasked.iter().any(|path| folder.join(path.trim_start_matches('/')).symlink_metadata().is_ok()) {
+        if unasked
+            .iter()
+            .any(|path| folder.join(path.trim_start_matches('/')).symlink_metadata().is_ok())
+        {
             return Err("an item that was not there".to_string());
         }
         for entry in std::fs::read_dir(folder).map_err(|e| e.to_string())? {
@@ -96,7 +99,10 @@ fn a_signed_out(pc: &Pc, owner: &Identity) {
     // A row synced the usual way knows its content; a bare row is a file of unknown content (the guarded set).
     rusqlite::Connection::open(pc.state_db())
         .unwrap()
-        .execute("UPDATE files SET local_hash = 'h', fetched_min_version = 0 WHERE item_kind = 'file'", [])
+        .execute(
+            "UPDATE files SET local_hash = 'h', fetched_min_version = 0 WHERE item_kind = 'file'",
+            [],
+        )
         .unwrap();
     std::fs::write(pc.root().join(A_NAME), b"ten bytes!").unwrap();
     std::fs::create_dir_all(pc.root().join("Taxes 2026")).unwrap();
@@ -108,8 +114,15 @@ fn start_with(pc: &Pc, port: &SwitchPort) -> Result<crate::app::SyncStart, SyncS
 
 fn nothing_of_a_left(pc: &Pc) {
     let rows = pc.contents().join("\n");
-    assert!(!rows.contains(A_NAME) && !rows.contains("Taxes 2026"), "A's names in B's rows:\n{rows}");
-    assert_eq!(listing(&pc.root()), Vec::<String>::new(), "A's items are gone from the folder");
+    assert!(
+        !rows.contains(A_NAME) && !rows.contains("Taxes 2026"),
+        "A's names in B's rows:\n{rows}"
+    );
+    assert_eq!(
+        listing(&pc.root()),
+        Vec::<String>::new(),
+        "A's items are gone from the folder"
+    );
 }
 
 /// The bug itself: B signs in over A's data and gets past the binding, to the registration, with A's rows and items
@@ -121,10 +134,17 @@ fn a_second_account_starts_clean_and_never_sees_the_first_ones_names() {
     pc.sign_in(&other());
     let port = SwitchPort::new(Removal::Works);
 
-    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+    assert_eq!(
+        start_with(&pc, &port),
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
 
     assert_eq!(port.removals.load(Ordering::SeqCst), 1);
-    assert_eq!(port.registers.load(Ordering::SeqCst), 1, "the start went on to the registration");
+    assert_eq!(
+        port.registers.load(Ordering::SeqCst),
+        1,
+        "the start went on to the registration"
+    );
     assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
     nothing_of_a_left(&pc);
 }
@@ -184,11 +204,17 @@ fn a_file_of_unknown_content_with_no_bytes_on_this_pc_does_not_keep_the_second_a
     pc.sign_in(&other());
     let port = SwitchPort::new(Removal::Works);
 
-    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+    assert_eq!(
+        start_with(&pc, &port),
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
 
     assert_eq!(port.removals.load(Ordering::SeqCst), 1);
     assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
-    assert!(!pc.contents().join("\n").contains(A_MADE_IN_THE_APP), "A's name is in B's rows");
+    assert!(
+        !pc.contents().join("\n").contains(A_MADE_IN_THE_APP),
+        "A's name is in B's rows"
+    );
     nothing_of_a_left(&pc);
 }
 
@@ -203,11 +229,16 @@ fn a_file_made_between_the_check_and_the_removal_survives_and_the_second_account
     let mut files = listing(&pc.root());
     pc.sign_in(&other());
     let port = SwitchPort::new(Removal::Works);
-    *port.dropped_after_the_check.lock().unwrap() = Some((A_MADE_IN_THE_APP.to_string(), b"typed by B just now".to_vec()));
+    *port.dropped_after_the_check.lock().unwrap() =
+        Some((A_MADE_IN_THE_APP.to_string(), b"typed by B just now".to_vec()));
 
     assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData));
 
-    assert_eq!(port.removals.load(Ordering::SeqCst), 1, "the removal was asked, and refused");
+    assert_eq!(
+        port.removals.load(Ordering::SeqCst),
+        1,
+        "the removal was asked, and refused"
+    );
     assert_eq!(port.registers.load(Ordering::SeqCst), 0);
     assert_eq!(
         std::fs::read(pc.root().join(A_MADE_IN_THE_APP)).unwrap(),
@@ -235,7 +266,10 @@ fn a_file_of_unknown_content_that_is_an_empty_placeholder_goes_with_the_rest() {
     pc.sign_in(&other());
     let port = SwitchPort::new(Removal::Works);
 
-    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+    assert_eq!(
+        start_with(&pc, &port),
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
 
     assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
     nothing_of_a_left(&pc);
@@ -253,7 +287,10 @@ fn a_file_of_unknown_content_with_bytes_on_this_pc_keeps_the_refusal_and_deletes
     pc.sign_in(&other());
     let port = SwitchPort::new(Removal::Works);
 
-    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::UnsentFileOfAnotherAccount));
+    assert_eq!(
+        start_with(&pc, &port),
+        Err(SyncStartRefused::UnsentFileOfAnotherAccount)
+    );
 
     assert_eq!(port.removals.load(Ordering::SeqCst), 0);
     assert_eq!(port.registers.load(Ordering::SeqCst), 0);
@@ -306,7 +343,10 @@ fn the_same_account_signing_back_in_keeps_everything() {
     pc.sign_in(&owner());
     let port = SwitchPort::new(Removal::Works);
 
-    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+    assert_eq!(
+        start_with(&pc, &port),
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
 
     assert_eq!(port.removals.load(Ordering::SeqCst), 0);
     assert_eq!(pc.contents(), contents);
@@ -360,15 +400,34 @@ fn the_first_accounts_entries_in_the_settings_file_go_with_its_data() {
     pc.sign_in(&b);
     let port = SwitchPort::new(Removal::Works);
 
-    assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+    assert_eq!(
+        start_with(&pc, &port),
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
 
     let config = settings_now();
     let names: Vec<&str> = config.backup_chosen_folders.iter().map(|f| f.name.as_str()).collect();
-    assert!(!names.contains(&"w27-a-photos"), "A's chosen folder is still in desktop.toml: {names:?}");
+    assert!(
+        !names.contains(&"w27-a-photos"),
+        "A's chosen folder is still in desktop.toml: {names:?}"
+    );
     assert!(names.contains(&"w27-b-music"), "B's own chosen folder stays: {names:?}");
-    assert!(!config.known_folder_backup.iter().any(|key| key == "custom:w27-a-photos"), "A's switch stays");
-    assert!(config.known_folder_backup.iter().any(|key| key == "custom:w27-b-music"), "B's switch stays");
-    assert_ne!(config.last_signed_in_email.as_deref(), Some("w27-settings-a@example.eu"), "A's address stays");
+    assert!(
+        !config
+            .known_folder_backup
+            .iter()
+            .any(|key| key == "custom:w27-a-photos"),
+        "A's switch stays"
+    );
+    assert!(
+        config.known_folder_backup.iter().any(|key| key == "custom:w27-b-music"),
+        "B's switch stays"
+    );
+    assert_ne!(
+        config.last_signed_in_email.as_deref(),
+        Some("w27-settings-a@example.eu"),
+        "A's address stays"
+    );
 }
 
 /// An account whose work waits for a person keeps its entries in desktop.toml as it keeps everything else.
@@ -384,7 +443,11 @@ fn a_refused_switch_keeps_the_first_accounts_entries_in_the_settings_file() {
 
     assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData));
 
-    let names: Vec<String> = settings_now().backup_chosen_folders.into_iter().map(|f| f.name).collect();
+    let names: Vec<String> = settings_now()
+        .backup_chosen_folders
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
     assert!(names.iter().any(|name| name == "w27-kept-photos"), "{names:?}");
 }
 
@@ -421,7 +484,10 @@ mod real_purge {
         }
         fn may_hold_bytes(&self, folder: &Path, path: &str) -> bool {
             let answer = self.os.may_hold_bytes(folder, path);
-            if !answer && path.trim_start_matches('/') == MADE_IN_THE_APP && self.dropped.fetch_add(1, Ordering::SeqCst) == 0 {
+            if !answer
+                && path.trim_start_matches('/') == MADE_IN_THE_APP
+                && self.dropped.fetch_add(1, Ordering::SeqCst) == 0
+            {
                 std::fs::write(folder.join(MADE_IN_THE_APP), self.drop_bytes).unwrap();
             }
             answer
@@ -451,14 +517,22 @@ mod real_purge {
 
         let started = pc.engine.start_sync_with(pc.root(), &port);
 
-        assert_eq!(port.dropped.load(Ordering::SeqCst), 1, "the file was dropped after the check");
+        assert_eq!(
+            port.dropped.load(Ordering::SeqCst),
+            1,
+            "the file was dropped after the check"
+        );
         assert_eq!(
             std::fs::read(pc.root().join(MADE_IN_THE_APP)).unwrap(),
             b"made during the switch",
             "the file made during the switch keeps every byte"
         );
         assert!(pc.root().join(FOLDER).is_dir());
-        assert_eq!(started, Err(SyncStartRefused::OtherAccountsData), "the second account is refused");
+        assert_eq!(
+            started,
+            Err(SyncStartRefused::OtherAccountsData),
+            "the second account is refused"
+        );
         assert_eq!(port.registers.load(Ordering::SeqCst), 0);
         assert_eq!(pc.db().owner().unwrap(), Some(owner()), "no row was cleared");
         assert_eq!(pc.contents(), contents);
@@ -478,7 +552,11 @@ mod account_switch_order {
         let mut rows = conn
             .prepare("SELECT key FROM sync_state WHERE key LIKE 'share_%' OR key LIKE 'guide_done:%' ORDER BY key")
             .unwrap();
-        let keys: Vec<String> = rows.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+        let keys: Vec<String> = rows
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
         keys.into_iter().filter(|key| key.contains(who)).collect()
     }
 
@@ -494,7 +572,9 @@ mod account_switch_order {
         }
         drop(db);
         let vault = pc.engine.vault();
-        vault.store_wrapped_master_key(SecretBytes::new_master_key(&[0xA1; 32])).unwrap();
+        vault
+            .store_wrapped_master_key(SecretBytes::new_master_key(&[0xA1; 32]))
+            .unwrap();
         vault.bind_vault_key_owner(a.user_id.as_deref().unwrap()).unwrap();
         assert_eq!(pins_of(pc, a.user_id.as_deref().unwrap()).len(), 3);
         pc.sign_in(&other());
@@ -525,13 +605,21 @@ mod account_switch_order {
             .unwrap();
         let port = SwitchPort::new(Removal::Works);
 
-        assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::OtherAccountsData), "B is refused, with words");
+        assert_eq!(
+            start_with(&pc, &port),
+            Err(SyncStartRefused::OtherAccountsData),
+            "B is refused, with words"
+        );
 
         assert_eq!(pc.db().owner().unwrap(), Some(a.clone()), "A still owns the local data");
         assert!(a_photos_in_settings(&a), "A's settings stay");
         assert_eq!(pins_of(&pc, a.user_id.as_deref().unwrap()).len(), 3, "A's pins stay");
         assert_eq!(pins_of(&pc, C_ID).len(), 3, "C's pins stay");
-        assert_eq!(pc.engine.vault().vault_key_owner().unwrap(), a.user_id.clone(), "A's key stays");
+        assert_eq!(
+            pc.engine.vault().vault_key_owner().unwrap(),
+            a.user_id.clone(),
+            "A's key stays"
+        );
     }
 
     /// A clean switch forgets A's settings, A's pins and A's key, and only A's: C's pins stay.
@@ -542,11 +630,18 @@ mod account_switch_order {
         a_left_everything(&pc, &a);
         let port = SwitchPort::new(Removal::Works);
 
-        assert_eq!(start_with(&pc, &port), Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }));
+        assert_eq!(
+            start_with(&pc, &port),
+            Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+        );
 
         assert_eq!(pc.db().owner().unwrap(), Some(other()));
         assert!(!a_photos_in_settings(&a), "A's settings go");
-        assert_eq!(pins_of(&pc, a.user_id.as_deref().unwrap()), Vec::<String>::new(), "A's pins go");
+        assert_eq!(
+            pins_of(&pc, a.user_id.as_deref().unwrap()),
+            Vec::<String>::new(),
+            "A's pins go"
+        );
         assert_eq!(pins_of(&pc, C_ID).len(), 3, "another account's pins stay");
         assert_eq!(pc.engine.vault().vault_key_owner().unwrap(), None, "A's key goes, last");
         assert!(!pc.engine.vault().has_vault_key().unwrap_or(false));

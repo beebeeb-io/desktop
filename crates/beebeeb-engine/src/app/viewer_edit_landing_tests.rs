@@ -53,7 +53,13 @@ fn set_version(db: &StateDb, version: i64) {
 }
 
 /// A signed-in engine with a writable document at version 4, and one save from version 4 queued.
-fn queued_save() -> (Arc<TestEngine>, tempfile::TempDir, tempfile::TempDir, StateDb, QueuedSave) {
+fn queued_save() -> (
+    Arc<TestEngine>,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    StateDb,
+    QueuedSave,
+) {
     let engine = engine();
     sign_in(&engine);
     let dir = tempfile::tempdir().unwrap();
@@ -82,10 +88,19 @@ fn queued_save() -> (Arc<TestEngine>, tempfile::TempDir, tempfile::TempDir, Stat
     engine.use_sync_root_for_test(root.path().to_path_buf());
     let session = engine.acct.session_generation();
     let opening = engine.viewer_opening(session, DOC);
-    assert_eq!(engine.save_text_for(session, DOC, "an invented edit", 4, opening), Ok(SaveEnd::Queued { base: 4 }));
+    assert_eq!(
+        engine.save_text_for(session, DOC, "an invented edit", 4, opening),
+        Ok(SaveEnd::Queued { base: 4 })
+    );
     let op = db.list_operations_for_file(DOC).unwrap().remove(0);
     let token = db.held_write(DOC).unwrap().map(|held| held.token().to_string());
-    let queued = QueuedSave { session, epoch: opening, base: 4, op_id: op.op_id, token };
+    let queued = QueuedSave {
+        session,
+        epoch: opening,
+        base: 4,
+        op_id: op.op_id,
+        token,
+    };
     (engine, dir, root, db, queued)
 }
 
@@ -113,11 +128,17 @@ fn a_save_the_server_refused_as_stale_is_a_conflict_never_saved() {
     assert_eq!(look(&db, DOC, &queued, 4).unwrap(), Fate::ParkedStale);
     set_version(&db, 5);
     assert_eq!(look(&db, DOC, &queued, 4).unwrap(), Fate::Conflict { theirs: 5 });
-    assert!(db.list_operations_for_file(DOC).unwrap().is_empty(), "the refused save is out of the queue");
+    assert!(
+        db.list_operations_for_file(DOC).unwrap().is_empty(),
+        "the refused save is out of the queue"
+    );
     assert!(db.held_write(DOC).unwrap().is_none(), "and no write is held for it");
     // Keep mine: saved from the version the file is at now, queued behind nothing.
     let session = engine.acct.session_generation();
-    assert_eq!(engine.save_text_for(session, DOC, "an invented edit", 5, queued.epoch), Ok(SaveEnd::Queued { base: 5 }));
+    assert_eq!(
+        engine.save_text_for(session, DOC, "an invented edit", 5, queued.epoch),
+        Ok(SaveEnd::Queued { base: 5 })
+    );
 }
 
 #[test]
@@ -129,13 +150,18 @@ fn a_save_parked_for_another_reason_is_not_saved() {
     ))
     .unwrap();
     assert_eq!(look(&db, DOC, &queued, 4).unwrap(), Fate::Failed);
-    assert_eq!(db.list_operations_for_file(DOC).unwrap().len(), 1, "it stays, for Sync history");
+    assert_eq!(
+        db.list_operations_for_file(DOC).unwrap().len(),
+        1,
+        "it stays, for Sync history"
+    );
 }
 
 #[test]
 fn an_op_that_left_the_queue_without_landing_is_not_saved() {
     let (_e, _d, _r, db, queued) = queued_save();
-    db.test_execute(&format!("DELETE FROM operation_queue WHERE op_id = '{}'", queued.op_id)).unwrap();
+    db.test_execute(&format!("DELETE FROM operation_queue WHERE op_id = '{}'", queued.op_id))
+        .unwrap();
     assert_eq!(look(&db, DOC, &queued, 4).unwrap(), Fate::Gone);
 }
 
@@ -149,17 +175,33 @@ fn a_stale_refusal_is_a_conflict_at_once_when_the_server_names_the_head() {
     // Without the server's answer: still not decided (the pull has not seen version 5).
     assert_eq!(look_with_head(&db, DOC, &queued, 4, None).unwrap(), Fate::ParkedStale);
     // With it: the question, now.
-    assert_eq!(look_with_head(&db, DOC, &queued, 4, Some((5, 3))).unwrap(), Fate::Conflict { theirs: 5 });
-    assert!(db.list_operations_for_file(DOC).unwrap().is_empty(), "the refused save is out of the queue");
+    assert_eq!(
+        look_with_head(&db, DOC, &queued, 4, Some((5, 3))).unwrap(),
+        Fate::Conflict { theirs: 5 }
+    );
+    assert!(
+        db.list_operations_for_file(DOC).unwrap().is_empty(),
+        "the refused save is out of the queue"
+    );
     assert!(db.held_write(DOC).unwrap().is_none(), "and no write is held for it");
-    assert_eq!(db.get_file_contract_state(DOC).unwrap().unwrap().current_version, 5, "this PC now knows the head");
+    assert_eq!(
+        db.get_file_contract_state(DOC).unwrap().unwrap().current_version,
+        5,
+        "this PC now knows the head"
+    );
     // A head that is not past the base decides nothing.
     let (_e2, _d2, _r2, db2, queued2) = queued_save();
     park_stale(&db2, &queued2.op_id);
-    assert_eq!(look_with_head(&db2, DOC, &queued2, 4, Some((4, 3))).unwrap(), Fate::ParkedStale);
+    assert_eq!(
+        look_with_head(&db2, DOC, &queued2, 4, Some((4, 3))).unwrap(),
+        Fate::ParkedStale
+    );
     // Keep mine: from the head, queued behind nothing.
     let session = engine.acct.session_generation();
-    assert_eq!(engine.save_text_for(session, DOC, "an invented edit", 5, queued.epoch), Ok(SaveEnd::Queued { base: 5 }));
+    assert_eq!(
+        engine.save_text_for(session, DOC, "an invented edit", 5, queued.epoch),
+        Ok(SaveEnd::Queued { base: 5 })
+    );
 }
 
 /// w29 (the Windows test machine, run 11, bug 2): offline, a save waited the whole land wait (20 s) for an upload that could not start.
@@ -180,10 +222,20 @@ fn a_link_failure_ends_the_land_wait() {
         ))
     };
     let gives_up = super::viewer_edit_landing::link_down_since;
-    let (now, soon, later) = (Duration::from_millis(100), Duration::from_millis(900), Duration::from_millis(1600));
+    let (now, soon, later) = (
+        Duration::from_millis(100),
+        Duration::from_millis(900),
+        Duration::from_millis(1600),
+    );
     assert!(gives_up(failure(100), 100, now), "same second: the save's own try");
     assert!(gives_up(failure(103), 100, now));
-    assert!(!gives_up(failure(99), 100, soon), "an older failure: the upload may still clear it");
-    assert!(gives_up(failure(99), 100, later), "and when it has not by now, the link is down");
+    assert!(
+        !gives_up(failure(99), 100, soon),
+        "an older failure: the upload may still clear it"
+    );
+    assert!(
+        gives_up(failure(99), 100, later),
+        "and when it has not by now, the link is down"
+    );
     assert!(!gives_up(None, 100, later), "no failure: wait for the upload");
 }

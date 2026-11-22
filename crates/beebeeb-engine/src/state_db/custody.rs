@@ -100,13 +100,21 @@ impl StateDb {
             if let Some(root) = self.get_file_contract_state(&id)?.and_then(|c| c.shared_root_id) {
                 roots.insert(root);
             }
-            stack.extend(rows.iter().filter(|r| r.parent_id.as_deref() == Some(&id)).map(|r| r.file_id.clone()));
+            stack.extend(
+                rows.iter()
+                    .filter(|r| r.parent_id.as_deref() == Some(&id))
+                    .map(|r| r.file_id.clone()),
+            );
         }
         Ok(roots.into_iter().collect())
     }
     /// The shared root of one row alone (a move's new parent), not its subtree.
     pub fn shared_roots_in_subtree_root_only(&self, file_id: &str) -> Result<Vec<String>> {
-        Ok(self.get_file_contract_state(file_id)?.and_then(|c| c.shared_root_id).into_iter().collect())
+        Ok(self
+            .get_file_contract_state(file_id)?
+            .and_then(|c| c.shared_root_id)
+            .into_iter()
+            .collect())
     }
     pub fn dirty_shared_index_roots(&self) -> Result<Vec<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");

@@ -23,7 +23,6 @@ use std::sync::{Arc, Mutex};
 
 use zeroize::Zeroizing;
 
-use plan_gate::PlanKnown;
 use crate::account::{AccountId, AccountRuntime, Accounts, SessionGeneration, SessionTransition};
 use crate::account_binding::{self, Identity};
 use crate::account_dto::AccountProfile;
@@ -46,21 +45,22 @@ use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 use lock_api::SessionMoved;
+use plan_gate::PlanKnown;
 
-mod plan_gate;
 pub mod account_actions_api;
 pub mod account_api;
 pub mod account_email_api;
 pub mod account_email_resend_api;
 pub mod account_password_api;
+mod account_switch;
 pub mod account_twofactor_api;
 pub mod backup_devices_api;
 pub(crate) mod credential_stores;
 mod owed_online;
+mod plan_gate;
 mod session_revoke;
 mod session_watch;
 mod unfinished_sign_out;
-mod account_switch;
 use session_revoke::revoke;
 pub mod account_twofactor_status_api;
 pub mod backups_api;
@@ -99,9 +99,9 @@ pub mod signin_api;
 pub mod signup_api;
 // Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
 pub mod state_owner;
+mod thumb_cache_api;
 pub mod transfer_limits_api;
 pub mod trash_api;
-mod thumb_cache_api;
 // What uploads, Try again on one, and the cancel of a new file's upload, for the native Files window.
 pub mod downloads_api;
 pub mod uploads_api;
@@ -110,11 +110,11 @@ pub mod trash_bulk_api;
 pub mod trash_purge_api;
 pub mod versions_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
-pub mod viewer_api;
 pub mod office_edit_api;
 pub mod office_recovery;
 pub mod office_scratch;
 pub mod office_session_end;
+pub mod viewer_api;
 pub mod viewer_edit_api;
 
 pub use credential_stores::{CredentialStores, PlatformCredentials};
@@ -321,9 +321,9 @@ impl<C: CredentialStores> Engine<C> {
         // A test build keeps its list in memory, one per handle: the machine's own store is never touched and one
         // test's owed token is never paid to another test's server.
         #[cfg(test)]
-        let owed = Arc::new(crate::keychain::owed_revocations::OwedRevocations::with_backend(Box::new(
-            crate::keychain::owed_revocations::MemoryOwed::default(),
-        )));
+        let owed = Arc::new(crate::keychain::owed_revocations::OwedRevocations::with_backend(
+            Box::new(crate::keychain::owed_revocations::MemoryOwed::default()),
+        ));
         #[cfg(not(test))]
         let owed = Arc::new(crate::keychain::owed_revocations::OwedRevocations::platform(identity));
         let handle = Self::open_owing(identity, config, host, stores, owed.clone())?;
@@ -894,7 +894,8 @@ impl<C: CredentialStores> Engine<C> {
                 return Err(SyncStartRefused::StateInUse);
             }
             // (4b) A corrupt `state.db` is moved aside (dc-144b): the start makes a fresh one and lists again.
-            self.move_aside_a_corrupt_state_db().map_err(|_| SyncStartRefused::Other)?;
+            self.move_aside_a_corrupt_state_db()
+                .map_err(|_| SyncStartRefused::Other)?;
             // (5) Never another provider's folder, nor one whose registration cannot be read.
             let registered = port.registration(&sync_root);
             if crate::sync_root_owner::refusal(self.identity, &registered, &sync_root).is_some() {

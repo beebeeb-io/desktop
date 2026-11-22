@@ -884,7 +884,10 @@ mod tests {
         let removed = db.delete_file_subtree("old-work").unwrap();
         assert_eq!(
             ids(&removed),
-            ["old-work", "old-a", "old-sub", "old-b"].iter().map(|s| s.to_string()).collect()
+            ["old-work", "old-a", "old-sub", "old-b"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         );
         let pos = |id: &str| removed.iter().position(|r| r.file_id == id).unwrap();
         assert!(pos("old-b") < pos("old-sub") && pos("old-sub") < pos("old-work"));
@@ -923,7 +926,10 @@ mod tests {
         seed(&db, "inside", "Elsewhere/x.txt", Some("work"), false);
 
         let removed = db.delete_file_subtree("work").unwrap();
-        assert_eq!(ids(&removed), ["work", "inside"].iter().map(|s| s.to_string()).collect());
+        assert_eq!(
+            ids(&removed),
+            ["work", "inside"].iter().map(|s| s.to_string()).collect()
+        );
         assert!(db.get_file("moved").unwrap().is_some());
     }
 }

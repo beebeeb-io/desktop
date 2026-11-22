@@ -138,7 +138,10 @@ pub enum ShareChange {
     HideRequest { request_id: String },
     /// Change when an OPEN file request of the account's stops taking uploads (`PATCH /file-requests/{id}`);
     /// `None` is never. A closed request is `Refused` (409).
-    RequestExpiry { request_id: String, expires_in_secs: Option<u64> },
+    RequestExpiry {
+        request_id: String,
+        expires_in_secs: Option<u64>,
+    },
     /// Leave a share that was approved for the account (`POST /shares/invites/{id}/leave`); already left is done.
     Leave { invite_id: String },
 }
@@ -510,10 +513,10 @@ fn owned_links(mine: &Value, by_me: &[SentShare], master_key: &[u8; 32]) -> Vec<
             share_ids: vec![id.to_string()],
             item_id: item.to_string(),
             // The invite names it; else the link row's own sealed name (`file`); else the fixed words.
-            name: by_me.iter().find(|s| s.item_id == item).map_or_else(
-                || link_name(share, item, master_key),
-                |s| s.name.clone(),
-            ),
+            name: by_me
+                .iter()
+                .find(|s| s.item_id == item)
+                .map_or_else(|| link_name(share, item, master_key), |s| s.name.clone()),
             expires_at: text(share, "expires_at").map(str::to_string),
             has_password: flag(share, "has_passphrase"),
         });

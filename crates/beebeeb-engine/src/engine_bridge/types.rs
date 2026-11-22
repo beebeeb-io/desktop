@@ -986,13 +986,17 @@ mod region_strict_tests {
     #[test]
     fn region_strict_ignores_other_errors_and_an_empty_country() {
         assert!(StorageCountryRefused::from_body(&serde_json::json!({"error":"stale_base"})).is_none());
-        let none = StorageCountryRefused::from_body(&serde_json::json!({"error":"region_unavailable_strict","country":" "}));
+        let none =
+            StorageCountryRefused::from_body(&serde_json::json!({"error":"region_unavailable_strict","country":" "}));
         assert_eq!(none, Some(StorageCountryRefused { country: None }));
     }
 
     #[test]
     fn region_strict_refusal_is_found_through_the_error_chain() {
-        let error = anyhow::Error::new(StorageCountryRefused { country: Some("Finland".into()) }).context("upload");
+        let error = anyhow::Error::new(StorageCountryRefused {
+            country: Some("Finland".into()),
+        })
+        .context("upload");
         assert!(crate::engine_bridge::engine_cause::<StorageCountryRefused>(&error).is_some());
     }
 }

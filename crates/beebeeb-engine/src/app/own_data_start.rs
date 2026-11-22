@@ -72,8 +72,7 @@ use crate::signin::start;
 use crate::sync_view::Start;
 
 /// dc-144b: what the window says once after a corrupt `state.db` was moved aside and the files listed again.
-pub const LOCAL_LIST_REBUILT_NOTICE: &str =
-    "Beebeeb rebuilt its local file list. Your files are listed again from your account; nothing in your account changed.";
+pub const LOCAL_LIST_REBUILT_NOTICE: &str = "Beebeeb rebuilt its local file list. Your files are listed again from your account; nothing in your account changed.";
 
 #[cfg(test)]
 #[path = "own_data_start_tests.rs"]

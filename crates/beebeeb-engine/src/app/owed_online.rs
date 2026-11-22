@@ -2,8 +2,8 @@
 //! then another state when it reaches the server again; [`OnlineWatch`] sees that change in the host's events and
 //! [`OwedPayingHost`] starts [`super::session_revoke::pay_owed_detached`] on it. Carries no path, id or token.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::engine_status::State;
 use crate::host::{ConflictNotice, EngineEvent, EngineHost, Notice};

@@ -282,8 +282,8 @@ mod tests {
     // Task 2523: another device's version reaches the copy on this PC; a held edit is never hydrated over.
     mod stale_2523;
     // S6: a hydrate's start look; a save made after it is never replaced (Linux).
-    mod start_look_s6;
     mod cursor_2272; // Task 2272: a failed op apply holds the cursor, retries, then parks.
+    mod start_look_s6;
     mod sync;
     mod sync_2;
     mod sync_3;
@@ -495,10 +495,10 @@ pub use types::{LocalEntry, NON_UUID, OpDone, PrunedEntry, RENAME_SETTLE_SECS, S
 // LD-0113 Amendment 7: the Windows-native rung removes a read-only Backups file the way the engine does.
 #[cfg(all(any(test, feature = "test-support"), target_os = "windows"))]
 pub use types::RemovedKind;
-#[cfg(all(any(test, feature = "test-support"), target_os = "windows"))]
-pub(crate) use types::engine_remove;
 #[cfg(windows)]
 pub(crate) use types::content_seq_for_wipe;
+#[cfg(all(any(test, feature = "test-support"), target_os = "windows"))]
+pub(crate) use types::engine_remove;
 
 // The native app's open file: the whole file in memory, nothing recorded (`app::viewer_api`).
 mod open_in_memory;
@@ -527,9 +527,9 @@ use fs::*;
 pub use fs::{LocalPathVerdict, move_no_replace, path_is_engine_internal, relative_db_path};
 
 mod meta;
-pub(crate) use meta::recorded_pin;
 #[cfg(windows)]
 pub use meta::promote_fetched_content;
+pub(crate) use meta::recorded_pin;
 use meta::*;
 pub use meta::{
     HydrateProgressFn, hydrate_dest_is_allowed, hydrate_final_status, item_content_version, item_version_identifier,

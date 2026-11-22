@@ -24,10 +24,10 @@
 //!
 //! Must not: log an id, a name, a link or anything the server sends; build a key, a token or a link by hand.
 
+use beebeeb_core::auth_flow::Method;
 use beebeeb_core::auth_flow::{HttpRequest, HttpResponse};
 use beebeeb_core::item_id::{ItemClass, item_class};
 use beebeeb_core::kdf::{FileKey, MasterKey};
-use beebeeb_core::auth_flow::Method;
 use beebeeb_core::share_flow::link::{
     CreateLink, LinkOptions, LinkStep, MAX_EXPIRES_IN_HOURS, MIN_PASSPHRASE_LEN, open_link_file_key, rebuild_link,
 };
@@ -95,7 +95,10 @@ impl std::fmt::Debug for LinkChange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LinkChange")
             .field("expires_in_hours", &self.expires_in_hours)
-            .field("passphrase", &self.passphrase.as_ref().map(|p| p.as_ref().map(|_| "(set)")))
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|p| p.as_ref().map(|_| "(set)")),
+            )
             .finish()
     }
 }
@@ -298,7 +301,9 @@ impl<C: CredentialStores> Engine<C> {
             }
             body.insert(
                 "passphrase".into(),
-                passphrase.as_ref().map_or(Value::Null, |typed| Value::String(typed.to_string())),
+                passphrase
+                    .as_ref()
+                    .map_or(Value::Null, |typed| Value::String(typed.to_string())),
             );
         }
         if body.is_empty() {
@@ -310,8 +315,12 @@ impl<C: CredentialStores> Engine<C> {
         // Through the lock's choke point: a locked screen or a closed vault sends nothing.
         let (token, key) = self
             .person_session(|current, now| {
-                (now == session)
-                    .then(|| (Zeroizing::new(current.token.clone()), Zeroizing::new(current.master_key)))
+                (now == session).then(|| {
+                    (
+                        Zeroizing::new(current.token.clone()),
+                        Zeroizing::new(current.master_key),
+                    )
+                })
             })
             .map_err(|_| ShareLinkError::NotSignedIn)?
             .ok_or(ShareLinkError::NotSignedIn)?;

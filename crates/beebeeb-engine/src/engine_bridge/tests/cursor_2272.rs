@@ -39,7 +39,10 @@ fn page(since: i64) -> (String, serde_json::Value) {
         .filter(|(seq, _)| *seq > since)
         .map(|(seq, id)| delete_op(seq, id))
         .collect();
-    ("200 OK".into(), serde_json::json!({ "since": since, "head_seq": 8, "ops": ops }))
+    (
+        "200 OK".into(),
+        serde_json::json!({ "since": since, "head_seq": 8, "ops": ops }),
+    )
 }
 
 fn present(bridge: &EngineBridge, id: &str) -> bool {
@@ -61,9 +64,16 @@ async fn cursor_2272_failed_op_mid_page_holds_cursor_and_retries() {
     // op 8 waits behind op 7 so the order holds.
     fail_sync_op_apply_for_test(&[7]);
     sync_tick(&bridge, root).await.unwrap();
-    assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(6), "cursor stays before the failed op");
+    assert_eq!(
+        bridge.db().get_sync_cursor().unwrap(),
+        Some(6),
+        "cursor stays before the failed op"
+    );
     assert!(!present(&bridge, ID6), "op 6 before it applied");
-    assert!(present(&bridge, ID7) && present(&bridge, ID8), "op 7 failed, op 8 waits");
+    assert!(
+        present(&bridge, ID7) && present(&bridge, ID8),
+        "op 7 failed, op 8 waits"
+    );
     assert_eq!(sync_op_failed_attempts(root, 7), 1);
 
     // Tick 2: inside the back-off op 7 is not tried again, and nothing moves.
@@ -109,7 +119,11 @@ async fn cursor_2272_op_that_keeps_failing_is_parked_with_words() {
 
     for attempt in 1..SYNC_OP_MAX_ATTEMPTS {
         sync_tick(&bridge, root).await.unwrap();
-        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(6), "attempt {attempt}: held");
+        assert_eq!(
+            bridge.db().get_sync_cursor().unwrap(),
+            Some(6),
+            "attempt {attempt}: held"
+        );
         assert_eq!(sync_op_failed_attempts(root, 7), attempt);
         assert!(parked_sync_ops(root).is_empty(), "attempt {attempt}: not parked yet");
         assert!(bridge.db().peek_resnapshot_request().unwrap().is_none());
@@ -123,11 +137,21 @@ async fn cursor_2272_op_that_keeps_failing_is_parked_with_words() {
     let parked = parked_sync_ops(root);
     assert_eq!(parked.len(), 1);
     let p = &parked[0];
-    assert_eq!((p.seq_id, p.op_type.as_str(), p.item_id.as_str()), (7, "file_delete", ID7));
+    assert_eq!(
+        (p.seq_id, p.op_type.as_str(), p.item_id.as_str()),
+        (7, "file_delete", ID7)
+    );
     assert_eq!(p.attempts, SYNC_OP_MAX_ATTEMPTS);
-    assert!(p.words.contains("could not be applied") && p.words.contains(ID7), "{}", p.words);
+    assert!(
+        p.words.contains("could not be applied") && p.words.contains(ID7),
+        "{}",
+        p.words
+    );
     assert!(p.error.contains("op 7 fails"), "{}", p.error);
-    assert!(bridge.db().peek_resnapshot_request().unwrap().is_some(), "re-snapshot requested");
+    assert!(
+        bridge.db().peek_resnapshot_request().unwrap().is_some(),
+        "re-snapshot requested"
+    );
     assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(8));
     assert!(present(&bridge, ID7), "the parked op itself applied nothing");
     assert!(!present(&bridge, ID8), "op 8 after it applied");

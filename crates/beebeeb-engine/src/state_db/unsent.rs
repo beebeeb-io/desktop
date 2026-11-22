@@ -217,43 +217,42 @@ impl StateDb {
                           queued_at, id
                  LIMIT ?1 OFFSET ?2",
             ))?;
-            
-            stmt
-                .query_map(params![i64::from(limit), i64::from(offset)], |row| {
-                    let kind: String = row.get(2)?;
-                    let metadata_json: Option<String> = row.get(3)?;
-                    let origin: Option<String> = row.get(4)?;
-                    let raw_group: String = row.get(6)?;
-                    let paused = raw_group.starts_with("paused:");
-                    let group = group_label(&raw_group);
-                    let attempts: i64 = row.get(8)?;
-                    let next_retry_at: i64 = row.get(9)?;
-                    let error_class: Option<String> = row.get(10)?;
-                    let claimed: bool = row.get(11)?;
-                    // Spec D8: any class is a park, as the reconcile pass reads it; a held row keeps its own action.
-                    let parked = !paused && error_class.is_some();
-                    let backing_off = !parked && group == "waiting" && attempts > 0 && next_retry_at > now;
-                    // As `retry_unsent_change` decides: a claimed row is being sent.
-                    let failed = !claimed && (backing_off || (!parked && group == "gave_up"));
-                    Ok(UnsentChange {
-                        id: row.get(0)?,
-                        file_id: row.get(1)?,
-                        kind: change_kind(&kind, metadata_json.as_deref()),
-                        path: row.get(5)?,
-                        backup: origin.as_deref() == Some("backup"),
-                        group,
-                        queued_at: row.get(7)?,
-                        retry_at: backing_off.then_some(next_retry_at),
-                        parked,
-                        // Until the checks below say otherwise.
-                        retryable: failed,
-                        blocked: None,
-                        park: parked.then(|| park_word(error_class.as_deref().unwrap_or_default())),
-                        exits: Vec::new(),
-                        version: None,
-                    })
-                })?
-                .collect::<Result<Vec<_>>>()?
+
+            stmt.query_map(params![i64::from(limit), i64::from(offset)], |row| {
+                let kind: String = row.get(2)?;
+                let metadata_json: Option<String> = row.get(3)?;
+                let origin: Option<String> = row.get(4)?;
+                let raw_group: String = row.get(6)?;
+                let paused = raw_group.starts_with("paused:");
+                let group = group_label(&raw_group);
+                let attempts: i64 = row.get(8)?;
+                let next_retry_at: i64 = row.get(9)?;
+                let error_class: Option<String> = row.get(10)?;
+                let claimed: bool = row.get(11)?;
+                // Spec D8: any class is a park, as the reconcile pass reads it; a held row keeps its own action.
+                let parked = !paused && error_class.is_some();
+                let backing_off = !parked && group == "waiting" && attempts > 0 && next_retry_at > now;
+                // As `retry_unsent_change` decides: a claimed row is being sent.
+                let failed = !claimed && (backing_off || (!parked && group == "gave_up"));
+                Ok(UnsentChange {
+                    id: row.get(0)?,
+                    file_id: row.get(1)?,
+                    kind: change_kind(&kind, metadata_json.as_deref()),
+                    path: row.get(5)?,
+                    backup: origin.as_deref() == Some("backup"),
+                    group,
+                    queued_at: row.get(7)?,
+                    retry_at: backing_off.then_some(next_retry_at),
+                    parked,
+                    // Until the checks below say otherwise.
+                    retryable: failed,
+                    blocked: None,
+                    park: parked.then(|| park_word(error_class.as_deref().unwrap_or_default())),
+                    exits: Vec::new(),
+                    version: None,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?
         };
         // Task 2414: Try again's own checks (spec D8, the reconcile pass's), so the list never offers it for a change
         // the command would refuse, and says why instead. Only the failed rows on this page, by primary key.

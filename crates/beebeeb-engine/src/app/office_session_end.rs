@@ -134,7 +134,10 @@ pub(super) fn forget_slots(slot: &Slot) {
 
 impl<C: CredentialStores> Engine<C> {
     pub(super) fn office_slot(&self) -> Slot {
-        (self.config.state_dir.clone(), Arc::as_ptr(&self.acct) as *const () as usize)
+        (
+            self.config.state_dir.clone(),
+            Arc::as_ptr(&self.acct) as *const () as usize,
+        )
     }
 
     /// Register the host's hook for this engine's state dir (a second call replaces the first).
@@ -182,10 +185,12 @@ impl<C: CredentialStores> Engine<C> {
             };
             set_grant(&dir, Some(grant));
             // The copy of the key does not outlive the bound, whether or not anything used it.
-            let _ = std::thread::Builder::new().name("office-grant-end".into()).spawn(move || {
-                std::thread::sleep(SCREEN_FLUSH_GRANT);
-                end_grant_of(&dir, to);
-            });
+            let _ = std::thread::Builder::new()
+                .name("office-grant-end".into())
+                .spawn(move || {
+                    std::thread::sleep(SCREEN_FLUSH_GRANT);
+                    end_grant_of(&dir, to);
+                });
         }
         run_in(&self.office_slot(), SessionEnding::ScreenLock);
     }

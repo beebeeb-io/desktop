@@ -137,7 +137,11 @@ impl<C: CredentialStores> Engine<C> {
             }
             // The recent searches go inside the sign-out, past its stop gate (a refused sign-out deletes nothing).
             self.sign_out_holding_step_as(discard_unsaved).await.map_err(|why| {
-                if why == super::UNSAVED_EDITS { ActionError::UnsavedEdits } else { ActionError::Failed }
+                if why == super::UNSAVED_EDITS {
+                    ActionError::UnsavedEdits
+                } else {
+                    ActionError::Failed
+                }
             })
         });
         self.publish();

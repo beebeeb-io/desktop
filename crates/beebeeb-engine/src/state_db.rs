@@ -694,8 +694,8 @@ pub use sql::{is_file_provider_trash, page_cache_limit_kib, tree_holds_a_file};
 mod conn;
 // dc-163: the re-entrant connection lock and the first pull's write batch.
 mod conn_lock;
-pub use conn_lock::{PULL_BATCH_ROWS, WriteBatch};
 use conn::*;
+pub use conn_lock::{PULL_BATCH_ROWS, WriteBatch};
 
 mod read_only;
 pub use read_only::ReadOnlyOpenError;

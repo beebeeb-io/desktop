@@ -181,7 +181,11 @@ mod reconcile_then_resume_tests {
         let resume = ResumeTicket::default();
         let mut reconciled = true;
         pc.tick(&resume, &mut reconciled).await;
-        assert_eq!(pc.bridge.db().peek_resnapshot_request().unwrap(), None, "no unlock, no list");
+        assert_eq!(
+            pc.bridge.db().peek_resnapshot_request().unwrap(),
+            None,
+            "no unlock, no list"
+        );
 
         resume.asked.store(1, SeqCst);
         pc.tick(&resume, &mut reconciled).await;

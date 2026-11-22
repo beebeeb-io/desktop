@@ -135,7 +135,11 @@ pub(crate) struct Store<'a> {
 
 impl<'a> Store<'a> {
     pub(crate) fn new(state_dir: &Path, account_id: &str, master: &'a MasterKey) -> Self {
-        Self { dir: account_dir(state_dir, account_id), account: account_id.to_string(), master }
+        Self {
+            dir: account_dir(state_dir, account_id),
+            account: account_id.to_string(),
+            master,
+        }
     }
 
     fn blob_path(&self, file_id: &str) -> PathBuf {
@@ -143,13 +147,19 @@ impl<'a> Store<'a> {
     }
 
     fn read_index(&self) -> Vec<String> {
-        let Ok(sealed) = fs::read(self.dir.join(INDEX_NAME)) else { return Vec::new() };
-        let Ok((_, plain)) = open_recovery_snapshot(self.master, INDEX_ID, &sealed) else { return Vec::new() };
+        let Ok(sealed) = fs::read(self.dir.join(INDEX_NAME)) else {
+            return Vec::new();
+        };
+        let Ok((_, plain)) = open_recovery_snapshot(self.master, INDEX_ID, &sealed) else {
+            return Vec::new();
+        };
         let mut ids = Vec::new();
         let mut rest: &[u8] = &plain;
         while let Some((len, tail)) = rest.split_first_chunk::<4>() {
             let len = u32::from_be_bytes(*len) as usize;
-            let Some(id) = tail.get(..len).and_then(|b| std::str::from_utf8(b).ok()) else { break };
+            let Some(id) = tail.get(..len).and_then(|b| std::str::from_utf8(b).ok()) else {
+                break;
+            };
             ids.push(id.to_string());
             rest = &tail[len..];
             if ids.len() >= MAX_ENTRIES {
@@ -165,8 +175,13 @@ impl<'a> Store<'a> {
             plain.extend_from_slice(&(id.len() as u32).to_be_bytes());
             plain.extend_from_slice(id.as_bytes());
         }
-        let meta = SnapshotMeta { base_version: 0, saved_at: now(), kind: 1 };
-        let sealed = seal_recovery_snapshot(self.master, INDEX_ID, &meta, &plain).map_err(|_| RecoveryRefused::Failed)?;
+        let meta = SnapshotMeta {
+            base_version: 0,
+            saved_at: now(),
+            kind: 1,
+        };
+        let sealed =
+            seal_recovery_snapshot(self.master, INDEX_ID, &meta, &plain).map_err(|_| RecoveryRefused::Failed)?;
         replace_file(&self.dir.join(INDEX_NAME), &sealed, || true).map_err(|_| RecoveryRefused::Failed)
     }
 
@@ -185,7 +200,11 @@ impl<'a> Store<'a> {
             return Err(RecoveryRefused::Refused);
         }
         let kind = kind_of(bytes).ok_or(RecoveryRefused::Refused)?;
-        let meta = SnapshotMeta { base_version: base, saved_at: now(), kind };
+        let meta = SnapshotMeta {
+            base_version: base,
+            saved_at: now(),
+            kind,
+        };
         let sealed = seal_recovery_snapshot(self.master, file_id, &meta, bytes).map_err(|_| RecoveryRefused::Failed)?;
         let _one = WRITE.lock().unwrap_or_else(|p| p.into_inner());
         fs::create_dir_all(&self.dir).map_err(|_| RecoveryRefused::Failed)?;
@@ -205,9 +224,15 @@ impl<'a> Store<'a> {
         let mut out = Vec::new();
         for file_id in self.read_index() {
             // Display only: the blob is authenticated when it is taken.
-            let Ok(head) = read_head(&self.blob_path(&file_id)) else { continue };
+            let Ok(head) = read_head(&self.blob_path(&file_id)) else {
+                continue;
+            };
             let Ok(meta) = peek_snapshot_meta(&head) else { continue };
-            out.push(RecoveryEntry { file_id, saved_at: meta.saved_at, base: meta.base_version });
+            out.push(RecoveryEntry {
+                file_id,
+                saved_at: meta.saved_at,
+                base: meta.base_version,
+            });
         }
         out
     }
@@ -316,7 +341,11 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// WRITES (the disk): delete the document's blob.
-    pub fn discard_office_snapshot_for(&self, session: SessionGeneration, file_id: &str) -> Result<(), RecoveryRefused> {
+    pub fn discard_office_snapshot_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+    ) -> Result<(), RecoveryRefused> {
         self.recovery_store(session, |s| s.discard(file_id))
     }
 

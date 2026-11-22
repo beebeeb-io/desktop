@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{REVOKE_BOUND, pay_owed, revoke, revoke_detached, revoke_owing};
-use crate::keychain::owed_revocations::{MemoryOwed, OwedRevocations};
 use crate::account::SessionTransition;
 use crate::app::{Engine, EngineConfig};
 use crate::host::ChannelHost;
 use crate::identity::TEST;
+use crate::keychain::owed_revocations::{MemoryOwed, OwedRevocations};
 use crate::keychain::{AuthSecretStore, SessionToken};
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
@@ -231,11 +231,13 @@ impl SignedIn {
             state_dir: crate::state_paths::init_for_test(),
             api_base: server.base.clone(),
         };
-        let engine = Arc::new(match owed {
-            Some(owed) => Engine::open_owing(&TEST, config, host, credentials.clone(), owed),
-            None => Engine::open(&TEST, config, host, credentials.clone()),
-        }
-        .expect("the handle opens"));
+        let engine = Arc::new(
+            match owed {
+                Some(owed) => Engine::open_owing(&TEST, config, host, credentials.clone(), owed),
+                None => Engine::open(&TEST, config, host, credentials.clone()),
+            }
+            .expect("the handle opens"),
+        );
         {
             let _writes = engine.writes.write().unwrap();
             engine
@@ -438,7 +440,10 @@ fn no_token_in_any_log_line() {
 
 fn owed_list() -> (MemoryOwed, Arc<OwedRevocations>) {
     let memory = MemoryOwed::default();
-    (memory.clone(), Arc::new(OwedRevocations::with_backend(Box::new(memory))))
+    (
+        memory.clone(),
+        Arc::new(OwedRevocations::with_backend(Box::new(memory))),
+    )
 }
 
 fn run<T>(work: impl std::future::Future<Output = T>) -> T {
@@ -488,7 +493,11 @@ fn the_token_is_owed_while_the_request_is_in_flight() {
     let token = invented_token();
     run(revoke_owing(&client_for(&server.base), &server.base, &token, &owed));
     let heard = server.heard_within(Duration::from_secs(1));
-    assert_eq!(heard[0].store_held_a_token, Some(true), "owed before the server heard it");
+    assert_eq!(
+        heard[0].store_held_a_token,
+        Some(true),
+        "owed before the server heard it"
+    );
     assert_eq!(owed_tokens(&owed), vec![token]);
 }
 
@@ -522,10 +531,23 @@ fn the_detached_revoke_does_not_hold_its_caller() {
     let token = invented_token();
     let started = Instant::now();
     run(async {
-        revoke_detached(client_for(&server.base), server.base.clone(), token.clone(), owed.clone());
+        revoke_detached(
+            client_for(&server.base),
+            server.base.clone(),
+            token.clone(),
+            owed.clone(),
+        );
     });
-    assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
-    assert_eq!(owed_tokens(&owed), vec![token], "owed before the caller got control back");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        owed_tokens(&owed),
+        vec![token],
+        "owed before the caller got control back"
+    );
 }
 
 /// Two owed tokens, one list entry: owing the same token twice keeps one; a token with a newline is refused.
@@ -570,7 +592,10 @@ fn a_sign_out_with_the_server_down_is_paid_at_the_next_start() {
     assert_eq!(heard.len(), 1, "the start paid the owed token once");
     assert!(heard[0].request_line.starts_with("POST /api/v1/auth/logout "));
     assert_eq!(heard[0].bearer.as_deref(), Some(token.as_str()));
-    assert!(eventually(Duration::from_secs(5), || owed.owed().is_empty()), "the answer settled it");
+    assert!(
+        eventually(Duration::from_secs(5), || owed.owed().is_empty()),
+        "the answer settled it"
+    );
     assert_eq!(up.server.heard.lock().unwrap().len(), 1, "and nothing else was asked");
 }
 
@@ -610,7 +635,11 @@ fn the_network_coming_back_pays_the_owed_list_once() {
     let token = invented_token();
     owed.owe(&token).unwrap();
     let server = TestServer::start(Server::Answers(200), None);
-    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let (inner, _messages) = ChannelHost::new(|| {});
     let host = super::super::owed_online::OwedPayingHost::new(
         inner,

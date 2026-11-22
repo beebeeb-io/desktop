@@ -938,9 +938,10 @@ pub(super) fn order_snapshot_nodes(nodes: &[serde_json::Value]) -> Vec<&serde_js
     // Defensive: emit any node not reached (a parent_id cycle) so nothing is lost.
     for n in nodes {
         if let Some(id) = n["id"].as_str()
-            && emitted.insert(id) {
-                ordered.push(n);
-            }
+            && emitted.insert(id)
+        {
+            ordered.push(n);
+        }
     }
     ordered
 }
@@ -1444,7 +1445,11 @@ mod shared_folder_index_dirty_tests {
     }
 
     fn run(bridge: &EngineBridge, sync_root: &Path, op_type: &str, payload: serde_json::Value) {
-        let op = crate::api_client::SyncOp { seq_id: 1, op_type: op_type.into(), payload };
+        let op = crate::api_client::SyncOp {
+            seq_id: 1,
+            op_type: op_type.into(),
+            payload,
+        };
         apply_sync_op(bridge, sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
     }
 
@@ -1454,11 +1459,30 @@ mod shared_folder_index_dirty_tests {
     fn has_thumbnail_is_stored_from_file_update_ops() {
         let (_dir, sync_root, bridge) = setup();
         assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), None);
-        run(&bridge, &sync_root, "file_update", serde_json::json!({ "id": FILE, "has_thumbnail": true }));
+        run(
+            &bridge,
+            &sync_root,
+            "file_update",
+            serde_json::json!({ "id": FILE, "has_thumbnail": true }),
+        );
         assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), Some(true));
-        run(&bridge, &sync_root, "file_update", serde_json::json!({ "id": FILE, "has_large_thumbnail": true }));
-        assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), Some(true), "no field, kept");
-        run(&bridge, &sync_root, "file_update", serde_json::json!({ "id": FILE, "has_thumbnail": false }));
+        run(
+            &bridge,
+            &sync_root,
+            "file_update",
+            serde_json::json!({ "id": FILE, "has_large_thumbnail": true }),
+        );
+        assert_eq!(
+            bridge.db().server_has_thumbnail(FILE, 1).unwrap(),
+            Some(true),
+            "no field, kept"
+        );
+        run(
+            &bridge,
+            &sync_root,
+            "file_update",
+            serde_json::json!({ "id": FILE, "has_thumbnail": false }),
+        );
         assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), Some(false));
     }
 
@@ -1466,20 +1490,31 @@ mod shared_folder_index_dirty_tests {
     fn shared_folder_index_is_dirty_after_a_trash() {
         let (_d, root, bridge) = setup();
         run(&bridge, &root, "file_trash", serde_json::json!({ "id": FILE }));
-        assert_eq!(bridge.db().dirty_shared_index_roots().unwrap(), vec![ROOT_A.to_string()]);
+        assert_eq!(
+            bridge.db().dirty_shared_index_roots().unwrap(),
+            vec![ROOT_A.to_string()]
+        );
     }
 
     #[test]
     fn shared_folder_index_is_dirty_after_a_delete() {
         let (_d, root, bridge) = setup();
         run(&bridge, &root, "file_delete", serde_json::json!({ "id": FILE }));
-        assert_eq!(bridge.db().dirty_shared_index_roots().unwrap(), vec![ROOT_A.to_string()]);
+        assert_eq!(
+            bridge.db().dirty_shared_index_roots().unwrap(),
+            vec![ROOT_A.to_string()]
+        );
     }
 
     #[test]
     fn shared_folder_index_is_dirty_for_both_roots_after_a_move() {
         let (_d, root, bridge) = setup();
-        run(&bridge, &root, "file_move", serde_json::json!({ "id": FILE, "new_parent_id": ROOT_B }));
+        run(
+            &bridge,
+            &root,
+            "file_move",
+            serde_json::json!({ "id": FILE, "new_parent_id": ROOT_B }),
+        );
         let mut dirty = bridge.db().dirty_shared_index_roots().unwrap();
         dirty.sort();
         assert_eq!(dirty, vec![ROOT_A.to_string(), ROOT_B.to_string()]);
@@ -1555,7 +1590,10 @@ mod first_pull_batch_tests {
     }
 
     fn rows(db: &Path, sql: &str) -> i64 {
-        rusqlite::Connection::open(db).unwrap().query_row(sql, [], |r| r.get(0)).unwrap()
+        rusqlite::Connection::open(db)
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -1571,7 +1609,10 @@ mod first_pull_batch_tests {
         let started = std::time::Instant::now();
         first_pull(&bridge, &sync_root, &nodes).await;
         let commits = bridge.db().wal_commits_for_test() - before;
-        println!("first pull of {ITEMS} items: {commits} commits, {:?}", started.elapsed());
+        println!(
+            "first pull of {ITEMS} items: {commits} commits, {:?}",
+            started.elapsed()
+        );
         // dc-170: batches also commit every BATCH_MAX_TIME, so a slow (debug) build commits more often than
         // ITEMS / PULL_BATCH_ROWS; one commit per row (the dc-086 bug) is still 100x over this bound.
         assert!(commits <= ITEMS / 100, "{commits} commits for {ITEMS} items");
@@ -1617,17 +1658,27 @@ mod first_pull_batch_tests {
             .unwrap();
         assert_eq!(check, "ok");
         let landed = rows(&db, "SELECT COUNT(*) FROM files");
-        assert!(landed > 0 && landed < (ITEMS / 2) as i64, "{landed} rows after a crash at half");
+        assert!(
+            landed > 0 && landed < (ITEMS / 2) as i64,
+            "{landed} rows after a crash at half"
+        );
         // dc-170: a batch also commits by time (BATCH_MAX_TIME), so the count need not be a multiple of
         // PULL_BATCH_ROWS; whole rows only is what the folder check below proves.
         assert_eq!(
-            rows(&db, "SELECT COUNT(*) FROM files f WHERE f.parent_id IS NOT NULL
-                        AND NOT EXISTS(SELECT 1 FROM files p WHERE p.file_id = f.parent_id)"),
+            rows(
+                &db,
+                "SELECT COUNT(*) FROM files f WHERE f.parent_id IS NOT NULL
+                        AND NOT EXISTS(SELECT 1 FROM files p WHERE p.file_id = f.parent_id)"
+            ),
             0,
             "a row landed without its folder"
         );
         let bridge = bridge_at(&db);
-        assert_eq!(bridge.db().get_sync_cursor().unwrap(), None, "a cursor after half a pull");
+        assert_eq!(
+            bridge.db().get_sync_cursor().unwrap(),
+            None,
+            "a cursor after half a pull"
+        );
 
         // The next pull goes over it and finishes.
         let sync_root = dir.path().join("Beebeeb");

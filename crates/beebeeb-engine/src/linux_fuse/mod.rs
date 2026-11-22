@@ -7,7 +7,6 @@
 // the runner; until then it must still compile and stay policy-free.
 #![allow(dead_code)]
 
-
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;

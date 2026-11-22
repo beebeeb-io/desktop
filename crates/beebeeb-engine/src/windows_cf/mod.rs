@@ -66,9 +66,9 @@ pub mod fetch_progress;
 mod registration;
 pub use registration::*;
 // drive-complete-006b: the uninstaller's teardown of this identity's sync folders (keep downloaded files, or remove).
-pub mod registration_teardown;
 #[cfg(test)]
 mod reconcile_tests;
+pub mod registration_teardown;
 // w36: an idle tick keeps no handle and does no per-row work.
 #[cfg(test)]
 mod idle_tick_native_tests;
@@ -191,13 +191,21 @@ mod alias_guard_tests {
             e.downcast_ref::<std::io::Error>()
                 .is_some_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists)
         };
-        assert_eq!(refuse_alias(&path).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            refuse_alias(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
         assert!(refused(&placeholders::set_pin_state(&path, true, false).unwrap_err()));
-        assert!(refused(&placeholders::convert_to_unsynced_placeholder(&path, "id").unwrap_err()));
+        assert!(refused(
+            &placeholders::convert_to_unsynced_placeholder(&path, "id").unwrap_err()
+        ));
         assert!(refused(&placeholders::restamp_cloud_only(&path, "a", "b").unwrap_err()));
         assert!(refused(&placeholders::resize_placeholder(&path, 1).unwrap_err()));
         assert!(refused(&placeholders::mark_not_in_sync_path(&path).unwrap_err()));
-        assert!(!poison::set_pin_by_path(&path, windows::Win32::Storage::CloudFilters::CF_PIN_STATE_PINNED));
+        assert!(!poison::set_pin_by_path(
+            &path,
+            windows::Win32::Storage::CloudFilters::CF_PIN_STATE_PINNED
+        ));
         assert!(path.exists());
     }
 }

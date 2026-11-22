@@ -6,9 +6,9 @@ use crate::host::ChannelHost;
 use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
+use beebeeb_api::flows::LockState;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use beebeeb_api::flows::LockState;
 use zeroize::Zeroizing;
 
 /// The tests share one state dir (and so one hook slot and one scratch folder): one at a time.
@@ -42,8 +42,7 @@ fn engine_with_a_session(account: &str) -> Arc<Engine<MemoryCredentials>> {
         state_dir: crate::state_paths::init_for_test(),
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine =
-        Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     {
         let _writes = engine.writes.write().unwrap();
         engine
@@ -90,8 +89,15 @@ fn a_lock_calls_the_hook_with_the_session_still_in_memory_and_ends_the_scratch()
         }
     }));
     engine.lock_vault();
-    assert_eq!(sealed_in_the_hook.load(Ordering::SeqCst), 1, "the snapshot was sealed before the key left");
-    assert!(engine.office_snapshots_for(session).is_err(), "locked: the key is gone, nothing opens");
+    assert_eq!(
+        sealed_in_the_hook.load(Ordering::SeqCst),
+        1,
+        "the snapshot was sealed before the key left"
+    );
+    assert!(
+        engine.office_snapshots_for(session).is_err(),
+        "locked: the key is gone, nothing opens"
+    );
     assert!(
         files_under(&state_dir.join("office-recovery")) > 0,
         "the sealed blob stays through a lock, for the offer after unlock"
@@ -107,7 +113,9 @@ fn a_sign_out_leaves_no_recovery_blob_and_no_scratch_file() {
     let engine = engine_with_a_session("an-invented-slot-out");
     let session = engine.acct.session_generation();
     let state_dir = engine.config.state_dir.clone();
-    engine.put_office_snapshot_for(session, FILE, 3, &package()).expect("kept");
+    engine
+        .put_office_snapshot_for(session, FILE, 3, &package())
+        .expect("kept");
     let blobs_before = files_under(&state_dir.join("office-recovery"));
     assert!(blobs_before > 0);
     let scratch = engine.scratch_for(session).expect("a scratch store");
@@ -130,8 +138,8 @@ fn a_sign_out_leaves_no_recovery_blob_and_no_scratch_file() {
 
 /// A real handle signed in to the engine's fake account and unlocked (a screen lock needs a password to open it).
 fn signed_in_engine(tag: &str) -> (Engine<MemoryCredentials>, crate::test_api::FakeApi) {
-    use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
     use crate::test_api::FakeApi;
+    use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
     let (account, phrase) = FakeAccount::register(&format!("{tag}@example.eu"), "a-test-password-1", TEST_PHRASE);
     let account = Arc::new(account);
     let api = FakeApi::start(account_handler(account.clone()));
@@ -146,7 +154,9 @@ fn signed_in_engine(tag: &str) -> (Engine<MemoryCredentials>, crate::test_api::F
     engine
         .sign_in_password(&account.email, Zeroizing::new("a-test-password-1".into()))
         .expect("the fake accepts the password");
-    engine.unlock_with_phrase(Zeroizing::new(phrase)).expect("the phrase unlocks");
+    engine
+        .unlock_with_phrase(Zeroizing::new(phrase))
+        .expect("the phrase unlocks");
     (engine, api)
 }
 
@@ -159,7 +169,10 @@ fn a_screen_lock_calls_the_hook_after_the_lock_and_the_open_session_may_still_se
     let engine = Arc::new(engine);
     let session: SessionGeneration = engine.acct.session_generation();
     let state_dir = engine.config.state_dir.clone();
-    assert!(engine.put_office_snapshot_for(session, FILE, 3, &package()).is_ok(), "open: the put works");
+    assert!(
+        engine.put_office_snapshot_for(session, FILE, 3, &package()).is_ok(),
+        "open: the put works"
+    );
     let _ = engine.discard_office_snapshot_for(session, FILE);
 
     let locked_when_called = Arc::new(AtomicUsize::new(0));
@@ -175,11 +188,25 @@ fn a_screen_lock_calls_the_hook_after_the_lock_and_the_open_session_may_still_se
         }
     }));
     engine.lock_screen().expect("the screen locks");
-    assert_eq!(locked_when_called.load(Ordering::SeqCst), 1, "the lock was already in place");
-    assert_eq!(sealed.load(Ordering::SeqCst), 1, "the open session sealed through the grant");
-    assert!(files_under(&state_dir.join("office-recovery")) > 0, "the blob is on disk");
+    assert_eq!(
+        locked_when_called.load(Ordering::SeqCst),
+        1,
+        "the lock was already in place"
+    );
+    assert_eq!(
+        sealed.load(Ordering::SeqCst),
+        1,
+        "the open session sealed through the grant"
+    );
+    assert!(
+        files_under(&state_dir.join("office-recovery")) > 0,
+        "the blob is on disk"
+    );
     // The grant is for that one session only: another turn's put, and a put after the vault closed, are refused.
-    assert!(engine.office_snapshots_for(session).is_err(), "a locked screen refuses everything else");
+    assert!(
+        engine.office_snapshots_for(session).is_err(),
+        "a locked screen refuses everything else"
+    );
     engine.set_office_session_end_hook(Arc::new(|_| {}));
     engine.lock_vault();
     assert!(
@@ -192,7 +219,10 @@ fn a_screen_lock_calls_the_hook_after_the_lock_and_the_open_session_may_still_se
 #[test]
 fn two_engines_on_one_state_dir_keep_their_own_hook() {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
-    let (a, b) = (engine_with_a_session("an-invented-slot-a"), engine_with_a_session("an-invented-slot-b"));
+    let (a, b) = (
+        engine_with_a_session("an-invented-slot-a"),
+        engine_with_a_session("an-invented-slot-b"),
+    );
     let (hit_a, hit_b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
     let (x, y) = (hit_a.clone(), hit_b.clone());
     a.set_office_session_end_hook(Arc::new(move |_| {
@@ -217,7 +247,9 @@ fn a_sign_out_with_unsaved_edits_is_refused_and_only_a_discard_signs_out() {
     let engine = engine_with_a_session("an-invented-slot-unsaved");
     let session = engine.acct.session_generation();
     let state_dir = engine.config.state_dir.clone();
-    engine.put_office_snapshot_for(session, FILE, 3, &package()).expect("kept");
+    engine
+        .put_office_snapshot_for(session, FILE, 3, &package())
+        .expect("kept");
     let called = Arc::new(AtomicUsize::new(0));
     let c = called.clone();
     engine.set_office_session_end_hook(Arc::new(move |_| {
@@ -230,7 +262,10 @@ fn a_sign_out_with_unsaved_edits_is_refused_and_only_a_discard_signs_out() {
     assert_eq!(engine.sign_out_for(session), Err(ActionError::UnsavedEdits));
     assert_eq!(called.load(Ordering::SeqCst), 0, "no editor was ended");
     assert!(engine.has_session(), "still signed in");
-    assert!(files_under(&state_dir.join("office-recovery")) > 0, "the recovery blob stays");
+    assert!(
+        files_under(&state_dir.join("office-recovery")) > 0,
+        "the recovery blob stays"
+    );
 
     assert_eq!(engine.sign_out_discarding_unsaved_for(session), Ok(()));
     assert_eq!(called.load(Ordering::SeqCst), 1);

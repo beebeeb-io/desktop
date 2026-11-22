@@ -446,8 +446,14 @@ impl EngineBridge {
         else {
             return Ok(FpWrite::plain(ignored_finder_item(&target.filename)));
         };
-        let prepared =
-            self.prepare_finder_modify(&target, &contents_path, contents, &file_id, item_contract.as_ref(), sealed)?;
+        let prepared = self.prepare_finder_modify(
+            &target,
+            &contents_path,
+            contents,
+            &file_id,
+            item_contract.as_ref(),
+            sealed,
+        )?;
         let op_id = uuid::Uuid::new_v4().to_string();
         let metadata_json = serde_json::to_string(&prepared.payload)?;
         let backup_source_key = crate::known_folder::backup_source_key_for_this_device(&target.filename);
@@ -546,7 +552,9 @@ impl EngineBridge {
     ) -> anyhow::Result<FinderWriteOutcome> {
         // see `queue_finder_create`'s identical guard.
         if self.is_stopping() {
-            return Err(anyhow::anyhow!("engine is stopping; refusing to enqueue a new local write"));
+            return Err(anyhow::anyhow!(
+                "engine is stopping; refusing to enqueue a new local write"
+            ));
         }
         // §7.2 (m-6): a provisional id whose create landed reaches the server file only when
         // the delete's base is that file's held token, the token the create's reply named.
@@ -593,7 +601,9 @@ impl EngineBridge {
                 beebeeb_core::backup::Mutation::Trash,
             )
         {
-            return Err(anyhow::Error::new(crate::backup_protect::DriveChangeRefused { message }));
+            return Err(anyhow::Error::new(crate::backup_protect::DriveChangeRefused {
+                message,
+            }));
         }
         let mut payload = serde_json::json!({
             "operation": Op::Trash.as_str(),

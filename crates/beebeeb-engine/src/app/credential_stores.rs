@@ -68,7 +68,9 @@ impl CredentialStores for PlatformCredentials {
     /// a warning at every open for nothing.
     fn legacy_flat(&self, identity: &'static EngineIdentity) -> Option<Self::Store> {
         if cfg!(any(target_os = "windows", target_os = "macos")) {
-            Some(AccountSlots::without_account_keys(crate::keychain::legacy_platform_keychain_store(identity)))
+            Some(AccountSlots::without_account_keys(
+                crate::keychain::legacy_platform_keychain_store(identity),
+            ))
         } else {
             None
         }
@@ -129,7 +131,9 @@ impl<S> AccountSlots<S> {
     /// `user_id`'s key slot. `Unsupported` without slots; `InvalidSecret` for an id that is not a server user id.
     fn account_key_store(&self, user_id: &str) -> AuthResult<S> {
         let Some(make) = self.account_key_slot.as_ref() else {
-            return Err(AuthStoreError::Unsupported("account key slots are not kept by this store"));
+            return Err(AuthStoreError::Unsupported(
+                "account key slots are not kept by this store",
+            ));
         };
         Ok(make(&account_key_slot_name(user_id)?))
     }

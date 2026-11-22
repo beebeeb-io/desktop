@@ -27,7 +27,10 @@ fn seeded() -> (tempfile::TempDir, std::path::PathBuf, StateDb) {
 fn set_version(path: &std::path::Path, version: i64) {
     Connection::open(path)
         .unwrap()
-        .execute("UPDATE files SET current_version = ?2 WHERE file_id = ?1", params![FILE, version])
+        .execute(
+            "UPDATE files SET current_version = ?2 WHERE file_id = ?1",
+            params![FILE, version],
+        )
         .unwrap();
 }
 
@@ -51,7 +54,11 @@ fn has_thumbnail_is_added_to_a_0_8_25_database_once() {
     for _ in 0..3 {
         let db = StateDb::open(&path).unwrap();
         assert!(db.get_file(FILE).unwrap().is_some(), "the row kept");
-        assert_eq!(db.server_has_thumbnail(FILE, 3).unwrap(), None, "not known on an older row");
+        assert_eq!(
+            db.server_has_thumbnail(FILE, 3).unwrap(),
+            None,
+            "not known on an older row"
+        );
     }
     let db = StateDb::open(&path).unwrap();
     assert!(db.set_server_has_thumbnail(FILE, true).unwrap());
@@ -67,10 +74,17 @@ fn has_thumbnail_holds_for_its_version_only() {
     assert!(db.set_server_has_thumbnail(FILE, true).unwrap());
     assert_eq!(db.server_has_thumbnail(FILE, 3).unwrap(), Some(true));
     assert_eq!(db.server_has_thumbnail(FILE, 2).unwrap(), None, "another version");
-    assert!(db.set_server_has_thumbnail(FILE, true).unwrap(), "unchanged, the row is there");
+    assert!(
+        db.set_server_has_thumbnail(FILE, true).unwrap(),
+        "unchanged, the row is there"
+    );
     set_version(&path, 4);
     assert_eq!(db.server_has_thumbnail(FILE, 4).unwrap(), None, "a new version");
-    assert_eq!(db.server_has_thumbnail(FILE, 3).unwrap(), None, "the old one is no longer the row's");
+    assert_eq!(
+        db.server_has_thumbnail(FILE, 3).unwrap(),
+        None,
+        "the old one is no longer the row's"
+    );
     assert!(db.set_server_has_thumbnail(FILE, false).unwrap());
     assert_eq!(db.server_has_thumbnail(FILE, 4).unwrap(), Some(false));
     assert!(!db.set_server_has_thumbnail("unknown", true).unwrap(), "an unknown id");

@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use beebeeb_core::local_seal::{DEFAULT_SCRATCH_CHUNK, SCRATCH_PURPOSE_SPILL, ScratchKey, ScratchReader, ScratchWriter};
+use beebeeb_core::local_seal::{
+    DEFAULT_SCRATCH_CHUNK, SCRATCH_PURPOSE_SPILL, ScratchKey, ScratchReader, ScratchWriter,
+};
 use zeroize::Zeroizing;
 
 use super::{CredentialStores, Engine};
@@ -84,18 +86,25 @@ impl ScratchStore {
     /// Seals `bytes` into a new file.
     pub fn put(&self, bytes: &[u8]) -> Result<ScratchFile, ScratchRefused> {
         fs::create_dir_all(&self.dir).map_err(|_| ScratchRefused::Failed)?;
-        let path = self.dir.join(format!("{}{SUFFIX}", NEXT_NAME.fetch_add(1, Ordering::Relaxed)));
+        let path = self
+            .dir
+            .join(format!("{}{SUFFIX}", NEXT_NAME.fetch_add(1, Ordering::Relaxed)));
         let written = self.session.with_key(|key| {
             let file = File::create(&path).map_err(|_| ScratchRefused::Failed)?;
-            let mut writer = ScratchWriter::new(key, BufWriter::new(file), SCRATCH_PURPOSE_SPILL, DEFAULT_SCRATCH_CHUNK)
-                .map_err(|_| ScratchRefused::Failed)?;
+            let mut writer =
+                ScratchWriter::new(key, BufWriter::new(file), SCRATCH_PURPOSE_SPILL, DEFAULT_SCRATCH_CHUNK)
+                    .map_err(|_| ScratchRefused::Failed)?;
             writer.write_all(bytes).map_err(|_| ScratchRefused::Failed)?;
             let (mut out, _) = writer.finish().map_err(|_| ScratchRefused::Failed)?;
             out.flush().map_err(|_| ScratchRefused::Failed)?;
             Ok(())
         });
         match written {
-            Ok(()) => Ok(ScratchFile { path, session: self.session.clone(), len: bytes.len() }),
+            Ok(()) => Ok(ScratchFile {
+                path,
+                session: self.session.clone(),
+                len: bytes.len(),
+            }),
             Err(e) => {
                 let _ = fs::remove_file(&path);
                 Err(e)
@@ -121,8 +130,8 @@ impl ScratchFile {
             input.read_exact(&mut header).map_err(|_| ScratchRefused::Failed)?;
             let id: [u8; 16] = header[10..26].try_into().expect("16 bytes");
             let mut whole = io::Cursor::new(header).chain(input);
-            let mut reader = ScratchReader::new(key, &mut whole, SCRATCH_PURPOSE_SPILL, &id)
-                .map_err(|_| ScratchRefused::Failed)?;
+            let mut reader =
+                ScratchReader::new(key, &mut whole, SCRATCH_PURPOSE_SPILL, &id).map_err(|_| ScratchRefused::Failed)?;
             let mut plain = Zeroizing::new(Vec::with_capacity(self.len));
             io::copy(&mut reader, &mut *plain).map_err(|_| ScratchRefused::Failed)?;
             Ok(plain)
@@ -142,7 +151,10 @@ fn store_in(state_dir: &Path, session: SessionGeneration) -> Option<ScratchStore
     let map = all.get_or_insert_with(HashMap::new);
     if let Some(existing) = map.get(state_dir) {
         if existing.generation == session {
-            return Some(ScratchStore { dir, session: existing.clone() });
+            return Some(ScratchStore {
+                dir,
+                session: existing.clone(),
+            });
         }
         existing.end();
         wipe(&dir);
@@ -151,7 +163,10 @@ fn store_in(state_dir: &Path, session: SessionGeneration) -> Option<ScratchStore
         wipe(&dir);
     }
     let key = ScratchKey::generate().ok()?;
-    let fresh = Arc::new(Session { generation: session, key: Mutex::new(Some(key)) });
+    let fresh = Arc::new(Session {
+        generation: session,
+        key: Mutex::new(Some(key)),
+    });
     map.insert(state_dir.to_path_buf(), fresh.clone());
     Some(ScratchStore { dir, session: fresh })
 }
@@ -204,7 +219,9 @@ mod office_scratch_tests {
     }
 
     fn folder_has_marker(dir: &Path) -> bool {
-        let Ok(rd) = fs::read_dir(dir.join(FOLDER)) else { return false };
+        let Ok(rd) = fs::read_dir(dir.join(FOLDER)) else {
+            return false;
+        };
         rd.flatten().any(|e| {
             let bytes = fs::read(e.path()).unwrap();
             bytes.windows(MARKER.len()).any(|w| w == MARKER.as_bytes())

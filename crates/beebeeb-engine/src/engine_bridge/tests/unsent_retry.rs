@@ -88,7 +88,11 @@ async fn w36_the_changes_only_step_leaves_the_backups_uploads_to_the_whole_step(
     bridge.db.enqueue_operation(&folder_create("change", 0, 0)).unwrap();
 
     let changes = bridge.process_due_changes(dir.path(), 200).await.unwrap();
-    assert_eq!(changes.completed_op_ids, ["change".to_string()], "the older backup op is not in its way");
+    assert_eq!(
+        changes.completed_op_ids,
+        ["change".to_string()],
+        "the older backup op is not in its way"
+    );
     let whole = bridge.process_due_operations(dir.path(), 200).await.unwrap();
     assert_eq!(whole.completed_op_ids, ["backup".to_string()]);
     assert_eq!(server.finish().len(), 2, "one request each");

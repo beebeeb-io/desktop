@@ -77,21 +77,15 @@ impl EngineBridge {
 
         // Filter 1 — engine-internal paths + OS junk.
         if path_is_engine_internal(sync_root, path) {
-            tracing::debug!(
-                "classify_local_path: rejected engine-internal path"
-            );
+            tracing::debug!("classify_local_path: rejected engine-internal path");
             return LocalPathVerdict::Skip;
         }
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
-            tracing::debug!(
-                "classify_local_path: rejected path with non-utf8 filename"
-            );
+            tracing::debug!("classify_local_path: rejected path with non-utf8 filename");
             return LocalPathVerdict::Skip;
         };
         if is_ignored_finder_name(&file_name) {
-            tracing::debug!(
-                "classify_local_path: rejected ignored/temp filename"
-            );
+            tracing::debug!("classify_local_path: rejected ignored/temp filename");
             return LocalPathVerdict::Skip;
         }
 
@@ -155,9 +149,7 @@ impl EngineBridge {
             if let Err(e) = self.db.note_untracked_orphan(&rel) {
                 tracing::debug!(error = %e, "classify_local_path: could not record an untracked placeholder");
             }
-            tracing::debug!(
-                "classify_local_path: rejected Cloud Files placeholder"
-            );
+            tracing::debug!("classify_local_path: rejected Cloud Files placeholder");
             return LocalPathVerdict::Skip;
         }
 
@@ -239,25 +231,27 @@ impl EngineBridge {
             // Task 2230: a lone `Trashing` row answers only for the file it records; bytes of
             // another size or hash are a file re-created at the path before the trash landed.
             if let Some(row) = rows.first()
-                && row.status == FileStatus::Trashing && !row.is_dir() {
-                    let recreated = match std::fs::metadata(path) {
-                        Ok(m) if m.len() as i64 != row.size_bytes => true,
-                        Ok(_) => match &row.content_hash {
-                            Some(recorded) => {
-                                #[cfg(target_os = "windows")]
-                                if !crate::windows_cf::placeholders::fully_on_disk(path) {
-                                    return Ok(RowAtPath::NotWhollyOnDisk);
-                                }
-                                cached_sha256_file_hex(&row.file_id, path)? != *recorded
+                && row.status == FileStatus::Trashing
+                && !row.is_dir()
+            {
+                let recreated = match std::fs::metadata(path) {
+                    Ok(m) if m.len() as i64 != row.size_bytes => true,
+                    Ok(_) => match &row.content_hash {
+                        Some(recorded) => {
+                            #[cfg(target_os = "windows")]
+                            if !crate::windows_cf::placeholders::fully_on_disk(path) {
+                                return Ok(RowAtPath::NotWhollyOnDisk);
                             }
-                            None => false,
-                        },
-                        Err(_) => false,
-                    };
-                    if recreated {
-                        return Ok(RowAtPath::None);
-                    }
+                            cached_sha256_file_hex(&row.file_id, path)? != *recorded
+                        }
+                        None => false,
+                    },
+                    Err(_) => false,
+                };
+                if recreated {
+                    return Ok(RowAtPath::None);
                 }
+            }
             return Ok(rows.pop().map_or(RowAtPath::None, RowAtPath::One));
         }
         let mut recorded = Vec::new();

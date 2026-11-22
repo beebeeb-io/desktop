@@ -446,7 +446,11 @@ mod order_tests {
             |_| log.borrow_mut().push("undo"),
         );
         assert_eq!(done, Ok(()));
-        assert_eq!(*log.borrow(), ["clear", "flip"], "a flip first races reconcile_stopped_switches");
+        assert_eq!(
+            *log.borrow(),
+            ["clear", "flip"],
+            "a flip first races reconcile_stopped_switches"
+        );
     }
 
     #[test]

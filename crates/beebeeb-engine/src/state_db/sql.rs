@@ -396,7 +396,10 @@ pub(super) fn decidable_parked_at_conn(conn: &Connection, op_id: &str, shown: i6
 /// presents `local` again, a change is recorded, and the staged copy is RELEASED in the journal
 /// (`completed = 1`, as `finish_claimed` does), so a crash before the unlink leaves no unfinished row:
 /// the engine-start sweep unlinks it (S6). Returns the copy for the caller to unlink after the commit.
-pub(super) fn retire_parked_conn<C: std::ops::Deref<Target = Connection>>(tx: &C, op_id: &str) -> Result<Option<String>> {
+pub(super) fn retire_parked_conn<C: std::ops::Deref<Target = Connection>>(
+    tx: &C,
+    op_id: &str,
+) -> Result<Option<String>> {
     let (file_id, write_id, payload): (String, String, Option<String>) = tx.query_row(
         "SELECT file_id, write_id, payload_path FROM operation_queue WHERE op_id = ?1",
         params![op_id],

@@ -160,7 +160,8 @@ pub trait AuthSecretStore: Send + Sync {
     }
 }
 
-const ACCOUNT_KEYS_UNSUPPORTED: AuthStoreError = AuthStoreError::Unsupported("account key slots are not kept by this store");
+const ACCOUNT_KEYS_UNSUPPORTED: AuthStoreError =
+    AuthStoreError::Unsupported("account key slots are not kept by this store");
 
 /// The same account by server user id; blank is never an account.
 fn same_account(a: &str, b: &str) -> bool {
@@ -470,13 +471,14 @@ impl<S: AuthSecretStore> AuthVault<S> {
         // R4, the first run after the single slot: a key tagged with its account is kept in that account's slot too.
         // From the key just read (no second read of the store).
         if let Ok(Some(owner)) = self.vault_key_owner()
-            && matches!(self.kept_key(&owner), Ok(None)) {
-                // Copied straight into the wiped buffer (the field is this module's).
-                let copy = SecretBytes(master_key.0.clone());
-                if let Err(error) = self.store.save_account_key(&owner, copy) {
-                    account_slot_refused("keep", &error);
-                }
+            && matches!(self.kept_key(&owner), Ok(None))
+        {
+            // Copied straight into the wiped buffer (the field is this module's).
+            let copy = SecretBytes(master_key.0.clone());
+            if let Err(error) = self.store.save_account_key(&owner, copy) {
+                account_slot_refused("keep", &error);
             }
+        }
         self.master_key = Some(master_key);
         self.state = VaultLockState::Unlocked;
         Ok(())
@@ -559,7 +561,8 @@ impl<S: AuthSecretStore> AuthVault<S> {
             (Ok(None), Ok(Some(owner))) => Some(owner.clone()),
             _ => None,
         };
-        let others_key = matches!(&key_owner_id, Ok(Some(owner)) if !leaving.as_deref().is_some_and(|l| same_account(l, owner)));
+        let others_key =
+            matches!(&key_owner_id, Ok(Some(owner)) if !leaving.as_deref().is_some_and(|l| same_account(l, owner)));
         if others_key {
             self.keep_tagged_working_key();
         }

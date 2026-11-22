@@ -520,7 +520,11 @@ fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
     let roots: Vec<String> = db.backups_roots().ok()?.into_iter().map(|(_, path)| path).collect();
     let (live, pinned): (Vec<_>, HashSet<String>) = {
         let rows = live_rows_pinned(db).ok()?;
-        let pinned = rows.iter().filter(|(_, p)| *p).map(|(row, _)| row.file_id.clone()).collect();
+        let pinned = rows
+            .iter()
+            .filter(|(_, p)| *p)
+            .map(|(row, _)| row.file_id.clone())
+            .collect();
         (rows.into_iter().map(|(row, _)| row).collect(), pinned)
     };
     // Each hidden folder's path, from its own row.

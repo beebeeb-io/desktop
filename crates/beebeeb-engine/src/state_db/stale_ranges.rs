@@ -116,7 +116,12 @@ mod tests {
         .unwrap();
     }
 
-    type RowState = (Option<String>, Option<String>, Option<(i64, Option<String>)>, FileStatus);
+    type RowState = (
+        Option<String>,
+        Option<String>,
+        Option<(i64, Option<String>)>,
+        FileStatus,
+    );
     fn row(db: &StateDb) -> RowState {
         let minted = db.minted_version("F").unwrap();
         let format = db.range_identity("F").unwrap().map(|identity| identity.format);

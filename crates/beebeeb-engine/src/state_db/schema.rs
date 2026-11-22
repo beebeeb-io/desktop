@@ -32,7 +32,10 @@ impl StateDb {
             Self::migrate_schema(&migration)?;
             migration.commit()?;
         }
-        Ok(Self(conn_lock::ConnLock::new(conn), std::sync::atomic::AtomicU64::new(0)))
+        Ok(Self(
+            conn_lock::ConnLock::new(conn),
+            std::sync::atomic::AtomicU64::new(0),
+        ))
     }
     /// Open an existing state database for reading only: no table is created or migrated, no row is written and
     /// the journal mode is left as it is, so a viewer can look at a database the engine owns. (SQLite itself may
@@ -507,7 +510,8 @@ impl StateDb {
                  DROP TRIGGER IF EXISTS files_unknown_marks_after_update;",
             )?;
         } else {
-            conn.execute_batch("CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert_any_status
+            conn.execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert_any_status
              AFTER INSERT ON files
              WHEN NEW.local_hash IS NULL AND NEW.fetched_min_version < 0
              BEGIN
@@ -529,7 +533,8 @@ impl StateDb {
              BEGIN
                  DELETE FROM unknown_checks WHERE file_id = OLD.file_id;
              END;
-             DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;")?;
+             DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;",
+            )?;
         }
         // LD-0105 / task 2180: the version a Windows placeholder was minted from (`cf_streaming.rs`).
         // NULL on every row from before it: no identity, so bytes on disk for it are never trusted.

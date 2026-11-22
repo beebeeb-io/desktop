@@ -209,7 +209,10 @@ fn the_overview_is_the_servers_rows_with_names_opened_here_and_no_key_material()
         .collect();
     assert_eq!(
         links,
-        [(TRIP, "Invented trip", true, true), (THEIRS, "Linked only.txt", false, false)]
+        [
+            (TRIP, "Invented trip", true, true),
+            (THEIRS, "Linked only.txt", false, false)
+        ]
     );
 
     assert_eq!(overview.requests.len(), 2);
@@ -453,9 +456,20 @@ fn a_request_expiry_and_leaving_are_sent_as_the_server_takes_them() {
     let engine = engine(&fake, true);
     let session = engine.session_turn();
     let change = |c: ShareChange| engine.share_change(session, &c);
-    change(ShareChange::RequestExpiry { request_id: INV_A.into(), expires_in_secs: Some(3600) }).expect("expiry");
-    change(ShareChange::RequestExpiry { request_id: INV_A.into(), expires_in_secs: None }).expect("never");
-    change(ShareChange::Leave { invite_id: INV_MINE.into() }).expect("left");
+    change(ShareChange::RequestExpiry {
+        request_id: INV_A.into(),
+        expires_in_secs: Some(3600),
+    })
+    .expect("expiry");
+    change(ShareChange::RequestExpiry {
+        request_id: INV_A.into(),
+        expires_in_secs: None,
+    })
+    .expect("never");
+    change(ShareChange::Leave {
+        invite_id: INV_MINE.into(),
+    })
+    .expect("left");
     assert_eq!(
         share_routes(&fake),
         [
@@ -464,8 +478,17 @@ fn a_request_expiry_and_leaving_are_sent_as_the_server_takes_them() {
             format!("POST /api/v1/shares/invites/{INV_MINE}/leave"),
         ]
     );
-    let bodies: Vec<Value> = fake.api.requests().iter().filter(|r| r.method == "PATCH").map(|r| r.json()).collect();
-    assert_eq!(bodies, [json!({ "expires_in_secs": 3600 }), json!({ "expires_in_secs": null })]);
+    let bodies: Vec<Value> = fake
+        .api
+        .requests()
+        .iter()
+        .filter(|r| r.method == "PATCH")
+        .map(|r| r.json())
+        .collect();
+    assert_eq!(
+        bodies,
+        [json!({ "expires_in_secs": 3600 }), json!({ "expires_in_secs": null })]
+    );
     // Not an id: nothing more is sent.
     assert_eq!(
         change(ShareChange::Leave { invite_id: "x".into() }),
@@ -480,14 +503,34 @@ fn leaving_an_invite_that_is_already_gone_is_done_and_a_closed_request_keeps_its
     let engine = engine(&fake, true);
     let session = engine.session_turn();
     fake.status.store(404, Ordering::SeqCst);
-    assert_eq!(engine.share_change(session, &ShareChange::Leave { invite_id: INV_MINE.into() }), Ok(()));
     assert_eq!(
-        engine.share_change(session, &ShareChange::RequestExpiry { request_id: INV_A.into(), expires_in_secs: Some(5) }),
+        engine.share_change(
+            session,
+            &ShareChange::Leave {
+                invite_id: INV_MINE.into()
+            }
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        engine.share_change(
+            session,
+            &ShareChange::RequestExpiry {
+                request_id: INV_A.into(),
+                expires_in_secs: Some(5)
+            }
+        ),
         Err(ShareChangeError::NotFound)
     );
     fake.status.store(409, Ordering::SeqCst);
     assert_eq!(
-        engine.share_change(session, &ShareChange::RequestExpiry { request_id: INV_B.into(), expires_in_secs: Some(5) }),
+        engine.share_change(
+            session,
+            &ShareChange::RequestExpiry {
+                request_id: INV_B.into(),
+                expires_in_secs: Some(5)
+            }
+        ),
         Err(ShareChangeError::Refused)
     );
 }

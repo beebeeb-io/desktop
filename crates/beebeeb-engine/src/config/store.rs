@@ -317,7 +317,10 @@ pub trait ConfigFs {
 }
 
 // Outside tests, the macOS sign-out and the discard-and-switch keep path (macOS, Windows) build one (spec 2026-10-10 W5).
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows", any(test, feature = "test-support"))), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", any(test, feature = "test-support"))),
+    allow(dead_code)
+)]
 pub struct RealConfigFs;
 
 impl ConfigFs for RealConfigFs {

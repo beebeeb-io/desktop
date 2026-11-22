@@ -6,8 +6,8 @@
 //! Windows Credential Manager (DPAPI). Linux has no store (fail closed: nothing is written, so nothing is owed).
 //! A test build never touches the machine's own items (macOS: the in-memory `TEST_KEYCHAIN`). Never logs a token.
 
-use super::{AuthResult, AuthStoreError};
 use super::EngineIdentity;
+use super::{AuthResult, AuthStoreError};
 use std::sync::Mutex;
 use zeroize::Zeroizing;
 
@@ -40,7 +40,11 @@ pub(crate) struct InFlight<'a> {
 
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
-        self.owed.in_flight.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.token);
+        self.owed
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.token);
     }
 }
 
@@ -55,8 +59,15 @@ impl OwedRevocations {
 
     /// Claim the right to ask the server about `token`. `None`: another task is asking right now and settles it.
     pub(crate) fn claim(&self, token: &str) -> Option<InFlight<'_>> {
-        let fresh = self.in_flight.lock().unwrap_or_else(|e| e.into_inner()).insert(token.to_string());
-        fresh.then(|| InFlight { owed: self, token: token.to_string() })
+        let fresh = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(token.to_string());
+        fresh.then(|| InFlight {
+            owed: self,
+            token: token.to_string(),
+        })
     }
 
     /// The OS credential store of `identity`.
@@ -158,16 +169,26 @@ impl OwedBackend for PlatformBackend {
 impl OwedBackend for PlatformBackend {
     fn load(&self) -> AuthResult<Option<Vec<u8>>> {
         let key = super::item_name(self.service, ENTRY);
-        Ok(super::TEST_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned())
+        Ok(super::TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned())
     }
     fn save(&self, bytes: &[u8]) -> AuthResult<()> {
         let key = super::item_name(self.service, ENTRY);
-        super::TEST_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()).insert(key, bytes.to_vec());
+        super::TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, bytes.to_vec());
         Ok(())
     }
     fn delete(&self) -> AuthResult<()> {
         let key = super::item_name(self.service, ENTRY);
-        super::TEST_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        super::TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
         Ok(())
     }
 }

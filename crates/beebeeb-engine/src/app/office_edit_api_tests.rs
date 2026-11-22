@@ -158,7 +158,11 @@ fn office_edit_keep_both_makes_the_conflict_copy_name() {
         .save_office_copy_for(session, DOC, &package(), "Invented PC", "10.15")
         .expect("the copy is stored");
     assert_eq!(copy.name, "Invented doc (Invented PC, 10.15).docx");
-    assert_eq!(db.list_operations_for_file(&copy.id).unwrap().len(), 1, "its upload is queued");
+    assert_eq!(
+        db.list_operations_for_file(&copy.id).unwrap().len(),
+        1,
+        "its upload is queued"
+    );
     assert!(
         db.list_operations_for_file(DOC).unwrap().is_empty(),
         "the original is untouched"
@@ -308,7 +312,10 @@ fn office_edit_the_staged_copy_is_sealed_under_the_account_key_and_opens_to_exac
     assert_eq!(metadata["staged_seal"], "office-v1");
     // The staged file holds no byte of the document.
     let staged = std::fs::read(op.payload_path.as_deref().unwrap()).unwrap();
-    assert!(!contains(&staged, MARKER.as_bytes()), "a marker of the document is in the staged copy");
+    assert!(
+        !contains(&staged, MARKER.as_bytes()),
+        "a marker of the document is in the staged copy"
+    );
     assert!(!contains(&staged, b"[Content_Types].xml"));
     assert_eq!(staged.len(), bytes.len() + 50);
     // A restart keeps only the account key: that opens it to exactly the bytes; another key or another file does not.

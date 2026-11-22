@@ -128,6 +128,11 @@ mod usn {
 
     impl UsnFeed {
         pub fn open(sync_root: &Path) -> Result<Self, &'static str> {
+            Self::open_by(sync_root, None)
+        }
+
+        /// [`UsnFeed::open`], through the `only`-th way of reading the journal alone (tests).
+        pub(super) fn open_by(sync_root: &Path, only: Option<usize>) -> Result<Self, &'static str> {
             let canonical_root = std::fs::canonicalize(sync_root).map_err(|_| "root unreadable")?;
             let letter = canonical_root
                 .components()
@@ -159,15 +164,18 @@ mod usn {
             // Admin: the volume read for reading; otherwise the unprivileged read, on the volume or the root.
             let mut tried = Vec::new();
             if let Ok(v) = open_volume(GENERIC_READ) {
-                tried.push((v, FSCTL_READ_USN_JOURNAL));
+                tried.push((0, v, FSCTL_READ_USN_JOURNAL));
             }
             if let Ok(v) = open_volume(FILE_READ_ATTRIBUTES.0) {
-                tried.push((v, FSCTL_READ_UNPRIVILEGED_USN_JOURNAL));
+                tried.push((1, v, FSCTL_READ_UNPRIVILEGED_USN_JOURNAL));
             }
             if let Ok(d) = open_dir() {
-                tried.push((d, FSCTL_READ_UNPRIVILEGED_USN_JOURNAL));
+                tried.push((2, d, FSCTL_READ_UNPRIVILEGED_USN_JOURNAL));
             }
-            for (journal, read_code) in tried {
+            for (way, journal, read_code) in tried {
+                if only.is_some_and(|only| only != way) {
+                    continue;
+                }
                 let Some(data) = query(&journal) else { continue };
                 let mut feed = UsnFeed {
                     journal,
@@ -392,6 +400,75 @@ mod usn {
         let _ = unsafe { CloseHandle(handle) };
         (n > 0 && n <= buf.len()).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..n])))
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use windows::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+
+        fn id_of(dir: &std::fs::File) -> u64 {
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            // SAFETY: `info` is the struct the call fills; `dir` is open.
+            unsafe { GetFileInformationByHandle(HANDLE(dir.as_raw_handle()), &mut info).unwrap() };
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)
+        }
+
+        /// RC2-1 probe: what each way of reading the journal names for a root-level and a nested new file,
+        /// on a plain folder and on a registered Cloud Files sync root.
+        #[test]
+        fn root_level_probe() {
+            for registered in [false, true] {
+                for way in 0..3 {
+                    let temp = tempfile::tempdir().unwrap();
+                    let root = temp.path().join("root");
+                    std::fs::create_dir_all(root.join("sub")).unwrap();
+                    if registered {
+                        crate::windows_cf::register_test_sync_root(&root).unwrap();
+                    }
+                    let mut feed = match UsnFeed::open_by(&root, Some(way)) {
+                        Ok(feed) => feed,
+                        Err(why) => {
+                            println!("PROBE registered={registered} way={way}: not opened ({why})");
+                            if registered {
+                                let _ = crate::windows_cf::unregister_any_sync_root(&root);
+                            }
+                            continue;
+                        }
+                    };
+                    let _ = feed.take();
+                    let root_id = id_of(&feed.root_dir);
+                    let root_as = feed.parent_path(root_id);
+                    let raw = resolve(&feed.root_dir, root_id);
+                    std::fs::write(root.join("a.txt"), b"a").unwrap();
+                    std::fs::write(root.join("sub/b.txt"), b"b").unwrap();
+                    std::fs::create_dir(root.join("newdir")).unwrap();
+                    std::fs::write(root.join("newdir/c.txt"), b"c").unwrap();
+                    let named = match feed.take() {
+                        Changes::Paths(paths) => paths
+                            .iter()
+                            .map(|p| {
+                                p.strip_prefix(&root)
+                                    .map(|r| r.display().to_string())
+                                    .unwrap_or_else(|_| format!("OUTSIDE {}", p.display()))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" | "),
+                        other => format!("{other:?}"),
+                    };
+                    println!(
+                        "PROBE registered={registered} way={way} mode={} root={} canonical={} raw={raw:?} root_as={root_as:?} named=[{named}]",
+                        feed.mode(),
+                        root.display(),
+                        feed.canonical_root.display(),
+                    );
+                    drop(feed);
+                    if registered {
+                        let _ = crate::windows_cf::unregister_any_sync_root(&root);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -480,7 +557,11 @@ mod tests {
         assert_eq!(memo.visited, 0, "no full walk 59 minutes into idle");
         let mut feed = Told([Changes::Unknown].into());
         scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
-        assert!(memo.visited >= 6, "an overflow walks everything at once: {}", memo.visited);
+        assert!(
+            memo.visited >= 6,
+            "an overflow walks everything at once: {}",
+            memo.visited
+        );
         memo.age_by(Duration::from_secs(60 * 60));
         let mut feed = Told(Default::default());
         scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);

@@ -65,7 +65,10 @@ pub(crate) fn register_test_sync_root(sync_root_path: &std::path::Path) -> anyho
 #[cfg(any(test, feature = "test-support"))]
 #[allow(dead_code)]
 pub(crate) fn leftover_sync_roots(roots: &[std::path::PathBuf]) -> usize {
-    roots.iter().filter(|root| registered_provider_name(root).is_ok()).count()
+    roots
+        .iter()
+        .filter(|root| registered_provider_name(root).is_ok())
+        .count()
 }
 
 /// LD-0105 S7 (W1): the Win32 hydration policy. `PROGRESSIVE` completes a reader's IO as soon as its
@@ -371,7 +374,11 @@ mod canonical_id_tests {
         std::fs::create_dir_all(&real).unwrap();
         let via = dir.join("via");
         let out = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"]).arg(&via).arg(&real).output().unwrap();
+            .args(["/C", "mklink", "/J"])
+            .arg(&via)
+            .arg(&real)
+            .output()
+            .unwrap();
         assert!(out.status.success(), "mklink /J failed");
         assert_eq!(
             shell_sync_root_id_as(&via, "BeebeebQA"),

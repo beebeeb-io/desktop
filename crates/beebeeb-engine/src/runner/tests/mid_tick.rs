@@ -106,7 +106,11 @@ async fn w36_a_nudge_while_the_loop_waits_is_the_loops_own() {
     rig.state.set_busy(false);
     rig.link.nudge();
     tokio::time::sleep(Duration::from_secs(5)).await;
-    assert_eq!(rig.sent(), 0, "`Wake::Nudge` runs that step; a second one here would only repeat it");
+    assert_eq!(
+        rig.sent(),
+        0,
+        "`Wake::Nudge` runs that step; a second one here would only repeat it"
+    );
 }
 
 /// A nudge and a tick that start together: the loop took the tick first (`biased`), so the nudge is served here.

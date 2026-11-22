@@ -174,7 +174,11 @@ fn signed_out_keeping_the_local_data_the_command_frees_nothing_and_its_binding_i
     signed_in(&f.engine, "user-a", "a@example.eu");
     assert_eq!(state_of(owner(&f.engine)), CommandState::Enabled, "the control");
     f.engine.sign_out_keeping_local_data().expect("the sign-out");
-    assert_eq!(f.removed.take(), std::slice::from_ref(&f.root), "the sign-out removed the binding");
+    assert_eq!(
+        f.removed.take(),
+        std::slice::from_ref(&f.root),
+        "the sign-out removed the binding"
+    );
     refused_and_untouched(&f, "signed_out");
 }
 
@@ -183,7 +187,11 @@ fn locked_the_command_frees_nothing_and_its_binding_is_removed() {
     let f = fixture();
     signed_in(&f.engine, "user-a", "a@example.eu");
     f.engine.lock();
-    assert_eq!(f.removed.take(), std::slice::from_ref(&f.root), "the lock removed the binding");
+    assert_eq!(
+        f.removed.take(),
+        std::slice::from_ref(&f.root),
+        "the lock removed the binding"
+    );
     refused_and_untouched(&f, "locked");
 }
 

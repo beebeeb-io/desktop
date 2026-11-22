@@ -567,8 +567,7 @@ impl EngineBridge {
         let master_key = self.api.master_key();
         // The item's key and CURRENT record (the completed upload's commitment included): a queued
         // successor's name is sealed again with them.
-        let landing_material =
-            owned_key_and_record(&self.db, master_key, server_file_id.as_str())?;
+        let landing_material = owned_key_and_record(&self.db, master_key, server_file_id.as_str())?;
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
                 op_id: &op.op_id,
@@ -629,8 +628,7 @@ impl EngineBridge {
         if let Some(path) = payload_path.as_deref() {
             // Task 1700: post-complete thumbnail work never fails the upload, but its
             // failure is surfaced on the outcome so a red run names the real error.
-            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id.as_str())?
-                .0;
+            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id.as_str())?.0;
             match self
                 .finish_completed_upload(
                     op,
@@ -935,9 +933,10 @@ impl EngineBridge {
         // convention, so no network call is made.
         if let Ok(crate::owner_keys::StoredName::Name(name)) =
             crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())
-            && crate::owner_keys::safe_display_name(&name) {
-                return name;
-            }
+            && crate::owner_keys::safe_display_name(&name)
+        {
+            return name;
+        }
         if let Ok(row) = self.api.get_file(request_id).await
             && let Ok(keys) = self.request_row_keys(&row).await
             && crate::owner_keys::safe_display_name(&keys.name.name)
@@ -1133,7 +1132,7 @@ impl EngineBridge {
             file_id,
             &sealed,
         )
-            .map_err(|_| unreadable())?;
+        .map_err(|_| unreadable())?;
         Ok(plain)
     }
 

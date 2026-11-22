@@ -50,38 +50,61 @@ impl Pc {
     /// with the twelve words and bound to the account. Then the start's restore.
     fn first_sign_in(&self, user_id: &str, key: &[u8; 32]) {
         let vault = self.engine.vault();
-        vault.install_session(SessionToken::new(format!("token-of-{user_id}")).unwrap()).unwrap();
+        vault
+            .install_session(SessionToken::new(format!("token-of-{user_id}")).unwrap())
+            .unwrap();
         vault.store_account_email(&format!("{user_id}@example.eu")).unwrap();
         vault.bind_session_owner(user_id).unwrap();
-        vault.store_wrapped_master_key(SecretBytes::new_master_key(key)).unwrap();
+        vault
+            .store_wrapped_master_key(SecretBytes::new_master_key(key))
+            .unwrap();
         vault.bind_vault_key_owner(user_id).unwrap();
         self.engine.restore();
     }
 
     fn install(&self) -> <MemoryCredentials as CredentialStores>::Store {
-        self.engine.stores.for_account(self.engine.identity, &self.engine.config.account_id)
+        self.engine
+            .stores
+            .for_account(self.engine.identity, &self.engine.config.account_id)
     }
 
     fn working_key(&self) -> Option<Vec<u8>> {
-        self.install().load_wrapped_master_key().unwrap().map(|k| k.expose_for_crypto().to_vec())
+        self.install()
+            .load_wrapped_master_key()
+            .unwrap()
+            .map(|k| k.expose_for_crypto().to_vec())
     }
 
     fn kept_key(&self, user_id: &str) -> Option<Vec<u8>> {
-        self.install().load_account_key(user_id).unwrap().map(|k| k.expose_for_crypto().to_vec())
+        self.install()
+            .load_account_key(user_id)
+            .unwrap()
+            .map(|k| k.expose_for_crypto().to_vec())
     }
 
     fn token(&self) -> Option<String> {
-        self.install().load_session_token().unwrap().map(|t| t.expose_for_request().to_string())
+        self.install()
+            .load_session_token()
+            .unwrap()
+            .map(|t| t.expose_for_request().to_string())
     }
 
     fn listed(&self) -> Vec<(String, bool)> {
-        self.engine.accounts_on_this_pc().into_iter().map(|a| (a.user_id, a.current)).collect()
+        self.engine
+            .accounts_on_this_pc()
+            .into_iter()
+            .map(|a| (a.user_id, a.current))
+            .collect()
     }
 
     /// After a switch to `user_id`: its session and its own key are the install slot's, and nothing asks for the
     /// twelve words.
     fn is_current_without_the_twelve_words(&self, user_id: &str, key: &[u8; 32], gate: GateState) {
-        assert_ne!(gate, GateState::NeedsRecoveryPhrase, "a switch to {user_id} asked for the twelve words");
+        assert_ne!(
+            gate,
+            GateState::NeedsRecoveryPhrase,
+            "a switch to {user_id} asked for the twelve words"
+        );
         assert_ne!(gate, GateState::SignedOut);
         assert_eq!(self.token(), Some(format!("token-of-{user_id}")));
         assert_eq!(self.working_key(), Some(key.to_vec()));
@@ -102,8 +125,16 @@ fn account_switch_three_switches_never_ask_for_the_twelve_words() {
     assert_eq!(pc.listed(), vec![(A.to_string(), true)]);
 
     pc.engine.add_another_account().unwrap();
-    assert_eq!(pc.engine.gate(), GateState::SignedOut, "the sign-in shows for the new account");
-    assert_eq!(pc.listed(), vec![(A.to_string(), false)], "A still signed in on this PC");
+    assert_eq!(
+        pc.engine.gate(),
+        GateState::SignedOut,
+        "the sign-in shows for the new account"
+    );
+    assert_eq!(
+        pc.listed(),
+        vec![(A.to_string(), false)],
+        "A still signed in on this PC"
+    );
     assert_eq!(pc.kept_key(A), Some(A_KEY.to_vec()), "A's key in A's slot");
     pc.first_sign_in(B, &B_KEY);
     assert_eq!(pc.listed(), vec![(B.to_string(), true), (A.to_string(), false)]);

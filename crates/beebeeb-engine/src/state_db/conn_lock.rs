@@ -71,7 +71,10 @@ impl ConnLock {
                 }
                 Some(_) => {
                     owner.2 += 1;
-                    owner = self.freed.wait(owner).unwrap_or_else(std::sync::PoisonError::into_inner);
+                    owner = self
+                        .freed
+                        .wait(owner)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     owner.2 -= 1;
                     if owner.0.is_none() {
                         owner.0 = Some(me);
@@ -268,7 +271,10 @@ impl<'a> WriteBatch<'a> {
 
     fn begin(&mut self) -> Result<()> {
         let hold = self.lock.hold();
-        self.lock.lock().expect("state_db lock").execute_batch("BEGIN IMMEDIATE")?;
+        self.lock
+            .lock()
+            .expect("state_db lock")
+            .execute_batch("BEGIN IMMEDIATE")?;
         self.hold = Some(hold);
         self.batch_rows = 0;
         self.opened = Instant::now();
@@ -281,7 +287,11 @@ impl<'a> WriteBatch<'a> {
             self.hold = None;
             self.commits += 1;
             let took = self.opened.elapsed();
-            tracing::debug!(rows = self.batch_rows, ms = took.as_millis() as u64, "state_db write batch committed");
+            tracing::debug!(
+                rows = self.batch_rows,
+                ms = took.as_millis() as u64,
+                "state_db write batch committed"
+            );
             if took > self.longest.0 {
                 self.longest = (took, self.batch_rows);
             }
@@ -361,8 +371,15 @@ mod tests {
         let longest = batch.longest.0;
         let commits = batch.finish().unwrap();
         assert!(commits >= 3, "{commits} commits for 6 rows of 20 ms under a 30 ms cap");
-        assert!(longest < Duration::from_millis(30 + 20 + 100), "a batch was open {longest:?}");
-        let rows: i64 = lock.lock().unwrap().query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0)).unwrap();
+        assert!(
+            longest < Duration::from_millis(30 + 20 + 100),
+            "a batch was open {longest:?}"
+        );
+        let rows: i64 = lock
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(rows, 6);
         assert_eq!(depth(&lock), (None, 0));
     }
@@ -395,10 +412,18 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let other = lock.clone();
         std::thread::spawn(move || {
-            let n: i64 = other.lock().unwrap().query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0)).unwrap();
+            let n: i64 = other
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+                .unwrap();
             tx.send(n).unwrap();
         });
-        assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(0), "another thread never got the lock");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Ok(0),
+            "another thread never got the lock"
+        );
     }
 
     /// dc-170 (2): re-entry inside a batch (under the batch's guard) leaves the batch usable.

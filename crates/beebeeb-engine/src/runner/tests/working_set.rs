@@ -391,13 +391,27 @@ async fn a_phase_armed_while_the_runner_waits_wakes_it_at_once() {
     let (_keep_open, mut cancel) = oneshot::channel::<()>();
     let mut tick = tokio::time::interval(TICK_INTERVAL);
     assert_eq!(
-        next_wake(&mut cancel, &mut tick, &send_phase, &crate::transfer_progress::TransferBoard::new()).await,
+        next_wake(
+            &mut cancel,
+            &mut tick,
+            &send_phase,
+            &crate::transfer_progress::TransferBoard::new()
+        )
+        .await,
         Wake::Tick,
         "an interval's first tick is at once"
     );
     let waiter = {
         let send_phase = send_phase.clone();
-        tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase, &crate::transfer_progress::TransferBoard::new()).await })
+        tokio::spawn(async move {
+            next_wake(
+                &mut cancel,
+                &mut tick,
+                &send_phase,
+                &crate::transfer_progress::TransferBoard::new(),
+            )
+            .await
+        })
     };
     // Paused clock: the waiter runs first and starts waiting, then the clock moves 50 ms. It now waits, 29.95 s
     // from its next tick.
@@ -539,12 +553,26 @@ async fn a_nudge_while_the_runner_waits_wakes_it_at_once() {
     let (_keep_open, mut cancel) = oneshot::channel::<()>();
     let mut tick = tokio::time::interval(TICK_INTERVAL);
     assert_eq!(
-        next_wake(&mut cancel, &mut tick, &send_phase, &crate::transfer_progress::TransferBoard::new()).await,
+        next_wake(
+            &mut cancel,
+            &mut tick,
+            &send_phase,
+            &crate::transfer_progress::TransferBoard::new()
+        )
+        .await,
         Wake::Tick
     );
     let waiter = {
         let send_phase = send_phase.clone();
-        tokio::spawn(async move { next_wake(&mut cancel, &mut tick, &send_phase, &crate::transfer_progress::TransferBoard::new()).await })
+        tokio::spawn(async move {
+            next_wake(
+                &mut cancel,
+                &mut tick,
+                &send_phase,
+                &crate::transfer_progress::TransferBoard::new(),
+            )
+            .await
+        })
     };
     tokio::time::sleep(Duration::from_millis(50)).await;
     send_phase.nudge();

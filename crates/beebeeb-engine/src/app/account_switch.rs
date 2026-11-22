@@ -75,7 +75,10 @@ impl<C: CredentialStores> Engine<C> {
         port: &dyn SyncRootPort,
     ) -> Option<super::SyncStartRefused> {
         let owner = data.db.owner().ok().flatten();
-        let other_account = match (owner.as_ref().and_then(|o| o.user_id.as_deref()), session.user_id.as_deref()) {
+        let other_account = match (
+            owner.as_ref().and_then(|o| o.user_id.as_deref()),
+            session.user_id.as_deref(),
+        ) {
             (Some(recorded), Some(now)) => recorded != now,
             _ => false,
         };
@@ -92,7 +95,10 @@ impl<C: CredentialStores> Engine<C> {
             && left.files.is_empty()
             && !left.folders.is_empty()
         {
-            tracing::info!(folders = left.folders.len(), "account switch: empty folders the previous account left go");
+            tracing::info!(
+                folders = left.folders.len(),
+                "account switch: empty folders the previous account left go"
+            );
             let _ = take_out(sync_root, &[], &left.folders);
             removed = self.remove_the_previous_account(data, previous, sync_root, port);
         }
@@ -153,7 +159,8 @@ impl<C: CredentialStores> Engine<C> {
             }
         }
         if db.has_account_data().map_err(|_| "unreadable")? {
-            port.remove_synced_items(db, sync_root, &unasked).map_err(|_| ITEMS_STAY)?;
+            port.remove_synced_items(db, sync_root, &unasked)
+                .map_err(|_| ITEMS_STAY)?;
         }
         let purge = db.purge_all_local_state().map_err(|_| "the rows stay")?;
         for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {
@@ -331,7 +338,10 @@ impl<C: CredentialStores> Engine<C> {
             take_out(&sync_root, &sources, &left.folders)?;
             Ok((kept_in, copies.len()))
         })?;
-        tracing::info!(kept, "discard and switch: the unsent files were kept; the switch goes on");
+        tracing::info!(
+            kept,
+            "discard and switch: the unsent files were kept; the switch goes on"
+        );
         // The plain start, after the locks: step 7 now finds nothing unsent and clears in 014's order.
         let start = self.start_on(sync_root, port);
         Ok(DiscardDone { kept_in, kept, start })
@@ -384,7 +394,10 @@ impl<C: CredentialStores> Engine<C> {
             take_out(&sync_root, &sources, &left.folders)?;
             Ok((aside, copies.len()))
         })?;
-        tracing::info!(kept, "keep aside: the previous account's files are beside the sync folder; the switch goes on");
+        tracing::info!(
+            kept,
+            "keep aside: the previous account's files are beside the sync folder; the switch goes on"
+        );
         let start = self.start_on(sync_root, port);
         Ok(DiscardDone { kept_in, kept, start })
     }
@@ -403,9 +416,7 @@ impl<C: CredentialStores> Engine<C> {
         let owner = db.owner().map_err(|_| DiscardRefused::Unreadable)?;
         match owner {
             Some(previous)
-                if previous.user_id.is_some()
-                    && identity.user_id.is_some()
-                    && previous.user_id != identity.user_id =>
+                if previous.user_id.is_some() && identity.user_id.is_some() && previous.user_id != identity.user_id =>
             {
                 Ok((db, previous))
             }
@@ -417,7 +428,9 @@ impl<C: CredentialStores> Engine<C> {
     /// in that account's own slot (and read back), so 014's last step, which removes only the working copy, leaves A
     /// able to sign back in without the twelve words. Any other working key, and every slot, is left alone.
     fn keep_its_key_in_its_slot(&self, previous: &Identity) -> Result<(), DiscardRefused> {
-        let Some(user_id) = previous.user_id.as_deref() else { return Ok(()) };
+        let Some(user_id) = previous.user_id.as_deref() else {
+            return Ok(());
+        };
         let vault = self.vault();
         let its = vault
             .vault_key_owner()
@@ -426,7 +439,9 @@ impl<C: CredentialStores> Engine<C> {
         if !its || !vault.has_vault_key().unwrap_or(false) {
             return Ok(());
         }
-        vault.bind_vault_key_owner(user_id).map_err(|_| DiscardRefused::KeyNotKept)?;
+        vault
+            .bind_vault_key_owner(user_id)
+            .map_err(|_| DiscardRefused::KeyNotKept)?;
         let store = self.stores.for_account(self.identity, &self.config.account_id);
         match store.load_account_key(user_id) {
             Ok(Some(_)) => Ok(()),
@@ -437,7 +452,11 @@ impl<C: CredentialStores> Engine<C> {
     /// The 1887 kept folder ("Changes not sent"). A test keeps under its own state folder.
     fn kept_root(&self) -> Option<PathBuf> {
         #[cfg(test)]
-        return Some(self.config.state_dir.join(crate::sign_out::kept_names::KEPT_FOLDER_NAME));
+        return Some(
+            self.config
+                .state_dir
+                .join(crate::sign_out::kept_names::KEPT_FOLDER_NAME),
+        );
         #[cfg(not(test))]
         crate::sign_out::kept_names::kept_root_for_this_app(self.identity)
     }
@@ -502,9 +521,17 @@ fn left_by_a_person(
             .collect();
         items.sort_by(|a, b| a.0.cmp(&b.0));
         for (name, kind) in items {
-            let path = if folder.is_empty() { name } else { format!("{folder}/{name}") };
+            let path = if folder.is_empty() {
+                name
+            } else {
+                format!("{folder}/{name}")
+            };
             if kind.is_dir() {
-                if db.get_file_by_path(&path).map_err(|_| DiscardRefused::Unreadable)?.is_none() {
+                if db
+                    .get_file_by_path(&path)
+                    .map_err(|_| DiscardRefused::Unreadable)?
+                    .is_none()
+                {
                     left.folders.push(path.clone());
                 }
                 folders.push(path);
@@ -523,7 +550,11 @@ fn left_by_a_person(
 /// that may hold bytes it never sent, in the database's order (`remove_the_previous_account`'s guarded check), then
 /// what a person left ([`left_by_a_person`]). Other work of its refuses: that needs its account.
 fn in_the_way(db: &StateDb, sync_root: &Path, port: &dyn SyncRootPort) -> Result<Left, DiscardRefused> {
-    if db.work_waiting_for_a_person().map_err(|_| DiscardRefused::Unreadable)?.is_some() {
+    if db
+        .work_waiting_for_a_person()
+        .map_err(|_| DiscardRefused::Unreadable)?
+        .is_some()
+    {
         return Err(DiscardRefused::OtherWork);
     }
     let guarded = db.guarded_paths().map_err(|_| DiscardRefused::Unreadable)?;
@@ -535,15 +566,22 @@ fn in_the_way(db: &StateDb, sync_root: &Path, port: &dyn SyncRootPort) -> Result
         })
         .collect();
     let mut left = left_by_a_person(db, sync_root, port, false)?;
-    left.files.retain(|path| !files.iter().any(|unsent| unsent.trim_start_matches('/') == path));
+    left.files
+        .retain(|path| !files.iter().any(|unsent| unsent.trim_start_matches('/') == path));
     files.append(&mut left.files);
-    Ok(Left { files, folders: left.folders })
+    Ok(Left {
+        files,
+        folders: left.folders,
+    })
 }
 
 /// Whether every source and its copy hold the same bytes now.
 fn every_copy_holds_the_same(sources: &[PathBuf], copies: &[PathBuf]) -> bool {
     sources.len() == copies.len()
-        && sources.iter().zip(copies).all(|(source, copy)| same_bytes(source, copy).unwrap_or(false))
+        && sources
+            .iter()
+            .zip(copies)
+            .all(|(source, copy)| same_bytes(source, copy).unwrap_or(false))
 }
 
 /// Each original out of the sync folder (its copy was proven first), then each folder no row names that this
@@ -574,7 +612,11 @@ fn aside_folder_name(previous: &Identity, on: chrono::NaiveDate) -> String {
         .take(100)
         .collect();
     let address = address.trim_matches(|c: char| c == '.' || c.is_whitespace());
-    let whose = if address.is_empty() { "the previous account" } else { address };
+    let whose = if address.is_empty() {
+        "the previous account"
+    } else {
+        address
+    };
     format!("Beebeeb files from {whose} ({})", on.format("%Y-%m-%d"))
 }
 
@@ -593,7 +635,11 @@ fn copy_aside(sync_root: &Path, name: &str, left: &Left) -> Result<(PathBuf, Vec
     let beside = sync_root.parent().ok_or("the sync folder has no folder beside it")?;
     let mut n = 1;
     let aside = loop {
-        let candidate = beside.join(if n == 1 { name.to_string() } else { format!("{name} ({n})") });
+        let candidate = beside.join(if n == 1 {
+            name.to_string()
+        } else {
+            format!("{name} ({n})")
+        });
         match std::fs::create_dir(&candidate) {
             Ok(()) => break candidate,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
@@ -630,9 +676,17 @@ fn copy_new(source: &Path, directory: &Path, file: &str) -> std::io::Result<Path
     use crate::sign_out::kept_names::with_suffix;
     let mut n = 1;
     loop {
-        let name = if n == 1 { file.to_string() } else { with_suffix(file, &format!(" ({n})")) };
+        let name = if n == 1 {
+            file.to_string()
+        } else {
+            with_suffix(file, &format!(" ({n})"))
+        };
         let destination = directory.join(name);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&destination) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
             Ok(mut to) => {
                 let copied = std::fs::File::open(source).and_then(|mut from| {
                     std::io::copy(&mut from, &mut to)?;
@@ -799,18 +853,28 @@ impl<C: CredentialStores> Engine<C> {
         let mut out = Vec::new();
         if let Some(user_id) = current.clone() {
             let email = vault.account_email().ok().flatten().or_else(|| self.account_email());
-            out.push(AccountOnThisPc { user_id, email, current: true });
+            out.push(AccountOnThisPc {
+                user_id,
+                email,
+                current: true,
+            });
         }
         for user_id in self.parked_ids() {
             if current.as_deref() == Some(user_id.as_str()) {
                 continue;
             }
-            let Some(store) = self.parked_store(&user_id) else { continue };
+            let Some(store) = self.parked_store(&user_id) else {
+                continue;
+            };
             if !matches!(store.load_session_token(), Ok(Some(_))) {
                 continue;
             }
             let email = store.load_account_email().ok().flatten();
-            out.push(AccountOnThisPc { user_id, email, current: false });
+            out.push(AccountOnThisPc {
+                user_id,
+                email,
+                current: false,
+            });
         }
         out
     }
@@ -912,7 +976,11 @@ impl<C: CredentialStores> Engine<C> {
         self.forget_session(SessionTransition::SignOut);
         let cleared = vault
             .clear_session_token()
-            .and_then(|()| self.stores.for_account(self.identity, &self.config.account_id).delete_account_email())
+            .and_then(|()| {
+                self.stores
+                    .for_account(self.identity, &self.config.account_id)
+                    .delete_account_email()
+            })
             .and_then(|()| vault.clear_lock_entries());
         if let Ok(mut email) = self.acct.auth_email.lock() {
             *email = None;
@@ -967,7 +1035,13 @@ impl<C: CredentialStores> Engine<C> {
 
     fn parked_ids(&self) -> Vec<String> {
         std::fs::read_to_string(self.parked_index())
-            .map(|text| text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
+            .map(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -1069,11 +1143,20 @@ mod keep_aside_name_tests {
     fn the_folder_is_named_for_the_account_and_the_day_and_never_for_an_id() {
         let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
         let a = Identity::new(Some("user-rc-b"), Some("a.person@example.eu"));
-        assert_eq!(aside_folder_name(&a, day), "Beebeeb files from a.person@example.eu (2026-11-22)");
+        assert_eq!(
+            aside_folder_name(&a, day),
+            "Beebeeb files from a.person@example.eu (2026-11-22)"
+        );
         let odd = Identity::new(Some("user-rc-b"), Some("a/b\\c:d*e?\"f<g>h|@example.eu. "));
-        assert_eq!(aside_folder_name(&odd, day), "Beebeeb files from abcdefgh@example.eu (2026-11-22)");
+        assert_eq!(
+            aside_folder_name(&odd, day),
+            "Beebeeb files from abcdefgh@example.eu (2026-11-22)"
+        );
         let unnamed = Identity::new(Some("user-rc-b"), None);
-        assert_eq!(aside_folder_name(&unnamed, day), "Beebeeb files from the previous account (2026-11-22)");
+        assert_eq!(
+            aside_folder_name(&unnamed, day),
+            "Beebeeb files from the previous account (2026-11-22)"
+        );
     }
 }
 
@@ -1089,6 +1172,9 @@ mod discard_ask_tests {
         assert_eq!(ask.names, (1..=5).map(|n| format!("file {n}.txt")).collect::<Vec<_>>());
         assert_eq!(ask.more(), 2);
         let few = DiscardAsk::of(vec!["a.txt".into(), "b/c.txt".into()]);
-        assert_eq!((few.files, few.names.clone(), few.more()), (2, vec!["a.txt".into(), "c.txt".into()], 0));
+        assert_eq!(
+            (few.files, few.names.clone(), few.more()),
+            (2, vec!["a.txt".into(), "c.txt".into()], 0)
+        );
     }
 }

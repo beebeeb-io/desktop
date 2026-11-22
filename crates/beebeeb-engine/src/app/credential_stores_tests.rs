@@ -709,7 +709,9 @@ mod key_slot_per_account {
     /// The twelve words, proven (`Engine::unlock_with_phrase`).
     fn unlock_with_words(credentials: &MemoryCredentials, key: &[u8; 32]) {
         let vault = vault(credentials);
-        vault.store_wrapped_master_key(SecretBytes::new_master_key(key)).unwrap();
+        vault
+            .store_wrapped_master_key(SecretBytes::new_master_key(key))
+            .unwrap();
         assert!(key_owner::bind_key_to_session_owner(&vault).unwrap());
     }
 
@@ -776,7 +778,11 @@ mod key_slot_per_account {
 
         sign_out(&credentials);
         assert_eq!(kept(&credentials, USER_B), None, "B signed out: its key is gone");
-        assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]), "A was switched away from");
+        assert_eq!(
+            kept(&credentials, USER_A).as_deref(),
+            Some(&KEY_A[..]),
+            "A was switched away from"
+        );
         let install = credentials.store_for(SLOT);
         assert!(install.load_wrapped_master_key().unwrap().is_none());
         assert!(install.load_session_token().unwrap().is_none());
@@ -811,14 +817,20 @@ mod key_slot_per_account {
         let credentials = MemoryCredentials::default();
         // An earlier build: one slot, A's key tagged A, no account slots yet.
         let store = credentials.store_for(SLOT);
-        store.save_wrapped_master_key(SecretBytes::new_master_key(KEY_A)).unwrap();
+        store
+            .save_wrapped_master_key(SecretBytes::new_master_key(KEY_A))
+            .unwrap();
         store.save_vault_key_owner(USER_A).unwrap();
         assert_eq!(kept(&credentials, USER_A), None);
 
         sign_in(&credentials, USER_B, "b@example.eu");
         assert_eq!(unlocks_without_words(&credentials), None, "B never gets A's key");
         unlock_with_words(&credentials, KEY_B);
-        assert_eq!(kept(&credentials, USER_A).as_deref(), Some(&KEY_A[..]), "A's key moved into A's slot");
+        assert_eq!(
+            kept(&credentials, USER_A).as_deref(),
+            Some(&KEY_A[..]),
+            "A's key moved into A's slot"
+        );
 
         sign_in(&credentials, USER_A, "a@example.eu");
         assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
@@ -834,7 +846,9 @@ mod key_slot_per_account {
             .save_session_token(&SessionToken::new("token-of-a").unwrap())
             .unwrap();
         store.save_session_owner(USER_A).unwrap();
-        store.save_wrapped_master_key(SecretBytes::new_master_key(KEY_A)).unwrap();
+        store
+            .save_wrapped_master_key(SecretBytes::new_master_key(KEY_A))
+            .unwrap();
         store.save_vault_key_owner(USER_A).unwrap();
 
         assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
@@ -852,13 +866,18 @@ mod key_slot_per_account {
 
         // A device approval of B (a switch: A stays signed in on this PC): token and key, untagged until bound.
         let vault = vault(&credentials);
+        vault.install_session(SessionToken::new("token-of-b").unwrap()).unwrap();
         vault
-            .install_session(SessionToken::new("token-of-b").unwrap())
+            .store_wrapped_master_key(SecretBytes::new_master_key(KEY_B))
             .unwrap();
-        vault.store_wrapped_master_key(SecretBytes::new_master_key(KEY_B)).unwrap();
         vault.bind_session_owner(USER_B).unwrap();
         assert_eq!(
-            credentials.store_for(SLOT).load_wrapped_master_key().unwrap().unwrap().expose_for_crypto(),
+            credentials
+                .store_for(SLOT)
+                .load_wrapped_master_key()
+                .unwrap()
+                .unwrap()
+                .expose_for_crypto(),
             &KEY_B[..]
         );
         vault.bind_vault_key_owner(USER_B).unwrap();
@@ -871,6 +890,9 @@ mod key_slot_per_account {
         assert!(super::super::account_key_slot_name("").is_err());
         assert!(super::super::account_key_slot_name("a/b").is_err());
         assert!(super::super::account_key_slot_name("a@example.eu").is_err());
-        assert_eq!(super::super::account_key_slot_name(USER_A).unwrap(), format!("account-key-{USER_A}"));
+        assert_eq!(
+            super::super::account_key_slot_name(USER_A).unwrap(),
+            format!("account-key-{USER_A}")
+        );
     }
 }

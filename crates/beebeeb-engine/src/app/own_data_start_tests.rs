@@ -405,8 +405,14 @@ fn a_windows_refusal_over_unowned_data_asks_for_the_proof_and_only_an_adoption_s
 
     assert_eq!(pc.start(), Err(SyncStartRefused::OtherAccountsData));
     assert_eq!(pc.port.registers(), 0, "the refused start asked Windows nothing");
-    listing_asked.recv_timeout(WAIT).expect("the refusal asked for the proof");
-    assert_eq!(pc.port.registers(), 0, "and nothing starts while the proof waits for its answer");
+    listing_asked
+        .recv_timeout(WAIT)
+        .expect("the refusal asked for the proof");
+    assert_eq!(
+        pc.port.registers(),
+        0,
+        "and nothing starts while the proof waits for its answer"
+    );
     gate.notify_one();
     pc.wait_for_outcomes(1);
 

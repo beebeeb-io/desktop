@@ -35,7 +35,9 @@ pub enum UnknownFiles {
 impl UnknownFiles {
     /// [`UnknownFiles::Refuse`] for the database's paths `at` (`/a/b` or `a/b`), keyed as `prepare` keys a path.
     pub fn refuse_at<'a>(at: impl IntoIterator<Item = &'a str>) -> Self {
-        UnknownFiles::Refuse { at: at.into_iter().map(path_key).collect() }
+        UnknownFiles::Refuse {
+            at: at.into_iter().map(path_key).collect(),
+        }
     }
 }
 
@@ -49,7 +51,8 @@ const SWITCH_ITEM_APPEARED: &str =
     "Something new appeared in the Beebeeb folder where nothing was a moment ago, so nothing was removed.";
 
 /// w29: said (never with a name) when a switch's purge meets a file that may hold a person's unsent bytes.
-const SWITCH_BYTES_HELD: &str = "A file in the Beebeeb folder may hold changes that were never sent, so nothing was removed.";
+const SWITCH_BYTES_HELD: &str =
+    "A file in the Beebeeb folder may hold changes that were never sent, so nothing was removed.";
 
 /// w29: whether the item at `path` is a placeholder holding no bytes on this PC, proven through a handle that fetches
 /// nothing (the reparse point is opened, never followed, never read). `false` for anything else or anything that

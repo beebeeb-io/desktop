@@ -293,7 +293,10 @@ impl EngineBridge {
                 if in_sync_folder
                     && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution, keep_there)?
                 {
-                    return Err(refuse_changed(&mut buf, "the local file was changed during the download"));
+                    return Err(refuse_changed(
+                        &mut buf,
+                        "the local file was changed during the download",
+                    ));
                 }
                 // Review P2-1, S6 (R8): the place (its size, times and inode) compared with the start look once the copy
                 // is written, right before it replaces the place: a save after the start look is never replaced.
@@ -306,9 +309,10 @@ impl EngineBridge {
                 let write_result =
                     write_hydrated_plaintext_checked(dest_path, allowed_roots, &buf, &mut place_unchanged);
                 if write_result.as_ref().is_err_and(place_changed_before_replace) {
-                    return Err(
-                        refuse_changed(&mut buf, "the local file was changed while the download was written"),
-                    );
+                    return Err(refuse_changed(
+                        &mut buf,
+                        "the local file was changed while the download was written",
+                    ));
                 }
                 let hydrated_hash = in_sync_folder.then(|| sha256_hex(&buf));
                 // Zeroize the in-memory copy now that it is on disk (or on
@@ -1294,13 +1298,11 @@ impl EngineBridge {
             .and_then(|data| {
                 // Task 1643: exactly the pinned version's plaintext for those chunks.
                 match pin.as_ref().map(|pin| pin.plaintext_size_of(chunks.clone())) {
-                    Some(want) if want != Some(data.len() as u64) => {
-                        Err(anyhow::anyhow!(
-                            "the range read is {} bytes, the pinned version's manifest says {want:?}",
-                            data.len()
-                        )
-                        .into())
-                    }
+                    Some(want) if want != Some(data.len() as u64) => Err(anyhow::anyhow!(
+                        "the range read is {} bytes, the pinned version's manifest says {want:?}",
+                        data.len()
+                    )
+                    .into()),
                     _ => Ok(data),
                 }
             });
