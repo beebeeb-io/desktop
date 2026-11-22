@@ -82,6 +82,39 @@ pub(super) fn tab_to(rt: &mut Runtime<State>, target: &str) {
     panic!("Tab never reaches {target}");
 }
 
+/// Focus the row keyed `item-<L>-<I>` the way a person does: Tab to it, or, in a roving list (one Tab stop),
+/// Tab into the list and arrow down to it.
+pub(super) fn row_to(rt: &mut Runtime<State>, target: &str) {
+    let list = target.rsplit_once('-').map(|(l, _)| format!("{l}-")).expect("item-<L>-<I>");
+    let is_row = |k: &str| k.strip_prefix(list.as_str()).is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()));
+    // A plain list: every row its own Tab stop.
+    for _ in 0..80 {
+        if find(rt, target).is_some_and(|e| e.focused) {
+            return;
+        }
+        key(rt, Key::Tab);
+    }
+    // A roving list: its one stop, then the arrows.
+    for _ in 0..80 {
+        let now = rt.elements().into_iter().find(|e| e.focused && !e.exiting).and_then(|e| e.key);
+        if now.as_deref() == Some(target) {
+            return;
+        }
+        if now.as_deref().is_some_and(is_row) {
+            key(rt, Key::Home);
+            for _ in 0..12 {
+                if find(rt, target).is_some_and(|e| e.focused) {
+                    return;
+                }
+                key(rt, Key::Down);
+            }
+            panic!("the arrows never reach {target}");
+        }
+        key(rt, Key::Tab);
+    }
+    panic!("Tab never reaches {target}");
+}
+
 fn tab_stops(rt: &mut Runtime<State>) -> Vec<String> {
     let mut stops: Vec<String> = Vec::new();
     for _ in 0..120 {
@@ -261,7 +294,7 @@ fn signing_out_of_all_apps_is_its_own_confirm() {
     assert_eq!(rt.state.account.dialog, None, "Cancel");
     assert!(asked(&rt).is_empty());
     // The row is below the window's edge on the one page: the keys reach it (and scroll to it).
-    tab_to(&mut rt, "item-3-1");
+    row_to(&mut rt, "item-3-1");
     key(&mut rt, Key::Enter);
     click(&mut rt, "btn-1");
     assert_eq!(asked(&rt), vec![Intent::Show("DW-A03")]);
@@ -1222,4 +1255,95 @@ fn every_settings_pane_draws_the_same_sidebar() {
         assert_eq!(shape, first, "{frame} draws another sidebar");
         assert!(selected.len() <= 1, "{frame} selects {selected:?}");
     }
+}
+
+fn focused(rt: &Runtime<State>) -> Option<String> {
+    rt.elements().into_iter().find(|e| e.focused && !e.exiting).and_then(|e| e.key)
+}
+
+/// Sign-in on the Security page is a list of rows that each open a page: one Tab stop, the arrows, Home, End,
+/// Page Up and Page Down rove, and typing jumps to the row whose name starts so.
+#[test]
+fn a_list_of_rows_that_open_pages_roves_and_jumps_by_typing() {
+    let mut rt = runtime("DW-S01");
+    let stops = tab_stops(&mut rt);
+    assert_eq!(
+        stops.iter().filter(|k| k.starts_with("item-0-")).count(),
+        1,
+        "one Tab stop for the list: {stops:?}"
+    );
+    tab_to(&mut rt, "item-0-0");
+    key(&mut rt, Key::Down);
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-1"));
+    key(&mut rt, Key::End);
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-2"));
+    key(&mut rt, Key::Home);
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-0"));
+    key(&mut rt, Key::PageDown);
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-2"));
+    key(&mut rt, Key::PageUp);
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-0"));
+    key(&mut rt, Key::Text("t".into()));
+    assert_eq!(focused(&rt).as_deref(), Some("item-0-1"), "Two-factor authentication");
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.pane, Pane::TwoFactor);
+}
+
+/// Delete on a device's row asks exactly what its Sign out button asks.
+#[test]
+fn delete_on_a_device_row_asks_the_same_confirm_as_its_button() {
+    let mut rt = runtime("DW-A55");
+    tab_to(&mut rt, "btn-0");
+    key(&mut rt, Key::Enter);
+    let by_button = (rt.state.account.dialog.clone(), says(&rt, "dlg-title"), name(&rt, "btn-3"));
+    key(&mut rt, Key::Escape);
+    assert_eq!(rt.state.account.dialog, None);
+    tab_to(&mut rt, "btn-0");
+    key(&mut rt, Key::Delete);
+    assert_eq!(
+        (rt.state.account.dialog.clone(), says(&rt, "dlg-title"), name(&rt, "btn-3")),
+        by_button
+    );
+    assert_eq!(by_button.0, Some(Dialog::SignOutDevice("dev-iphone".into())));
+    // Esc: nothing signed out. F2 and the Menu key do nothing on a device row (it has no rename and no menu).
+    key(&mut rt, Key::Escape);
+    assert_eq!(source(&rt).sessions().len(), 4);
+    tab_to(&mut rt, "btn-0");
+    key(&mut rt, Key::Function(2));
+    key(&mut rt, Key::ContextMenu);
+    assert_eq!(rt.state.account.dialog, None);
+}
+
+/// Signing a device out removes its row, and the confirm's opener with it: focus lands in the list (the next
+/// device's Sign out), never nowhere.
+#[test]
+fn focus_lands_on_the_list_after_a_sign_out_removes_the_row() {
+    let mut rt = runtime("DW-A55");
+    tab_to(&mut rt, "btn-0");
+    key(&mut rt, Key::Delete);
+    tab_to(&mut rt, "btn-3");
+    assert_eq!(name(&rt, "btn-3"), "Sign out Anna's iPhone, destructive");
+    key(&mut rt, Key::Text(" ".into()));
+    assert_eq!(rt.state.account.dialog, None);
+    assert_eq!(source(&rt).sessions().len(), 3, "the iPhone is signed out");
+    assert_eq!(focused(&rt).as_deref(), Some("btn-0"));
+    assert_eq!(name(&rt, "btn-0"), "Sign out Studio-PC (bb)", "the next device's row");
+}
+
+/// A passkey's row: Delete asks to remove it, F2 renames it, the Menu key opens its menu.
+#[test]
+fn a_passkey_row_takes_delete_f2_and_the_menu_key() {
+    let mut rt = runtime("DW-A73");
+    tab_to(&mut rt, "item-0-0-more");
+    key(&mut rt, Key::Delete);
+    assert!(matches!(rt.state.account.dialog, Some(Dialog::RemovePasskey(_))));
+    key(&mut rt, Key::Escape);
+    tab_to(&mut rt, "item-0-0-more");
+    key(&mut rt, Key::ContextMenu);
+    assert!(matches!(rt.state.account.dialog, Some(Dialog::PasskeyMenu(_))));
+    key(&mut rt, Key::Escape);
+    tab_to(&mut rt, "item-0-0-more");
+    key(&mut rt, Key::Function(2));
+    assert_eq!(rt.state.account.dialog, None);
+    assert!(rt.state.account.form.renaming.is_some(), "F2 renames");
 }

@@ -70,7 +70,7 @@ pub fn overlay(plan: &PlanDetails, t: &Theme) -> El {
         figures,
         meters::meter(0, WIDTH - 48.0, 6.0, &[(plan.share, t.text)], t)
             .label(format!("{} of {} used", plan.used, plan.size)),
-        super::numbered_list(3, None, rows, None, t).w_full(),
+        lists::list(3, None, rows, None, t).w_full(),
         dialogs::caption(
             0,
             "Plans are changed on beebeeb.io. There are no purchases in the app.",

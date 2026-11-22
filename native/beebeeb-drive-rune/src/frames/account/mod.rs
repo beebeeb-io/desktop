@@ -990,11 +990,44 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(body)
 }
 
-/// `lists::list` with every row told its place in the whole list (position_in_set), for a screen reader.
-pub(super) fn numbered_list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>, t: &Theme) -> El {
-    let n = rows.len();
-    let rows = rows.into_iter().enumerate().map(|(i, r)| r.position_in_set(i + 1, n)).collect();
-    crate::ui::settings_list::list(index, title, rows, foot, t)
+/// What a key does to the row it was pressed on (or in): the row's own actions, where it has them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum RowKey {
+    /// Delete: the row's remove, revoke or sign-out, with its confirm.
+    Remove,
+    /// F2: the row's rename.
+    Rename,
+    /// The Menu key or Shift+F10: the row's menu.
+    Menu,
+}
+
+impl RowKey {
+    /// The row action a key asks for. Account lists are single-select: Shift and Ctrl extend nothing.
+    pub(super) fn of(ev: &KeyEvent) -> Option<RowKey> {
+        let m = ev.mods;
+        let ctrl = m.ctrl || m.cmd;
+        match ev.key {
+            Key::Delete if !ctrl && !m.alt && !m.shift => Some(RowKey::Remove),
+            Key::Function(2) if !ctrl && !m.alt && !m.shift => Some(RowKey::Rename),
+            Key::ContextMenu => Some(RowKey::Menu),
+            Key::Function(10) if m.shift && !ctrl && !m.alt => Some(RowKey::Menu),
+            _ => None,
+        }
+    }
+}
+
+/// A row's own keys (`RowKey`), taken while the focus is on the row or on a control inside it. `act` returns
+/// `false` for a key the row has no action for: nothing happens and the key goes on.
+pub(super) fn row_keys(row: El, act: impl Fn(&mut State, RowKey) -> bool + 'static) -> El {
+    row.on_key(move |s: &mut State, ev: &KeyEvent, _: &mut Tx| RowKey::of(ev).is_some_and(|k| act(s, k)))
+}
+
+/// `ui::dialog::modal_back` for the account kit's confirms. `account_set::dialog` hands back the scrim with the
+/// card already in it (no card alone to give `modal_back`), so its two return layers go on that scrim here, as
+/// `modal_back` puts them: focus back on `opener` while it is still there, else into `fallback` (the list).
+pub(super) fn modal_back(scrim: El, opener: &str, fallback: &str, dismiss: impl Fn(&mut State) + 'static) -> El {
+    let back = el().size(0.0, 0.0).pin(Some(0.0), Some(0.0), None, None).focus_return(opener);
+    scrim.child(back).modal(false, dismiss).focus_return(fallback)
 }
 
 /// The account sections' keyboard. Esc closes what is open, innermost first: a confirm, a page

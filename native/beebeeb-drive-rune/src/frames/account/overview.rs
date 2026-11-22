@@ -27,7 +27,10 @@ fn who_row(index: usize, row: Row, to: (Pane, &'static str), source: &dyn Accoun
 
 pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
     let who = source.identity();
-    let identity = super::numbered_list(
+    // Name and email each open their page: one Tab stop, the arrows between them. A page nothing answers for
+    // leaves its row as text, and then the list is a plain one.
+    let wired = [Pane::Name, Pane::Email].iter().all(|p| source.pane_state(*p) != PaneState::Unwired);
+    let identity = (if wired { crate::ui::settings_list::roving_list } else { crate::ui::settings_list::list })(
         0,
         None,
         vec![
@@ -59,7 +62,7 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
 
     // The phrase was shown once, at sign-up, and never again: this row only says so. It is
     // text, not a button: no reveal, no re-authentication, no regenerate.
-    let recovery = super::numbered_list(
+    let recovery = crate::ui::settings_list::list(
         1,
         Some("Recovery"),
         vec![set::item(
@@ -110,7 +113,7 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
             )
         })
         .collect();
-    let uses = super::numbered_list(
+    let uses = crate::ui::settings_list::list(
         2,
         Some("This account uses"),
         products,
