@@ -344,7 +344,7 @@ fn saving_a_note_writes_four_files_that_match_the_window() {
         !note["element"]["key_path"].as_str().unwrap().contains("fb-root"),
         "paths start at the app's root"
     );
-    assert_eq!(note["app"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(note["app"]["version"], crate::engine_host::settings::version_words());
     assert!(note["app"]["commit"].is_string() && note["app"]["build_kind"].is_string());
     assert_eq!(note["platform"]["scale"], 2.0);
     assert_eq!(note["platform"]["theme"], "light");

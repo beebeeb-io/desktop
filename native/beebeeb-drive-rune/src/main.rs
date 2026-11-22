@@ -75,7 +75,8 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
             std::thread::sleep(std::time::Duration::from_secs(3));
-            panic!("test crash");
+            // The UI thread panics (`log_file::crash::panic_if_test_crash_due`), so the app ends.
+            log_file::crash::request_test_crash();
         });
     }
     shell::run();
