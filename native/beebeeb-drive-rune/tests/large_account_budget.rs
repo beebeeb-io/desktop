@@ -9,7 +9,9 @@
 //! Run: cargo test --locked --release --config profile.release.debug-assertions=true --test large_account_budget
 //! (the engine refuses test-support in a release build without debug assertions; that guard stays.)
 //! One test: the account is seeded once and all views are measured on it. Budgets can be raised on a slow machine by
-//! BB_BUDGET_SCALE (a number, default 1), never lowered by code.
+//! BB_BUDGET_SCALE (a number, default 1), never lowered by code. An unoptimised build (the plain `cargo test` of the
+//! whole suite, `BEEBEEB_OPT_LEVEL` 0 from build.rs) measures and prints every number but holds none: the budgets
+//! are an optimised build's (a debug build's grid frame is ~47 ms and its photos library ~330 ms on bb-build-linux).
 #![allow(warnings)]
 
 // Every module of `src/main.rs`, at this crate's root (the app's `pub(in crate::engine_host::…)` paths need them
@@ -305,5 +307,11 @@ fn large_account_stays_inside_its_budgets() {
         over.push(format!("photos library {best:.2} ms > {PHOTOS_BUDGET_MS} ms"));
     }
 
+    if env!("BEEBEEB_OPT_LEVEL") == "0" {
+        if !over.is_empty() {
+            println!("BUDGET not held in an unoptimised build (run it with --release):\n{}", over.join("\n"));
+        }
+        return;
+    }
     assert!(over.is_empty(), "over budget:\n{}", over.join("\n"));
 }

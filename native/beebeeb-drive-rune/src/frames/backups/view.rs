@@ -375,7 +375,7 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
         ));
         if failed {
             // The older list stays, said under it; Try again reads it again.
-            children.push(row().px(14.0).child(devices_retry()));
+            children.push(row().px(space::S14).child(devices_retry()));
             buttons += 1;
         }
     } else if let Some(note) = note {

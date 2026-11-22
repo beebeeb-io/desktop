@@ -120,6 +120,9 @@ fn emit_source_offer() {
 }
 
 fn main() {
+    // The optimisation level, for the large-account budget test: its budgets are an optimised build's
+    // (`tests/large_account_budget.rs`); an unoptimised `cargo test` prints the numbers and does not hold them.
+    println!("cargo:rustc-env=BEEBEEB_OPT_LEVEL={}", std::env::var("OPT_LEVEL").unwrap_or_default());
     emit_source_offer();
     emit_app_identifier();
     emit_windows_resource();
