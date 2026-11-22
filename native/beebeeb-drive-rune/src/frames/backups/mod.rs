@@ -20,10 +20,12 @@
 pub mod mail;
 #[cfg(test)]
 mod mail_tests;
+#[allow(clippy::single_range_in_vec_init)] // a one-range slice is the API of `sub_rich`
 mod mail_view;
 pub mod source;
 #[cfg(test)]
 mod tests;
+#[allow(clippy::single_range_in_vec_init)] // a one-range slice is the API of `sub_rich`
 mod view;
 
 use rune::{Key, KeyEvent, TextEdit, Tx};

@@ -376,6 +376,7 @@ const SCENE: Host<State> = Host {
 };
 
 /// The group's board frames, each as a scene of the window (`frames::scenes`).
+#[allow(clippy::type_complexity)]
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-1202", |s| set_scene(s, "DW-1202")),
     ("DW-1203", |s| set_scene(s, "DW-1203")),

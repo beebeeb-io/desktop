@@ -41,20 +41,7 @@ pub static RETRY: Icon = icon24!(
     r#"<path d="M20 12a8 8 0 1 1-2.3-5.6L20 8.5"></path><path d="M20 4v4.5h-4.5"></path>"#
 );
 
-pub static DOC_VIDEO: Icon = icon24!(
-    "doc-video",
-    r#"<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M10 15l5-3-5-3v6z"></path>"#
-);
-
-pub static DOC_AUDIO: Icon = icon24!(
-    "doc-audio",
-    r#"<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M11 15a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM11 15v-4l4-1"></path>"#
-);
-
-/// Clear the search.
-pub static CLOSE: Icon = icon24!("close", r#"<path d="M18 6L6 18M6 6l12 12"></path>"#);
-
-/// `--color-red` as a count's fill (`.mk-badge.is-red`), the same in both themes.
+   /// `--color-red` as a count's fill (`.mk-badge.is-red`), the same in both themes.
 pub fn red_badge() -> Color {
     oklch(0.55, 0.20, 25.0)
 }
@@ -82,29 +69,3 @@ pub fn note_bg(t: &Theme) -> Color {
     t.text.alpha(0.06)
 }
 
-/// A photo's stand-in until the engine hands over pixels: the board's sample pictures
-/// (`.mk-ph1` … `.mk-ph6`), as CSS angle and three stops.
-pub fn sample_photo(n: u8) -> (f32, [(f32, [u8; 3]); 3]) {
-    match n {
-        1 => (
-            160.0,
-            [(0.0, [233, 201, 160]), (0.55, [185, 122, 80]), (1.0, [94, 74, 74])],
-        ),
-        2 => (
-            170.0,
-            [(0.0, [156, 196, 220]), (0.60, [233, 226, 207]), (1.0, [141, 154, 120])],
-        ),
-        3 => (
-            150.0,
-            [(0.0, [51, 67, 92]), (0.55, [122, 127, 150]), (1.0, [227, 181, 140])],
-        ),
-        6 => (
-            120.0,
-            [(0.0, [217, 223, 228]), (0.60, [142, 164, 180]), (1.0, [74, 88, 102])],
-        ),
-        _ => (
-            180.0,
-            [(0.0, [243, 217, 168]), (0.50, [213, 140, 106]), (1.0, [63, 58, 88])],
-        ),
-    }
-}
