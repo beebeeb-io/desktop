@@ -26,9 +26,10 @@ fn odd_file_names_become_unknown_and_main_is_kept() {
 fn write_read_clear_round_trip() {
     let dir = std::env::temp_dir().join(format!("bb-crash-{}", std::process::id()));
     assert!(take_pending(&dir).is_none());
-    write(&dir, "x CRASH\n");
+    let rec = "2026-11-22T10:00:00Z CRASH version=0.9.0 thread=main location=run.rs:1\n";
+    write(&dir, rec);
     let r = take_pending(&dir).expect("record");
-    assert_eq!(r.text, "x CRASH\n");
+    assert_eq!(r.text, rec);
     assert!(take_pending(&dir).is_some(), "stays until cleared");
     clear(&dir);
     assert!(take_pending(&dir).is_none());
