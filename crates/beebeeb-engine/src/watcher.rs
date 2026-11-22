@@ -212,7 +212,7 @@ pub(crate) fn run_scan(
         }
     };
 
-    let mut on_dir = 
+    let mut on_dir =
         // on_dir (PRE-ORDER, parents before children): scaffold a server vault
         // folder for every directory that has no row yet, so a nested file
         // dispatched just after resolves THIS folder as its parent and the server
@@ -239,94 +239,88 @@ pub(crate) fn run_scan(
             bridge.ensure_local_folder(sync_root, dir_path);
         };
     let mut on_file = |file_path: &std::path::Path, meta: &std::fs::Metadata| {
-            visited.set(visited.get() + 1);
-            tracing::debug!(
-                "enumeration scan: found file"
-            );
+        visited.set(visited.get() + 1);
+        tracing::debug!("enumeration scan: found file");
 
-            // Disable-race gate (task 0811 review fix): a file the mirror copied
-            // while its folder was enabled is still on disk after a disable+purge.
-            // Skip it so the purge is final — the persisted config flip means it
-            // never re-enqueues, even across restarts. (When the user re-enables,
-            // the key returns to the set and the next scan picks it back up.)
-            if backup_disabled(file_path) {
-                tracing::debug!(
-                    "enumeration scan: skipped disabled backup file"
-                );
-                return;
-            }
+        // Disable-race gate (task 0811 review fix): a file the mirror copied
+        // while its folder was enabled is still on disk after a disable+purge.
+        // Skip it so the purge is final — the persisted config flip means it
+        // never re-enqueues, even across restarts. (When the user re-enables,
+        // the key returns to the set and the next scan picks it back up.)
+        if backup_disabled(file_path) {
+            tracing::debug!("enumeration scan: skipped disabled backup file");
+            return;
+        }
 
-            // Task 2229: a file found settled whose listing and row are both unchanged needs
-            // nothing, and skipping it opens no handle. The row stamp is read before
-            // classifying, so a write to the row during the pass makes the next pass ask again.
-            let mut disk = DiskStamp::of(meta);
-            let row = crate::engine_bridge::relative_db_path(sync_root, file_path)
-                .and_then(|rel| bridge.db().file_row_stamp_by_path(&rel).ok().flatten());
-            let seen = match row {
-                None => memo.untracked.get(file_path).copied(),
-                Some(row) => memo.settled.get(file_path).filter(|(_, r)| *r == row).map(|(d, _)| *d),
-            };
-            // Task 2241: only a skip candidate (listing matches) is opened for its identity, once; a
-            // changed file keeps its listing-only stamp.
-            if let Some(seen) = seen {
-                match disk.check(&seen, || DiskStamp::default_identity(file_path)) {
-                    Ok(()) => {
-                        memo.skipped += 1;
-                        memo.retry.remove(file_path);
-                        return;
-                    }
-                    Err(stamp) => disk = stamp,
-                }
-            }
-
-            // Throttle (task 0811): cap NEW enqueues per pass so a first enable of
-            // a huge folder ramps up gradually instead of flooding the queue. Keep
-            // walking (so parent folders keep getting scaffolded) but stop
-            // dispatching files — the next pass picks up the remainder.
-            if dispatched >= MAX_NEW_UPLOADS_PER_SCAN {
-                owe_full.set(true);
-                tracing::debug!(
-                    max_new_uploads = MAX_NEW_UPLOADS_PER_SCAN,
-                    "enumeration scan: skipped file due to per-scan upload cap"
-                );
-                return;
-            }
-
-            // A file queued here is a tracked file from now on (its row is written before
-            // the queue call returns): a later pass queues nothing while its upload is
-            // queued, and sends a later change of it (task 1640).
-            memo.classified += 1;
-            match (dispatch_local_create_verdict(bridge, sync_root, file_path, "scan"), row) {
-                (ScanDispatch::Settled, Some(row)) => {
-                    memo.retry.remove(file_path);
-                    memo.settled.insert(file_path.to_path_buf(), (disk, row));
-                }
-                (verdict, _) => {
-                    memo.settled.remove(file_path);
-                    // R3: an untracked placeholder is recorded (once, by the classifier); remember its listing.
-                    if row.is_none()
-                        && verdict == ScanDispatch::NotQueued
-                        && crate::engine_bridge::relative_db_path(sync_root, file_path)
-                            .is_some_and(|rel| bridge.db().has_unknown_orphan(&rel).unwrap_or(false))
-                    {
-                        memo.untracked.insert(file_path.to_path_buf(), disk);
-                        memo.retry.remove(file_path);
-                    } else if verdict == ScanDispatch::NotQueued {
-                        // dc-166: "ask again next pass" holds with a change feed too: asked by path.
-                        memo.retry.insert(file_path.to_path_buf());
-                    } else {
-                        memo.retry.remove(file_path);
-                    }
-                    if verdict == ScanDispatch::Queued {
-                        dispatched += 1;
-                    } else {
-                        tracing::debug!(
-                            "enumeration scan: file was not queued"
-                        );
-                    }
-                }
-            }
+        // Task 2229: a file found settled whose listing and row are both unchanged needs
+        // nothing, and skipping it opens no handle. The row stamp is read before
+        // classifying, so a write to the row during the pass makes the next pass ask again.
+        let mut disk = DiskStamp::of(meta);
+        let row = crate::engine_bridge::relative_db_path(sync_root, file_path)
+            .and_then(|rel| bridge.db().file_row_stamp_by_path(&rel).ok().flatten());
+        let seen = match row {
+            None => memo.untracked.get(file_path).copied(),
+            Some(row) => memo.settled.get(file_path).filter(|(_, r)| *r == row).map(|(d, _)| *d),
         };
+        // Task 2241: only a skip candidate (listing matches) is opened for its identity, once; a
+        // changed file keeps its listing-only stamp.
+        if let Some(seen) = seen {
+            match disk.check(&seen, || DiskStamp::default_identity(file_path)) {
+                Ok(()) => {
+                    memo.skipped += 1;
+                    memo.retry.remove(file_path);
+                    return;
+                }
+                Err(stamp) => disk = stamp,
+            }
+        }
+
+        // Throttle (task 0811): cap NEW enqueues per pass so a first enable of
+        // a huge folder ramps up gradually instead of flooding the queue. Keep
+        // walking (so parent folders keep getting scaffolded) but stop
+        // dispatching files — the next pass picks up the remainder.
+        if dispatched >= MAX_NEW_UPLOADS_PER_SCAN {
+            owe_full.set(true);
+            tracing::debug!(
+                max_new_uploads = MAX_NEW_UPLOADS_PER_SCAN,
+                "enumeration scan: skipped file due to per-scan upload cap"
+            );
+            return;
+        }
+
+        // A file queued here is a tracked file from now on (its row is written before
+        // the queue call returns): a later pass queues nothing while its upload is
+        // queued, and sends a later change of it (task 1640).
+        memo.classified += 1;
+        match (dispatch_local_create_verdict(bridge, sync_root, file_path, "scan"), row) {
+            (ScanDispatch::Settled, Some(row)) => {
+                memo.retry.remove(file_path);
+                memo.settled.insert(file_path.to_path_buf(), (disk, row));
+            }
+            (verdict, _) => {
+                memo.settled.remove(file_path);
+                // R3: an untracked placeholder is recorded (once, by the classifier); remember its listing.
+                if row.is_none()
+                    && verdict == ScanDispatch::NotQueued
+                    && crate::engine_bridge::relative_db_path(sync_root, file_path)
+                        .is_some_and(|rel| bridge.db().has_unknown_orphan(&rel).unwrap_or(false))
+                {
+                    memo.untracked.insert(file_path.to_path_buf(), disk);
+                    memo.retry.remove(file_path);
+                } else if verdict == ScanDispatch::NotQueued {
+                    // dc-166: "ask again next pass" holds with a change feed too: asked by path.
+                    memo.retry.insert(file_path.to_path_buf());
+                } else {
+                    memo.retry.remove(file_path);
+                }
+                if verdict == ScanDispatch::Queued {
+                    dispatched += 1;
+                } else {
+                    tracing::debug!("enumeration scan: file was not queued");
+                }
+            }
+        }
+    };
     match only {
         None => walk_dir(sync_root, sync_root, 0, &mut on_dir, &mut on_file),
         Some(paths) => visit_paths(sync_root, paths, &mut on_dir, &mut on_file),

@@ -42,12 +42,18 @@ pub fn open(sync_root: &Path) -> Box<dyn ChangeFeed> {
     #[cfg(target_os = "windows")]
     match usn::UsnFeed::open(sync_root) {
         Ok(feed) => {
-            tracing::info!(mode = feed.mode(), "enumeration scan: following the change journal; full walk every 10 min");
+            tracing::info!(
+                mode = feed.mode(),
+                "enumeration scan: following the change journal; full walk every 10 min"
+            );
             return Box::new(feed);
         }
         Err(why) => {
             // Zero-knowledge: a reason word, never a path.
-            tracing::warn!(why, "enumeration scan: no change journal; walking the whole folder every pass");
+            tracing::warn!(
+                why,
+                "enumeration scan: no change journal; walking the whole folder every pass"
+            );
         }
     }
     let _ = sync_root;
@@ -66,7 +72,7 @@ mod usn {
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_NAME_NORMALIZED,
         FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdType,
-        GetFinalPathNameByHandleW, OpenFileById, VOLUME_NAME_DOS,
+        GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW, OpenFileById, VOLUME_NAME_DOS,
     };
     use windows::Win32::System::IO::DeviceIoControl;
 
@@ -144,7 +150,10 @@ mod usn {
             let root_dir = open_dir().map_err(|_| "root unopenable")?;
             let volume = format!(r"\\.\{letter}:");
             let open_volume = |access: u32| {
-                std::fs::OpenOptions::new().access_mode(access).share_mode(share).open(&volume)
+                std::fs::OpenOptions::new()
+                    .access_mode(access)
+                    .share_mode(share)
+                    .open(&volume)
             };
             // Admin: the volume read for reading; otherwise the unprivileged read, on the volume or the root.
             let mut tried = Vec::new();
@@ -179,7 +188,11 @@ mod usn {
         }
 
         pub fn mode(&self) -> &'static str {
-            if self.read_code == FSCTL_READ_USN_JOURNAL { "volume" } else { "unprivileged" }
+            if self.read_code == FSCTL_READ_USN_JOURNAL {
+                "volume"
+            } else {
+                "unprivileged"
+            }
         }
 
         /// One read from `next_usn`; the bytes returned (the first 8 are the next USN). `None` on error.
@@ -228,7 +241,9 @@ mod usn {
                 return known.clone();
             }
             let resolved = resolve(&self.root_dir, parent).and_then(|full| {
-                full.strip_prefix(&self.canonical_root).ok().map(|rel| self.sync_root.join(rel))
+                full.strip_prefix(&self.canonical_root)
+                    .ok()
+                    .map(|rel| self.sync_root.join(rel))
             });
             self.parents.insert(parent, resolved.clone());
             resolved
@@ -255,7 +270,11 @@ mod usn {
                     if forget_parents {
                         self.parents.clear();
                     }
-                    return if paths.is_empty() { Changes::Nothing } else { Changes::Paths(paths) };
+                    return if paths.is_empty() {
+                        Changes::Nothing
+                    } else {
+                        Changes::Paths(paths)
+                    };
                 }
                 let mut at = 8usize;
                 while at + 60 <= got {
@@ -272,7 +291,8 @@ mod usn {
                         let name_len = u16::from_le_bytes(rec[56..58].try_into().unwrap()) as usize;
                         let name_at = u16::from_le_bytes(rec[58..60].try_into().unwrap()) as usize;
                         if attributes & FILE_ATTRIBUTE_DIRECTORY != 0
-                            && reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME | USN_REASON_FILE_DELETE)
+                            && reason
+                                & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME | USN_REASON_FILE_DELETE)
                                 != 0
                         {
                             // A renamed or removed folder leaves stale paths for what is cached under it.
@@ -347,11 +367,23 @@ mod usn {
         .ok()?;
         let mut buf = vec![0u16; 1024];
         // SAFETY: `handle` is open; `buf` is the output slice.
-        let mut n = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) } as usize;
+        let mut n = unsafe {
+            GetFinalPathNameByHandleW(
+                handle,
+                &mut buf,
+                GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0),
+            )
+        } as usize;
         if n > buf.len() {
             buf = vec![0u16; n];
             // SAFETY: as above, with the size the first call asked for.
-            n = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) } as usize;
+            n = unsafe {
+                GetFinalPathNameByHandleW(
+                    handle,
+                    &mut buf,
+                    GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0),
+                )
+            } as usize;
         }
         // SAFETY: `handle` came from OpenFileById above and is closed once.
         let _ = unsafe { CloseHandle(handle) };
@@ -387,15 +419,27 @@ mod tests {
         let state = temp.path().join("state");
         std::fs::create_dir_all(root.join("Photos/2026")).unwrap();
         std::fs::create_dir_all(&state).unwrap();
-        for (i, rel) in ["a.txt", "Photos/b.jpg", "Photos/2026/c.jpg", "Photos/2026/d.jpg"].iter().enumerate() {
+        for (i, rel) in ["a.txt", "Photos/b.jpg", "Photos/2026/c.jpg", "Photos/2026/d.jpg"]
+            .iter()
+            .enumerate()
+        {
             std::fs::write(root.join(rel), vec![b'x'; 10 + i]).unwrap();
         }
         let db = Arc::new(StateDb::open(&state.join("state.db")).unwrap());
         // The first file list is in, so folders are scaffolded and no pass is owed for them.
         db.set_sync_cursor(1).unwrap();
-        let api = Arc::new(ApiClient::new("https://api.beebeeb.io".into(), "token".into(), [17u8; 32]));
+        let api = Arc::new(ApiClient::new(
+            "https://api.beebeeb.io".into(),
+            "token".into(),
+            [17u8; 32],
+        ));
         let bridge = EngineBridge::new(&crate::identity::TEST, db.clone(), api);
-        Fixture { _temp: temp, root, db, bridge }
+        Fixture {
+            _temp: temp,
+            root,
+            db,
+            bridge,
+        }
     }
 
     /// dc-166 red test: at 41,510 placeholders the idle scan did 4,300-4,600 file operations a second.
@@ -409,7 +453,11 @@ mod tests {
         assert!(memo.visited >= 6, "the first tick walks everything: {}", memo.visited);
         for _ in 0..3 {
             scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
-            assert_eq!((memo.visited, memo.classified, memo.skipped), (0, 0, 0), "an idle tick opens nothing");
+            assert_eq!(
+                (memo.visited, memo.classified, memo.skipped),
+                (0, 0, 0),
+                "an idle tick opens nothing"
+            );
         }
         // The backstop: once FULL_RECHECK_INTERVAL has passed, everything is walked again.
         memo.age_by(FULL_RECHECK_INTERVAL);
@@ -430,13 +478,18 @@ mod tests {
         feed.0.push_back(Changes::Paths([new.clone()].into()));
         scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
         assert_eq!(memo.visited, 1);
-        assert!(f.db.get_file_by_path("Photos/new.jpg").unwrap().is_some(), "the named file is queued");
+        assert!(
+            f.db.get_file_by_path("Photos/new.jpg").unwrap().is_some(),
+            "the named file is queued"
+        );
 
         std::fs::create_dir_all(f.root.join("Moved/in")).unwrap();
         std::fs::write(f.root.join("Moved/in/e.txt"), b"e").unwrap();
         std::fs::write(f.root.join("Moved/f.txt"), b"f").unwrap();
         // The folder and something under it named: the folder's walk covers both, each once.
-        feed.0.push_back(Changes::Paths([f.root.join("Moved"), f.root.join("Moved/f.txt")].into()));
+        feed.0.push_back(Changes::Paths(
+            [f.root.join("Moved"), f.root.join("Moved/f.txt")].into(),
+        ));
         scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
         assert_eq!(memo.visited, 4, "Moved, Moved/in, e.txt, f.txt");
         assert!(f.db.get_file_by_path("Moved/in/e.txt").unwrap().is_some());
@@ -445,7 +498,12 @@ mod tests {
         std::fs::create_dir_all(f.root.join(".beebeeb")).unwrap();
         std::fs::write(f.root.join(".beebeeb/state.db-wal"), b"w").unwrap();
         feed.0.push_back(Changes::Paths(
-            [f.root.join("gone.txt"), f.root.join(".beebeeb/state.db-wal"), PathBuf::from("/elsewhere/x")].into(),
+            [
+                f.root.join("gone.txt"),
+                f.root.join(".beebeeb/state.db-wal"),
+                PathBuf::from("/elsewhere/x"),
+            ]
+            .into(),
         ));
         scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
         assert_eq!(memo.visited, 0);

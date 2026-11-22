@@ -243,9 +243,7 @@ pub fn scan_tick(
     use super::change_feed::Changes;
     // Taken before the walk, so a change made while it runs is named next tick.
     let changes = feed.take();
-    let backstop = memo
-        .since
-        .is_none_or(|since| since.elapsed() >= FULL_RECHECK_INTERVAL);
+    let backstop = memo.since.is_none_or(|since| since.elapsed() >= FULL_RECHECK_INTERVAL);
     let full = backstop || memo.owe_full || changes == Changes::Unknown || backup_keys_changed(bridge, memo);
     if full {
         return run_scan(bridge, sync_root, memo, None);
@@ -286,7 +284,9 @@ pub(super) fn visit_paths(
         if walked.is_some_and(|dir| path.starts_with(dir)) {
             continue;
         }
-        let Ok(rel) = path.strip_prefix(sync_root) else { continue };
+        let Ok(rel) = path.strip_prefix(sync_root) else {
+            continue;
+        };
         if rel.as_os_str().is_empty() || crate::engine_bridge::path_is_engine_internal(sync_root, path) {
             continue;
         }
@@ -298,7 +298,9 @@ pub(super) fn visit_paths(
         {
             continue;
         }
-        let Ok(meta) = std::fs::symlink_metadata(path) else { continue };
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            continue;
+        };
         let ft = meta.file_type();
         if ft.is_symlink() {
             continue;
@@ -338,9 +340,7 @@ pub(super) fn walk_dir(
     // Skip the whole engine-internal subtree up front (`.beebeeb/` etc.) so we
     // never even read its children — cheaper and impossible to misclassify.
     if crate::engine_bridge::path_is_engine_internal(sync_root, dir) {
-        tracing::debug!(
-            "enumeration scan: skipped engine-internal directory"
-        );
+        tracing::debug!("enumeration scan: skipped engine-internal directory");
         return;
     }
 
@@ -371,9 +371,7 @@ pub(super) fn walk_dir(
         // Engine-internal guard per entry too (the lock file at the root, a
         // nested `.beebeeb`). Cheap and defensive.
         if crate::engine_bridge::path_is_engine_internal(sync_root, &path) {
-            tracing::debug!(
-                "enumeration scan: skipped engine-internal entry"
-            );
+            tracing::debug!("enumeration scan: skipped engine-internal entry");
             continue;
         }
 
@@ -394,9 +392,7 @@ pub(super) fn walk_dir(
         };
         let ft = meta.file_type();
         if ft.is_symlink() {
-            tracing::debug!(
-                "enumeration scan: skipped symlink"
-            );
+            tracing::debug!("enumeration scan: skipped symlink");
             continue;
         }
         if ft.is_dir() {
@@ -407,9 +403,7 @@ pub(super) fn walk_dir(
         } else if ft.is_file() {
             on_file(&path, &meta);
         } else {
-            tracing::debug!(
-                "enumeration scan: skipped non-file entry"
-            );
+            tracing::debug!("enumeration scan: skipped non-file entry");
         }
         // Other entry kinds (sockets, devices) are ignored.
     }
@@ -425,7 +419,10 @@ mod tests {
         for (name, src) in [
             ("watcher.rs", include_str!("../watcher.rs")),
             ("watcher/scan.rs", include_str!("scan.rs")),
-            ("engine_bridge/local_classify.rs", include_str!("../engine_bridge/local_classify.rs")),
+            (
+                "engine_bridge/local_classify.rs",
+                include_str!("../engine_bridge/local_classify.rs"),
+            ),
         ] {
             let production = src.split("#[cfg(test)]").next().unwrap();
             for (n, line) in production.lines().enumerate() {
@@ -433,7 +430,14 @@ mod tests {
                 if t.starts_with("//") {
                     continue;
                 }
-                for bad in ["path = %", "path = ?", "path=%", "filename = %", "dir.display()", "path.display()"] {
+                for bad in [
+                    "path = %",
+                    "path = ?",
+                    "path=%",
+                    "filename = %",
+                    "dir.display()",
+                    "path.display()",
+                ] {
                     assert!(!t.contains(bad), "{name}:{}: log carries a path: {t}", n + 1);
                 }
             }
@@ -471,7 +475,10 @@ mod tests {
         // Stored without identity: on an identity platform never unchanged, refilled once; elsewhere skipped.
         let mut bare = seen;
         bare.identity = None;
-        assert_eq!(stamp_of(&f).check_on(&bare, true, || read(id)).unwrap_err().identity, id);
+        assert_eq!(
+            stamp_of(&f).check_on(&bare, true, || read(id)).unwrap_err().identity,
+            id
+        );
         assert_eq!(stamp_of(&f).check_on(&bare, false, || read(None)), Ok(()));
         assert_eq!(reads.get(), 4);
         // Changed file: no open, listing-only stamp.
