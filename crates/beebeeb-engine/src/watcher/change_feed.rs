@@ -5,7 +5,8 @@
 //! journal names every create, write, rename and delete NTFS records, Cloud Files filter or not (the filter
 //! sits above NTFS; the `notify`/ReadDirectoryChanges route does not fire on a connected root, see the
 //! watcher module docs). The scan then visits only the named paths; a full walk still runs every
-//! [`FULL_RECHECK_INTERVAL`] as the backstop, and whenever the feed cannot say ([`Changes::Unknown`]).
+//! [`FULL_RECHECK_INTERVAL`] (an hour) as the backstop, and at once whenever the feed cannot say
+//! ([`Changes::Unknown`]: a journal gap or overflow) or the app resumes from sleep.
 //! Elsewhere, or when the journal cannot be opened, there is no feed and every pass is a full walk, as before.
 
 use std::collections::BTreeSet;
@@ -44,7 +45,7 @@ pub fn open(sync_root: &Path) -> Box<dyn ChangeFeed> {
         Ok(feed) => {
             tracing::info!(
                 mode = feed.mode(),
-                "enumeration scan: following the change journal; full walk every 10 min"
+                "enumeration scan: following the change journal; full walk every 60 min"
             );
             return Box::new(feed);
         }
@@ -465,6 +466,25 @@ mod tests {
         memo.age_by(FULL_RECHECK_INTERVAL);
         scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
         assert!(memo.visited >= 6, "the backstop walks everything: {}", memo.visited);
+    }
+
+    /// dc-174 red test: no full walk within 60 minutes of idle; a journal overflow walks at once.
+    #[test]
+    fn full_walk_is_hourly_and_an_overflow_walks_at_once() {
+        let f = fixture();
+        let mut memo = ScanMemo::default();
+        let mut feed = Told(Default::default());
+        scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
+        memo.age_by(Duration::from_secs(59 * 60));
+        scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
+        assert_eq!(memo.visited, 0, "no full walk 59 minutes into idle");
+        let mut feed = Told([Changes::Unknown].into());
+        scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
+        assert!(memo.visited >= 6, "an overflow walks everything at once: {}", memo.visited);
+        memo.age_by(Duration::from_secs(60 * 60));
+        let mut feed = Told(Default::default());
+        scan_tick(&f.bridge, &f.root, &mut memo, &mut feed);
+        assert!(memo.visited >= 6, "the hourly backstop walks");
     }
 
     /// A file the feed names is queued, and only it is looked at; a named folder is walked whole.

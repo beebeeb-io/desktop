@@ -331,6 +331,7 @@ pub(super) async fn scan_loop(
     let mut memo = ScanMemo::default();
     // dc-166: opened on the first pass (blocking I/O), kept across passes.
     let mut feed: Option<Box<dyn super::change_feed::ChangeFeed>> = None;
+    let mut last_tick = std::time::SystemTime::now();
     loop {
         // Wait one interval OR a shutdown signal. We sleep FIRST so the very
         // first scan happens one interval after startup — by then the initial
@@ -344,6 +345,14 @@ pub(super) async fn scan_loop(
             }
             _ = tokio::time::sleep(SCAN_INTERVAL) => {}
         }
+
+        // dc-174: a tick far later than the interval means the machine slept; the journal may have
+        // wrapped meanwhile, so walk everything now rather than at the next hourly backstop.
+        let now = std::time::SystemTime::now();
+        if now.duration_since(last_tick).is_ok_and(|gap| gap >= SCAN_INTERVAL * 4) {
+            memo.owe_full = true;
+        }
+        last_tick = now;
 
         // Run the blocking walk + classify + queue off the async runtime.
         // `bridge`/`sync_root` are cheap to clone (Arc + PathBuf).
@@ -865,7 +874,7 @@ mod tests {
             pass(&format!("journal, idle tick {n}"), &mut memo, feed.as_mut());
         }
         memo.age_by(FULL_RECHECK_INTERVAL);
-        pass("journal, 10-minute backstop walk", &mut memo, feed.as_mut());
+        pass("journal, hourly backstop walk", &mut memo, feed.as_mut());
         pass("journal, idle tick after it", &mut memo, feed.as_mut());
         memo.age_by(FULL_RECHECK_INTERVAL);
         pass("journal, second backstop walk", &mut memo, feed.as_mut());
@@ -875,7 +884,7 @@ mod tests {
             pass(&format!("no journal, walk {n}"), &mut memo, &mut crate::watcher::NoFeed);
         }
         memo.age_by(FULL_RECHECK_INTERVAL);
-        pass("no journal, 10-minute walk", &mut memo, &mut crate::watcher::NoFeed);
+        pass("no journal, hourly walk", &mut memo, &mut crate::watcher::NoFeed);
         pass("no journal, walk after it", &mut memo, &mut crate::watcher::NoFeed);
     }
 }
