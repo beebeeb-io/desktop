@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use zeroize::Zeroizing;
@@ -68,6 +69,14 @@ fn from_call(error: AccountCallError) -> PreviewsRefused {
         AccountCallError::ServerError | AccountCallError::Unreadable => PreviewsRefused::Failed,
     }
 }
+
+/// How long a read of the account's preview setting serves the thumbnail upload's looks.
+const SETTING_LIFETIME: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The setting last read for the thumbnail upload: which session of which account (and server) it was read for, when,
+/// and what it said. Dropped when the setting is changed here ([`Engine::set_photo_previews_for`]).
+type SettingRead = ((SessionGeneration, String, String), std::time::Instant, PreviewSetting);
+static SETTING_READ: std::sync::Mutex<Option<SettingRead>> = std::sync::Mutex::new(None);
 
 /// What [`Engine::upload_made_thumbnail_for`] came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,10 +202,14 @@ impl<C: CredentialStores> Engine<C> {
         session: SessionGeneration,
         setting: PreviewSetting,
     ) -> Result<(), PreviewsRefused> {
-        self.account_call_for(session, move |api| async move {
-            Ok(api.set_photo_previews_setting(&setting).await?)
-        })
-        .map_err(from_call)
+        let set = self
+            .account_call_for(session, move |api| async move {
+                Ok(api.set_photo_previews_setting(&setting).await?)
+            })
+            .map_err(from_call);
+        // Whatever was read before is not the setting now: the next look reads it again.
+        SETTING_READ.lock().unwrap_or_else(PoisonError::into_inner).take();
+        set
     }
 
     /// Make and upload the previews the account's setting asks for, for `session`: one photo at a time, the newest
@@ -415,8 +428,23 @@ impl<C: CredentialStores> Engine<C> {
             return MadeUpload::Failed;
         };
         let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
-        let setting = match self.runtime.block_on(api.photo_previews_setting()) {
-            Ok(setting) => setting,
+        let read_key = (session, self.config.account_id.clone(), self.config.api_base.clone());
+        let cached = SETTING_READ
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|(at, read, _)| *at == read_key && read.elapsed() < SETTING_LIFETIME)
+            .map(|(_, _, setting)| *setting);
+        let read = match cached {
+            Some(setting) => Ok(setting),
+            None => self.runtime.block_on(api.photo_previews_setting()),
+        };
+        let setting = match read {
+            Ok(setting) => {
+                *SETTING_READ.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some((read_key, std::time::Instant::now(), setting));
+                setting
+            }
             Err(error) => {
                 return match super::settings_api::kind_of(&anyhow::Error::from(error)) {
                     AccountCallError::NotSignedIn | AccountCallError::SessionEnded => MadeUpload::SessionMoved,

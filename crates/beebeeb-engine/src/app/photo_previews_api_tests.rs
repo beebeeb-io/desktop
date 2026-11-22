@@ -1087,8 +1087,34 @@ fn made_thumbnail_waits_while_the_setting_is_off_and_goes_when_it_is_on() {
     world.keep_made(M2, 0);
     assert_eq!(world.upload_made(M2, 0, true), MadeUpload::NotNow(NotNow::SettingOff));
     assert!(world.thumb_puts().is_empty());
-    world.previews.set_setting(JPEG_1920);
+    let session = world.engine.session_turn();
+    world.engine.set_photo_previews_for(session, JPEG_1920).unwrap();
     // The 404 was remembered: a later look without it still sends.
     assert_eq!(world.upload_made(M2, 0, false), MadeUpload::Sent);
     assert_eq!(world.thumb_puts().len(), 1);
+}
+
+const M9: &str = "d0000000-0000-4000-8000-000000000199";
+
+#[test]
+fn a_hundred_looks_read_the_setting_once_and_a_local_change_reads_it_again() {
+    let world = world("thumb9", &[(M9, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    world.keep_made(M9, 0);
+    let gets = |world: &World| {
+        world
+            .api
+            .requests()
+            .iter()
+            .filter(|req| req.method == "GET" && req.path.starts_with("/api/v1/preferences/photo_previews"))
+            .count()
+    };
+    for _ in 0..100 {
+        assert_eq!(world.upload_made(M9, 0, true), MadeUpload::NotNow(NotNow::SettingOff));
+    }
+    assert_eq!(gets(&world), 1);
+    // The settings pane changes it here: the next look reads it again, and sends.
+    let session = world.engine.session_turn();
+    world.engine.set_photo_previews_for(session, JPEG_1920).unwrap();
+    assert_eq!(world.upload_made(M9, 0, true), MadeUpload::Sent);
+    assert_eq!(gets(&world), 2);
 }
