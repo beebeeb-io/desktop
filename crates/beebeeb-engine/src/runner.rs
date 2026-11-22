@@ -794,7 +794,15 @@ async fn run(
                     }
                 }
                 let pull_started = std::time::Instant::now();
+                // dc-164: while the first list comes in, placeholders appear folder by folder (top level first), not
+                // only after the whole list; stopped before anything below reads the pulled rows.
+                #[cfg(target_os = "windows")]
+                let early_placeholders = awaiting_first_list.then(|| crate::windows_cf::EarlyPasses::start(&sync_root));
                 let pulled = sync_tick_outcome(&*bridge, &sync_root).await;
+                #[cfg(target_os = "windows")]
+                if let Some(early) = early_placeholders {
+                    early.stop().await;
+                }
                 if !first_tick_logged {
                     phase_timing(
                         "first-pull",
@@ -916,8 +924,18 @@ async fn run(
                         // placeholder minted now. Idempotent — existing
                         // placeholders are a no-op (ERROR_ALREADY_EXISTS → Ok).
                         let placeholders_started = std::time::Instant::now();
+                        // dc-164: off the async workers (it makes file system calls for every new row).
                         #[cfg(target_os = "windows")]
-                        crate::windows_cf::refresh_placeholders(&sync_root);
+                        {
+                            let placeholder_root = sync_root.clone();
+                            if let Err(e) = tokio::task::spawn_blocking(move || {
+                                crate::windows_cf::refresh_placeholders(&placeholder_root)
+                            })
+                            .await
+                            {
+                                tracing::warn!(error = %e, "placeholder pass panicked; next tick retries");
+                            }
+                        }
                         if !first_tick_logged {
                             phase_timing("placeholders", placeholders_started, 0);
                             first_tick_logged = true;
