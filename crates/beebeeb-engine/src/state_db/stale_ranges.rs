@@ -75,7 +75,12 @@ impl StateDb {
                      status = 'cloud_only', cache_path = NULL, cache_bytes = 0
                  WHERE file_id = ?1 AND content_seq = ?2 AND minted_object_version_id = ?3 AND {STALE_RANGES_SQL}"
             ),
-            params![stale.file_id, seq_before, stale.minted_object_version_id, stale.size_bytes],
+            params![
+                stale.file_id,
+                seq_before,
+                stale.minted_object_version_id,
+                stale.size_bytes
+            ],
         )? == 1)
     }
 }
@@ -111,7 +116,14 @@ mod tests {
         .unwrap();
     }
 
-    fn row(db: &StateDb) -> (Option<String>, Option<String>, Option<(i64, Option<String>)>, FileStatus) {
+    fn row(
+        db: &StateDb,
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Option<(i64, Option<String>)>,
+        FileStatus,
+    ) {
         let minted = db.minted_version("F").unwrap();
         let format = db.range_identity("F").unwrap().map(|identity| identity.format);
         let status = db.get_file("F").unwrap().unwrap().status;
@@ -126,7 +138,11 @@ mod tests {
     fn range_wipe_after_a_pull_moves_a_partial_placeholder_to_the_current_version() {
         let (_dir, db) = file_with_v1_ranges();
         assert!(db.list_stale_ranges(10).unwrap().is_empty(), "current: nothing stale");
-        assert_eq!(db.fetched_content("F").unwrap(), Some((1, None)), "V1's ranges are recorded");
+        assert_eq!(
+            db.fetched_content("F").unwrap(),
+            Some((1, None)),
+            "V1's ranges are recorded"
+        );
         pull_v2(&db);
         let stale = db.list_stale_ranges(10).unwrap();
         assert_eq!(
@@ -147,7 +163,10 @@ mod tests {
             "V2 is the identity, V1's session record and ranges are gone"
         );
         assert!(db.list_stale_ranges(10).unwrap().is_empty(), "once");
-        assert!(!db.record_stale_ranges_wiped(&stale[0], db.content_seq("F").unwrap().unwrap()).unwrap());
+        assert!(
+            !db.record_stale_ranges_wiped(&stale[0], db.content_seq("F").unwrap().unwrap())
+                .unwrap()
+        );
     }
 
     /// A fetch recorded after the sequence was read (an opener after the handle closed) keeps its record: nothing is
@@ -197,7 +216,8 @@ mod tests {
         let stale = db.list_stale_ranges(10).unwrap();
         assert_eq!(stale.iter().map(|s| s.file_id.as_str()).collect::<Vec<_>>(), vec!["F"]);
         // The size moved again after the placeholder was given 200: no identity, so nothing on it is trusted.
-        db.test_execute("UPDATE files SET size_bytes = 300 WHERE file_id = 'F'").unwrap();
+        db.test_execute("UPDATE files SET size_bytes = 300 WHERE file_id = 'F'")
+            .unwrap();
         let seq_before = db.content_seq("F").unwrap().unwrap();
         assert!(db.record_stale_ranges_wiped(&stale[0], seq_before).unwrap());
         assert_eq!(db.minted_version("F").unwrap(), None);
