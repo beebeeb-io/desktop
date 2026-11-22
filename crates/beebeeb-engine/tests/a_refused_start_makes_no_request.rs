@@ -1,6 +1,7 @@
-//! S1, invariants I8 and I10 (contract §6): this PC's local data belongs to another account; the start refuses with
-//! `OtherAccountsData`, makes no request and changes nothing in the folder. Mutant: ignore the binding's refusal, so
-//! an engine is made for the other account's data.
+//! S1, invariants I8 and I10 (contract §6): this PC's local data belongs to another account, which also left a file
+//! of its own making in a folder no row names; the start refuses with `LeftoverFilesOfAnotherAccount` (dc-RC-b: the
+//! reason a person can answer, where the plain one is `OtherAccountsData`), makes no request and changes nothing in
+//! the folder. Mutant: ignore the binding's refusal, so an engine is made for the other account's data.
 
 mod common;
 
@@ -25,7 +26,7 @@ fn a_refused_start_makes_no_request() {
 
     assert_eq!(
         s.engine.start_sync(folder.clone()),
-        Err(SyncStartRefused::OtherAccountsData)
+        Err(SyncStartRefused::LeftoverFilesOfAnotherAccount)
     );
     // An engine that was made anyway would register a device and ask for a snapshot within a second.
     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -35,7 +36,7 @@ fn a_refused_start_makes_no_request() {
     assert!(!s.engine.is_syncing());
     assert_eq!(
         s.engine.view().start,
-        Start::Refused(SyncStartRefused::OtherAccountsData)
+        Start::Refused(SyncStartRefused::LeftoverFilesOfAnotherAccount)
     );
 }
 
