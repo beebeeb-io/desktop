@@ -32,8 +32,6 @@ pub(super) const OFFLINE: &str = "Offline";
 fn unread(source: &dyn AccountSource) -> &'static str {
     if source.offline() { OFFLINE } else { NOT_KNOWN }
 }
-/// The name the shell holds the web's delete-account page under (`Intent::Web`).
-pub const DELETE_PAGE: &str = "delete-account";
 
 fn factor_icon(kind: FactorKind) -> &'static rune::Icon {
     match kind {
@@ -137,7 +135,7 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
             .key("score-words")
             .grow(1.0)
             .min_w(0.0)
-            .gap(2.0)
+            .gap(crate::theme::scale::space::S2)
             .child(
                 kit::label("ring-head", head, SCORE_HEAD, t.text)
                     .role("heading")
@@ -150,13 +148,13 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
         .role("group")
         .label("Security score")
         .w_full()
-        .padding(18.0)
-        .gap(12.0)
-        .radius(10.0)
+        .padding(crate::theme::scale::space::S18)
+        .gap(crate::theme::scale::space::S12)
+        .radius(crate::theme::scale::radius::PANEL)
         .fill(t.card)
         .box_shadow(kit::ring(kit::HAIR, t.separator))
         .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)));
-    let line = row().key("score").w_full().center_y().gap(14.0);
+    let line = row().key("score").w_full().center_y().gap(crate::theme::scale::space::S14);
     let Some(factors) = scored(facts) else {
         return card.child(line.child(ring(1.0, "?".into(), t.separator)).child(words(
             "Security score not known yet".into(),
@@ -181,7 +179,7 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
             .label(format!("To do: {}. {}", f.says, why(f.kind)))
             .w_full()
             .center_y()
-            .gap(10.0)
+            .gap(crate::theme::scale::space::S10)
             .pt(12.0)
             .child(
                 el().key(format!("todo-{i}-rule"))
@@ -298,7 +296,7 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> Option<El> {
                 .role("combobox")
                 .label(format!("Locks again after, {after}"))
                 .mr(8.0)
-                .radius(6.0)
+                .radius(crate::theme::tokens::radius::MD)
                 .focusable(true)
                 .on_press(|s: &mut State| super::go(s, "DW-0716"))
                 .child(lists::pop_button("item-1-0", after, t)),
@@ -760,6 +758,7 @@ fn sign_out_confirm(
 
 /// dc-005: what a sign-out keeps and removes, with counts. Sealed staged copies stay encrypted on this PC and open
 /// again after sign-in; unsaved Office recovery copies are removed. `waiting`: uploads not sent yet.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn sign_out_counts_words(waiting: u64, sealed: u64, office_recovery: u64) -> String {
     let plural = |n: u64, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
     let mut out = Vec::new();

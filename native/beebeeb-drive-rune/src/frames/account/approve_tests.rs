@@ -375,10 +375,9 @@ fn the_review_is_modal_tab_stays_inside_and_the_pane_behind_takes_no_press() {
             .into_iter()
             .find(|e| e.focused && !e.exiting)
             .and_then(|e| e.key)
+            && !stops.contains(&now)
         {
-            if !stops.contains(&now) {
-                stops.push(now);
-            }
+            stops.push(now);
         }
     }
     stops.sort();

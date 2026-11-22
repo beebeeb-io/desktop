@@ -55,8 +55,10 @@ pub enum SignOutMode {
     /// Done in the call (the board's frames).
     AtOnce,
     /// Refused: unsent changes.
+    #[cfg_attr(not(test), allow(dead_code))]
     Refused,
     /// Refused: an open editor holds unsaved changes (until `sign_out_discarding_unsaved`, or the mode is reset).
+    #[cfg_attr(not(test), allow(dead_code))]
     Unsaved,
     /// On its way: answered after this many polls (`u32::MAX`: never, in a test's lifetime).
     After(u32),

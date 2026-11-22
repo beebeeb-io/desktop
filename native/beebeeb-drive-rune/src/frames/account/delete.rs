@@ -492,7 +492,7 @@ pub fn undone(name: &str, t: &Theme, cx: &mut Cx<State>) -> El {
             t,
         ))
         .child(
-            col().key("au-actions").w_full().gap(6.0).mt(6.0).child(
+            col().key("au-actions").w_full().gap(crate::theme::scale::space::S6).mt(6.0).child(
                 au::button(
                     &mut keys,
                     "Continue to Drive",

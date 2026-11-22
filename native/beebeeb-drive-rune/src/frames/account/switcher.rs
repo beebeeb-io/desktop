@@ -156,13 +156,13 @@ pub fn panel(t: &Theme) -> Option<El> {
         .key("switcher")
         .role("menu")
         .label("Accounts on this PC")
-        .gap(2.0)
-        .px(4.0)
-        .py(4.0)
+        .gap(crate::theme::scale::space::S2)
+        .px(crate::theme::scale::space::S4)
+        .py(crate::theme::scale::space::S4)
         .radius(radius::CONTROL)
         .fill(t.card)
         .border(kit::HAIR, t.separator)
-        .child(kit::label("switcher-head", "Accounts on this PC", type_::CAPTION, t.text_tertiary).px(6.0).py(2.0));
+        .child(kit::label("switcher-head", "Accounts on this PC", type_::CAPTION, t.text_tertiary).px(crate::theme::scale::space::S6).py(crate::theme::scale::space::S2));
     for (i, account) in listed().into_iter().enumerate() {
         let key = format!("switcher-account-{i}");
         let mut line = row()
@@ -174,9 +174,9 @@ pub fn panel(t: &Theme) -> Option<El> {
                 format!("Switch to {}", account.email)
             })
             .center_y()
-            .gap(8.0)
-            .px(6.0)
-            .py(4.0)
+            .gap(crate::theme::scale::space::S8)
+            .px(crate::theme::scale::space::S6)
+            .py(crate::theme::scale::space::S4)
             .radius(radius::CONTROL)
             .child(kit::avatar(
                 format!("{key}-avatar"),
@@ -225,8 +225,8 @@ pub fn panel(t: &Theme) -> Option<El> {
             .key("switcher-add")
             .role("menuitem")
             .label("Add another account")
-            .px(6.0)
-            .py(6.0)
+            .px(crate::theme::scale::space::S6)
+            .py(crate::theme::scale::space::S6)
             .radius(radius::CONTROL)
             .hover(t.selection)
             .press(t.press)
@@ -236,7 +236,7 @@ pub fn panel(t: &Theme) -> Option<El> {
             .child(kit::label("switcher-add-label", "Add another account", type_::BODY_SM, t.text)),
     );
     if let Some(words) = said() {
-        list = list.child(kit::label("switcher-said", words, type_::CAPTION, t.text_secondary).px(6.0).wrap());
+        list = list.child(kit::label("switcher-said", words, type_::CAPTION, t.text_secondary).px(crate::theme::scale::space::S6).wrap());
     }
     Some(list)
 }

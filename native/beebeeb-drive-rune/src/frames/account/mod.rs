@@ -53,7 +53,7 @@ use crate::shell::app::{Event, Screen, SettingsPane};
 use crate::shell::{host, instance, placeholder, registry};
 use crate::theme::tokens::{self, Theme};
 use crate::ui::{account_set as set, caption};
-use rune::{Cx, El, Icon, Key, KeyEvent, Tx, col, el, row};
+use rune::{Cx, El, Key, KeyEvent, Tx, col, el, row};
 
 use source::AccountSource;
 
@@ -541,7 +541,7 @@ fn unbuilt_pane(pane: Pane, t: &Theme) -> El {
         .key("not-built")
         .role("group")
         .label(format!("{title}: not built yet"))
-        .gap(4.0)
+        .gap(crate::theme::scale::space::S4)
         .child(crate::ui::kit::label(
             "not-built-label",
             "NOT BUILT YET",
@@ -717,9 +717,12 @@ fn take_answers(s: &mut State) {
 }
 
 /// The frames of this group that are built: the id, and what shows it on a fresh `State`.
+/// A scene: a name and the setup that puts the state there.
+pub type SceneFn = fn(&mut State);
+
 /// A page whose board frame shows typed text gets that text; the board draws most of them at
 /// a later moment than their opening (fields filled, no field in focus).
-pub const FRAMES: &[(&str, fn(&mut State))] = &[
+pub const FRAMES: &[(&str, SceneFn)] = &[
     ("DW-A51", |s| open_on(s, "DW-A51")),
     // Sign-in and security, the one page (no board frame: `FRAMES.md`, "Sign-in and security, one page"). Its
     // states have ids of their own, DW-S..; the board ids it replaced (DW-A52, DW-A84, DW-A84a, DW-A57,
@@ -1035,10 +1038,10 @@ pub(super) fn modal_back(scrim: El, opener: &str, fallback: &str, dismiss: impl 
 /// control; in a confirm Enter is its default button, the safe choice).
 pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     sync(s);
-    if let Some(Dialog::LockDelay(hot)) = s.account.dialog {
-        if let Some(taken) = app_lock::on_key(s, hot, ev) {
-            return taken;
-        }
+    if let Some(Dialog::LockDelay(hot)) = s.account.dialog
+        && let Some(taken) = app_lock::on_key(s, hot, ev)
+    {
+        return taken;
     }
     if ev.key != Key::Escape {
         return false;
