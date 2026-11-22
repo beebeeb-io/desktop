@@ -104,7 +104,23 @@ pub fn pass_excludes(sync_root: &Path) -> Option<Vec<PathBuf>> {
         && clean(&real) && !excludes.contains(&real) {
             excludes.push(real);
         }
-    (!excludes.is_empty()).then_some(excludes)
+    if excludes.is_empty() {
+        return None;
+    }
+    // Container layers (Windows Sandbox, Docker) hold wcifs placeholders; wcifs.sys keeps a kernel handle per entry
+    // opened, so the walk is never their first opener.
+    let containers = containers_folder();
+    if clean(&containers) && !excludes.contains(&containers) {
+        excludes.push(containers);
+    }
+    Some(excludes)
+}
+
+/// `%ProgramData%\Microsoft\Windows\Containers` (`C:\ProgramData` when the variable is unset). Not absolute off
+/// Windows, so [`pass_excludes`] drops it there.
+fn containers_folder() -> PathBuf {
+    let base = std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    base.join("Microsoft").join("Windows").join("Containers")
 }
 
 /// Whether `a` and `b` name the same folder: compared as [`check_source`] compares (component by component, without
@@ -374,5 +390,19 @@ mod tests {
         assert_eq!(keys, ["letter.txt"], "nothing of the sync root is listed");
         assert_eq!(walk.skipped, vec![("Beebeeb".to_string(), SkipReason::Excluded)]);
         assert!(pass_excludes(Path::new("")).is_none(), "no clean spelling, no pass");
+    }
+
+    /// A source holding the containers folder (C:\ProgramData, a whole drive) has it left out of the walk.
+    #[cfg(windows)]
+    #[test]
+    fn the_containers_folder_is_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let excludes = pass_excludes(&dir.path().join("Beebeeb")).unwrap();
+        assert!(excludes.contains(&containers_folder()), "{excludes:?}");
+    }
+
+    #[test]
+    fn the_containers_folder_ends_in_the_containers_path() {
+        assert!(containers_folder().ends_with(Path::new("Microsoft").join("Windows").join("Containers")));
     }
 }
