@@ -23,6 +23,9 @@
 //! It is a `tracing::Subscriber` of its own (no `tracing-subscriber`: no new crate is built, and every field passes
 //! through one visitor that this file owns).
 
+pub mod crash;
+#[cfg(test)]
+mod crash_tests;
 mod redact;
 #[cfg(test)]
 mod tests;
