@@ -378,6 +378,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
@@ -442,6 +444,10 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: crates/beebeeb-engine
         run: cargo build --locked --release
+
+      - name: Clippy, zero warnings
+        working-directory: crates/beebeeb-engine
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Upload engine test evidence
         if: always()
@@ -560,11 +566,17 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.99.1
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           workspaces: native/beebeeb-drive-rune
+
+      - name: Clippy, zero warnings
+        if: runner.os != 'macOS'
+        working-directory: native/beebeeb-drive-rune
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Every target is covered by the test build
         working-directory: native/beebeeb-drive-rune
