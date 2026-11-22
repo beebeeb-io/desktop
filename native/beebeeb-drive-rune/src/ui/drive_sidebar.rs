@@ -366,23 +366,38 @@ fn foot(s: &State, standing: Standing, t: &Theme) -> El {
     let who: Option<Account> = if details { s.actions.source.account() } else { None };
     let account = row().key("account-row").center_y().gap(8.0).pt(2.0).px(2.0);
     let account = match &who {
-        Some(who) => account
-            .child(kit::avatar(
-                "avatar",
-                &who.initials,
-                26.0,
-                rune::oklch(0.88, 0.05, 250.0),
-                t.card,
-                t,
-            ))
-            .child(
-                col()
-                    .key("account-info")
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .child(kit::label("account-name", &who.name, type_::BODY_SEMI, t.text).truncate())
-                    .child(kit::label("account-email", &who.email, type_::BODY_SM, t.text_tertiary).truncate()),
-            ),
+        // dc-167: the pill (avatar, name, email) opens the account switcher (`frames::account::switcher`).
+        Some(who) => account.child(
+            row()
+                .key("account-pill")
+                .role("button")
+                .label(format!("{}, switch account", who.email))
+                .center_y()
+                .gap(8.0)
+                .grow(1.0)
+                .min_w(0.0)
+                .radius(radius::CONTROL)
+                .hover(t.selection)
+                .press(t.press)
+                .focusable(open)
+                .on_press(crate::frames::account::switcher::toggle)
+                .child(kit::avatar(
+                    "avatar",
+                    &who.initials,
+                    26.0,
+                    rune::oklch(0.88, 0.05, 250.0),
+                    t.card,
+                    t,
+                ))
+                .child(
+                    col()
+                        .key("account-info")
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .child(kit::label("account-name", &who.name, type_::BODY_SEMI, t.text).truncate())
+                        .child(kit::label("account-email", &who.email, type_::BODY_SM, t.text_tertiary).truncate()),
+                ),
+        ),
         // No account known, or blanked: the row keeps its height and names no one.
         None => account.child(
             col()
@@ -420,6 +435,7 @@ fn foot(s: &State, standing: Standing, t: &Theme) -> El {
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
         .border_layout()
         .child(meter)
+        .children(crate::frames::account::switcher::panel(t).filter(|_| who.is_some()))
         .child(account)
 }
 

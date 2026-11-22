@@ -31,6 +31,7 @@ mod plan;
 mod request;
 mod security_overview;
 mod sessions;
+pub mod switcher;
 pub mod source;
 #[cfg(test)]
 mod tests;

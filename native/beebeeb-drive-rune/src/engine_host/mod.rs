@@ -450,6 +450,8 @@ impl<C: CredentialStores> LiveEngine<C> {
     where
         C: 'static,
     {
+        // dc-167: the account switcher reaches this handle (installed once; a second call changes nothing).
+        crate::frames::account::switcher::install(self.clone());
         let live = self.clone();
         setup::Hooks {
             start_sync: Arc::new(move || live.start_sync().is_ok()),
@@ -503,6 +505,38 @@ impl<C: CredentialStores> LiveEngine<C> {
         Ok(config
             .sync_root
             .unwrap_or_else(|| beebeeb_engine::config::default_sync_root_suggestion(self.identity)))
+    }
+}
+
+/// dc-167: the account switcher's calls, forwarded to the handle (`app::account_switch`). Run off the window's thread.
+impl<C: CredentialStores + 'static> crate::frames::account::switcher::Switcher for LiveEngine<C> {
+    fn accounts(&self) -> Vec<crate::frames::account::switcher::Listed> {
+        self.engine
+            .accounts_on_this_pc()
+            .into_iter()
+            .map(|account| crate::frames::account::switcher::Listed {
+                email: account.email.unwrap_or_else(|| "Account".to_string()),
+                id: account.user_id,
+                current: account.current,
+            })
+            .collect()
+    }
+
+    /// The switch, then sync starts for the account it came to (its start clears the previous account's local data,
+    /// and an unsent file of it is offered "Discard and switch" by the sync-off banner). A gate that is not open
+    /// (the account's own app lock) starts nothing here: its unlock does.
+    fn switch_to(&self, id: &str) -> Result<(), String> {
+        self.engine.switch_account(id).map_err(|why| why.words().to_string())?;
+        let _ = self.start_sync();
+        Ok(())
+    }
+
+    fn add_another(&self) -> Result<(), String> {
+        self.engine.add_another_account().map_err(|why| why.words().to_string())
+    }
+
+    fn sign_out(&self, id: &str) -> Result<(), String> {
+        self.engine.sign_out_parked_account(id).map_err(|why| why.words().to_string())
     }
 }
 
