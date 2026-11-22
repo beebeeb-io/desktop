@@ -356,15 +356,6 @@ fn prepare(
             continue;
         }
         if metadata.is_dir() {
-                    // A junction/symlink is removed, never followed; its target is not ours.
-                    directories.push(file);
-                } else if let Some(entry) = keep_pending_file(file, &relative, keep_dir)? {
-                    kept.push(entry);
-                }
-                continue;
-            }
-        }
-        if metadata.is_dir() {
             directories.push(file);
             prepare(
                 db,
