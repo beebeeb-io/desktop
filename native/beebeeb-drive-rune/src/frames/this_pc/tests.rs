@@ -85,6 +85,7 @@ fn tab_to(rt: &mut Runtime<State>, key: &str) {
     panic!("Tab never reached {key}; focus is on {:?}", focused(rt));
 }
 
+#[allow(clippy::type_complexity)]
 const SCENES: [(&str, fn(&mut State)); 9] = [
     ("DW-1301", scenes::dw_1301),
     ("DW-1302", scenes::dw_1302),

@@ -10,7 +10,7 @@
 //!
 //! Every measurement is the board's computed CSS (`.wn-dlg`, `.wn-cmds`, `.wn-cmd`).
 
-use rune::{Align, Color, Cx, El, Key, KeyEvent, ScrollSpec, TextStyle, Tx, col, el, row};
+use rune::{Align, Cx, El, Key, KeyEvent, ScrollSpec, TextStyle, Tx, col, el, row};
 
 use super::commands::{APP, EDITOR, WINDOW};
 use crate::State;

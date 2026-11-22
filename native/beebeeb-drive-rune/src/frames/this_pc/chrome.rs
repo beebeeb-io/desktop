@@ -13,10 +13,6 @@ use crate::shell::host;
 use crate::theme::scale::space;
 use crate::theme::tokens::{Theme, type_};
 
-/// Whether the search field has the keyboard (Rune reports a focused field's caret).
-pub fn search_focused(cx: &rune::Cx<State>) -> bool {
-    cx.caret(crate::ui::keys::SEARCH_KEY).is_some()
-}
 use crate::ui::toolbar as tb;
 
 /// How the toolbar's Files controls show in a section that has no use for them.
@@ -45,6 +41,7 @@ pub fn search_field(ui: &Ui, placeholder: &'static str, t: &Theme) -> El {
 
 /// The toolbar (`.mk-tb`): the one window toolbar (`ui::toolbar::bar`) with the section's title,
 /// its own controls in the slot (`slot`), the Files controls as `how` says, and its search field.
+#[allow(clippy::too_many_arguments)]
 pub fn toolbar(
     s: &State,
     ui: &Ui,

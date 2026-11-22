@@ -5,7 +5,6 @@
 //! settings pane has; this file adds `mail-title`, `mail-sub`, `mail-note`, `mail-count`,
 //! `mail-left` and the fields `field-<N>` (`-label`, `-value`, `-caret`, `-msg`).
 
-use rune::tok::Family;
 use rune::{Color, El, Icon, Span, TextEdit, TextStyle, col, el, rich, row, text_input};
 
 use super::mail::{Connection, Field, Mail, MailFolder, MailState};
@@ -23,9 +22,9 @@ use crate::ui::settings_card as cards;
 use crate::ui::settings_controls::{self as controls, BANNER_TEXT, BANNER_TITLE, Emphasis};
 use crate::ui::settings_dialog::{self as dialogs, DIALOG_TITLE, Weight};
 use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
-use crate::ui::settings_notice::{self as notice, PILL, Tone};
+use crate::ui::settings_notice::{self as notice, Tone};
 use crate::ui::settings_shell::{self as shell, SUB};
-use crate::ui::{au, kit, pill, settings_meter};
+use crate::ui::{au, kit, pill};
 
 /// A folder that is not ticked: a point where the tick would be (`M12 11.9v.2`).
 static NOT_TICKED: Icon = Icon {

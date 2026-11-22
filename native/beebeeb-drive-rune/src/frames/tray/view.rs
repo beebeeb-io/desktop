@@ -10,7 +10,7 @@ use rune::{Align, Color, Cursor, El, Icon, LiveRegion, ScrollFade, ScrollPos, Sc
 use super::source::{Change, Changes, MAX_ROWS, Origin, Snapshot, Status, Tile, Tone, What};
 use super::{Host, Ui, icons};
 use crate::theme::scale::space;
-use crate::theme::tokens::{self, Theme, type_};
+use crate::theme::tokens::{self, Theme};
 use crate::theme::file_icons::icon_for;
 use crate::ui::file_row::{self, RowLook};
 use crate::ui::view_state::{ViewState, try_again, view_state};
@@ -35,8 +35,6 @@ mod type_fly {
     pub const LABEL: TextStyle = crate::theme::scale::text::CAPTION_SEMI;
     /// 11px/500: "last 50" (`.mk-plabel span`).
     pub const LABEL_COUNT: TextStyle = TextStyle::new(11.0, 500.0).lh(17.0);
-    /// 12.5px/500: a file's name (`.mk-pr-tx b`).
-    pub const NAME: TextStyle = TextStyle::new(12.5, 500.0).lh(15.0);
     /// 11.5px/400: what happened to it (`.mk-pr-tx span`).
     pub const WHAT: TextStyle = TextStyle::new(11.5, 400.0).lh(14.0);
     /// 11px/400 mono: when (`.mk-pr-t`).
