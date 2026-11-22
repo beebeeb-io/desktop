@@ -143,8 +143,11 @@ fn search_details(s: &mut State) {
     );
 }
 
+/// A scene: its name and the function that sets it up.
+type Scene = (&'static str, fn(&mut State));
+
 /// The names `--scene` knows, for the shell's list of scenes (`frames::scenes`).
-pub const RENDER_SCENES: &[(&str, fn(&mut State))] = &[
+pub const RENDER_SCENES: &[Scene] = &[
     ("trash-details", trash_details),
     ("trash-preview-text", trash_preview_text),
     ("trash-preview-notyet", trash_preview_notyet),

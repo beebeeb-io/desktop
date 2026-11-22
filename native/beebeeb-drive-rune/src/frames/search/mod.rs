@@ -19,6 +19,7 @@ pub mod source;
 #[cfg(test)]
 mod tests;
 mod view;
+#[cfg(test)]
 pub use view::PLAIN_NOTE;
 
 use std::sync::Arc;
