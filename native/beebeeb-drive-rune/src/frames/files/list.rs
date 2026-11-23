@@ -137,7 +137,6 @@ pub fn rows(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
                                     .on_drop_hover(move |s: &mut State, over: bool, _: &mut Tx| s.drop_over(i, over));
                             }
                             row.on_press_tx(move |s: &mut State, tx: &mut Tx| {
-                                eprintln!("PRESS {i}");
                                 let mods = tx.mods();
                                 tx.focus("rows", false);
                                 if mods.shift {

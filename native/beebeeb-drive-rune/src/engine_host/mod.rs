@@ -1037,11 +1037,11 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     /// The status line's word for the handle's view (`sync::sync_word`): read without waiting, on every frame, and
     /// never "Up to date" for an engine that does not run.
     fn sync_state(&self) -> Option<String> {
-        files_downloads::with_downloads(
+        let word = files_downloads::with_downloads(
             sync::sync_word(&self.engine.view()),
             !self.downloads.downloads().is_empty(),
-        )
-        .map(str::to_string)
+        );
+        files_uploads::with_uploads(word, self.uploads.sending()).map(str::to_string)
     }
 
     fn details(&self, item: &DriveItem, folder: &str) -> Details {
