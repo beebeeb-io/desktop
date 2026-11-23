@@ -319,6 +319,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let Some(stamp) = self.stamp_of(file_id).filter(|_| writable) else {
             return SaveOutcome::Failed;
         };
+        let base = match (how, self.office.shown.as_ref()) {
+            (How::Save, Some(shown)) if shown.file_id == file_id => shown.restored_base.unwrap_or(base),
+            _ => base,
+        };
         let work = &self.office.work;
         if self.changes.busy || work.saving.is_some() || work.creating.is_some() {
             return SaveOutcome::Failed;

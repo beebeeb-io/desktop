@@ -157,12 +157,16 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let (Some(offer), Some(bytes)) = (store.offer(file_id), store.restore(file_id)) else {
             return false;
         };
+        // The restored edits come from the blob's version: a save is sent from it, so a newer server version answers
+        // Conflict instead of being overwritten.
+        let blob_base = store.base_of(file_id).unwrap_or(shown.base);
+        shown.restored_base = (blob_base != shown.base).then_some(blob_base);
         let waker = self.engine.clone();
         let wake: crate::engine_host::office_host::Wake = Arc::new(move || waker.wake());
         let scratch = self.engine.office_scratch(session);
         let mut view = (self.office.edit_opener)(&shown.helper, kind, bytes, wake, scratch);
         view.set_kept(shown.kept);
-        view.set_recovery(store, file_id, shown.base);
+        view.set_recovery(store, file_id, blob_base);
         view.push_answer(EditAnswer::Restored { at: offer.at });
         if let Some(mut old) = shown.view.replace(view) {
             old.close(CloseWhy::Closed);
@@ -209,6 +213,12 @@ impl Recovery {
         let entries = self.blobs.list(self.session).ok()?;
         let entry = entries.iter().find(|entry| entry.file_id == file_id)?;
         Some(RecoveryOffer { at: clock(entry.saved_at) })
+    }
+
+    /// The version the file's blob was edited from.
+    pub(crate) fn base_of(&self, file_id: &str) -> Option<i64> {
+        let entries = self.blobs.list(self.session).ok()?;
+        entries.iter().find(|entry| entry.file_id == file_id).map(|entry| entry.base)
     }
 
     /// The bytes of the file's blob. The blob stays until [`Recovery::saved`] or [`Recovery::discard`].

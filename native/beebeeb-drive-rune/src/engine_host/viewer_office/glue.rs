@@ -93,6 +93,8 @@ pub(super) struct Shown {
     pub(super) edit: Option<EditKind>,
     /// The version the editor's file was opened from (the recovery blob's base).
     pub(super) base: i64,
+    /// Set by a restore of a blob edited from another version: the next Save is sent from it.
+    pub(super) restored_base: Option<i64>,
     /// The read's answer, while it is on its way.
     pub(super) inbox: Option<mpsc::Receiver<Read>>,
     pub(super) view: Option<OfficeView>,
@@ -213,6 +215,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             edit,
             // A document made here is edited from the version its upload becomes: a new file's first.
             base: opening.edit.map_or(0, |facts| facts.version.max(i64::from(edit.is_some()))),
+            restored_base: None,
             inbox: Some(inbox),
             view: None,
             ended: false,

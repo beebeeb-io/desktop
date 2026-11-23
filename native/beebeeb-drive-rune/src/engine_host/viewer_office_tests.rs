@@ -2187,6 +2187,24 @@ fn a_snapshot_is_kept_survives_a_restart_and_restores() {
 }
 
 #[test]
+fn a_restore_saves_from_the_blobs_version_so_a_newer_one_conflicts() {
+    // The blob was edited from version 2; the file is at 3 when it is opened again.
+    let engine = TestEngine::new(&[("f1", "Invented.docx", 64)]);
+    engine.s().blobs.insert("f1".into(), (86_400 * 100, 2, b"KEPT".to_vec()));
+    let mut e = editor_over(engine, "Invented.docx");
+    assert!(e.source.office_restore("f1"));
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.source.poll("f1");
+    e.fake.saved(b"PK saved package", 4);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(
+        matches!(settled, crate::frames::viewers::source::Settled::Conflict(_)),
+        "the newer version is not overwritten: {settled:?}"
+    );
+    assert!(e.engine.s().stored.is_empty());
+}
+
+#[test]
 fn a_landed_save_deletes_the_blob() {
     let mut e = editor("Invented.docx", false);
     snapshot(&e.fake, b"SNAP", 2);
