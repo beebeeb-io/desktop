@@ -1,7 +1,7 @@
 //! RC2-6b: the tick's two per-row placeholder passes (Windows: `refresh_placeholders` and
 //! `reconcile_placeholder_state`) run only when something can have changed.
 //!
-//! On LargeAccount::GUUS (41,510 items, 2,741 folders) the two passes listed every folder of the sync root twice on
+//! On LargeAccount::REFERENCE (41,510 items, 2,741 folders) the two passes listed every folder of the sync root twice on
 //! every 30 s tick, nothing changed or not: 1,133 file operations a second on an idle account, locked or not
 //! (board/evidence/drive-complete/rc2-6). Both look for things the NTFS change journal names: a placeholder that left
 //! its folder (a delete, a rename) and an attribute change made in Explorer (pin, unpin, "Free up space", a

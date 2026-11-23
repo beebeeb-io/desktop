@@ -1,4 +1,4 @@
-//! A large invented account for the fake server: Guus's size (about 40,000 files) with deterministic names, so the
+//! A large invented account for the fake server: a big account's size (about 40,000 files) with deterministic names, so the
 //! native bench (`native/beebeeb-drive-rune/examples/bench_large.rs`) measures the views at the size that hurts.
 //!
 //! [`seed`] adds items to a [`FakeAccount`] (the account the fake server serves, `server::fixture_account`); the
@@ -28,8 +28,8 @@ pub struct LargeAccount {
 }
 
 impl LargeAccount {
-    /// Guus's account on 2026-11-20.
-    pub const GUUS: LargeAccount = LargeAccount {
+    /// The size of a big real account, measured on 2026-11-20.
+    pub const REFERENCE: LargeAccount = LargeAccount {
         files: 38_764,
         folders: 2_739,
         photos: 8_816,
@@ -304,10 +304,21 @@ mod tests {
         (files, folders, photos, backups, biggest)
     }
 
+    /// The public repo's name check (`scripts/check-infra-names.sh`) bans a person's name; this file once carried it.
+    #[test]
+    fn large_account_source_names_no_person() {
+        let name = ["Gu", "us"].concat();
+        let src = include_str!("large_account.rs");
+        assert!(
+            !src.to_lowercase().contains(&name.to_lowercase()),
+            "a person's name is in large_account.rs"
+        );
+    }
+
     #[test]
     fn large_account_seed_holds_the_counts() {
         let (account, _) = FakeAccount::register("large@example.invalid", "a large invented password", TEST_PHRASE);
-        let spec = LargeAccount::GUUS;
+        let spec = LargeAccount::REFERENCE;
         seed(&account, &spec);
         assert_eq!(
             counts(&account),

@@ -1515,7 +1515,7 @@ mod first_pull_batch_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const KEY: [u8; 32] = [63u8; 32];
-    /// LargeAccount::GUUS's size (dc-086): 41,510 items, 2,739 of them folders.
+    /// LargeAccount::REFERENCE's size (dc-086): 41,510 items, 2,739 of them folders.
     const ITEMS: usize = 41_510;
     const FOLDERS: usize = 2_739;
     const CHILD: &str = "BB_DC163_FIRST_PULL_CHILD";

@@ -1,4 +1,4 @@
-//! Budgets for the Files window on the 40,000-file account (`LargeAccount::GUUS`, task 025's fixture), one check per
+//! Budgets for the Files window on the 40,000-file account (`LargeAccount::REFERENCE`, task 025's fixture), one check per
 //! view. Time is CPU time of the test thread (not the clock), so a loaded build machine does not flake it.
 //!
 //! * frame build, p95 over 40 frames: under 16 ms on the files root, the 5,000-photo folder as a list and as a grid,
@@ -175,7 +175,7 @@ fn large_account_stays_inside_its_budgets() {
     let mut over: Vec<String> = Vec::new();
         // The seeded account and the fake server that serves it.
     let (account, _phrase) = FakeAccount::register(EMAIL, PASSWORD, TEST_PHRASE);
-    seed(&account, &LargeAccount::GUUS);
+    seed(&account, &LargeAccount::REFERENCE);
     let owner = Identity::new(Some(&account.user_id), Some(&account.email));
     let rows = local_rows(&account);
     let api = FakeApi::start(account_handler(Arc::new(account)));
@@ -285,7 +285,7 @@ fn large_account_stays_inside_its_budgets() {
                 .unwrap()
                 .count()
         });
-        assert_eq!(n, LargeAccount::GUUS.biggest_folder, "the biggest folder lists whole");
+        assert_eq!(n, LargeAccount::REFERENCE.biggest_folder, "the biggest folder lists whole");
         best = best.min(ms);
     }
     println!("BUDGET folder list SQL {best:.2} ms (budget {SQL_BUDGET_MS})");
