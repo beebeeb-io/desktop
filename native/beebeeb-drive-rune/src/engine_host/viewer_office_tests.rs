@@ -2193,7 +2193,9 @@ fn a_restore_saves_from_the_blobs_version_so_a_newer_one_conflicts() {
     engine.s().blobs.insert("f1".into(), (86_400 * 100, 2, b"KEPT".to_vec()));
     let mut e = editor_over(engine, "Invented.docx");
     assert!(e.source.office_restore("f1"));
-    // A frame: the restored editing session is open (Save is refused while it is still opening).
+    // The restored editing session opens (the fake is shared with the one the restore closed, so it says closed until
+    // then) and a frame reads that: Save is refused before.
+    e.fake.set(open_state(OfficeKind::Docx));
     e.source.poll("f1");
     assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
     e.source.poll("f1");
