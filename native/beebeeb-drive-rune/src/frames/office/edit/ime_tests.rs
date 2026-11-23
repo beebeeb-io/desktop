@@ -22,6 +22,9 @@ enum Asked {
     Copy,
 }
 
+/// A copy answer that stands for the helper refusing the copy as too large.
+const TOO_LARGE: &str = "<too large>";
+
 type Log = Rc<RefCell<Vec<Asked>>>;
 
 /// The fixture, writing down the editor's calls. `copy` is what a copy answers (`None`: the call is not taken).
@@ -52,6 +55,10 @@ impl ViewerSource for Recording {
     fn copy_selection(&mut self, _: &str) -> bool {
         self.log.borrow_mut().push(Asked::Copy);
         let Some((text, html)) = self.copy.clone() else { return false };
+        if text == TOO_LARGE {
+            self.inner.edit_answers.push(EditAnswer::CopyTooLarge);
+            return true;
+        }
         self.inner.edit_answers.push(EditAnswer::Clip { text, html });
         true
     }
@@ -335,6 +342,20 @@ fn a_cut_with_nothing_selected_in_a_document_deletes_nothing() {
 #[test]
 fn a_cut_whose_copy_was_not_taken_deletes_nothing() {
     let mut h = harness(EditKind::Xlsx, None);
+    h.focus();
+    h.ctrl('x');
+    assert_eq!(h.asked(), [Asked::Copy]);
+}
+
+#[test]
+fn a_cut_whose_copy_comes_back_empty_or_too_large_deletes_nothing() {
+    // Slides: the copy is taken (sent), but the answer is empty (a caret, nothing selected).
+    let mut h = harness(EditKind::Pptx, Some(("", None)));
+    h.focus();
+    h.ctrl('x');
+    assert_eq!(h.asked(), [Asked::Copy]);
+    // Too large: the helper refuses the copy.
+    let mut h = harness(EditKind::Xlsx, Some((TOO_LARGE, None)));
     h.focus();
     h.ctrl('x');
     assert_eq!(h.asked(), [Asked::Copy]);

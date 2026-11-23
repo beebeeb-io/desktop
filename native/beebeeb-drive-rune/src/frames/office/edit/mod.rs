@@ -131,7 +131,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
                 edit.can_undo = false;
                 edit.can_redo = false;
             }
-            EditAnswer::CopyTooLarge => ui.toast = Some(crate::frames::viewers::source::COPY_TOO_LARGE.to_string()),
+            EditAnswer::CopyTooLarge => {
+                clipboard::cancel_cut();
+                ui.toast = Some(crate::frames::viewers::source::COPY_TOO_LARGE.to_string());
+            }
         }
     }
     ui.office.edit = Some(edit);
