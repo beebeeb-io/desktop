@@ -164,10 +164,10 @@ pub(super) fn first_list_after_pull(still_owed: bool, reached_server: bool) -> c
     }
 }
 
-/// How often the pulse looks. The look itself is free while nothing is moving.
+/// How often the pulse looks. While nothing moves or waits the look is one read of the upload queue.
 pub(super) const STATUS_PULSE_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Reports `syncing` (with progress) while files move, and the way back to `idle`.
+/// Reports `syncing` (with progress) while files move or wait to be sent, and the way back to `idle`.
 /// Runs for the engine's lifetime and is aborted with it.
 pub(super) async fn run_status_pulse(
     app: Host,
@@ -180,11 +180,8 @@ pub(super) async fn run_status_pulse(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
-        let transfer_in_flight = !transfers.active().is_empty();
         let paused = sync_paused.load(Ordering::Relaxed) || crate::power::current().is_some();
-        let payload = tracker.pulse(paused, transfer_in_flight, || {
-            current_activity(&db, &transfers)
-        });
+        let payload = status_pulse_once(&tracker, &db, &transfers, paused);
         if let Some(payload) = payload {
             let going_quiet = payload.state == crate::engine_status::State::Idle;
             emit_payload(&app, payload);
@@ -194,6 +191,22 @@ pub(super) async fn run_status_pulse(
             }
         }
     }
+}
+
+/// One look of the pulse: the event to emit, if the picture changed.
+///
+/// RC4-1: work is a file moving on the board or an upload due in the queue. The scan queues a copied file at once
+/// and its upload starts at the next tick (up to [`TICK_INTERVAL`] later); asked for the board alone, the engine
+/// said `idle` all that time and the status line read "Up to date" with 18 files still to send. The queue is asked
+/// only while nothing moves (one `EXISTS` read); a read that fails counts as nothing waiting.
+pub(super) fn status_pulse_once(
+    tracker: &StatusTracker,
+    db: &StateDb,
+    transfers: &crate::transfer_progress::TransferBoard,
+    paused: bool,
+) -> Option<crate::engine_status::StatusPayload> {
+    let work_waiting = !transfers.active().is_empty() || db.upload_waiting(now_secs()).unwrap_or(false);
+    tracker.pulse(paused, work_waiting, || current_activity(db, transfers))
 }
 
 /// Publish the loop's current high-level engine state to the shared telemetry

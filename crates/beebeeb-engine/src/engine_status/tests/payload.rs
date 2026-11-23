@@ -300,6 +300,25 @@ fn the_pulse_reports_syncing_while_work_is_in_flight_and_idle_once_when_it_ends(
     assert_eq!(t.pulse(false, true, Activity::default), None);
 }
 
+/// RC4-1: a good tick that leaves files to send is not `idle` (the status line reads `idle` as "Up to date"); the
+/// pulse then keeps looking with nothing in flight, and says `idle` once when the last file is gone.
+#[test]
+fn status_stays_syncing_after_a_good_tick_that_leaves_files_to_send() {
+    let t = tracker();
+    let p = t.finish_tick(&Outcome::Synced, 100, busy(18, 4_096, 0));
+    assert_eq!(p.state, State::Syncing);
+    assert_eq!(p.activity, Some(busy(18, 4_096, 0)));
+    assert_eq!(p.last_tick_ok_at, Some(100), "the check still stamps its time");
+    assert_eq!(p.to_json()["legacy_state"], "idle", "old consumers still read idle");
+    let s = t.pulse(false, false, || busy(18, 4_096, 0)).expect("files still wait");
+    assert_eq!(s.state, State::Syncing);
+    let s = t
+        .pulse(false, false, Activity::default)
+        .expect("the way back is reported");
+    assert_eq!(s.state, State::Idle);
+    assert_eq!(t.pulse(false, false, Activity::default), None);
+}
+
 #[test]
 fn offline_error_and_stopped_outrank_syncing() {
     for outcome in [

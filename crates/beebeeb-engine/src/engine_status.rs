@@ -446,7 +446,11 @@ impl StatusTracker {
         inner.showing_syncing = false;
         match outcome {
             Outcome::Synced => {
-                inner.state = State::Idle;
+                // RC4-1: a good check with files still to send is not `idle` (the status line reads `idle` as
+                // "Up to date"); the pulse says `idle` when the last one is gone.
+                let working = activity.files_remaining > 0;
+                inner.state = if working { State::Syncing } else { State::Idle };
+                inner.showing_syncing = working;
                 inner.error = None;
                 inner.reason = None;
                 inner.last_tick_ok_at = Some(now);
@@ -471,15 +475,16 @@ impl StatusTracker {
     }
 
     /// Called about once a second. Returns the event to emit, if the picture
-    /// changed. `paused` is the live pause flag. `transfer_in_flight` is the
-    /// in-memory board's answer ("is any file moving right now"), which costs
-    /// nothing: `read_activity` (a few state-DB queries) is only called when a
-    /// transfer is moving or the last pulse reported syncing, so an idle engine
-    /// does no work here. It runs under the lock.
+    /// changed. `paused` is the live pause flag. `work_waiting` is the caller's
+    /// cheap answer to "is any file moving right now, or queued to be sent"
+    /// (RC4-1: the queue counts, a queued file waits up to a tick for its upload
+    /// to start): `read_activity` (a few state-DB queries) is only called when
+    /// it says yes or the last pulse reported syncing, so an idle engine does
+    /// next to no work here. It runs under the lock.
     pub fn pulse(
         &self,
         paused: bool,
-        transfer_in_flight: bool,
+        work_waiting: bool,
         read_activity: impl FnOnce() -> Activity,
     ) -> Option<StatusPayload> {
         let mut inner = self.inner.lock().expect("status tracker poisoned");
@@ -509,7 +514,7 @@ impl StatusTracker {
             // Offline, error and stopped outrank syncing (spec section 3).
             return None;
         }
-        if !transfer_in_flight && !inner.showing_syncing {
+        if !work_waiting && !inner.showing_syncing {
             return None;
         }
         let activity = read_activity();
