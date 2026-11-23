@@ -69,8 +69,8 @@ fn office_sheets_bounds_frozen_panes_at_a_sheets_size_lay_out_one_screen() {
 fn office_sheets_bounds_hidden_and_tiny_lines_stay_within_the_budget() {
     // Hidden rows and columns (0 pt) take no room and are not drawn.
     let mut view = sheet(400, 30);
-    for r in 0..10 {
-        view.row_heights[r] = 0.0;
+    for h in view.row_heights.iter_mut().take(10) {
+        *h = 0.0;
     }
     view.col_widths[1] = 0.0;
     let shown = Shown::from_top_left(&view, (1000.0, 600.0));

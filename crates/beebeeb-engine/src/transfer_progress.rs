@@ -951,7 +951,7 @@ impl FetchRow {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn follow(&self, meter: &ReceiveMeter) -> std::convert::Infallible {
         let Some(guard) = &self.guard else {
-            return std::future::pending::<std::convert::Infallible>().await;
+            match std::future::pending::<std::convert::Infallible>().await {}
         };
         let mut tick = tokio::time::interval(FOLLOW_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
