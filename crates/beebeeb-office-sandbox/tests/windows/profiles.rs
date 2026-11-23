@@ -230,10 +230,25 @@ fn the_token_holds_exactly_the_profiles_capabilities() {
     assert_eq!(counts, [0, 2, 5]);
 }
 
+/// Whether this test process is in session 0: a service's or an SSH login's session, which has no desktop. The app
+/// never runs there, and no AppContainer can initialise `ole32.dll` there (1114, measured on the build machine).
+fn in_session_zero() -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ProcessIdToSessionId(process: u32, session: *mut u32) -> i32;
+    }
+    let mut session = u32::MAX;
+    // SAFETY: this process's own id, and a valid place for the answer.
+    let known = unsafe { ProcessIdToSessionId(std::process::id(), &mut session) } != 0;
+    known && session == 0
+}
+
 /// Windows' decoders start in the system-decoder profile, with and without HEVC: COM (`lpacCom`, Guus 2026-11-21),
 /// Media Foundation, Microsoft's AAC decoder (a video's sound) and WIC (HEIC and camera RAW pictures). The default
 /// profile cannot start them. The plain probe first: the instrument can say `ok`.
-/// Run it in a desktop session: in session 0 `ole32.dll` does not initialise in any container (1114, measured).
+/// It measures in a desktop session only: in session 0 `ole32.dll` does not initialise in any container (1114,
+/// measured), so there it stops after the plain probe and says so. `scripts/windows/decoder-session-tests.ps1` runs
+/// it where it measures.
 #[test]
 fn windows_decoders_start_in_the_system_decoder_profile_only() {
     let _serial = serial();
@@ -244,6 +259,15 @@ fn windows_decoders_start_in_the_system_decoder_profile_only() {
         "the instrument can say ok: the plain probe starts them"
     );
     drop(plain);
+    if in_session_zero() {
+        // Straight to stderr, past the harness's capture: a run that measured nothing says so in every log.
+        let _ = writeln!(
+            std::io::stderr(),
+            "NOT MEASURED: windows_decoders_start_in_the_system_decoder_profile_only needs a desktop session \
+             (this is session 0); run scripts/windows/decoder-session-tests.ps1 in one"
+        );
+        return;
+    }
     let answers: Vec<String> = EVERY_PROFILE
         .iter()
         .map(|profile| Probe::confined_as(*profile).attempt("decoders"))

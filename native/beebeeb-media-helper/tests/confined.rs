@@ -1,10 +1,12 @@
 //! The `System` route inside the sandbox (Windows): the helper binary started as the app starts it, confined in the
 //! system-decoder profile without HEVC, plays AAC through Windows' decoder. That profile holds `lpacCom` (Guus,
 //! 2026-11-21); without it COM does not start there and a video plays silent (ux-57). Needs a desktop session: in
-//! session 0 the system's libraries do not initialise inside an AppContainer.
+//! session 0 the system's libraries do not initialise inside an AppContainer, so there the test says it measured
+//! nothing and stops. `scripts/windows/decoder-session-tests.ps1` runs it where it measures.
 #![cfg(windows)]
 
 use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use beebeeb_media_protocol::{Codec, FromHelper, KindHint, ToHelper, read_to_app, write_msg};
@@ -49,8 +51,30 @@ impl App {
     }
 }
 
+/// Whether this test process is in session 0: a service's or an SSH login's session, which has no desktop. The app
+/// never runs there, and no AppContainer can initialise `ole32.dll` there (1114, measured on the build machine).
+fn in_session_zero() -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ProcessIdToSessionId(process: u32, session: *mut u32) -> i32;
+    }
+    let mut session = u32::MAX;
+    // SAFETY: this process's own id, and a valid place for the answer.
+    let known = unsafe { ProcessIdToSessionId(std::process::id(), &mut session) } != 0;
+    known && session == 0
+}
+
 #[test]
 fn confined_system_profile_plays_aac_with_sound() {
+    if in_session_zero() {
+        // Straight to stderr, past the harness's capture: a run that measured nothing says so in every log.
+        let _ = writeln!(
+            std::io::stderr(),
+            "NOT MEASURED: confined_system_profile_plays_aac_with_sound needs a desktop session (this is session 0); \
+             run scripts/windows/decoder-session-tests.ps1 in one"
+        );
+        return;
+    }
     let profile = Profile::SystemDecoder { hevc: false };
     let sandbox = Sandbox::with_profile(Limits::default(), profile).expect("a sandbox");
     let mut child = sandbox
