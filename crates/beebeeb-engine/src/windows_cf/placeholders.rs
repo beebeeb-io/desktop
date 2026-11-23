@@ -1556,11 +1556,13 @@ pub fn handle_identity(file: &std::fs::File) -> (bool, Option<String>) {
 
 /// What the entry at `path` is, by its placeholder's identity: a remote deletion removes an entry only when
 /// that identity names the deleted file. Read through a handle opened for its attributes only, on the entry itself
-/// (never a recall), sharing every access. An entry that is not a reparse point is an ordinary file or folder (never
-/// asked of the Cloud Files API); nothing there reads as not a placeholder too (the caller finds it gone).
+/// (never a recall), sharing every access. The reparse bit does not decide: Windows can hide it on a placeholder
+/// wholly on disk (seen in a process that had not connected a sync root yet), and such an entry, read as an ordinary
+/// file, was removed on another file's behalf. The Cloud Files API is asked, and answers "not a cloud file" for an
+/// ordinary file or folder; nothing there reads as not a placeholder too (the caller finds it gone).
 pub fn entry_identity(path: &std::path::Path) -> crate::unknown_check::EntryIdentity {
     use crate::unknown_check::EntryIdentity;
-    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+    use std::os::windows::fs::OpenOptionsExt as _;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{ERROR_NOT_A_CLOUD_FILE, HANDLE};
     use windows::Win32::Storage::FileSystem::{
@@ -1568,9 +1570,6 @@ pub fn entry_identity(path: &std::path::Path) -> crate::unknown_check::EntryIden
         FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
     match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 => {
-            return EntryIdentity::NotPlaceholder;
-        }
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return EntryIdentity::NotPlaceholder,
         Err(_) => return EntryIdentity::Unreadable,

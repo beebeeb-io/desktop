@@ -566,8 +566,14 @@ fn a_sign_out_with_the_server_down_is_paid_at_the_next_start() {
     let down = SignedIn::on_owing(Server::Absent, &token, Some(owed.clone()));
     assert_eq!(down.engine.sign_out_keeping_local_data(), Ok(()));
     assert!(!down.store_holds_a_token());
-    // The server never heard it: still owed, however long the detached try took.
+    // The server never heard it: still owed, however long the detached try took. The next start is another run of
+    // the app, so it begins once that try has ended (it holds the token's claim until then, and Windows retries a
+    // refused loopback connect for about 2 s).
     std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        eventually(REVOKE_BOUND + Duration::from_secs(2), || owed.claim(&token).is_some()),
+        "the sign-out's own try ended within its bound"
+    );
     assert_eq!(owed_tokens(&owed), vec![token.clone()]);
 
     let up = SignedIn::on_owing(Server::Answers(200), &invented_token(), Some(owed.clone()));

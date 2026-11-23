@@ -136,7 +136,8 @@ fn w36_an_idle_tick_keeps_no_handle_and_does_no_work_per_row() {
     let mut memo = populate::PlacedMemo::default();
 
     let (first, _, first_io) = tick(&r, &mut memo, &cursor);
-    assert_eq!((first.created, first.create_calls), (rows, rows), "{first:?}");
+    // dc-164: one create call per folder batch (the root's folders, then each folder's files).
+    assert_eq!((first.created, first.create_calls), (rows, FOLDERS + 1), "{first:?}");
 
     // The first tick after a start: every placeholder is there, the memo is empty. No create call, so no handle.
     let (start, start_handles, _) = tick(&r, &mut populate::PlacedMemo::default(), &cursor);
@@ -223,7 +224,8 @@ fn w37_placeholder_rows_named_in_another_case_or_by_a_short_name_keep_no_handle(
     let rows = 1 + 2 * EACH;
     let cursor = std::sync::atomic::AtomicUsize::new(0);
     let (first, _, _) = tick(&r, &mut populate::PlacedMemo::default(), &cursor);
-    assert_eq!((first.created, first.create_calls), (rows, rows), "{first:?}");
+    // dc-164: one create call per folder batch (the root's one folder, then its files).
+    assert_eq!((first.created, first.create_calls), (rows, 2), "{first:?}");
 
     // The rows now name their entries in another case, and by the entry's short name.
     let mut by_short_name = 0;
