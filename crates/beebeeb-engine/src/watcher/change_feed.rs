@@ -16,6 +16,7 @@
 //! whose file is gone names its folder, and the scan lists the top level when the root itself is named.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
 
@@ -69,6 +70,77 @@ pub fn open(sync_root: &Path) -> Box<dyn ChangeFeed> {
 
 /// Above this many changed paths in one take, a full walk is cheaper than visiting them one by one.
 pub(super) const MAX_PATHS_PER_TAKE: usize = 20_000;
+
+/// RC5-1: how often the scan loop reads the feed between scans, so the status knows of a change long before the
+/// scan (every [`SCAN_INTERVAL`], which stays: it lets a copied file finish landing) looks at it.
+pub(super) const GATHER_INTERVAL: Duration = Duration::from_millis(500);
+
+/// RC5-1: the feed named a change under the sync root that no scan has looked at yet. Read by the status pulse:
+/// in the seconds between a copy and the scan the status said "Up to date" with the copied files waiting. One
+/// engine runs a watcher at a time (as with the Cloud Files notify sender), so one flag.
+static CHANGES_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// RC5-1: has the change feed named something the scan has not looked at yet? `false` where there is no feed.
+pub fn changes_pending() -> bool {
+    CHANGES_PENDING.load(Ordering::Relaxed)
+}
+
+pub(super) fn set_changes_pending(pending: bool) {
+    CHANGES_PENDING.store(pending, Ordering::Relaxed);
+}
+
+/// RC5-1: a feed read often, its changes held for the scan. [`Gathered::gather`] reads the inner feed and keeps what
+/// it named; [`ChangeFeed::take`] hands everything held since the last take to the scan. [`Gathered::named`] is the
+/// status signal: a take that named paths since the scan's last take. A feed that cannot say ([`Changes::Unknown`],
+/// which [`NoFeed`] always answers) names nothing, so no feed never reads as a change waiting.
+pub struct Gathered {
+    feed: Box<dyn ChangeFeed>,
+    held: Changes,
+    named: bool,
+}
+
+impl Gathered {
+    pub fn new(feed: Box<dyn ChangeFeed>) -> Self {
+        Self {
+            feed,
+            held: Changes::Nothing,
+            named: false,
+        }
+    }
+
+    /// Read the inner feed and hold what it says until the scan takes it.
+    pub fn gather(&mut self) {
+        let more = self.feed.take();
+        if matches!(more, Changes::Paths(_)) {
+            self.named = true;
+        }
+        self.held = match (std::mem::replace(&mut self.held, Changes::Nothing), more) {
+            (Changes::Unknown, _) | (_, Changes::Unknown) => Changes::Unknown,
+            (Changes::Nothing, other) | (other, Changes::Nothing) => other,
+            (Changes::Paths(mut held), Changes::Paths(more)) => {
+                held.extend(more);
+                if held.len() > MAX_PATHS_PER_TAKE {
+                    Changes::Unknown
+                } else {
+                    Changes::Paths(held)
+                }
+            }
+        };
+    }
+
+    /// The feed named a change since the scan last took.
+    pub fn named(&self) -> bool {
+        self.named
+    }
+}
+
+impl ChangeFeed for Gathered {
+    fn take(&mut self) -> Changes {
+        self.gather();
+        self.named = false;
+        std::mem::replace(&mut self.held, Changes::Nothing)
+    }
+}
 
 #[cfg(target_os = "windows")]
 mod usn {
@@ -459,6 +531,41 @@ mod tests {
         fn take(&mut self) -> Changes {
             self.0.pop_front().unwrap_or(Changes::Nothing)
         }
+    }
+
+    fn paths(names: &[&str]) -> Changes {
+        Changes::Paths(names.iter().map(PathBuf::from).collect())
+    }
+
+    /// RC5-1: what the feed names between scans is held for the scan (none of it lost) and is the status signal
+    /// until the scan takes it; a feed that cannot say is never a change waiting.
+    #[test]
+    fn gathered_changes_wait_for_the_scan_and_signal_until_taken() {
+        let told = Told([paths(&["a"]), Changes::Nothing, paths(&["b"])].into());
+        let mut feed = Gathered::new(Box::new(told));
+        assert!(!feed.named());
+        feed.gather();
+        assert!(feed.named(), "the journal named a copied file: a change waits");
+        feed.gather();
+        assert!(feed.named(), "still waits: the scan has not looked");
+        assert_eq!(feed.take(), paths(&["a", "b"]), "the scan gets all of it");
+        assert!(!feed.named(), "taken");
+        assert_eq!(feed.take(), Changes::Nothing);
+
+        let mut none = Gathered::new(Box::new(NoFeed));
+        none.gather();
+        assert!(!none.named(), "no feed: never a change waiting");
+        assert_eq!(none.take(), Changes::Unknown, "and the scan still walks everything");
+
+        let mut gap = Gathered::new(Box::new(Told([paths(&["a"]), Changes::Unknown].into())));
+        gap.gather();
+        gap.gather();
+        assert!(gap.named());
+        assert_eq!(
+            gap.take(),
+            Changes::Unknown,
+            "a gap after a change still asks for the full walk"
+        );
     }
 
     struct Fixture {

@@ -206,7 +206,10 @@ pub(super) fn status_pulse_once(
     paused: bool,
 ) -> Option<crate::engine_status::StatusPayload> {
     let work_waiting = !transfers.active().is_empty() || db.upload_waiting(now_secs()).unwrap_or(false);
-    tracker.pulse(paused, work_waiting, || current_activity(db, transfers))
+    // RC5-1: a change the journal named and the scan has not looked at yet is not "Up to date" either.
+    tracker.pulse_seeing(paused, work_waiting, crate::watcher::changes_pending(), || {
+        current_activity(db, transfers)
+    })
 }
 
 /// Publish the loop's current high-level engine state to the shared telemetry

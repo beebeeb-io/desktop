@@ -328,22 +328,49 @@ pub(super) async fn scan_loop(
     sync_root: PathBuf,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
+    use super::change_feed::{GATHER_INTERVAL, Gathered, set_changes_pending};
     let mut memo = ScanMemo::default();
     // dc-166: opened on the first pass (blocking I/O), kept across passes.
-    let mut feed: Option<Box<dyn super::change_feed::ChangeFeed>> = None;
+    let mut feed: Option<Gathered> = None;
     let mut last_tick = std::time::SystemTime::now();
+    set_changes_pending(false);
     loop {
         // Wait one interval OR a shutdown signal. We sleep FIRST so the very
         // first scan happens one interval after startup — by then the initial
         // `seed_placeholders` + first sync tick have run, so the DB rows that
         // filter-3 needs to suppress just-downloaded files are already present.
-        tokio::select! {
-            biased;
-            _ = &mut shutdown_rx => {
-                tracing::debug!("enumeration scan loop shutting down");
+        // RC5-1: meanwhile the feed is read every GATHER_INTERVAL and what it named is held for the scan, so the
+        // status says a change is waiting from the moment the journal has it; the scan keeps its own interval
+        // (a copied file has those seconds to finish landing).
+        let scan_due = tokio::time::Instant::now() + SCAN_INTERVAL;
+        loop {
+            let wake = scan_due.min(tokio::time::Instant::now() + GATHER_INTERVAL);
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {
+                    tracing::debug!("enumeration scan loop shutting down");
+                    set_changes_pending(false);
+                    return;
+                }
+                _ = tokio::time::sleep_until(wake) => {}
+            }
+            if tokio::time::Instant::now() >= scan_due {
                 break;
             }
-            _ = tokio::time::sleep(SCAN_INTERVAL) => {}
+            let Some(mut gathering) = feed.take() else { continue };
+            match tokio::task::spawn_blocking(move || {
+                gathering.gather();
+                gathering
+            })
+            .await
+            {
+                Ok(gathered) => {
+                    set_changes_pending(gathered.named());
+                    feed = Some(gathered);
+                }
+                // As for a scan: the feed is lost, the next pass opens a new one and walks everything.
+                Err(e) => tracing::warn!(error = %e, "change feed read panicked; continuing"),
+            }
         }
 
         // dc-174: a tick far later than the interval means the machine slept; the journal may have
@@ -361,14 +388,16 @@ pub(super) async fn scan_loop(
         let mut memo_for_scan = std::mem::take(&mut memo);
         let feed_for_scan = feed.take();
         match tokio::task::spawn_blocking(move || {
-            let mut feed = feed_for_scan.unwrap_or_else(|| super::change_feed::open(&root_for_scan));
-            scan_tick(&bridge_for_scan, &root_for_scan, &mut memo_for_scan, feed.as_mut());
+            let mut feed = feed_for_scan.unwrap_or_else(|| Gathered::new(super::change_feed::open(&root_for_scan)));
+            scan_tick(&bridge_for_scan, &root_for_scan, &mut memo_for_scan, &mut feed);
             (memo_for_scan, feed)
         })
         .await
         {
             Ok((kept, kept_feed)) => {
                 memo = kept;
+                // RC5-1: what was waiting has been looked at (and queued) now; only what came in since still waits.
+                set_changes_pending(kept_feed.named());
                 feed = Some(kept_feed);
             }
             // The blocking task panicked — log and continue. Never let one bad

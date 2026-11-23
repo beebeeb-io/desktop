@@ -527,3 +527,105 @@ fn once_syncing_the_pulse_keeps_reading_until_it_has_reported_the_way_back() {
     );
     assert_eq!(reads, 0);
 }
+
+// ── RC5-1: a change the scan has not looked at yet ──────────────────────
+
+fn never_read() -> Activity {
+    panic!("nothing moves or waits: the queue is not read")
+}
+
+/// RC5-1 red test: files copied in, the journal has them, the scan (every 8 s) has not looked yet. Sampled then, the
+/// status said `idle` ("Up to date"). It says `running` (the status line's "Checking"), then `syncing` once the scan
+/// queued them, then `idle` when the last is sent.
+#[test]
+fn a_change_the_scan_has_not_looked_at_is_not_up_to_date() {
+    let t = tracker();
+    assert_eq!(
+        t.finish_tick(&Outcome::Synced, 100, Activity::default()).state,
+        State::Idle
+    );
+    let mut view = EngineStatusView::default();
+    let s = t
+        .pulse_seeing(false, false, true, never_read)
+        .expect("the change is reported at once");
+    assert_eq!(s.state, State::Running);
+    assert_eq!(s.last_tick_ok_at, Some(100), "the last check's time is kept");
+    view.apply(&s.to_json());
+    assert_ne!(view.state, "idle");
+    assert_eq!(t.pulse_seeing(false, false, true, never_read), None, "already told");
+    // The scan queued the 18 files: the queue has them, the feed has nothing new.
+    let s = t
+        .pulse_seeing(false, true, false, || busy(18, 4_096, 0))
+        .expect("syncing");
+    assert_eq!(s.state, State::Syncing);
+    let s = t.pulse_seeing(false, false, false, Activity::default).expect("sent");
+    assert_eq!(s.state, State::Idle);
+    assert_eq!(t.pulse_seeing(false, false, false, Activity::default), None);
+}
+
+/// RC5-1: a change the scan looked at and queued nothing for (an edit of a file already sent with the same bytes)
+/// ends in `idle` again, said once.
+#[test]
+fn checking_ends_in_idle_when_the_scan_queued_nothing() {
+    let t = tracker();
+    t.finish_tick(&Outcome::Synced, 100, Activity::default());
+    assert_eq!(
+        t.pulse_seeing(false, false, true, never_read).unwrap().state,
+        State::Running
+    );
+    assert_eq!(
+        t.pulse_seeing(false, false, false, never_read).unwrap().state,
+        State::Idle
+    );
+    assert_eq!(t.pulse_seeing(false, false, false, never_read), None);
+}
+
+/// RC5-1: a tick that ends while a change waits for the scan is not `idle` either; nor is the end of a batch.
+#[test]
+fn a_tick_or_a_batch_ending_while_a_change_waits_says_checking() {
+    let t = tracker();
+    assert_eq!(
+        t.pulse_seeing(false, false, true, never_read),
+        None,
+        "before the first check: already running"
+    );
+    let p = t.finish_tick(&Outcome::Synced, 100, Activity::default());
+    assert_eq!(p.state, State::Running);
+    assert_eq!(p.last_tick_ok_at, Some(100));
+    assert_eq!(
+        t.pulse_seeing(false, false, false, never_read).unwrap().state,
+        State::Idle
+    );
+
+    assert_eq!(
+        t.pulse_seeing(false, true, false, || busy(2, 20, 5)).unwrap().state,
+        State::Syncing
+    );
+    let s = t.pulse_seeing(false, false, true, Activity::default).unwrap();
+    assert_eq!(s.state, State::Running, "the batch is sent, but more was copied in");
+    assert_eq!(
+        t.pulse_seeing(false, false, false, never_read).unwrap().state,
+        State::Idle
+    );
+}
+
+/// RC5-1: offline, paused and stopped still outrank a waiting change.
+#[test]
+fn a_waiting_change_does_not_outrank_offline_paused_or_stopped() {
+    let t = tracker();
+    t.finish_tick(
+        &Outcome::Down {
+            down: Down::Offline(Reason::from(LinkReason::Connect)),
+            error: None,
+        },
+        100,
+        Activity::default(),
+    );
+    assert_eq!(t.pulse_seeing(false, false, true, never_read), None);
+    assert_eq!(
+        t.pulse_seeing(true, false, true, never_read).unwrap().state,
+        State::Paused
+    );
+    t.stopped();
+    assert_eq!(t.pulse_seeing(false, false, true, never_read), None);
+}

@@ -356,6 +356,12 @@ struct Inner {
     /// `true` once the pulse has reported `syncing`, so it knows to report the
     /// way back to `idle` (and only then).
     showing_syncing: bool,
+    /// RC5-1: `true` while the pulse reports `running` ("Checking") because the change feed named something the
+    /// scan has not looked at yet, so it knows to report the way back to `idle`.
+    showing_checking: bool,
+    /// RC5-1: the change feed's last answer to "a change waits for the scan" (the pulse's `changes_pending`), so a
+    /// tick that ends in the seconds before the scan does not say `idle` either.
+    changes_pending: bool,
     /// What the pre-popover emitter last said for this state (`running` until the first tick
     /// ends, then `idle`, `error`, `paused`, `stopped`). The pulse repeats it, so a user who
     /// reads the tray tooltip sees the same words while a file moves as before this slice.
@@ -381,6 +387,8 @@ impl StatusTracker {
                 last_tick_ok_at: None,
                 changes: 0,
                 showing_syncing: false,
+                showing_checking: false,
+                changes_pending: false,
                 legacy_state: "running",
             }),
         }
@@ -413,6 +421,7 @@ impl StatusTracker {
         inner.reason = None;
         inner.last_tick_ok_at = None;
         inner.showing_syncing = false;
+        inner.showing_checking = false;
         inner.legacy_state = "running";
         Self::payload(&inner, "running", None)
     }
@@ -424,6 +433,7 @@ impl StatusTracker {
         inner.error = None;
         inner.reason = None;
         inner.showing_syncing = false;
+        inner.showing_checking = false;
         inner.legacy_state = "paused";
         Self::payload(&inner, "paused", None)
     }
@@ -435,6 +445,7 @@ impl StatusTracker {
         inner.reason = None;
         inner.last_tick_ok_at = None;
         inner.showing_syncing = false;
+        inner.showing_checking = false;
         inner.legacy_state = "stopped";
         Self::payload(&inner, "stopped", None)
     }
@@ -444,13 +455,24 @@ impl StatusTracker {
     pub fn finish_tick(&self, outcome: &Outcome, now: i64, activity: Activity) -> StatusPayload {
         let mut inner = self.inner.lock().expect("status tracker poisoned");
         inner.showing_syncing = false;
+        inner.showing_checking = false;
         match outcome {
             Outcome::Synced => {
                 // RC4-1: a good check with files still to send is not `idle` (the status line reads `idle` as
                 // "Up to date"); the pulse says `idle` when the last one is gone.
                 let working = activity.files_remaining > 0;
-                inner.state = if working { State::Syncing } else { State::Idle };
+                // RC5-1: nor is one that ends while a change the scan has not looked at yet waits: `running`
+                // ("Checking") until the scan has, and the pulse says what comes next.
+                let checking = !working && inner.changes_pending;
+                inner.state = if working {
+                    State::Syncing
+                } else if checking {
+                    State::Running
+                } else {
+                    State::Idle
+                };
                 inner.showing_syncing = working;
+                inner.showing_checking = checking;
                 inner.error = None;
                 inner.reason = None;
                 inner.last_tick_ok_at = Some(now);
@@ -487,7 +509,23 @@ impl StatusTracker {
         work_waiting: bool,
         read_activity: impl FnOnce() -> Activity,
     ) -> Option<StatusPayload> {
+        self.pulse_seeing(paused, work_waiting, false, read_activity)
+    }
+
+    /// [`StatusTracker::pulse`], also told whether the change feed named a change the scan has not looked at yet
+    /// (`changes_pending`, RC5-1). A copied file waits up to a scan interval (8 s) before the scan finds and queues
+    /// it, and the status said "Up to date" all that time. While a change waits and nothing moves, the pulse reports
+    /// `running`, the state the status line words "Checking" (it is not a finished check), and `idle` again once the
+    /// scan has looked and queued nothing; a queued file turns it into `syncing` as before.
+    pub fn pulse_seeing(
+        &self,
+        paused: bool,
+        work_waiting: bool,
+        changes_pending: bool,
+        read_activity: impl FnOnce() -> Activity,
+    ) -> Option<StatusPayload> {
         let mut inner = self.inner.lock().expect("status tracker poisoned");
+        inner.changes_pending = changes_pending;
         if inner.state == State::Stopped {
             // The engine has been told to stop. A pulse that is still running in the last moments
             // of teardown must not announce `paused` or `syncing` after `stopped`.
@@ -501,6 +539,7 @@ impl StatusTracker {
             inner.error = None;
             inner.reason = None;
             inner.showing_syncing = false;
+            inner.showing_checking = false;
             inner.legacy_state = "paused";
             return Some(Self::payload(&inner, "paused", None));
         }
@@ -514,19 +553,30 @@ impl StatusTracker {
             // Offline, error and stopped outrank syncing (spec section 3).
             return None;
         }
-        if !work_waiting && !inner.showing_syncing {
-            return None;
+        if work_waiting || inner.showing_syncing {
+            let activity = read_activity();
+            if activity.files_remaining > 0 {
+                inner.state = State::Syncing;
+                inner.showing_syncing = true;
+                inner.showing_checking = false;
+                return Some(Self::payload(&inner, inner.legacy_state, Some(activity)));
+            }
+            if inner.showing_syncing {
+                inner.showing_syncing = false;
+                inner.showing_checking = changes_pending;
+                inner.state = if changes_pending { State::Running } else { State::Idle };
+                return Some(Self::payload(&inner, inner.legacy_state, Some(activity)));
+            }
         }
-        let activity = read_activity();
-        if activity.files_remaining > 0 {
-            inner.state = State::Syncing;
-            inner.showing_syncing = true;
-            return Some(Self::payload(&inner, inner.legacy_state, Some(activity)));
+        if changes_pending && inner.state == State::Idle {
+            inner.state = State::Running;
+            inner.showing_checking = true;
+            return Some(Self::payload(&inner, inner.legacy_state, None));
         }
-        if inner.showing_syncing {
+        if !changes_pending && inner.showing_checking {
             inner.state = State::Idle;
-            inner.showing_syncing = false;
-            return Some(Self::payload(&inner, inner.legacy_state, Some(activity)));
+            inner.showing_checking = false;
+            return Some(Self::payload(&inner, inner.legacy_state, None));
         }
         None
     }
