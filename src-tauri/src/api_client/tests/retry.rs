@@ -76,3 +76,44 @@ fn header_secs_parses_numeric_and_rejects_dates() {
     // Absent header → None.
     assert_eq!(header_secs(&headers, "nope"), None);
 }
+
+#[test]
+fn only_idempotent_methods_are_replayed() {
+    use reqwest::Method;
+    for m in [Method::GET, Method::HEAD, Method::PUT, Method::DELETE] {
+        assert!(is_idempotent(&m), "{m}");
+    }
+    assert!(!is_idempotent(&Method::POST));
+    assert!(!is_idempotent(&Method::PATCH));
+}
+
+#[test]
+fn body_retry_after_is_read() {
+    assert_eq!(body_retry_after(r#"{"error":"rate_limited","retry_after":7}"#), Some(7));
+    assert_eq!(body_retry_after("{}"), None);
+    assert_eq!(body_retry_after("nope"), None);
+}
+
+#[test]
+fn a_post_429_is_returned_not_retried_and_pauses_the_client() {
+    // The server answers ONE request; a retry would fail as a transport error instead.
+    let base = one_shot_server(Some(
+        "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+    ));
+    let client = link_client(base);
+    let err = run_async(client.send_with_retry(|| client.client.post(client.url("/x")))).unwrap_err();
+    assert!(matches!(err, DesktopApiError::HttpStatus { status, .. } if status.as_u16() == 429), "{err}");
+    assert!(client.pause_until.lock().unwrap().is_some(), "the 429 pauses the whole client");
+}
+
+#[test]
+fn a_policy_refusal_is_rate_limited_and_says_temporarily_blocked() {
+    let base = one_shot_server(Some(
+        "HTTP/1.1 429 Too Many Requests\r\nretry-after: 600\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+    ));
+    let client = link_client(base);
+    let err = run_async(client.send_with_retry(|| client.client.get(client.url("/x")))).unwrap_err();
+    assert!(matches!(err, DesktopApiError::RateLimited { banned: false, retry_after: Some(600) }), "{err}");
+    assert!(err.to_string().contains("temporarily blocked"));
+    assert!(err.to_string().starts_with("HTTP 429"));
+}

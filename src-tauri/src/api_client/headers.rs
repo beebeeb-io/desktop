@@ -56,7 +56,7 @@ pub(crate) fn provenance_headers() -> HeaderMap {
 // policy refusal: not waited out, the 429 is returned to the caller.
 
 /// Extra attempts after the first 429 (so up to 1 + this total requests).
-pub(super) const MAX_429_RETRIES: u32 = 3;
+pub(super) const MAX_429_RETRIES: u32 = 4;
 
 /// Longest `Retry-After` we wait for. Anything above is a policy refusal.
 pub(super) const RETRY_AFTER_MAX_SECS: u64 = 60;
@@ -85,6 +85,19 @@ pub(super) enum RetryDecision {
 /// True when a 429 body is the server's `{"error":"banned"}`.
 pub(super) fn is_banned_body(body: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| v["error"] == "banned")
+}
+
+/// `retry_after` seconds from a 429 body (`{"error":"rate_limited","retry_after":N}`), if present.
+pub(super) fn body_retry_after(body: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["retry_after"].as_u64())
+}
+
+/// Only these methods may be replayed after a 429; a POST is not.
+pub(super) fn is_idempotent(method: &reqwest::Method) -> bool {
+    use reqwest::Method;
+    matches!(*method, Method::GET | Method::HEAD | Method::PUT | Method::DELETE | Method::OPTIONS)
 }
 
 /// Current UNIX time in seconds (for interpreting `x-ratelimit-reset`, which is

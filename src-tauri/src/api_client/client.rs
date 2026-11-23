@@ -28,6 +28,9 @@ pub struct ApiClient {
     /// no default headers (so no `X-Beebeeb-*`), no cookies, no `Authorization`, redirects
     /// refused, https only (loopback http when the API itself is on loopback http).
     pub(super) storage_client: std::sync::OnceLock<Option<Client>>,
+    /// The 429 contract: while a 429 wait is running, every request of this client (and of the
+    /// backup-pass clone, which shares it) waits for the same deadline before it is sent.
+    pub(super) pause_until: std::sync::Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
 }
 
 impl Drop for ApiClient {
@@ -72,6 +75,7 @@ impl ApiClient {
             link: std::sync::Arc::new(crate::link_health::LinkMonitor::new()),
             direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
             storage_client: std::sync::OnceLock::new(),
+            pause_until: Default::default(),
         }
     }
 
@@ -112,6 +116,7 @@ impl ApiClient {
             link: self.link.clone(),
             direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
             storage_client: std::sync::OnceLock::new(),
+            pause_until: self.pause_until.clone(),
         }
     }
 
@@ -323,11 +328,17 @@ impl ApiClient {
         let mut spent_ms: u64 = 0;
         let mut attempt: u32 = 0;
         loop {
-            let resp = match build()
+            // Every request waits for a running 429 pause, whichever call set it.
+            self.wait_for_pause().await;
+            let request = match build()
                 .header("Authorization", format!("Bearer {}", self.token))
-                .send()
-                .await
+                .build()
             {
+                Ok(request) => request,
+                Err(e) => return Err(e.into()),
+            };
+            let idempotent = is_idempotent(request.method());
+            let resp = match self.client.execute(request).await {
                 Ok(resp) => resp,
                 Err(e) => {
                     self.link.note_reqwest_error(&e, now_unix_secs() as i64);
@@ -339,39 +350,62 @@ impl ApiClient {
                 return Self::check_status(resp).await;
             }
             // 429: decide whether (and how long) to wait before retrying.
+            let status = resp.status();
             let retry_after = header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str());
             let reset_in =
                 header_secs(resp.headers(), "x-ratelimit-reset").map(|epoch| epoch.saturating_sub(now_unix_secs()));
             // The body tells a ban from a window; a 429 body is a small error object.
-            let (parts, body) = {
-                let status = resp.status();
-                let headers = resp.headers().clone();
-                ((status, headers), resp.text().await.unwrap_or_default())
+            let body = resp.text().await.unwrap_or_default();
+            let hint = match (retry_after, body_retry_after(&body)) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
             };
+            let banned = is_banned_body(&body);
             let jitter_pct = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=RETRY_JITTER_MAX_PCT);
-            match retry_decision(
-                attempt,
-                spent_ms,
-                retry_after,
-                reset_in,
-                is_banned_body(&body),
-                jitter_pct,
-            ) {
-                RetryDecision::Wait(wait_ms) => {
-                    if wait_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-                    }
+            let decision = retry_decision(attempt, spent_ms, hint, reset_in, banned, jitter_pct);
+            // Whatever the answer, the whole client holds off for the wait (capped at 60 s).
+            let wait_ms = match decision {
+                RetryDecision::Wait(ms) => ms,
+                _ => hint.unwrap_or(RETRY_DEFAULT_WAIT_SECS).saturating_mul(1000),
+            };
+            self.pause_for(wait_ms.min(RETRY_AFTER_MAX_SECS * 1000));
+            match decision {
+                // Only idempotent requests are replayed; a POST gets its 429 back.
+                RetryDecision::Wait(wait_ms) if idempotent => {
                     spent_ms = spent_ms.saturating_add(wait_ms);
                     attempt += 1;
                 }
-                // Out of attempts/budget, or a policy refusal: return the 429.
-                RetryDecision::GiveUp | RetryDecision::Refuse => {
-                    let snippet: String = body.chars().take(300).collect();
-                    return Err(DesktopApiError::HttpStatus {
-                        status: parts.0,
-                        snippet,
+                RetryDecision::Refuse => {
+                    return Err(DesktopApiError::RateLimited {
+                        banned,
+                        retry_after: hint.or(reset_in),
                     });
                 }
+                // Out of attempts/budget, or a non-idempotent request: return the 429.
+                RetryDecision::Wait(_) | RetryDecision::GiveUp => {
+                    let snippet: String = body.chars().take(300).collect();
+                    return Err(DesktopApiError::HttpStatus { status, snippet });
+                }
+            }
+        }
+    }
+
+    /// Hold every request of this client until `wait_ms` from now (never shortens a longer pause).
+    fn pause_for(&self, wait_ms: u64) {
+        let until = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+        let mut slot = self.pause_until.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.map_or(true, |current| current < until) {
+            *slot = Some(until);
+        }
+    }
+
+    /// Sleep until the shared pause (if any) is over.
+    async fn wait_for_pause(&self) {
+        loop {
+            let until = *self.pause_until.lock().unwrap_or_else(|e| e.into_inner());
+            match until {
+                Some(until) if until > tokio::time::Instant::now() => tokio::time::sleep_until(until).await,
+                _ => return,
             }
         }
     }
