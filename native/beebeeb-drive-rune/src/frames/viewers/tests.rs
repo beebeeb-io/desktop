@@ -1269,6 +1269,17 @@ fn a_quit_with_unsaved_changes_asks_save_discard_or_cancel() {
     assert!(!holds(&rt.state));
 }
 
+/// A text save the engine still has in flight keeps the quit question waiting; it does not read as "not saved".
+#[test]
+fn a_text_save_still_in_flight_keeps_the_quit_question_waiting() {
+    use super::unsaved_guard::{Then, ask, save_state};
+    let (mut rt, calls) = note(false, false);
+    edit_and_type(&mut rt);
+    assert!(ask(&mut rt.state, Then::Quit));
+    calls.borrow_mut().push("saving".into());
+    assert_eq!(save_state(&rt.state), None);
+}
+
 /// ux-53: with the editor focused behind it, Enter on the shown question presses Save.
 #[test]
 fn enter_on_the_shown_unsaved_question_presses_save() {

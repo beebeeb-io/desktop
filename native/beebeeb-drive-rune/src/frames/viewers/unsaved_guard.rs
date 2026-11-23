@@ -93,13 +93,10 @@ pub(crate) fn save_open_editor(s: &mut State) -> bool {
 
 /// While Save waits for the editor. `Some(true)`: it landed, go on; `Some(false)`: it did not; `None`: still going.
 pub(crate) fn save_state(s: &State) -> Option<bool> {
-    let office_saving = s
-        .viewer
-        .ui
-        .as_ref()
-        .and_then(|ui| ui.office.edit.as_ref())
-        .is_some_and(|e| e.saving);
-    if office_saving {
+    let saving = s.viewer.ui.as_ref().is_some_and(|ui| {
+        ui.source.saving() || ui.office.edit.as_ref().is_some_and(|e| e.saving)
+    });
+    if saving {
         return None;
     }
     Some(!holds(s))
