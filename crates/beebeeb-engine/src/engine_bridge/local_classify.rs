@@ -308,6 +308,12 @@ impl EngineBridge {
                 pass.left += 1;
                 continue;
             }
+            if size > REBUILT_CHECK_BYTES_PER_TICK {
+                // Too large to hold in memory for the check: never downloaded; it stays held, as before.
+                owed.differing.insert(file_id);
+                pass.differing += 1;
+                continue;
+            }
             bytes_spent = bytes_spent.saturating_add(size);
             match self.check_one_after_rebuild(&file_id, &path).await {
                 Ok(RebuiltVerdict::Agreed) => pass.agreed += 1,
