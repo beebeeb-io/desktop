@@ -108,7 +108,7 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-fn account_dir(state_dir: &Path, account_id: &str) -> PathBuf {
+pub(crate) fn account_dir(state_dir: &Path, account_id: &str) -> PathBuf {
     state_dir.join(FOLDER).join(hashed(&["account", account_id]))
 }
 

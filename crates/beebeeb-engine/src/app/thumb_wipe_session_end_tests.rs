@@ -49,7 +49,12 @@ fn folder_files(engine: &Engine<MemoryCredentials>) -> usize {
             .map(|rd| rd.flatten().map(|e| if e.path().is_dir() { count(&e.path()) } else { 1 }).sum())
             .unwrap_or(0)
     }
-    count(&engine.config.state_dir.join("thumb-cache"))
+    // This account's folder: the scratch state dir is the whole test process's, and other tests keep thumbnails of
+    // their own accounts in it at the same time.
+    count(&crate::thumb_cache::account_dir(
+        &engine.config.state_dir,
+        &engine.config.account_id,
+    ))
 }
 
 #[test]
