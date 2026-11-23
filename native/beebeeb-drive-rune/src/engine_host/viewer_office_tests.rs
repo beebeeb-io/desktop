@@ -2199,7 +2199,7 @@ fn a_restore_saves_from_the_blobs_version_so_a_newer_one_conflicts() {
     let settled = until_settled(&mut e.source, "f1", || {});
     assert!(
         matches!(settled, crate::frames::viewers::source::Settled::Conflict(_)),
-        "the newer version is not overwritten: {settled:?}"
+        "the newer version is not overwritten"
     );
     assert!(e.engine.s().stored.is_empty());
 }
