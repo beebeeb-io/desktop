@@ -27,6 +27,9 @@ pub enum DesktopApiError {
         status: reqwest::StatusCode,
         snippet: String,
     },
+    /// A 429 that is a policy refusal (`Retry-After` over 60 s, or `error: "banned"`): shown as
+    /// "temporarily blocked", never as a connection failure.
+    RateLimited { banned: bool, retry_after: Option<u64> },
     /// An upload init refused with 409: the class, and the plan reason when the
     /// server named one.
     InitConflict(InitConflict),
@@ -76,6 +79,13 @@ impl std::fmt::Display for DesktopApiError {
         match self {
             DesktopApiError::Transport(error) => error.fmt(f),
             DesktopApiError::HttpStatus { status, snippet } => write!(f, "HTTP {status}: {snippet}"),
+            // Keeps the `HTTP 429` prefix `link_health` reads.
+            DesktopApiError::RateLimited { retry_after: Some(secs), .. } => {
+                write!(f, "HTTP 429 Too Many Requests: temporarily blocked, try again in about {secs} s")
+            }
+            DesktopApiError::RateLimited { retry_after: None, .. } => {
+                f.write_str("HTTP 429 Too Many Requests: temporarily blocked, try again later")
+            }
             DesktopApiError::InitConflict(error) => error.fmt(f),
             DesktopApiError::UploadRefused(error) => error.fmt(f),
             DesktopApiError::UpgradeRequired(error) => error.fmt(f),
