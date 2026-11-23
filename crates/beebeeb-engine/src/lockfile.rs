@@ -79,6 +79,10 @@ impl LockFile {
         if path.exists() {
             let raw = fs::read_to_string(&path).map_err(|e| format!("read existing lock {}: {e}", path.display()))?;
             match serde_json::from_str::<LockContents>(&raw) {
+                // An empty or all-NUL lock is a write cut short by a crash or power loss: nobody holds it.
+                Err(_) if is_blank(&raw) => {
+                    tracing::warn!("empty .beebeeb-sync.lock found (interrupted write); overwriting");
+                }
                 Ok(prior) => {
                     // A lock naming THIS process is the app's own, left by a forced stop (the engine task was
                     // aborted before its guard dropped): reclaim it. Another live pid still holds it.
@@ -117,7 +121,10 @@ impl LockFile {
             started_at: Utc::now(),
         };
         let json = serde_json::to_string_pretty(&contents).map_err(|e| format!("serialize lock: {e}"))?;
-        fs::write(&path, json).map_err(|e| format!("write lock {}: {e}", path.display()))?;
+        // Write a temp file and rename it over, so a crash never leaves a truncated lock.
+        let tmp = path.with_extension("lock.tmp");
+        fs::write(&tmp, json).map_err(|e| format!("write lock {}: {e}", tmp.display()))?;
+        fs::rename(&tmp, &path).map_err(|e| format!("write lock {}: {e}", path.display()))?;
 
         Ok(Self { path })
     }
@@ -128,10 +135,16 @@ impl LockFile {
 pub fn held_by_a_live_process(state_dir: &std::path::Path) -> bool {
     match fs::read_to_string(state_dir.join(crate::state_paths::LOCK_FILENAME)) {
         // An unparseable lock is held (as `acquire` refuses it); a lock naming this process is our own, not held.
-        Ok(raw) => serde_json::from_str::<LockContents>(&raw)
-            .map_or(true, |prior| prior.pid != process::id() && pid_alive(prior.pid)),
+        Ok(raw) => serde_json::from_str::<LockContents>(&raw).map_or(!is_blank(&raw), |prior| {
+            prior.pid != process::id() && pid_alive(prior.pid)
+        }),
         Err(error) => error.kind() != std::io::ErrorKind::NotFound,
     }
+}
+
+/// Empty or all-NUL content: what a lock write cut short by a crash leaves behind.
+fn is_blank(raw: &str) -> bool {
+    raw.chars().all(|c| c.is_whitespace() || c == '\0')
 }
 
 impl Drop for LockFile {
@@ -228,6 +241,19 @@ mod tests {
             started_at: Utc::now(),
         };
         fs::write(path, serde_json::to_string(&c).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn empty_or_nul_lock_is_stale_and_replaced_atomically() {
+        for junk in ["", "\0\0\0"] {
+            let d = dir();
+            fs::write(lock_path(&d), junk).unwrap();
+            assert!(!held_by_a_live_process(d.path()));
+            let lock = LockFile::acquire_at(lock_path(&d), "desktop").expect("blank lock is stale");
+            assert!(serde_json::from_str::<LockContents>(&fs::read_to_string(lock_path(&d)).unwrap()).is_ok());
+            assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1, "no temp file left");
+            drop(lock);
+        }
     }
 
     #[test]
