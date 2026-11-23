@@ -26,6 +26,7 @@ use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::state_db::RetryOutcome;
 
 use super::log;
+use crate::ui::status_line as line;
 use super::stamp::{Stamp, stamp};
 use crate::frames::files::source::{Action, ActionError, Change};
 use crate::frames::files::uploads::{Upload, UploadState, Uploads};
@@ -212,6 +213,19 @@ impl<E: UploadsEngine> UploadCalls<E> {
         words(read)
     }
 
+    /// Is a file queued or on its way (a row that is not stopped), by the read held under this stamp? The status
+    /// line is never "Up to date" while it is (RC3-5).
+    pub fn sending(&self) -> bool {
+        let Some((read_under, read, _)) = self.held.as_ref() else {
+            return false;
+        };
+        *read_under == self.engine.stamp()
+            && read
+                .rows
+                .iter()
+                .any(|row| !matches!(row.stands, UploadStands::Stopped { .. }))
+    }
+
     /// The change an upload id stands for, among the rows held, with the row's state.
     fn row_of(&self, id: &str) -> Option<&beebeeb_engine::app::uploads_api::UploadRow> {
         self.held.as_ref()?.1.rows.iter().find(|row| row.file_id == id)
@@ -389,14 +403,28 @@ impl<E: UploadsEngine> UploadCalls<E> {
         });
         // The engine's own word moving while something moves or waits (the pulse that says it ended) reads at once,
         // whatever the held read's age: a finished upload leaves the panel and the status line at that pulse.
-        if busy && word != self.word {
+        // Also when nothing is held yet: the engine moving to Syncing is how files queued from outside are found.
+        let moved_to_syncing = word == Some(line::SYNCING) && self.word.is_some();
+        if (busy || moved_to_syncing) && word != self.word {
             self.dirty = true;
         }
         self.word = word;
-        if reread || self.dirty || (busy && old) {
+        // Every word but "Up to date" reads on a wake (age-gated), as the downloads do: Paused, Offline and Sync
+        // stopped send no pulse when a queued file arrives or leaves.
+        let idle = word == Some(line::UP_TO_DATE);
+        if reread || self.dirty || (old && (busy || !idle)) {
             self.start_read(now);
         }
         std::mem::take(&mut self.changes)
+    }
+}
+
+/// The status line's word for the engine's own, with the uploads: never "Up to date" while a file is queued or on
+/// its way (RC3-5).
+pub fn with_uploads(word: Option<&'static str>, sending: bool) -> Option<&'static str> {
+    match word {
+        Some(line::UP_TO_DATE) if sending => Some(line::SYNCING),
+        other => other,
     }
 }
 
