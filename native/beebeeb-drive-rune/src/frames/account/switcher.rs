@@ -323,6 +323,59 @@ pub fn panel(t: &Theme) -> Option<El> {
 mod tests {
     use super::*;
 
+    /// A credential store that answers slowly (as Windows' can): `accounts` waits until the test lets it go.
+    struct SlowStore {
+        open: Mutex<bool>,
+        opened: std::sync::Condvar,
+        switched: Mutex<Vec<String>>,
+    }
+
+    impl Switcher for SlowStore {
+        fn accounts(&self) -> Vec<Listed> {
+            let mut open = self.open.lock().unwrap();
+            while !*open {
+                open = self.opened.wait(open).unwrap();
+            }
+            vec![
+                Listed { id: "b".into(), email: "b@example.eu".into(), current: true },
+                Listed { id: "a".into(), email: "a@example.eu".into(), current: false },
+            ]
+        }
+        fn switch_to(&self, id: &str) -> Result<(), String> {
+            self.switched.lock().unwrap().push(id.to_string());
+            Ok(())
+        }
+        fn add_another(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn sign_out(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// RC3-1 (c), rc3/f3b: the list was opened and "Switch to ..." pressed 1.3 s later; 142 s on, the old account,
+    /// no dialog and no log line. Opening the list reads it off the window's thread, and while that read ran a press
+    /// on an account was dropped without a word. A press must reach the engine. (One process per test: the switcher
+    /// is installed once.)
+    #[test]
+    fn rc3_a_press_on_an_account_while_the_list_is_read_reaches_the_engine() {
+        let store = Arc::new(SlowStore {
+            open: Mutex::new(false),
+            opened: std::sync::Condvar::new(),
+            switched: Mutex::new(Vec::new()),
+        });
+        install(store.clone());
+        toggle_open();
+        switch_to("a".to_string());
+        *store.open.lock().unwrap() = true;
+        store.opened.notify_all();
+        let pressed = std::time::Instant::now();
+        while store.switched.lock().unwrap().is_empty() && pressed.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(*store.switched.lock().unwrap(), vec!["a".to_string()], "the press asked the engine to switch");
+    }
+
     #[test]
     fn initials_come_from_the_first_letter_only() {
         assert_eq!(initials("anna@example.eu"), "A");

@@ -1159,6 +1159,31 @@ fn clear_parked<P: AuthSecretStore>(parked: &P) -> crate::keychain::AuthResult<(
 #[path = "account_switch_switcher_tests.rs"]
 mod switcher_tests;
 
+/// RC3-1 (b), rc3/f2: "Discard and switch" made its copy and then ended with `discard and switch: nothing was
+/// removed` (the file still in the folder, the dialog back). The step between the copy and the removal is the kept
+/// folder's record, a write that must survive a power loss: it has to work on the OS this runs on.
+#[cfg(test)]
+mod kept_folder_record_tests {
+    use super::*;
+
+    #[test]
+    fn account_switch_rc3_the_kept_folder_is_recorded_on_this_os() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("desktop.toml");
+        let recorded = DesktopConfig::update_at_durable_with(
+            &path,
+            |config| {
+                config.kept_unsent_folder = Some("Changes not sent".to_string());
+                (true, ())
+            },
+            &crate::config::RealConfigFs,
+        );
+        assert_eq!(recorded, Ok(()), "discard and switch: nothing was removed (the record of the kept folder)");
+        let read = DesktopConfig::load_from(&path).unwrap();
+        assert_eq!(read.kept_unsent_folder.as_deref(), Some("Changes not sent"));
+    }
+}
+
 #[cfg(test)]
 mod keep_aside_name_tests {
     use super::*;
