@@ -110,9 +110,6 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
     let server = server();
     server.two_factor.lock().unwrap()[0] = Some(true);
     let mut rt = window_on(signed_in(&server), SettingsPane::Security);
-    wait_for(&mut rt, "the page", |rt| shows(rt, "3 signed in"));
-    assert!(!has(&rt, "not-built"));
-    assert!(shows(&rt, "Security score not known yet") && shows(&rt, "On"));
     let text = |rt: &Runtime<State>, key: &str| {
         rt.elements()
             .into_iter()
@@ -120,7 +117,13 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
             .and_then(|e| e.text)
             .unwrap_or_default()
     };
-    assert_eq!(text(&rt, "item-0-1-sub"), "On");
+    // The device count and two-factor are two reads, each drawn when it lands (the page never waits on a read):
+    // the test waits on both, not on the count alone (that raced the account read: RC5-3).
+    wait_for(&mut rt, "the page", |rt| {
+        shows(rt, "3 signed in") && text(rt, "item-0-1-sub") == "On"
+    });
+    assert!(!has(&rt, "not-built"));
+    assert!(shows(&rt, "Security score not known yet") && shows(&rt, "On"));
     assert_eq!(text(&rt, "item-0-0-sub"), "Last change not known");
     assert_eq!(text(&rt, "item-0-2-sub"), "Not known");
     // The one mark on the page is two-factor's: it is the one state that was read as good.
