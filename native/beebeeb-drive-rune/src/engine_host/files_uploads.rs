@@ -404,8 +404,8 @@ impl<E: UploadsEngine> UploadCalls<E> {
         // The engine's own word moving while something moves or waits (the pulse that says it ended) reads at once,
         // whatever the held read's age: a finished upload leaves the panel and the status line at that pulse.
         // Also when nothing is held yet: the engine moving to Syncing is how files queued from outside are found.
-        let syncing = word == Some(line::SYNCING);
-        if (busy || syncing) && word != self.word {
+        let moved_to_syncing = word == Some(line::SYNCING) && self.word.is_some();
+        if (busy || moved_to_syncing) && word != self.word {
             self.dirty = true;
         }
         self.word = word;
