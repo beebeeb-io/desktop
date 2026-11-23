@@ -160,3 +160,19 @@ fn account_switch_parked_slots_are_named_by_server_id_only() {
     assert_eq!(parked_slot_name("../x"), None);
     assert_eq!(parked_slot_name(""), None);
 }
+
+/// Review e1-app 1: A parks for "Add another account", then the app restarts before B signs in. The start's finish of
+/// a clear cut short must not take A's kept key: A still switches back in without the twelve words.
+#[test]
+fn account_switch_a_restart_after_add_another_account_keeps_the_parked_key() {
+    let pc = Pc::new();
+    pc.first_sign_in(A, &A_KEY);
+    pc.engine.add_another_account().unwrap();
+
+    let _ = pc.engine.vault_at_start();
+
+    assert_eq!(pc.kept_key(A), Some(A_KEY.to_vec()), "A's kept key survived the start");
+    assert_eq!(pc.listed(), vec![(A.to_string(), false)]);
+    let gate = pc.engine.switch_account(A).unwrap();
+    pc.is_current_without_the_twelve_words(A, &A_KEY, gate);
+}

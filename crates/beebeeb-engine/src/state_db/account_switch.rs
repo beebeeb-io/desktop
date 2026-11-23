@@ -117,6 +117,8 @@ fn other_work_waits(conn: &rusqlite::Connection) -> Result<bool> {
         "SELECT COUNT(*) FROM operation_queue o WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.file_id = o.file_id)",
         "SELECT COUNT(*) FROM staged_payloads s
            WHERE NOT EXISTS (SELECT 1 FROM operation_queue o WHERE o.payload_path = s.path)",
+        // A save made in the app: its bytes are only the staged copy outside the folder, so it is no item there.
+        "SELECT COUNT(*) FROM operation_queue WHERE write_id IS NOT NULL",
         "SELECT COUNT(*) FROM upload_finalizations",
         "SELECT COUNT(*) FROM unknown_orphans",
         "SELECT COUNT(*) FROM files WHERE status IN ('conflict', 'error', 'trashing')",

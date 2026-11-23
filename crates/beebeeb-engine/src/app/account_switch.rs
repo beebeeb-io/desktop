@@ -202,6 +202,10 @@ impl<C: CredentialStores> Engine<C> {
         if db.has_account_data().map_err(|_| "unreadable")? {
             port.remove_synced_items(db, sync_root, &unasked).map_err(|_| ITEMS_STAY)?;
         }
+        // The files go first and the rows only when every file is gone (`local_state_file_paths`): a copy that cannot
+        // be removed leaves A's rows and owner record as they were, so the switch is refused and can be tried again.
+        let files = db.local_state_file_paths().map_err(|_| "unreadable")?;
+        self.remove_its_copies(&files, sync_root)?;
         let purge = db.purge_all_local_state().map_err(|_| "the rows stay")?;
         let mut copies = purge.payload_paths;
         copies.extend(purge.cache_paths);
@@ -1092,7 +1096,8 @@ impl<C: CredentialStores> Engine<C> {
         let cleared = vault
             .clear_session_token()
             .and_then(|()| self.stores.for_account(self.identity, &self.config.account_id).delete_account_email())
-            .and_then(|()| vault.clear_lock_entries());
+            .and_then(|()| vault.clear_lock_entries())
+            .and_then(|()| self.empty_the_working_key_slot(&mut vault, &user_id));
         if let Ok(mut email) = self.acct.auth_email.lock() {
             *email = None;
         }
@@ -1103,6 +1108,18 @@ impl<C: CredentialStores> Engine<C> {
         self.acct.auth_health.note_result(None);
         self.set_auth_present(false);
         cleared.map_err(|_| SwitchRefused::Store)
+    }
+
+    /// The working key still tagged `user_id`'s goes from the install slot once its kept copy reads back. A key left
+    /// there with no token is what the next start takes for a sign-out cut short and deletes, kept copy included.
+    /// `bind_session_owner` on the way back restores it from the kept slot.
+    fn empty_the_working_key_slot(&self, vault: &mut AuthVault<C::Store>, user_id: &str) -> crate::keychain::AuthResult<()> {
+        let its = vault.vault_key_owner()?.is_some_and(|tag| crate::signin::key_owner::tag_is_account(&tag, user_id));
+        let kept = self.stores.for_account(self.identity, &self.config.account_id).load_account_key(user_id)?.is_some();
+        if its && kept {
+            vault.delete_vault_key_and_owner()?;
+        }
+        Ok(())
     }
 
     /// `user_id`'s parked session into the install slot: token, email, lock entries, then its owner, which makes its

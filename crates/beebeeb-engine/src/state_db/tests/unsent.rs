@@ -778,3 +778,25 @@ fn failed_and_paused_pin_downloads_are_counted_and_listed_as_not_downloaded() {
     );
     assert_eq!(db.unsent_changes(0, 100, NOW).unwrap().total, 1);
 }
+
+/// Review e2-keys-sync 1: a save made in the app (a queued change with a write id) has its bytes only in its staged
+/// copy outside the folder, so it is other work: an account switch neither counts it as folder work nor forgets it.
+#[test]
+fn a_queued_save_from_the_app_is_not_work_in_the_folder() {
+    let (_dir, db) = db();
+    queue(&db, "save", ("upload_version", None), (None, 0, 0), None, 1);
+    assert_eq!(
+        db.work_in_the_folder().unwrap(),
+        Some(vec!["docs/save.txt".to_string()])
+    );
+    sql(&db, "UPDATE operation_queue SET write_id = 'w-save'", []);
+
+    assert_eq!(db.work_in_the_folder().unwrap(), None);
+    assert_eq!(db.forget_work_in_the_folder().unwrap(), None);
+    let queued: i64 =
+        db.0.lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM operation_queue", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(queued, 1, "the save is still queued");
+}

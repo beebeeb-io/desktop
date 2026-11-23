@@ -553,3 +553,32 @@ mod account_switch_order {
         assert!(!pc.engine.vault().has_vault_key().unwrap_or(false));
     }
 }
+
+/// Review e1-app 2: a cached copy of A's that cannot be deleted (here a directory under the cache root, which
+/// `remove_file` refuses) keeps A's owner record and rows: B stays refused and A's rows still name their copy, so a
+/// later start tries the delete again.
+#[test]
+fn a_cached_copy_that_cannot_be_deleted_keeps_the_owner_record() {
+    let pc = Pc::new();
+    a_signed_out(&pc, &owner());
+    let stuck = crate::local_state::disposable_cache_roots(&TEST)
+        .into_iter()
+        .next()
+        .unwrap()
+        .join(format!("a-switch-stuck-{}", std::process::id()));
+    std::fs::create_dir_all(stuck.join("held")).unwrap();
+    std::fs::write(stuck.join("held").join("x"), b"x").unwrap();
+    rusqlite::Connection::open(pc.state_db())
+        .unwrap()
+        .execute("UPDATE files SET cache_path = ?1 WHERE file_id = ?2", rusqlite::params![stuck.to_str().unwrap(), IDS[0]])
+        .unwrap();
+    pc.sign_in(&other());
+    let port = SwitchPort::new(Removal::Works);
+
+    let started = start_with(&pc, &port);
+
+    let _ = std::fs::remove_dir_all(&stuck);
+    assert!(started.is_err() && !matches!(started, Err(SyncStartRefused::RegistrationFailed { .. })), "{started:?}");
+    assert_eq!(pc.db().owner().unwrap(), Some(owner()), "A's owner record stays");
+    assert!(pc.contents().join("\n").contains(A_NAME), "A's rows stay");
+}
