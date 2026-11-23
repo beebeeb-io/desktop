@@ -71,9 +71,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, HICON, HMENU, KillTimer, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage,
     RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SPI_GETCLIENTAREAANIMATION, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SystemParametersInfoW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTALIGN,
-    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION,
-    WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_TOOLWINDOW,
-    WS_POPUP, WTS_SESSION_LOCK,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_ENDSESSION, WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_POPUP, WTS_SESSION_LOCK,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DEVICE_NOTIFY_WINDOW_HANDLE, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, WM_POWERBROADCAST,
@@ -102,6 +102,8 @@ const ICON_ID: u32 = 1;
 const TIMER_ANIMATE: usize = 1;
 /// Tries again to add the icon while the taskbar is not there yet (a start at login).
 const TIMER_RETRY: usize = 2;
+/// Re-checks for a maximized window stuck at the old scale after a scale change (`windows_dpi.rs`).
+const TIMER_DPI: usize = 3;
 
 /// The calls that leave this thread's control: a cross-process send, or a modal loop. Each can
 /// re-enter [`procedure`] before it returns. Behind a trait so the harness can re-enter on
@@ -560,6 +562,13 @@ fn handle(hwnd: HWND, context: &Context, message: u32, w: WPARAM, l: LPARAM) -> 
             refresh(hwnd, context);
             Some(0)
         }
+        WM_TIMER if w == TIMER_DPI => {
+            if !super::windows_dpi::on_tick() {
+                // SAFETY: this thread's own live window and its own timer.
+                unsafe { KillTimer(hwnd, TIMER_DPI) };
+            }
+            Some(0)
+        }
         WM_TIMER => {
             if w == TIMER_ANIMATE {
                 context.update(|state| state.step = (state.step + 1) % SYNC_STEPS);
@@ -571,7 +580,18 @@ fn handle(hwnd: HWND, context: &Context, message: u32, w: WPARAM, l: LPARAM) -> 
         // went on or off: the palette (`tokens::theme`) is re-read first, so the icon and every frame take it, and
         // the app's view re-runs. `Presence(true)` is the event the app takes as "nothing to do" (the icon is
         // there): its handler's update re-runs the main window's view, which is all a palette change needs.
+        // A maximized window of this app may be left at the old scale (rune's gap, `windows_dpi.rs`): nudge it now
+        // and re-check for a while.
+        WM_DPICHANGED => {
+            super::windows_dpi::on_broadcast();
+            // SAFETY: this thread's own live window.
+            unsafe { SetTimer(hwnd, TIMER_DPI, super::windows_dpi::RECHECK_MS, None) };
+            None
+        }
         WM_SETTINGCHANGE | WM_DISPLAYCHANGE => {
+            super::windows_dpi::on_broadcast();
+            // SAFETY: this thread's own live window.
+            unsafe { SetTimer(hwnd, TIMER_DPI, super::windows_dpi::RECHECK_MS, None) };
             if message == WM_SETTINGCHANGE && super::windows::on_setting_change() {
                 context.send(TrayEvent::Presence(true));
             }

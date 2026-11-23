@@ -34,6 +34,8 @@ pub(crate) fn contrast_colors() -> Option<crate::theme::contrast::SystemColors> 
     windows_contrast::read()
 }
 #[cfg(windows)]
+mod windows_dpi;
+#[cfg(windows)]
 mod windows_folder;
 #[cfg(windows)]
 mod windows_packet;
