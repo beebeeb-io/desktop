@@ -2193,6 +2193,7 @@ fn a_restore_saves_from_the_blobs_version_so_a_newer_one_conflicts() {
     engine.s().blobs.insert("f1".into(), (86_400 * 100, 2, b"KEPT".to_vec()));
     let mut e = editor_over(engine, "Invented.docx");
     assert!(e.source.office_restore("f1"));
+    assert!(matches!(e.source.poll_edit("f1"), Some(EditAnswer::Restored { .. })));
     assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
     e.source.poll("f1");
     e.fake.saved(b"PK saved package", 4);
