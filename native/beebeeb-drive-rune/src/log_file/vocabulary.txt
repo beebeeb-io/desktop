@@ -1012,6 +1012,7 @@ suspected
 sweep
 switch
 switched
+switcher
 symlink
 sync
 sync-root
