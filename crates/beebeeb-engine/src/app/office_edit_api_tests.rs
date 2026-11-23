@@ -13,7 +13,7 @@ use crate::host::ChannelHost;
 use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
-use crate::state_db::{FileEntry, FileStatus, ItemKind, PERMISSION_READ, PERMISSION_WRITE, StateDb};
+use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb, PERMISSION_READ, PERMISSION_WRITE};
 
 type TestEngine = Engine<MemoryCredentials>;
 
@@ -158,7 +158,11 @@ fn office_edit_keep_both_makes_the_conflict_copy_name() {
         .save_office_copy_for(session, DOC, &package(), "Invented PC", "10.15")
         .expect("the copy is stored");
     assert_eq!(copy.name, "Invented doc (Invented PC, 10.15).docx");
-    assert_eq!(db.list_operations_for_file(&copy.id).unwrap().len(), 1, "its upload is queued");
+    assert_eq!(
+        db.list_operations_for_file(&copy.id).unwrap().len(),
+        1,
+        "its upload is queued"
+    );
     assert!(
         db.list_operations_for_file(DOC).unwrap().is_empty(),
         "the original is untouched"
@@ -265,11 +269,9 @@ fn office_edit_create_refuses_a_name_that_exists_and_queues_a_new_one() {
         Some(EditRefused::Failed)
     );
     // In a folder, the same name is free; a file is no folder.
-    assert!(
-        engine
-            .create_office_for(session, Some(FOLDER), "Invented new.docx", &package())
-            .is_ok()
-    );
+    assert!(engine
+        .create_office_for(session, Some(FOLDER), "Invented new.docx", &package())
+        .is_ok());
     assert_eq!(
         engine
             .create_office_for(session, Some(DOC), "Inside.docx", &package())
@@ -289,9 +291,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 #[test]
-fn office_edit_the_staged_copy_is_sealed_under_the_account_key_and_opens_to_exactly_the_bytes() {
-    use beebeeb_core::kdf::MasterKey;
-    use beebeeb_core::local_seal::open_recovery_snapshot;
+fn office_edit_the_staged_copy_is_the_document_itself_for_every_reader_but_the_upload() {
     let (engine, _d, _r, db) = setup();
     let session = engine.acct.session_generation();
     let opening = engine.viewer_opening(session, DOC);
@@ -303,18 +303,10 @@ fn office_edit_the_staged_copy_is_sealed_under_the_account_key_and_opens_to_exac
     let ops = db.list_operations_for_file(DOC).unwrap();
     assert_eq!(ops.len(), 1);
     let op = &ops[0];
-    // The op says so, so the upload opens it.
-    let metadata: serde_json::Value = serde_json::from_str(op.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["staged_seal"], "office-v1");
-    // The staged file holds no byte of the document.
+    // No seal marker: Keep both, the Finder hydrate and the sign-out keep step take the staged file as the document.
+    let metadata: serde_json::Value = serde_json::from_str(op.metadata_json.as_deref().unwrap_or("{}")).unwrap();
+    assert!(metadata.get("staged_seal").is_none());
     let staged = std::fs::read(op.payload_path.as_deref().unwrap()).unwrap();
-    assert!(!contains(&staged, MARKER.as_bytes()), "a marker of the document is in the staged copy");
-    assert!(!contains(&staged, b"[Content_Types].xml"));
-    assert_eq!(staged.len(), bytes.len() + 50);
-    // A restart keeps only the account key: that opens it to exactly the bytes; another key or another file does not.
-    let (meta, plain) = open_recovery_snapshot(&MasterKey::from_bytes([7; 32]), DOC, &staged).unwrap();
-    assert_eq!(&plain[..], &bytes[..]);
-    assert_eq!((meta.base_version, meta.kind), (4, 1));
-    assert!(open_recovery_snapshot(&MasterKey::from_bytes([8; 32]), DOC, &staged).is_err());
-    assert!(open_recovery_snapshot(&MasterKey::from_bytes([7; 32]), FOLDER, &staged).is_err());
+    assert!(contains(&staged, MARKER.as_bytes()));
+    assert_eq!(&staged[..], &bytes[..]);
 }

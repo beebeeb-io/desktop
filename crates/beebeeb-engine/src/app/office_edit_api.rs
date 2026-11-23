@@ -19,7 +19,7 @@
 
 use zeroize::Zeroizing;
 
-use super::viewer_edit_api::{EditRefused, NewCopy, SaveEnd, anonymous_file};
+use super::viewer_edit_api::{anonymous_file, EditRefused, NewCopy, SaveEnd};
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
 use crate::api_client::ApiClient;
@@ -245,9 +245,8 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
-    /// The one place the saved bytes are staged for the upload: sealed with core's account-bound recovery-snapshot
-    /// seal (never the session scratch key: a staged save must survive a restart), so the staging folder holds no byte
-    /// of the document. The upload of the op opens it as it reads. Same checks and the same one write path as
+    /// The one place the saved bytes are staged for the upload, as plain bytes like every other viewer save (a sealed
+    /// blob would be read as the document by the conflict, Finder and sign-out readers). Same checks and the same one write path as
     /// [`Self::save_bytes_for`].
     fn stage_office_bytes(
         &self,
@@ -257,8 +256,11 @@ impl<C: CredentialStores> Engine<C> {
         base: i64,
         opening: u64,
     ) -> Result<SaveEnd, EditRefused> {
-        let kind = package_kind(bytes).ok_or(EditRefused::Failed)?;
-        self.save_bytes_sealed_for(session, file_id, bytes, base, opening, Some(kind))
+        package_kind(bytes).ok_or(EditRefused::Failed)?;
+        // Not sealed (`None`): every reader of an op's staged file other than the upload (Keep both / Keep the other in
+        // conflicts, the Finder hydrate, the sign-out keep step) takes it for the plaintext document. Seal it again
+        // only when those readers open `staged_seal` too.
+        self.save_bytes_sealed_for(session, file_id, bytes, base, opening, None)
     }
 }
 
