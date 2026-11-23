@@ -181,7 +181,10 @@ impl ApiClient {
     }
 
     pub fn upload_complete_url(&self, upload_session_id: UploadSessionId<'_>) -> String {
-        self.url(&format!("/api/v1/uploads/{}/complete", encode(upload_session_id.as_str())))
+        self.url(&format!(
+            "/api/v1/uploads/{}/complete",
+            encode(upload_session_id.as_str())
+        ))
     }
 
     pub fn file_url(&self, file_id: FileId<'_>) -> String {
@@ -225,11 +228,17 @@ impl ApiClient {
     /// Tests only: no desktop caller lists folder members; the URL contract is still pinned.
     #[cfg(test)]
     pub fn folder_members_url(&self, folder_id: FolderId<'_>) -> String {
-        self.url(&format!("/api/v1/shares/invites/folder-members/{}", encode(folder_id.as_str())))
+        self.url(&format!(
+            "/api/v1/shares/invites/folder-members/{}",
+            encode(folder_id.as_str())
+        ))
     }
 
     pub fn folder_keys_url(&self, invite_id: InviteId<'_>) -> String {
-        self.url(&format!("/api/v1/shares/invites/{}/folder-keys", encode(invite_id.as_str())))
+        self.url(&format!(
+            "/api/v1/shares/invites/{}/folder-keys",
+            encode(invite_id.as_str())
+        ))
     }
 
     pub fn shares_incoming_url(&self) -> String {
@@ -283,8 +292,8 @@ impl ApiClient {
     // `get_typed` / `send_with_retry`, which:
     //   * retry on HTTP 429 (rate limit) — up to `MAX_429_RETRIES` extra
     //     attempts — honouring `Retry-After` / `x-ratelimit-reset` for the
-    //     per-attempt wait (capped at `RETRY_WAIT_CAP_SECS`) and bounding the
-    //     CUMULATIVE wait at `RETRY_TOTAL_BUDGET_SECS` so a hammered endpoint
+    //     per-attempt wait (up to `RETRY_AFTER_MAX_SECS`, plus 0-25 % jitter) and bounding the
+    //     CUMULATIVE wait at `RETRY_TOTAL_BUDGET_MS` so a hammered endpoint
     //     can't stall a view indefinitely. This makes a transient 429 (the prod
     //     account-data endpoints currently 429 under load) retry gracefully
     //     instead of surfacing "Couldn't load" to the view.
@@ -303,12 +312,15 @@ impl ApiClient {
     /// backoff + retry, returning a 2xx response or a descriptive error.
     ///
     /// On a 429 we read the server's hint (`Retry-After` seconds or
-    /// `x-ratelimit-reset` epoch-seconds), clamp it to a sane per-attempt cap,
-    /// sleep, and retry — up to `MAX_429_RETRIES` extra attempts and a total
-    /// sleep budget of `RETRY_TOTAL_BUDGET_SECS`. The final 429 (or a non-429
+    /// `x-ratelimit-reset` epoch-seconds), sleep, and retry — up to `MAX_429_RETRIES` extra attempts and a total
+    /// sleep budget of `RETRY_TOTAL_BUDGET_MS`. A `Retry-After` above 60 s or
+    /// `error: "banned"` is returned at once as the 429. The final 429 (or a non-429
     /// non-2xx at any point) is surfaced via `check_status`.
-    pub(super) async fn send_with_retry(&self, build: impl Fn() -> reqwest::RequestBuilder) -> ApiResult<reqwest::Response> {
-        let mut spent: u64 = 0;
+    pub(super) async fn send_with_retry(
+        &self,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> ApiResult<reqwest::Response> {
+        let mut spent_ms: u64 = 0;
         let mut attempt: u32 = 0;
         loop {
             let resp = match build()
@@ -330,17 +342,36 @@ impl ApiClient {
             let retry_after = header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str());
             let reset_in =
                 header_secs(resp.headers(), "x-ratelimit-reset").map(|epoch| epoch.saturating_sub(now_unix_secs()));
-            match retry_decision(attempt, spent, retry_after, reset_in) {
-                Some(wait) => {
-                    if wait > 0 {
-                        tokio::time::sleep(Duration::from_secs(wait)).await;
+            // The body tells a ban from a window; a 429 body is a small error object.
+            let (parts, body) = {
+                let status = resp.status();
+                let headers = resp.headers().clone();
+                ((status, headers), resp.text().await.unwrap_or_default())
+            };
+            let jitter_pct = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=RETRY_JITTER_MAX_PCT);
+            match retry_decision(
+                attempt,
+                spent_ms,
+                retry_after,
+                reset_in,
+                is_banned_body(&body),
+                jitter_pct,
+            ) {
+                RetryDecision::Wait(wait_ms) => {
+                    if wait_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
                     }
-                    spent = spent.saturating_add(wait);
+                    spent_ms = spent_ms.saturating_add(wait_ms);
                     attempt += 1;
-                    // Loop back and retry.
                 }
-                // Budget/attempt exhausted — surface the 429 as a clean error.
-                None => return Self::check_status(resp).await,
+                // Out of attempts/budget, or a policy refusal: return the 429.
+                RetryDecision::GiveUp | RetryDecision::Refuse => {
+                    let snippet: String = body.chars().take(300).collect();
+                    return Err(DesktopApiError::HttpStatus {
+                        status: parts.0,
+                        snippet,
+                    });
+                }
             }
         }
     }
@@ -357,8 +388,7 @@ impl ApiClient {
         // refused until the owner upgrades it. It is its own state — never a
         // generic error and never a reason to retry as a legacy write.
         if status == reqwest::StatusCode::CONFLICT
-            && serde_json::from_str::<serde_json::Value>(&body)
-                .is_ok_and(|value| value["error"] == "upgrade_required")
+            && serde_json::from_str::<serde_json::Value>(&body).is_ok_and(|value| value["error"] == "upgrade_required")
         {
             return Err(DesktopApiError::UpgradeRequired(UpgradeRequired));
         }
