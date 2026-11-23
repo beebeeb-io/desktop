@@ -143,6 +143,8 @@ pub enum PageState {
 
 /// Why opening stopped, when it is not a failed decryption (DW-1518 is that).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// `HelperStopped` says what stopped: the helper, where every other variant is about the file or the session.
+#[allow(clippy::enum_variant_names)]
 pub enum Stopped {
     /// Beebeeb could not be reached. Trying again may work.
     Offline,
@@ -411,6 +413,25 @@ pub enum Settled {
     /// A change begun before the file was opened again (Show it, Try again): what it came to, said. Nothing on
     /// screen changes.
     Said(String),
+}
+
+/// Which it is, with its version and the kind of its body: never the file's name, a device's name or the words
+/// said (they can name the file).
+impl fmt::Debug for Settled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Settled::Offline { on, done } => write!(f, "Offline(on {on}, done {done})"),
+            Settled::Saved { body, version, .. } => write!(f, "Saved(version {version}, {body:?})"),
+            Settled::Queued { body, version } => write!(f, "Queued(version {version}, {body:?})"),
+            Settled::Opened { body, version } => write!(f, "Opened(version {version}, {body:?})"),
+            Settled::Conflict(theirs) => write!(f, "Conflict(version {})", theirs.version),
+            Settled::Newer(_) => f.write_str("Newer"),
+            Settled::Failed => f.write_str("Failed"),
+            Settled::Refused(_) => f.write_str("Refused"),
+            Settled::SavedRevision(revision) => write!(f, "SavedRevision({revision})"),
+            Settled::Said(_) => f.write_str("Said"),
+        }
+    }
 }
 
 /// Which of the theme's inks a run of text is drawn in.

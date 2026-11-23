@@ -93,12 +93,13 @@ pub fn flush_clip(s: &mut State, tx: &mut Tx) -> bool {
     text.zeroize();
     html.zeroize();
     // An empty answer means nothing was taken, so a waiting cut is dropped, not run.
-    if CUT_PENDING.with(|c| c.replace(false)) && written {
-        if let Some(ui) = viewers::ui(s) {
-            let (source, id) = ui.edit_source();
-            let id = id.to_string();
-            source.edit(&id, EditOp::Delete { back: false, word: false });
-        }
+    if CUT_PENDING.with(|c| c.replace(false))
+        && written
+        && let Some(ui) = viewers::ui(s)
+    {
+        let (source, id) = ui.edit_source();
+        let id = id.to_string();
+        source.edit(&id, EditOp::Delete { back: false, word: false });
     }
     written
 }

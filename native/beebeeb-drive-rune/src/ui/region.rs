@@ -6,6 +6,8 @@
 //! ([`pin`]), so no board frame moves with the PC the tests run on.
 
 /// The order of day, month and year in the region's short date.
+// Only Windows reads a region (`from_values`); elsewhere the app itself only ever has the board's `Dmy`.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DateOrder {
     /// 28 Oct 2026 (en-GB, nl-NL, de-DE).
@@ -48,6 +50,7 @@ impl Region {
     /// From the region's own values: the decimal separator (`sDecimal`), the short date's pattern (`sShortDate`,
     /// "d-M-yyyy") and the short time's (`sShortTime`, "HH:mm" or "h:mm tt"). What is missing or unreadable keeps
     /// the board's.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     pub fn from_values(decimal: Option<&str>, short_date: Option<&str>, short_time: Option<&str>) -> Region {
         let mut region = Region::EN_GB;
         if let Some(sep) = decimal.and_then(|d| d.trim().chars().next()) {

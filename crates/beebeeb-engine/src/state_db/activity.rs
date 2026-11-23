@@ -146,14 +146,14 @@ impl StateDb {
     /// counts (and leaves out an upload held with its folder).
     pub fn upload_waiting(&self, now: i64) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        Ok(conn.query_row(
+        conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM operation_queue
                            WHERE kind IN ('upload_file', 'upload_version')
                              AND next_retry_at <= ?1
                              AND paused_reason IS NULL AND attempts < max_attempts)",
             params![now],
             |row| row.get(0),
-        )?)
+        )
     }
     /// What is waiting to transfer (see [`TransferBacklog`]). `now` is unix seconds: an upload whose
     /// retry time is still ahead of it is waiting out a backoff and does not count.
