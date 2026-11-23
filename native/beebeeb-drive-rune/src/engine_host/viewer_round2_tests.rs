@@ -628,8 +628,9 @@ fn a_pdf_whose_helper_stops_at_a_page_shows_failed_once_and_try_again_opens_it_a
     assert!(source.picture("f-pdf", Picture::Page(1)).is_none());
     assert!(!source.finds(), "nothing of the stopped opening is searched");
     // Try again: the file is read and opened anew, in a new helper.
+    // The retry's download runs on its worker, so it is counted once the retry opened, never right after `retry`
+    // returns (that count raced the worker: RC5-3).
     assert!(source.retry("f-pdf").is_ok());
-    assert_eq!(fake.s().fetches.len(), 1, "the first open's download; the retry's comes on its worker");
     let began = Instant::now();
     let again = loop {
         if let Some(body @ Body::Pdf(_)) = source.poll("f-pdf") {
@@ -639,6 +640,7 @@ fn a_pdf_whose_helper_stops_at_a_page_shows_failed_once_and_try_again_opens_it_a
         std::thread::sleep(Duration::from_millis(2));
     };
     assert!(matches!(again, Body::Pdf(ref doc) if doc.pages == 2), "{again:?}");
+    assert_eq!(fake.s().fetches.len(), 2, "the first open's download, and the retry's: read anew");
 }
 
 #[test]
