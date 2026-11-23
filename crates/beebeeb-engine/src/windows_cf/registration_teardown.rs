@@ -201,11 +201,18 @@ pub(crate) fn tear_down_root(
     root: &Path,
     choice: SyncFolderChoice,
     known_folders: &[PathBuf],
+    check_owner: impl FnOnce(&Path) -> anyhow::Result<()>,
     unregister_shell: impl FnOnce(&Path) -> anyhow::Result<()>,
     unregister_cloud_files: impl FnOnce(&Path) -> anyhow::Result<()>,
     report: &mut TeardownReport,
 ) {
     report.roots += 1;
+    // Before anything is walked or deleted: a folder registered to another provider is never ours to touch.
+    if let Err(error) = check_owner(root) {
+        tracing::warn!(error = %error, "uninstall: the sync folder is not ours; left untouched");
+        report.failures += 1;
+        return;
+    }
     let remove = match choice {
         SyncFolderChoice::Remove if remove_would_take_known_folder(root, known_folders) => {
             tracing::warn!("uninstall: a known folder is inside the sync folder; it is kept, not removed");
@@ -223,11 +230,12 @@ pub(crate) fn tear_down_root(
         tracing::warn!(error = %error, "uninstall: Explorer registration not removed");
         report.failures += 1;
     }
-    if let Err(error) = unregister_cloud_files(root) {
+    let unregistered = unregister_cloud_files(root);
+    if let Err(error) = &unregistered {
         tracing::warn!(error = %error, "uninstall: Cloud Files registration not removed");
         report.failures += 1;
     }
-    if exists && remove {
+    if exists && remove && unregistered.is_ok() {
         match std::fs::remove_dir_all(root) {
             Ok(()) => report.folders_removed += 1,
             Err(error) => {
@@ -273,14 +281,10 @@ pub fn uninstall(identity: &'static EngineIdentity, choice: SyncFolderChoice) ->
             &root,
             choice,
             &known,
+            // A folder no longer registered is fine; one registered to another provider is refused (never ours).
+            |root| crate::sync_root_owner::check(identity, root).map_err(|refusal| anyhow::anyhow!(refusal)),
             |root| super::unregister_shell_sync_root(identity, root),
-            |root| {
-                // A folder no longer registered is fine; one registered to another provider is refused (never ours).
-                match crate::sync_root_owner::check(identity, root) {
-                    Ok(()) => super::unregister_any_sync_root(root),
-                    Err(refusal) => Err(anyhow::anyhow!(refusal)),
-                }
-            },
+            super::unregister_any_sync_root,
             &mut report,
         );
     }
@@ -403,6 +407,7 @@ mod tests {
             SyncFolderChoice::KeepDownloaded,
             &[],
             |_| Ok(()),
+            |_| Ok(()),
             crate::windows_cf::unregister_any_sync_root,
             &mut report,
         );
@@ -426,6 +431,7 @@ mod tests {
             SyncFolderChoice::Remove,
             &[],
             |_| Ok(()),
+            |_| Ok(()),
             crate::windows_cf::unregister_any_sync_root,
             &mut report,
         );
@@ -443,11 +449,55 @@ mod tests {
             SyncFolderChoice::Remove,
             &[qa.root.join("folder")],
             |_| Ok(()),
+            |_| Ok(()),
             crate::windows_cf::unregister_any_sync_root,
             &mut report,
         );
         assert_eq!(report.remove_refused, 1);
         assert!(qa.root.join("folder").join("downloaded.txt").exists());
         assert!(not_registered(&qa.root));
+    }
+
+    #[test]
+    fn registration_teardown_leaves_a_folder_that_is_not_ours_untouched() {
+        for choice in [SyncFolderChoice::KeepDownloaded, SyncFolderChoice::Remove] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("Other");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("theirs.txt"), b"theirs").unwrap();
+            let mut report = TeardownReport::default();
+            tear_down_root(
+                &root,
+                choice,
+                &[],
+                |_| Err(anyhow::anyhow!("registered to another provider")),
+                |_| panic!("must not unregister the shell root"),
+                |_| panic!("must not unregister the cloud root"),
+                &mut report,
+            );
+            assert_eq!(report.failures, 1, "{report:?}");
+            assert_eq!(report.folders_removed, 0);
+            assert_eq!(std::fs::read(root.join("theirs.txt")).unwrap(), b"theirs");
+        }
+    }
+
+    #[test]
+    fn registration_teardown_remove_keeps_the_folder_when_unregister_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Mine");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        let mut report = TeardownReport::default();
+        tear_down_root(
+            &root,
+            SyncFolderChoice::Remove,
+            &[],
+            |_| Ok(()),
+            |_| Ok(()),
+            |_| Err(anyhow::anyhow!("refused")),
+            &mut report,
+        );
+        assert_eq!(report.failures, 1, "{report:?}");
+        assert!(root.join("a.txt").exists());
     }
 }
