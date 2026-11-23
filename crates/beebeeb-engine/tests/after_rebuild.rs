@@ -235,3 +235,30 @@ async fn rebuilt_check_finding_a_file_different_is_not_a_change() {
     })
     .await;
 }
+
+/// A file larger than one tick's byte budget is never downloaded into memory by the check: it stays held.
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuilt_check_never_downloads_a_file_over_the_tick_budget() {
+    let r = rebuilt(b"x").await;
+    let state_dir = r.state_dir.clone();
+    // A sparse file over the 256 MiB budget.
+    let big = std::fs::OpenOptions::new()
+        .write(true)
+        .open(r.sync_root.join("notes.txt"))
+        .unwrap();
+    big.set_len(300 * 1024 * 1024).unwrap();
+    drop(big);
+    in_state(&state_dir, async {
+        scan(&r);
+        let tick = sync_tick_outcome(&r.bridge, &r.sync_root).await.unwrap();
+        assert_eq!(tick.rebuilt_agreed, 0);
+        assert!(
+            !r._fake.routes().iter().any(|route| route.contains("/chunks/")),
+            "no chunk of the file was downloaded"
+        );
+        assert_eq!(held(&r), vec!["content_unknown".to_string()], "stays held");
+    })
+    .await;
+    let owed = RebuiltCheck::read(&state_dir).unwrap().expect("owed");
+    assert!(owed.differing.contains(FILE), "not checked again");
+}
