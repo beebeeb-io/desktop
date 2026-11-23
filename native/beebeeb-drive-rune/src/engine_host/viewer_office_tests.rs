@@ -2194,6 +2194,9 @@ fn a_restore_saves_from_the_blobs_version_so_a_newer_one_conflicts() {
     let mut e = editor_over(engine, "Invented.docx");
     assert!(e.source.office_restore("f1"));
     assert!(matches!(e.source.poll_edit("f1"), Some(EditAnswer::Restored { .. })));
+    snapshot(&e.fake, b"EDITED", 2);
+    let _ = e.source.poll_edit("f1");
+    assert_eq!(e.engine.s().blobs.get("f1").map(|blob| blob.1), Some(2), "later snapshots keep the blob's base");
     assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
     e.source.poll("f1");
     e.fake.saved(b"PK saved package", 4);
