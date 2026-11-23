@@ -556,12 +556,12 @@ mod tests {
         assert_eq!(local.index.file_count(), 2);
     }
 
-    /// A tenth of LargeAccount::GUUS (seeding rows one by one is slow); prints the first-build time, `--nocapture`.
+    /// A tenth of LargeAccount::REFERENCE (seeding rows one by one is slow); prints the first-build time, `--nocapture`.
     #[test]
     fn test_081_large_account_first_build_time_is_recorded() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = StateDb::open(dir.path().join("state.db")).expect("state db");
-        let n = crate::test_api::large_account::LargeAccount::GUUS.files / 10;
+        let n = crate::test_api::large_account::LargeAccount::REFERENCE.files / 10;
         for i in 0..n {
             seed_file(
                 &db,
