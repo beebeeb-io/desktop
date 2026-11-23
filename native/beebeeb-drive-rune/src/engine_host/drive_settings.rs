@@ -421,8 +421,7 @@ pub(crate) const METERED_WORDS: &str = "Paused: metered connection";
 impl<E: DriveEngine> EngineDriveSettings<E> {
     /// The live rate: the transfer board's bytes done now against the last read (up, down per second); while the board
     /// holds nothing, the recorder's newest sample.
-    fn live_rate(&mut self) -> Option<(u64, u64)> {
-        let now = Instant::now();
+    fn live_rate(&mut self, now: Instant) -> Option<(u64, u64)> {
         let totals = self.engine.transfer_totals();
         let last = self.totals.take();
         let Some((up, down)) = totals else { return read_rate(&*self.engine) };
@@ -436,6 +435,20 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             // The first read has nothing to compare with.
             _ => self.rate,
         }
+    }
+
+    /// One look at the live rate at `now`, while Bandwidth is shown: read when the last read is [`RATE_EVERY`] old
+    /// (or there is none), over the time since that read. `now` is the pump's clock, handed in so a test holds it.
+    /// `true`: the rate drawn changed.
+    fn pump_rate(&mut self, now: Instant) -> bool {
+        if self.rate_at.is_some_and(|at| now.saturating_duration_since(at) < RATE_EVERY) {
+            return false;
+        }
+        self.rate_at = Some(now);
+        let rate = self.live_rate(now);
+        let changed = rate != self.rate;
+        self.rate = rate;
+        changed
     }
 
     /// `base` with "Right now" filled from the engine's transfer rate and its metered hold.
@@ -953,11 +966,8 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         let sampling = self.activity.running();
         // Bandwidth's "Right now": the newest sample, every 2 seconds while the pane is shown.
         let rate_wanted = self.open == Some(Pane::Bandwidth) && self.mine();
-        if rate_wanted && self.rate_at.is_none_or(|at| at.elapsed() >= RATE_EVERY) {
-            self.rate_at = Some(Instant::now());
-            let rate = self.live_rate();
-            changed |= rate != self.rate;
-            self.rate = rate;
+        if rate_wanted {
+            changed |= self.pump_rate(Instant::now());
         }
         if sampling {
             let engine = &self.engine;

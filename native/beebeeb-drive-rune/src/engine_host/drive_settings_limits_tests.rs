@@ -248,12 +248,14 @@ fn bandwidth_pane_shows_the_live_rate_read_from_the_transfer_board() {
     let mut source = open_bandwidth(&fake);
     assert!(source.bandwidth().upload.speed.is_none(), "nothing moved yet: a dash");
 
-    // An upload moved 20 MB and a download 5 MB in the 10 seconds since the last read.
+    // An upload moved 20 MB and a download 5 MB in the 10 seconds since the last read. The pump's clock is handed in:
+    // read from the machine, the time the test itself takes is part of the 10 seconds and the rate drawn is a little
+    // under 500 KB/s on a slow run ("499", the full Windows suite of 11-23).
     *fake.board.lock().unwrap() = Some((20_000_000, 5_000_000));
-    let back = Duration::from_secs(10);
-    source.rate_at = source.rate_at.map(|at| at - back);
-    source.totals = source.totals.map(|(at, up, down)| (at - back, up, down));
-    source.pump(0.0);
+    let (read_at, ..) = source.totals.expect("the pane's first read holds the board's totals");
+    assert_eq!(source.rate_at, Some(read_at), "the read and its totals are stamped with one clock");
+    assert!(!source.pump_rate(read_at + Duration::from_secs(1)), "not read again inside 2 seconds");
+    assert!(source.pump_rate(read_at + Duration::from_secs(10)));
     let pane = source.bandwidth();
     assert_eq!(pane.upload.speed, Some(("2.0".into(), "MB/s".into())));
     assert_eq!(pane.download.speed, Some(("500".into(), "KB/s".into())));
