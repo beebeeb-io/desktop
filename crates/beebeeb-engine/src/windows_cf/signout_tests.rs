@@ -777,3 +777,34 @@ fn w29_a_plain_file_at_a_path_of_unknown_content_is_never_removed() {
     assert!(switch_purge(&f, &[]).is_err());
     assert!(f.root.join("Plain.docx").exists());
 }
+
+// ---- RC3-1 (VM 401, rc3/f1): the switch's purge after a person's leftover file was taken out of a synced folder ----
+
+/// A synced folder placeholder with a synced file in it; a person made a new file in that folder (the engine made it
+/// a placeholder that is not in sync when it queued the upload), and "Keep them aside" took it out again. The folder
+/// holds exactly what the database lists, so the switch's purge removes it.
+#[test]
+fn rc3_switch_purge_removes_a_synced_folder_a_leftover_file_was_taken_out_of() {
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    use crate::windows_cf::placeholders::{convert_to_unsynced_placeholder, create_placeholder};
+    assert!(create_placeholder(&f.root, "Folder", "Folder", 0, 1_700_000_000, true).unwrap());
+    f.track("Folder", ItemKind::Folder, FileStatus::Local);
+    assert!(create_placeholder(&f.root.join("Folder"), "Folder/own.txt", "own.txt", 4096, 1_700_000_000, false).unwrap());
+    f.track("Folder/own.txt", ItemKind::File, FileStatus::CloudOnly);
+    let leftover = f.root.join("Folder").join("leftover.txt");
+    std::fs::write(&leftover, b"made while sync was paused").unwrap();
+    convert_to_unsynced_placeholder(&leftover, "local-leftover").unwrap();
+    std::fs::remove_file(&leftover).unwrap();
+
+    let removed = switch_purge(f, &["Folder/leftover.txt"]);
+
+    assert!(
+        removed.is_ok(),
+        "the folder in sync before the leftover: {:?}, after: {:?}",
+        Some(true),
+        crate::windows_cf::placeholders::placeholder_in_sync(&f.root.join("Folder"))
+    );
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}

@@ -45,6 +45,9 @@ impl SyncRootPort for AsidePort {
     }
     fn remove_synced_items(&self, db: &StateDb, folder: &Path, _unasked: &[String]) -> Result<(), String> {
         self.removals.fetch_add(1, Ordering::SeqCst);
+        // RC3-1: the Windows purge's own first gate (`windows_cf::signout::purge`): while the database holds a queued
+        // change or a file that is not at rest it refuses before it looks at the folder.
+        purge_gate(db)?;
         for path in listing(folder) {
             let path = path.replace('\\', "/");
             let on_the_list = db.get_file_by_path(&path).unwrap().is_some();
@@ -61,8 +64,23 @@ impl SyncRootPort for AsidePort {
                 std::fs::remove_file(&path).map_err(|e| e.to_string())?;
             }
         }
-        Ok(())
+        purge_finish(db)
     }
+}
+
+/// RC3-1: what the Windows purge asks of the database before it removes anything (its preflight, the same
+/// portable policy function): no queued change, no file that is not at rest.
+fn purge_gate(db: &StateDb) -> Result<(), String> {
+    db.windows_signout_preflight().map_err(|_| "unsent work is in the database".to_string())
+}
+
+/// RC3-1: how the Windows purge ends: the staged copies' rows go, then the account's rows in the one transaction
+/// that refuses while a queued change is left.
+fn purge_finish(db: &StateDb) -> Result<(), String> {
+    for (path, _, _) in db.staged_payloads_for_signout().map_err(|e| e.to_string())? {
+        db.forget_staged_payload(&path).map_err(|e| e.to_string())?;
+    }
+    db.finish_windows_signout().map_err(|_| "the rows stay".to_string())
 }
 
 fn a() -> Identity {
@@ -424,4 +442,268 @@ fn account_switch_rc2_held_edits_of_a_rebuilt_state_db_offer_the_choice() {
         Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
     );
     assert_eq!(pc.db().owner().unwrap(), Some(other()));
+}
+
+// ---- RC3-1 (VM 401, rc3/f1 f2 f3b): the choice was offered, and neither answer finished the switch ----
+
+const FOLDER_OF_A: &str = "Folder of A";
+const NEW_IN_FOLDER: &str = "Folder of A/leftover of A.txt";
+
+/// Every line the engine logs while `body` runs on this thread.
+fn logged<T>(body: impl FnOnce() -> T) -> (T, String) {
+    use std::sync::Mutex;
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let writer = Capture(buffer.clone());
+    // A second live dispatcher keeps callsite interest from being cached as "never" by another test's thread.
+    let _second_dispatcher = tracing::Dispatch::new(tracing_subscriber::registry());
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::new("beebeeb_engine=trace"))
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let out = body();
+    drop(guard);
+    let text = String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
+    (out, text)
+}
+
+/// The VM's folder: A synced a folder with a file in it, paused sync, and made a new file in that folder (its upload
+/// queued, its row `uploading`). A signed out; B signs in.
+fn a_left_a_new_file_in_a_synced_folder(pc: &Pc) {
+    a_signed_out(pc, false);
+    row(&pc.db(), IDS[2], FOLDER_OF_A, true, 3);
+    std::fs::create_dir_all(pc.root().join(FOLDER_OF_A)).unwrap();
+    queued_while_paused(pc, IDS[1], NEW_IN_FOLDER, false);
+}
+
+/// (a) rc3/f1. Red at a5b14cd with the log lines of the VM: `keep aside: ... the switch goes on kept=1`, then
+/// `the previous account's local data stays why="the folder's items stay"` and the plain refusal. The file was moved
+/// aside, its queued upload was still in the database, and the Windows purge refuses while one is.
+#[test]
+fn account_switch_rc3_keep_aside_finishes_the_switch_with_its_queued_upload_in_the_database() {
+    let pc = Pc::new();
+    a_left_a_new_file_in_a_synced_folder(&pc);
+    let port = AsidePort::new();
+    assert_eq!(
+        pc.engine.start_sync_with(pc.root(), &port),
+        Err(SyncStartRefused::LeftoverFilesOfAnotherAccount)
+    );
+
+    let (done, log) = logged(|| pc.engine.keep_aside_and_switch_with(pc.root(), &port));
+    let done = done.unwrap();
+
+    assert!(log.contains("keep aside: the previous account's files are beside the sync folder"), "{log}");
+    assert!(!log.contains("the folder's items stay"), "the removal went through: {log}");
+    assert_eq!(done.kept, 1);
+    assert_eq!(std::fs::read(aside(&pc).join(NEW_IN_FOLDER)).unwrap(), b"made by A while paused");
+    assert_eq!(done.start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }), "past the binding");
+    assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
+    assert_eq!(listing(&pc.root()), Vec::<String>::new(), "nothing of A's is left in the sync folder");
+    assert_eq!(a_key_in_its_slot(&pc), Some(A_KEY.to_vec()), "R4: A's key is kept in A's slot");
+}
+
+/// (b) rc3/f2, the engine's half: the confirmed discard keeps a copy, takes the file out and finishes the switch.
+/// (On Windows it ended before that, at the kept folder's record: see `kept_folder_record_tests`.)
+#[test]
+fn account_switch_rc3_discard_finishes_the_switch_with_its_queued_upload_in_the_database() {
+    let pc = Pc::new();
+    a_left_a_new_file_in_a_synced_folder(&pc);
+    let port = AsidePort::new();
+    assert_eq!(
+        pc.engine.start_sync_with(pc.root(), &port),
+        Err(SyncStartRefused::LeftoverFilesOfAnotherAccount)
+    );
+    let ask = pc.engine.discard_and_switch_ask_with(&pc.root(), &port).unwrap();
+    assert_eq!(ask.names, vec!["leftover of A.txt".to_string()]);
+
+    let (done, log) = logged(|| pc.engine.discard_and_switch_with(&ask, pc.root(), &port));
+    let done = done.unwrap();
+
+    assert!(!log.contains("nothing was removed"), "{log}");
+    assert!(!log.contains("the previous account's local data stays"), "{log}");
+    assert_eq!(done.kept, 1);
+    assert!(done.kept_in.is_dir(), "the copy is in Changes not sent");
+    assert_eq!(done.start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }), "past the binding");
+    assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
+    assert_eq!(listing(&pc.root()), Vec::<String>::new(), "the file is out of the sync folder");
+}
+
+/// (c) rc3/f3b, the engine's half (the click itself never reached the engine: `frames/account/switcher.rs`): two
+/// empty folders made while sync was paused, each queued. The start removes them and goes on, with no refusal.
+#[test]
+fn account_switch_rc3_only_empty_folders_finish_the_switch_with_their_queued_creates_in_the_database() {
+    let pc = Pc::new();
+    a_signed_out(&pc, false);
+    queued_while_paused(&pc, IDS[1], "Empty B", true);
+    queued_while_paused(&pc, IDS[2], "Empty B two", true);
+    let port = AsidePort::new();
+
+    let (start, log) = logged(|| pc.engine.start_sync_with(pc.root(), &port));
+
+    assert!(!log.contains("the previous account's local data stays"), "{log}");
+    assert_eq!(start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }), "past the binding");
+    assert_eq!(pc.db().owner().unwrap(), Some(other()), "B owns the local data now");
+    assert_eq!(listing(&pc.root()), Vec::<String>::new());
+}
+
+/// A removal the OS refuses after the answered work was forgotten leaves A's data A's: its synced rows and its owner
+/// record stay, nothing of the queue comes back, and B is refused.
+#[test]
+fn account_switch_rc3_a_removal_refused_after_the_answer_leaves_the_synced_rows_with_their_account() {
+    struct Refuses(AsidePort);
+    impl SyncRootPort for Refuses {
+        fn registration(&self, folder: &Path) -> Registration {
+            self.0.registration(folder)
+        }
+        fn register(&self, folder: &Path) -> Result<(), Option<i32>> {
+            self.0.register(folder)
+        }
+        fn engine_lock_held(&self, state_dir: &Path) -> bool {
+            self.0.engine_lock_held(state_dir)
+        }
+        fn may_hold_bytes(&self, folder: &Path, path: &str) -> bool {
+            self.0.may_hold_bytes(folder, path)
+        }
+        fn left_by_a_person(&self, folder: &Path, path: &str) -> bool {
+            self.0.left_by_a_person(folder, path)
+        }
+        fn remove_synced_items(&self, db: &StateDb, _folder: &Path, _unasked: &[String]) -> Result<(), String> {
+            purge_gate(db)?;
+            Err("an item is open in another app".to_string())
+        }
+    }
+    let pc = Pc::new();
+    a_left_a_new_file_in_a_synced_folder(&pc);
+    let port = Refuses(AsidePort::new());
+
+    let done = pc.engine.keep_aside_and_switch_with(pc.root(), &port).unwrap();
+
+    assert_eq!(done.start, Err(SyncStartRefused::OtherAccountsData), "B is refused");
+    let db = pc.db();
+    assert_eq!(db.owner().unwrap(), Some(a()), "the data is still A's");
+    assert!(db.get_file_by_path(SYNCED).unwrap().is_some(), "A's synced file keeps its row");
+    assert!(db.get_file_by_path(FOLDER_OF_A).unwrap().is_some(), "and its synced folder");
+    assert!(db.get_file_by_path(NEW_IN_FOLDER).unwrap().is_none(), "the file kept aside has no row left");
+    assert_eq!(db.work_waiting_for_a_person().unwrap(), None, "and no queued upload");
+    assert!(pc.root().join(SYNCED).is_file(), "nothing synced was removed");
+    assert_eq!(std::fs::read(aside(&pc).join(NEW_IN_FOLDER)).unwrap(), b"made by A while paused");
+}
+
+/// The same answers through the real Windows port (the real purge, the real file-system steps): what VM 401 ran.
+#[cfg(target_os = "windows")]
+mod on_windows {
+    use super::*;
+    use crate::sync_root_port::OsSyncRoots;
+
+    /// Windows' own answers; only the registration is a test's.
+    struct RealPort(OsSyncRoots);
+
+    impl RealPort {
+        fn new() -> Self {
+            Self(OsSyncRoots::new(&crate::identity::TEST))
+        }
+    }
+
+    impl SyncRootPort for RealPort {
+        fn registration(&self, _folder: &Path) -> Registration {
+            Registration::Nobody
+        }
+        fn register(&self, _folder: &Path) -> Result<(), Option<i32>> {
+            Err(Some(CODE))
+        }
+        fn engine_lock_held(&self, _state_dir: &Path) -> bool {
+            false
+        }
+        fn may_hold_bytes(&self, folder: &Path, path: &str) -> bool {
+            self.0.may_hold_bytes(folder, path)
+        }
+        fn left_by_a_person(&self, folder: &Path, path: &str) -> bool {
+            self.0.left_by_a_person(folder, path)
+        }
+        fn remove_synced_items(&self, db: &StateDb, folder: &Path, unasked: &[String]) -> Result<(), String> {
+            self.0.remove_synced_items(db, folder, unasked)
+        }
+    }
+
+    /// A synced a folder (an ordinary directory, as a folder made on this PC is left), paused sync and made a new
+    /// file in it. A signed out; B signs in.
+    fn a_left_a_new_file(pc: &Pc) {
+        let db = pc.db();
+        row(&db, IDS[2], FOLDER_OF_A, true, 3);
+        db.set_owner(&a()).unwrap();
+        drop(db);
+        std::fs::create_dir_all(pc.root().join(FOLDER_OF_A)).unwrap();
+        queued_while_paused(pc, IDS[1], NEW_IN_FOLDER, false);
+        let vault = pc.engine.vault();
+        vault.store_wrapped_master_key(SecretBytes::new_master_key(&A_KEY)).unwrap();
+        vault.bind_vault_key_owner(a().user_id.as_deref().unwrap()).unwrap();
+        pc.sign_in(&other());
+    }
+
+    #[test]
+    fn account_switch_rc3_windows_keep_aside_finishes_the_switch() {
+        let pc = Pc::new();
+        a_left_a_new_file(&pc);
+        let port = RealPort::new();
+        assert_eq!(
+            pc.engine.start_sync_with(pc.root(), &port),
+            Err(SyncStartRefused::LeftoverFilesOfAnotherAccount)
+        );
+
+        let (done, log) = logged(|| pc.engine.keep_aside_and_switch_with(pc.root(), &port));
+        let done = done.unwrap();
+
+        assert!(!log.contains("the folder's items stay"), "{log}");
+        assert_eq!(done.start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }), "{log}");
+        assert_eq!(pc.db().owner().unwrap(), Some(other()));
+        assert_eq!(listing(&pc.root()), Vec::<String>::new());
+        assert_eq!(std::fs::read(aside(&pc).join(NEW_IN_FOLDER)).unwrap(), b"made by A while paused");
+    }
+
+    #[test]
+    fn account_switch_rc3_windows_discard_finishes_the_switch() {
+        let pc = Pc::new();
+        a_left_a_new_file(&pc);
+        let port = RealPort::new();
+        assert_eq!(
+            pc.engine.start_sync_with(pc.root(), &port),
+            Err(SyncStartRefused::LeftoverFilesOfAnotherAccount)
+        );
+        let ask = pc.engine.discard_and_switch_ask_with(&pc.root(), &port).unwrap();
+
+        let (done, log) = logged(|| pc.engine.discard_and_switch_with(&ask, pc.root(), &port));
+
+        let done = done.unwrap_or_else(|why| panic!("discard and switch: nothing was removed why={why:?}\n{log}"));
+        assert_eq!(done.start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }), "{log}");
+        assert_eq!(pc.db().owner().unwrap(), Some(other()));
+        assert_eq!(listing(&pc.root()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn account_switch_rc3_windows_only_empty_folders_finish_the_switch() {
+        let pc = Pc::new();
+        pc.db().set_owner(&a()).unwrap();
+        queued_while_paused(&pc, IDS[1], "Empty B", true);
+        queued_while_paused(&pc, IDS[2], "Empty B two", true);
+        pc.sign_in(&other());
+        let port = RealPort::new();
+
+        let (start, log) = logged(|| pc.engine.start_sync_with(pc.root(), &port));
+
+        assert_eq!(start, Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }), "{log}");
+        assert_eq!(pc.db().owner().unwrap(), Some(other()));
+        assert_eq!(listing(&pc.root()), Vec::<String>::new());
+    }
 }
