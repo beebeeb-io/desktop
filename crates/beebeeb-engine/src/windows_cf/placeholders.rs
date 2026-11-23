@@ -1556,10 +1556,10 @@ pub fn handle_identity(file: &std::fs::File) -> (bool, Option<String>) {
 
 /// What the entry at `path` is, by its placeholder's identity: a remote deletion removes an entry only when
 /// that identity names the deleted file. Read through a handle opened for its attributes only, on the entry itself
-/// (never a recall), sharing every access. The reparse bit does not decide: Windows hides it on a placeholder wholly
-/// on disk from a process that has not connected a sync root, and such an entry read as an ordinary file was removed
-/// on another file's behalf. The Cloud Files API is asked, and answers "not a cloud file" for an ordinary file or
-/// folder; nothing there reads as not a placeholder too (the caller finds it gone).
+/// (never a recall), sharing every access. The reparse bit does not decide: Windows can hide it on a placeholder
+/// wholly on disk (seen in a process that had not connected a sync root yet), and such an entry, read as an ordinary
+/// file, was removed on another file's behalf. The Cloud Files API is asked, and answers "not a cloud file" for an
+/// ordinary file or folder; nothing there reads as not a placeholder too (the caller finds it gone).
 pub fn entry_identity(path: &std::path::Path) -> crate::unknown_check::EntryIdentity {
     use crate::unknown_check::EntryIdentity;
     use std::os::windows::fs::OpenOptionsExt as _;
