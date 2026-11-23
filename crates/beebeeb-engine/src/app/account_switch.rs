@@ -36,6 +36,12 @@
 //! folder ("Beebeeb files from <that account's address>"), at its own path inside it, takes an original out only once
 //! every copy holds the same bytes, and starts. Nothing is deleted without one of the two answers.
 //!
+//! RC3-1 (VM 401, rc3/f1 f2): an answer finishes the switch. The answered work (the queued changes of the files
+//! taken out, their staged copies, the edits held for review) is forgotten in one transaction
+//! ([`StateDb::forget_work_in_the_folder`]) before the OS is asked to remove the synced items: the Windows purge
+//! refuses while the database holds any of it. The kept folder's record is written with steps Windows accepts
+//! ([`KeptRecordFs`]). If the removal still refuses, the previous account's synced rows and owner record stay.
+//!
 //! dc-167, the account switcher (Guus 2026-11-21: a switch keeps the key, a sign-out forgets): every account signed
 //! in on this PC keeps its session (token, owner, email, lock entries) in a parked slot of its own
 //! ([`parked_slot_name`]) while another account is the current one, and its vault key in its R4 slot. A switch parks
@@ -141,6 +147,7 @@ impl<C: CredentialStores> Engine<C> {
     ) -> Result<(), &'static str> {
         let db = &data.db;
         let mut unasked = Vec::new();
+        let mut answered = false;
         if let Some(kind) = db.work_waiting_for_a_person().map_err(|_| "unreadable")? {
             // RC2-5: work whose every byte is an item in the folder is settled once a person's answer took those
             // items out (keep aside, discard) or they hold nothing: what is still there with bytes refuses.
@@ -157,6 +164,7 @@ impl<C: CredentialStores> Engine<C> {
                 return Err(ITS_FOLDERS_STAY);
             }
             unasked = changes.gone;
+            answered = true;
         }
         // A file of unknown content keeps B out only while its item in the folder may hold bytes (an edit of A's
         // nobody sent). With none on this PC there is nothing a person could lose: the row goes with the others.
@@ -178,26 +186,26 @@ impl<C: CredentialStores> Engine<C> {
                 unasked.push(path.clone());
             }
         }
+        // RC3-1 (VM 401, rc3/f1): the answered work is forgotten before the removal is asked. The OS's removal
+        // (the Windows purge) refuses, before it looks at the folder, while the database holds a queued change or a
+        // file that is not at rest; left there, every answered switch ended in the plain refusal. From here on the
+        // previous account's rows describe only what is still in the folder.
+        if answered {
+            let payloads = db
+                .forget_work_in_the_folder()
+                .map_err(|_| "unreadable")?
+                .ok_or("its work changed")?;
+            tracing::info!("account switch: the previous account's answered changes were forgotten");
+            // Their staged copies hold nothing the answer did not keep. One that is not ours to delete stays.
+            let _ = self.remove_its_copies(&payloads, sync_root);
+        }
         if db.has_account_data().map_err(|_| "unreadable")? {
             port.remove_synced_items(db, sync_root, &unasked).map_err(|_| ITEMS_STAY)?;
         }
         let purge = db.purge_all_local_state().map_err(|_| "the rows stay")?;
-        for path in purge.payload_paths.iter().chain(purge.cache_paths.iter()) {
-            let path = Path::new(path);
-            // RC2-5: a queued change's payload may be its item in the sync folder: the person answered for those
-            // (or they hold nothing), and this never deletes in the folder.
-            if path.starts_with(sync_root) {
-                continue;
-            }
-            if !crate::is_disposable_cache_path(self.identity, path) {
-                return Err("a cached file is not ours to delete");
-            }
-            match std::fs::remove_file(path) {
-                Ok(()) => (),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(_) => return Err("a cached file stays"),
-            }
-        }
+        let mut copies = purge.payload_paths;
+        copies.extend(purge.cache_paths);
+        self.remove_its_copies(&copies, sync_root)?;
         // The owner record goes in this transaction: until it commits, B is still refused, and A's settings, share
         // pins and key are all still here (dc-014), so A signs back in to exactly what it left.
         if db.clear_account_data(false).is_err() {
@@ -220,6 +228,29 @@ impl<C: CredentialStores> Engine<C> {
             self.forget_its_key(user_id);
         }
         Ok(())
+    }
+
+    /// The staged and cached copies the forgotten rows named, outside the sync folder. RC2-5: a queued change's
+    /// payload may be its item in the sync folder: the person answered for those (or they hold nothing), and this
+    /// never deletes in the folder. Every path is tried; the first that could not go is the error.
+    fn remove_its_copies(&self, paths: &[String], sync_root: &Path) -> Result<(), &'static str> {
+        let mut stays = Ok(());
+        for path in paths {
+            let path = Path::new(path);
+            if path.starts_with(sync_root) {
+                continue;
+            }
+            if !crate::is_disposable_cache_path(self.identity, path) {
+                stays = stays.and(Err("a cached file is not ours to delete"));
+                continue;
+            }
+            match std::fs::remove_file(path) {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(_) => stays = stays.and(Err("a cached file stays")),
+            }
+        }
+        stays
     }
 
     /// The previous account's vault key, if the credential store still holds it: a token-only sign-in of B leaves a
@@ -336,7 +367,7 @@ impl<C: CredentialStores> Engine<C> {
         sync_root: PathBuf,
         port: &dyn SyncRootPort,
     ) -> Result<DiscardDone, DiscardRefused> {
-        let (kept_in, kept) = self.runtime.block_on(async {
+        let kept = self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let slot = self.acct.engine.lock().await;
             if slot.as_ref().is_some_and(|runner| runner.is_running()) {
@@ -361,6 +392,10 @@ impl<C: CredentialStores> Engine<C> {
             }
             take_out(&sync_root, &sources, &left.folders)?;
             Ok((kept_in, copies.len()))
+        });
+        // RC3-1: the host's own line hides the reason; this one names it (a fixed word, never a name).
+        let (kept_in, kept) = kept.inspect_err(|why| {
+            tracing::warn!(kind = refusal_kind(why), "discard and switch: refused, nothing was taken out");
         })?;
         tracing::info!(kept, "discard and switch: the unsent files were kept; the switch goes on");
         // The plain start, after the locks: step 7 now finds nothing unsent and clears in 014's order.
@@ -389,7 +424,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     fn keep_aside_on(&self, sync_root: PathBuf, port: &dyn SyncRootPort) -> Result<DiscardDone, DiscardRefused> {
-        let (kept_in, kept) = self.runtime.block_on(async {
+        let kept = self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let slot = self.acct.engine.lock().await;
             if slot.as_ref().is_some_and(|runner| runner.is_running()) {
@@ -414,6 +449,9 @@ impl<C: CredentialStores> Engine<C> {
             }
             take_out(&sync_root, &sources, &left.folders)?;
             Ok((aside, copies.len()))
+        });
+        let (kept_in, kept) = kept.inspect_err(|why| {
+            tracing::warn!(kind = refusal_kind(why), "keep aside: refused, nothing was taken out");
         })?;
         tracing::info!(kept, "keep aside: the previous account's files are beside the sync folder; the switch goes on");
         let start = self.start_on(sync_root, port);
@@ -483,9 +521,52 @@ impl<C: CredentialStores> Engine<C> {
                 config.kept_unsent_folder = Some(folder);
                 (true, ())
             },
-            &crate::config::RealConfigFs,
+            &KeptRecordFs,
         )
         .map_err(|_| DiscardRefused::KeepFailed)
+    }
+}
+
+/// RC3-1 (VM 401, rc3/f2): the durable write's file-system steps, as they work on every OS this runs on.
+/// `config::RealConfigFs` flushes the new file through a handle opened for reading and opens the directory as a file;
+/// Windows refuses both ("Access is denied"), so every "Discard and switch" there ended after its copy was made and
+/// before anything was taken out. Here the file is flushed through a handle opened for writing. The directory is
+/// flushed where the OS has that (unix); on Windows the rename is NTFS's own journalled step, and the flush of the
+/// directory is tried and never refuses the record.
+struct KeptRecordFs;
+
+impl crate::config::ConfigFs for KeptRecordFs {
+    fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        crate::config::ConfigFs::write(&crate::config::RealConfigFs, path, bytes)
+    }
+    fn sync_file(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::OpenOptions::new().write(true).open(path)?.sync_all()
+    }
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
+    #[cfg(unix)]
+    fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        std::fs::File::open(dir)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        let _ = std::fs::File::open(dir).and_then(|directory| directory.sync_all());
+        Ok(())
+    }
+}
+
+/// A refused answer's reason for a log line: a fixed word, never a name or a path.
+fn refusal_kind(why: &DiscardRefused) -> &'static str {
+    match why {
+        DiscardRefused::Unsupported => "not on this os",
+        DiscardRefused::NothingToDiscard => "nothing to answer for",
+        DiscardRefused::SyncRunning => "sync is running",
+        DiscardRefused::Changed => "the files changed",
+        DiscardRefused::KeyNotKept => "the key was not kept",
+        DiscardRefused::KeepFailed => "a copy or its record failed",
+        DiscardRefused::Unreadable => "unreadable",
+        DiscardRefused::OtherWork => "other work waits",
     }
 }
 
@@ -1176,7 +1257,7 @@ mod kept_folder_record_tests {
                 config.kept_unsent_folder = Some("Changes not sent".to_string());
                 (true, ())
             },
-            &crate::config::RealConfigFs,
+            &KeptRecordFs,
         );
         assert_eq!(recorded, Ok(()), "discard and switch: nothing was removed (the record of the kept folder)");
         let read = DesktopConfig::load_from(&path).unwrap();

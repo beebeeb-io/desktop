@@ -9,11 +9,18 @@
 //! the sync-off banner. A sign-out of a listed account forgets only that account.
 //!
 //! The engine is reached through [`Switcher`], which the engine host installs once at start ([`install`]). Every
-//! call runs on a thread of its own, never the window's; the engine wakes the window when it is done. Nothing of an
-//! account (email, id) is logged.
+//! call runs on a thread of its own, never the window's. Nothing of an account (email, id) is logged.
+//!
+//! RC3-1 (VM 401, rc3/f3b f4: "Switch to" pressed 1.3 s after the list opened did nothing, with no log line; after a
+//! restart the list showed no account). Reading the list and acting on it are apart: a read never disables a row and
+//! never drops a press. One action runs at a time (`Menu::acting`); a press while one runs is said in the list and
+//! logged, never dropped. The list is read once at [`install`], and the press that opens it waits a moment for its
+//! read ([`READ_WAIT`]), so the list is drawn as it is now: nothing draws the window again when a read ends later
+//! (with sync idle or paused no other event does).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
 use crate::State;
 use crate::theme::tokens::{self, Theme, radius, type_};
@@ -44,16 +51,141 @@ pub trait Switcher: Send + Sync {
 }
 
 static SWITCHER: OnceLock<Arc<dyn Switcher>> = OnceLock::new();
-static OPEN: AtomicBool = AtomicBool::new(false);
-static BUSY: AtomicBool = AtomicBool::new(false);
-/// The last refusal, in a person's words; cleared when the list closes.
-static SAID: Mutex<Option<String>> = Mutex::new(None);
-/// The list as last read, so a frame never waits on the credential store.
-static LISTED: Mutex<Vec<Listed>> = Mutex::new(Vec::new());
+/// The window's one list.
+static MENU: OnceLock<Arc<Menu>> = OnceLock::new();
+
+/// How long the press that opens the list waits for its read, so the list is drawn as it is now and not as it was
+/// last read. A credential store slower than this shows the last read; its rows still take a press.
+const READ_WAIT: Duration = Duration::from_millis(250);
+/// What is said when a press arrives while another request still runs.
+const STILL_WORKING: &str = "Beebeeb is still working on the last request. Try again in a moment.";
+
+/// The list's state. One for the window ([`MENU`]); a test makes its own.
+#[derive(Default)]
+struct Menu {
+    open: AtomicBool,
+    /// A switch, an add or a sign-out runs: one at a time. Reading the list never sets it.
+    acting: AtomicBool,
+    /// The last refusal, in a person's words; cleared when the list closes.
+    said: Mutex<Option<String>>,
+    /// The list as last read, so a frame never waits on the credential store.
+    listed: Mutex<Vec<Listed>>,
+}
+
+/// Ends an action however its thread ends (a panic too), so the next press is taken.
+struct Acting(Arc<Menu>);
+
+impl Drop for Acting {
+    fn drop(&mut self) {
+        self.0.acting.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Menu {
+    fn is_open(&self) -> bool {
+        self.open.load(Ordering::SeqCst)
+    }
+
+    fn acting(&self) -> bool {
+        self.acting.load(Ordering::SeqCst)
+    }
+
+    fn said(&self) -> Option<String> {
+        self.said.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    fn say(&self, words: Option<String>) {
+        *self.said.lock().unwrap_or_else(PoisonError::into_inner) = words;
+    }
+
+    fn listed(&self) -> Vec<Listed> {
+        self.listed.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// Read the list again on a thread of its own, waiting at most `wait` for it. Never holds a press back: a read
+    /// sets no flag a row looks at.
+    fn refresh(self: &Arc<Self>, switcher: Arc<dyn Switcher>, wait: Duration) {
+        let (done, read) = std::sync::mpsc::channel();
+        let menu = self.clone();
+        let started = std::thread::Builder::new()
+            .name("account-switcher-list".to_string())
+            .spawn(move || {
+                let accounts = switcher.accounts();
+                *menu.listed.lock().unwrap_or_else(PoisonError::into_inner) = accounts;
+                let _ = done.send(());
+            });
+        if started.is_err() {
+            tracing::warn!("account switcher: the list could not be read (no thread)");
+        } else if !wait.is_zero() {
+            let _ = read.recv_timeout(wait);
+        }
+    }
+
+    /// The pill: open (reading the list) or close.
+    fn toggle(self: &Arc<Self>, switcher: Option<Arc<dyn Switcher>>) {
+        let open = !self.is_open();
+        self.open.store(open, Ordering::SeqCst);
+        self.say(None);
+        if open && let Some(switcher) = switcher {
+            self.refresh(switcher, READ_WAIT);
+        }
+    }
+
+    /// One action (a switch, an add, a sign-out) on its own thread; one at a time. A press while one runs is said
+    /// in the list and logged, never dropped. A refusal is shown in the list; the list is read again after.
+    fn act(
+        self: &Arc<Self>,
+        name: &'static str,
+        switcher: Arc<dyn Switcher>,
+        call: impl FnOnce(&dyn Switcher) -> Result<(), String> + Send + 'static,
+    ) {
+        if self.acting.swap(true, Ordering::SeqCst) {
+            tracing::warn!(
+                request = name,
+                "account switcher: not taken, another request is still running"
+            );
+            self.say(Some(STILL_WORKING.to_string()));
+            self.open.store(true, Ordering::SeqCst);
+            return;
+        }
+        let menu = self.clone();
+        let started = std::thread::Builder::new().name(name.to_string()).spawn(move || {
+            let acting = Acting(menu);
+            let menu = &acting.0;
+            tracing::info!(request = name, "account switcher: asked");
+            if let Err(words) = call(&*switcher) {
+                tracing::warn!(request = name, "account switcher: refused");
+                menu.say(Some(words));
+                menu.open.store(true, Ordering::SeqCst);
+            }
+            let accounts = switcher.accounts();
+            *menu.listed.lock().unwrap_or_else(PoisonError::into_inner) = accounts;
+        });
+        if started.is_err() {
+            self.acting.store(false, Ordering::SeqCst);
+            tracing::warn!(request = name, "account switcher: not started (no thread)");
+            self.say(Some("Beebeeb could not do that just now. Try again.".to_string()));
+            self.open.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A press on an account: the list closes and the engine is asked to switch.
+    fn switch_to(self: &Arc<Self>, switcher: Arc<dyn Switcher>, id: String) {
+        self.open.store(false, Ordering::SeqCst);
+        self.act("account-switch", switcher, move |switcher| switcher.switch_to(&id));
+    }
+}
+
+fn menu() -> &'static Arc<Menu> {
+    MENU.get_or_init(Arc::default)
+}
 
 /// Installed once by the engine host at start; a second call changes nothing.
 pub fn install(switcher: Arc<dyn Switcher>) {
-    let _ = SWITCHER.set(switcher);
+    if SWITCHER.set(switcher.clone()).is_ok() {
+        // The first open draws what was last read: read once now, so that is the accounts and never an empty list.
+        menu().refresh(switcher, Duration::ZERO);
+    }
 }
 
 fn switcher() -> Option<Arc<dyn Switcher>> {
@@ -62,29 +194,19 @@ fn switcher() -> Option<Arc<dyn Switcher>> {
 
 /// Whether the list is open.
 pub fn is_open() -> bool {
-    OPEN.load(Ordering::SeqCst)
+    menu().is_open()
 }
 
 fn said() -> Option<String> {
-    SAID.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    menu().said()
 }
 
 fn say(words: Option<String>) {
-    *SAID.lock().unwrap_or_else(PoisonError::into_inner) = words;
+    menu().say(words);
 }
 
 fn listed() -> Vec<Listed> {
-    LISTED.lock().unwrap_or_else(PoisonError::into_inner).clone()
-}
-
-/// Read the list again, off the window's thread.
-fn refresh() {
-    let Some(switcher) = switcher() else { return };
-    run_off_thread("account-switcher-list", move || {
-        let accounts = switcher.accounts();
-        *LISTED.lock().unwrap_or_else(PoisonError::into_inner) = accounts;
-        Ok(())
-    });
+    menu().listed()
 }
 
 /// The pill's press: open (reading the list) or close.
@@ -93,16 +215,11 @@ pub fn toggle(_s: &mut State) {
 }
 
 fn toggle_open() {
-    let open = !OPEN.load(Ordering::SeqCst);
-    OPEN.store(open, Ordering::SeqCst);
-    say(None);
-    if open {
-        refresh();
-    }
+    menu().toggle(switcher());
 }
 
 fn close() {
-    OPEN.store(false, Ordering::SeqCst);
+    menu().open.store(false, Ordering::SeqCst);
 }
 
 /// The pill's key and the last item's: `rune` sends Return on a button and the arrows outside a group to the app.
@@ -155,43 +272,22 @@ fn first_item() -> String {
         .map_or_else(|| ADD.to_string(), |i| format!("switcher-account-{i}"))
 }
 
-/// One engine call on its own thread; one at a time. A refusal is shown in the list; the list is read again after.
-fn run_off_thread(name: &str, call: impl FnOnce() -> Result<(), String> + Send + 'static) {
-    if BUSY.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let started = std::thread::Builder::new().name(name.to_string()).spawn(move || {
-        let result = call();
-        if let Err(words) = result {
-            say(Some(words));
-        }
-        if let Some(switcher) = switcher() {
-            let accounts = switcher.accounts();
-            *LISTED.lock().unwrap_or_else(PoisonError::into_inner) = accounts;
-        }
-        BUSY.store(false, Ordering::SeqCst);
-    });
-    if started.is_err() {
-        BUSY.store(false, Ordering::SeqCst);
-        say(Some("Beebeeb could not do that just now. Try again.".to_string()));
-    }
-}
-
 fn switch_to(id: String) {
     let Some(switcher) = switcher() else { return };
-    close();
-    run_off_thread("account-switch", move || switcher.switch_to(&id));
+    menu().switch_to(switcher, id);
 }
 
 fn add_another() {
     let Some(switcher) = switcher() else { return };
     close();
-    run_off_thread("account-add", move || switcher.add_another());
+    menu().act("account-add", switcher, |switcher| switcher.add_another());
 }
 
 fn sign_out(id: String) {
     let Some(switcher) = switcher() else { return };
-    run_off_thread("account-sign-out-other", move || switcher.sign_out(&id));
+    menu().act("account-sign-out-other", switcher, move |switcher| {
+        switcher.sign_out(&id)
+    });
 }
 
 fn initials(email: &str) -> String {
@@ -209,7 +305,8 @@ pub fn panel(t: &Theme) -> Option<El> {
     if !is_open() || switcher().is_none() {
         return None;
     }
-    let busy = BUSY.load(Ordering::SeqCst);
+    // Only an action in flight holds the rows back: a read of the list never does (RC3-1).
+    let busy = menu().acting();
     let mut list = col()
         .key("switcher")
         .role("menu")
@@ -324,10 +421,18 @@ mod tests {
     use super::*;
 
     /// A credential store that answers slowly (as Windows' can): `accounts` waits until the test lets it go.
+    #[derive(Default)]
     struct SlowStore {
         open: Mutex<bool>,
         opened: std::sync::Condvar,
         switched: Mutex<Vec<String>>,
+    }
+
+    impl SlowStore {
+        fn let_go(&self) {
+            *self.open.lock().unwrap() = true;
+            self.opened.notify_all();
+        }
     }
 
     impl Switcher for SlowStore {
@@ -353,27 +458,58 @@ mod tests {
         }
     }
 
+    fn until(what: impl Fn() -> bool) -> bool {
+        let asked = std::time::Instant::now();
+        while !what() && asked.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        what()
+    }
+
     /// RC3-1 (c), rc3/f3b: the list was opened and "Switch to ..." pressed 1.3 s later; 142 s on, the old account,
     /// no dialog and no log line. Opening the list reads it off the window's thread, and while that read ran a press
-    /// on an account was dropped without a word. A press must reach the engine. (One process per test: the switcher
-    /// is installed once.)
+    /// on an account was dropped without a word (red at 63e293320). A press reaches the engine whatever the read does.
     #[test]
     fn rc3_a_press_on_an_account_while_the_list_is_read_reaches_the_engine() {
-        let store = Arc::new(SlowStore {
-            open: Mutex::new(false),
-            opened: std::sync::Condvar::new(),
-            switched: Mutex::new(Vec::new()),
-        });
-        install(store.clone());
-        toggle_open();
-        switch_to("a".to_string());
-        *store.open.lock().unwrap() = true;
-        store.opened.notify_all();
-        let pressed = std::time::Instant::now();
-        while store.switched.lock().unwrap().is_empty() && pressed.elapsed() < std::time::Duration::from_secs(5) {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert_eq!(*store.switched.lock().unwrap(), vec!["a".to_string()], "the press asked the engine to switch");
+        let (menu, store) = (Arc::new(Menu::default()), Arc::new(SlowStore::default()));
+        menu.toggle(Some(store.clone()));
+        assert!(
+            menu.is_open() && !menu.acting(),
+            "the list is open and its rows take a press while it is read"
+        );
+
+        menu.switch_to(store.clone(), "a".to_string());
+
+        assert!(
+            until(|| !store.switched.lock().unwrap().is_empty()),
+            "the press asked the engine to switch"
+        );
+        assert_eq!(*store.switched.lock().unwrap(), vec!["a".to_string()]);
+        assert!(!menu.is_open(), "and the list closed");
+
+        // The switch has not ended (its read of the list waits on the store): a second press is said, not dropped.
+        menu.switch_to(store.clone(), "a".to_string());
+        assert_eq!(menu.said().as_deref(), Some(STILL_WORKING));
+        assert!(menu.is_open(), "where the person reads it");
+        assert_eq!(store.switched.lock().unwrap().len(), 1, "and asked nothing twice");
+
+        store.let_go();
+        assert!(until(|| !menu.acting()), "the request ended");
+        assert_eq!(menu.listed().len(), 2, "and the list was read again");
+    }
+
+    /// rc3/f4: after a restart the first open showed no account at all (the list as last read: never). The press
+    /// that opens the list waits a moment for its read, so the accounts are there when the list is first drawn.
+    #[test]
+    fn rc3_the_list_is_read_by_the_time_it_is_first_drawn() {
+        let (menu, store) = (Arc::new(Menu::default()), Arc::new(SlowStore::default()));
+        store.let_go();
+        menu.toggle(Some(store.clone()));
+        assert_eq!(menu.listed().len(), 2, "the press that opened the list read it");
+        assert!(
+            menu.listed().iter().any(|account| !account.current),
+            "the other account is listed"
+        );
     }
 
     #[test]
