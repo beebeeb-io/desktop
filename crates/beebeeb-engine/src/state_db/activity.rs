@@ -140,6 +140,21 @@ impl StateDb {
         assert_eq!(rc, rusqlite::ffi::SQLITE_OK, "sqlite3_db_status");
         i64::from(current)
     }
+    /// RC4-1: is an upload queued and due (not waiting out a backoff, not paused, not given up)? One cheap
+    /// read for the status pulse, which asks once a second: a file queued for upload is work to report
+    /// from the moment it is queued, not only once its upload runs. [`Self::transfer_backlog`] gives the
+    /// counts (and leaves out an upload held with its folder).
+    pub fn upload_waiting(&self, now: i64) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operation_queue
+                           WHERE kind IN ('upload_file', 'upload_version')
+                             AND next_retry_at <= ?1
+                             AND paused_reason IS NULL AND attempts < max_attempts)",
+            params![now],
+            |row| row.get(0),
+        )?)
+    }
     /// What is waiting to transfer (see [`TransferBacklog`]). `now` is unix seconds: an upload whose
     /// retry time is still ahead of it is waiting out a backoff and does not count.
     pub fn transfer_backlog(&self, now: i64) -> Result<TransferBacklog> {

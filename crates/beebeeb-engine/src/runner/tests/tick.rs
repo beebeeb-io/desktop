@@ -81,6 +81,8 @@ fn a_good_tick_with_work_left_keeps_the_batch_going() {
     let link = crate::link_health::LinkMonitor::new();
     let tracker = StatusTracker::new(None);
     let payload = finish_tick_payload(&tracker, Ok(()), &link, 0, &db, &board).to_json();
+    assert_eq!(payload["state"], "syncing", "RC4-1: a file still to send is not `idle`");
+    assert_eq!(payload["legacy_state"], "idle");
     assert_eq!(payload["files_remaining"], 1);
     assert_eq!(payload["bytes_total"], 800, "500 finished + 300 still queued");
     assert_eq!(payload["bytes_done"], 500);
@@ -434,7 +436,6 @@ async fn the_real_pulse_emits_syncing_with_progress_then_idle_and_resets_the_bat
     let dir = tempfile::tempdir().unwrap();
     let db = status_db(dir.path());
     seed_file(&db, "f1", 100);
-    db.enqueue_operation(&upload_op("op-f1", "f1")).unwrap();
     let board = crate::transfer_progress::TransferBoard::new();
     let paused = Arc::new(AtomicBool::new(false));
     let (app, events) = status_recorder();
@@ -448,19 +449,28 @@ async fn the_real_pulse_emits_syncing_with_progress_then_idle_and_resets_the_bat
         paused,
     ));
 
-    // Quiet: nothing is moving, so nothing is emitted (and no DB work is done).
+    // Quiet: nothing is moving or waiting, so nothing is emitted.
     tokio::time::sleep(Duration::from_millis(1300)).await;
     assert!(events.lock().unwrap().is_empty(), "an idle engine emits nothing");
 
-    // A file starts moving: within a couple of pulses the UI hears `syncing`.
+    // RC4-1: a file is queued and its upload has not started: the UI hears `syncing` with nothing moved yet.
+    db.enqueue_operation(&upload_op("op-f1", "f1")).unwrap();
+    let queued = wait_for_event(&events, Duration::from_millis(3000), |e| e["state"] == "syncing")
+        .await
+        .expect("a `syncing` event while a file waits in the queue");
+    assert_eq!(queued["files_remaining"], 1);
+    assert_eq!(queued["bytes_done"], 0);
+
+    // The file starts moving: within a couple of pulses the UI hears the progress.
     let transfer = board.begin("f1", crate::transfer_progress::Direction::Up, 100);
     transfer.update(40);
-    let syncing = wait_for_event(&events, Duration::from_millis(3000), |e| e["state"] == "syncing")
-        .await
-        .expect("a `syncing` event while a file moves");
+    let syncing = wait_for_event(&events, Duration::from_millis(3000), |e| {
+        e["state"] == "syncing" && e["bytes_done"] == 40
+    })
+    .await
+    .expect("a `syncing` event while a file moves");
     assert_eq!(syncing["files_remaining"], 1);
     assert_eq!(syncing["bytes_total"], 100);
-    assert_eq!(syncing["bytes_done"], 40);
     assert_eq!(syncing["legacy_state"], "idle");
 
     // It finishes and leaves the queue: the pulse says `idle` and ends the batch.
