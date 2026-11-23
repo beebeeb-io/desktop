@@ -2,9 +2,11 @@
 //!
 //! Ctrl+C asks the editor for the selection (`copy_selection`); the answer, text and HTML, arrives through the
 //! source's poll into `EditUi.clip` and [`flush_clip`] writes it with `Tx::copy_rich`. Ctrl+X asks the same and then
-//! sends `Delete`. Ctrl+V reads the clipboard and sends `Paste`: plain text only in 0.9.0, even when the clipboard
+//! sends `Delete` once the copy is on the clipboard. Ctrl+V reads the clipboard and sends `Paste`: plain text only in 0.9.0, even when the clipboard
 //! also holds HTML.
 #![allow(dead_code)]
+
+use std::cell::Cell;
 
 use beebeeb_office_protocol::check::MAX_OP_TEXT_BYTES;
 use beebeeb_office_protocol::office::{EditKind, EditOp};
@@ -16,6 +18,17 @@ use crate::frames::viewers::{self, Ui};
 
 /// What the person is told when a paste is over what one edit can carry.
 pub const PASTE_TOO_LARGE: &str = "That is too much to paste at once. Paste it in smaller pieces.";
+
+thread_local! {
+    /// A cut whose copy answer has not come yet. The `Delete` goes from [`flush_clip`], and only when the answer
+    /// put text on the clipboard.
+    static CUT_PENDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The copy was refused (too large): the cut that waited on it removes nothing.
+pub fn cancel_cut() {
+    CUT_PENDING.with(|c| c.set(false));
+}
 
 /// A clipboard key. `false`: not taken. Called first by each surface's `on_key`.
 pub fn on_clip_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
@@ -35,17 +48,16 @@ pub fn on_clip_key(s: &mut State, tx: &mut Tx, ev: &KeyEvent) -> bool {
     tx.instant();
     match chord {
         'c' => {
+            cancel_cut();
             ask_copy(ui);
         }
         'x' => {
             // Never delete what was not asked for: a cut whose copy was not taken removes nothing. In a document an
             // empty selection is a caret, and Delete would remove the next character; cells and shapes have no
             // selection rectangles to look at.
-            if ask_copy(ui) && (kind != EditKind::Docx || has_selection) {
-                let (source, id) = ui.edit_source();
-                let id = id.to_string();
-                source.edit(&id, EditOp::Delete { back: false, word: false });
-            }
+            // The `Delete` waits for the answer: `flush_clip` sends it once the text is on the clipboard.
+            let asked = ask_copy(ui) && (kind != EditKind::Docx || has_selection);
+            CUT_PENDING.with(|c| c.set(asked));
         }
         _ => tx.read_clipboard(paste),
     }
@@ -80,6 +92,14 @@ pub fn flush_clip(s: &mut State, tx: &mut Tx) -> bool {
     }
     text.zeroize();
     html.zeroize();
+    // An empty answer means nothing was taken, so a waiting cut is dropped, not run.
+    if CUT_PENDING.with(|c| c.replace(false)) && written {
+        if let Some(ui) = viewers::ui(s) {
+            let (source, id) = ui.edit_source();
+            let id = id.to_string();
+            source.edit(&id, EditOp::Delete { back: false, word: false });
+        }
+    }
     written
 }
 
