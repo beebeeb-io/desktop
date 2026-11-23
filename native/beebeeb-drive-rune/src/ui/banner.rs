@@ -98,9 +98,16 @@ pub struct Banner<'a> {
 pub fn runs_line(key: &str, figure: &str, runs: &[Run], words: TextStyle, figures: TextStyle, ink: Color) -> El {
     let box_key = format!("{key}-box");
     kit::note_text(key, &box_key, &sentence(runs), words, ink);
-    // One text element named with the whole sentence (UIA text); the runs inside stay out of
-    // the tree so the sentence is not read twice or in pieces.
-    let mut line = row().key(box_key).role("text").label(sentence(runs)).items_center();
+    // One text element holding the whole sentence; the runs inside stay out of the tree so the
+    // sentence is not read twice or in pieces. A text element's UIA Name is its VALUE (AccessKit
+    // `label_comes_from_value`), and Rune sets that only from the element's own text or
+    // `a11y_value`; a label alone leaves the Text with no Name (RC2-15b missed this).
+    let mut line = row()
+        .key(box_key)
+        .role("text")
+        .label(sentence(runs))
+        .a11y_value(sentence(runs))
+        .items_center();
     let mut n = 0;
     for (i, run) in runs.iter().enumerate() {
         line = line.child(match run {
@@ -224,6 +231,15 @@ mod tests {
         let mut all = Vec::new();
         walk(&tree, &mut all);
         let sentence = "Rebuilt at 14:02 from your files.";
+        // What Windows UIA reads: a Text's Name is its value, so check the raw nodes, not the
+        // dump's name (which falls back to the label and hid this in RC2-15b).
+        let raw = rt.accessibility_tree();
+        let texts: Vec<_> = raw
+            .nodes
+            .iter()
+            .filter(|(_, n)| format!("{:?}", n.role()) == "Label" && n.value() == Some(sentence))
+            .collect();
+        assert_eq!(texts.len(), 1, "exactly one Text node holds the sentence as its value");
         let named: Vec<_> = all.iter().filter(|n| n["label"] == sentence || n["name"] == sentence).collect();
         assert!(
             named.iter().any(|n| n["role"] != "status"),
