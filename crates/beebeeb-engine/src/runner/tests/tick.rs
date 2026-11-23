@@ -315,6 +315,119 @@ fn the_pulses_activity_counts_an_upload_that_is_due_and_not_one_in_retry_backoff
     );
 }
 
+/// RC4-1 (VM 401: 18 files copied into the folder root, "Up to date" at 129 of 134 polls). The status line says
+/// "Up to date" for an engine that reports `idle`. The scan queues the copied files at once; their uploads start at
+/// the next tick, up to 30 s later. All that time the engine must report `syncing` with the count, and `idle` only
+/// when the last one has left the queue. Sampled here as the pulse does, once a second, before any tick or upload.
+#[test]
+fn status_is_syncing_from_the_scan_that_queued_copied_files_until_the_last_is_sent() {
+    let temp = tempfile::tempdir().unwrap();
+    let sync_root = temp.path().join("sync-root");
+    let state_dir = temp.path().join("state");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let db = status_db(&state_dir);
+    let api = Arc::new(crate::api_client::ApiClient::new(
+        "https://api.beebeeb.io".into(),
+        "token".into(),
+        [17u8; 32],
+    ));
+    let bridge = EngineBridge::new(&crate::identity::TEST, db.clone(), api);
+    let board = crate::transfer_progress::TransferBoard::new();
+    let link = crate::link_health::LinkMonitor::new();
+    let tracker = StatusTracker::new(None);
+    // A finished check with nothing to do: the engine says `idle` ("Up to date"), and the pulse is quiet.
+    assert_eq!(
+        finish_tick_payload(&tracker, Ok(()), &link, 0, &db, &board).to_json()["state"],
+        "idle"
+    );
+    assert_eq!(status_pulse_once(&tracker, &db, &board, false), None);
+
+    for n in 0..18 {
+        std::fs::write(sync_root.join(format!("copied-{n}.txt")), format!("file {n}")).unwrap();
+    }
+    crate::watcher::run_one_scan(&bridge, &sync_root);
+    assert_eq!(
+        db.list_due_operations(i64::MAX).unwrap().len(),
+        18,
+        "the scan queued all 18"
+    );
+
+    // No tick has run and no upload has started: nothing is on the board.
+    assert!(board.active().is_empty());
+    let queued = status_pulse_once(&tracker, &db, &board, false)
+        .expect("the pulse after the scan reports the queued files")
+        .to_json();
+    assert_eq!(queued["state"], "syncing", "18 files wait to be sent: not `idle`");
+    assert_eq!(queued["files_remaining"], 18);
+    // It keeps saying so on every look while they wait.
+    let still = status_pulse_once(&tracker, &db, &board, false)
+        .expect("still queued")
+        .to_json();
+    assert_eq!(still["state"], "syncing");
+
+    // A check that finishes while files still wait does not say `idle` either.
+    let after_tick = finish_tick_payload(&tracker, Ok(()), &link, 0, &db, &board).to_json();
+    assert_eq!(
+        after_tick["state"], "syncing",
+        "a good check with 18 files left is not `idle`"
+    );
+    assert_eq!(after_tick["files_remaining"], 18);
+    assert!(
+        after_tick["last_tick_ok_at"].as_i64().unwrap() > 0,
+        "the check still stamps its time"
+    );
+    assert_eq!(
+        status_pulse_once(&tracker, &db, &board, false)
+            .expect("still queued")
+            .to_json()["state"],
+        "syncing"
+    );
+
+    // All but one sent: still `syncing`. The last one leaves the queue: `idle` once, then quiet.
+    let ops = db.list_due_operations(i64::MAX).unwrap();
+    for op in &ops[1..] {
+        db.remove_operation(&op.op_id).unwrap();
+    }
+    let one_left = status_pulse_once(&tracker, &db, &board, false)
+        .expect("one left")
+        .to_json();
+    assert_eq!(one_left["state"], "syncing");
+    assert_eq!(one_left["files_remaining"], 1);
+    db.remove_operation(&ops[0].op_id).unwrap();
+    let done = status_pulse_once(&tracker, &db, &board, false)
+        .expect("the last file sent is reported")
+        .to_json();
+    assert_eq!(done["state"], "idle");
+    assert_eq!(done["files_remaining"], 0);
+    assert_eq!(status_pulse_once(&tracker, &db, &board, false), None);
+}
+
+/// RC4-1: a queued upload that waits out a backoff, and a paused engine, do not read as `syncing`.
+#[test]
+fn status_is_not_syncing_for_an_upload_that_waits_out_a_backoff_or_while_paused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = status_db(dir.path());
+    seed_file(&db, "f1", 100);
+    let mut backing_off = upload_op("op-f1", "f1");
+    backing_off.attempts = 1;
+    backing_off.next_retry_at = i64::MAX;
+    db.enqueue_operation(&backing_off).unwrap();
+    let board = crate::transfer_progress::TransferBoard::new();
+    let tracker = StatusTracker::new(None);
+    tracker.finish_tick(&crate::engine_status::Outcome::Synced, 1, Activity::default());
+    assert_eq!(status_pulse_once(&tracker, &db, &board, false), None);
+
+    seed_file(&db, "f2", 100);
+    db.enqueue_operation(&upload_op("op-f2", "f2")).unwrap();
+    let paused = status_pulse_once(&tracker, &db, &board, true).expect("the pause is reported");
+    assert_eq!(paused.state, crate::engine_status::State::Paused);
+    assert_eq!(status_pulse_once(&tracker, &db, &board, true), None);
+    // Resumed with one file due: `syncing` at the next look.
+    let resumed = status_pulse_once(&tracker, &db, &board, false).expect("one file is due");
+    assert_eq!(resumed.state, crate::engine_status::State::Syncing);
+}
+
 #[cfg(not(target_os = "windows"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_real_pulse_emits_syncing_with_progress_then_idle_and_resets_the_batch() {

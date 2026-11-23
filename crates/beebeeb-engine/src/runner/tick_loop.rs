@@ -180,11 +180,8 @@ pub(super) async fn run_status_pulse(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
-        let transfer_in_flight = !transfers.active().is_empty();
         let paused = sync_paused.load(Ordering::Relaxed) || crate::power::current().is_some();
-        let payload = tracker.pulse(paused, transfer_in_flight, || {
-            current_activity(&db, &transfers)
-        });
+        let payload = status_pulse_once(&tracker, &db, &transfers, paused);
         if let Some(payload) = payload {
             let going_quiet = payload.state == crate::engine_status::State::Idle;
             emit_payload(&app, payload);
@@ -194,6 +191,17 @@ pub(super) async fn run_status_pulse(
             }
         }
     }
+}
+
+/// One look of the pulse: the event to emit, if the picture changed.
+pub(super) fn status_pulse_once(
+    tracker: &StatusTracker,
+    db: &StateDb,
+    transfers: &crate::transfer_progress::TransferBoard,
+    paused: bool,
+) -> Option<crate::engine_status::StatusPayload> {
+    let transfer_in_flight = !transfers.active().is_empty();
+    tracker.pulse(paused, transfer_in_flight, || current_activity(db, transfers))
 }
 
 /// Publish the loop's current high-level engine state to the shared telemetry
