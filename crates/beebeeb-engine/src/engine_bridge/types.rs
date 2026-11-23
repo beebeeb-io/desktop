@@ -849,6 +849,9 @@ pub struct SyncTickOutcome {
     /// (`AuthHealth::note_tick`): only an HTTP 401 answer there is a refusal, so a run of refused ticks closes the
     /// vault; offline or a 5xx is a failure that proves nothing about the session.
     pub pull_failure: Option<anyhow::Error>,
+    /// RC3-4: files the rebuilt-`state.db` check agreed this tick (`check_after_rebuild`). They leave the "not
+    /// checked yet" row, so the runner counts the tick as one that changed what the windows list.
+    pub rebuilt_agreed: usize,
 }
 
 /// Drop duplicate ids from one tick's applied batch (an item can be applied

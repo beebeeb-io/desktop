@@ -214,9 +214,11 @@ pub async fn sync_tick_outcome(
     bridge: &EngineBridge,
     sync_root: &Path,
 ) -> anyhow::Result<SyncTickOutcome> {
-    let outcome = sync_tick_pull(bridge, sync_root).await?;
+    let mut outcome = sync_tick_pull(bridge, sync_root).await?;
     if outcome.reached_server {
-        bridge.check_after_rebuild(sync_root).await;
+        // RC3-4: files agreed here leave the "not checked yet" row; the runner counts the tick as a change so the
+        // windows read their lists again (not only at the next slow refresh).
+        outcome.rebuilt_agreed = bridge.check_after_rebuild(sync_root).await.agreed;
     }
     Ok(outcome)
 }
@@ -331,6 +333,7 @@ async fn sync_tick_pull(
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: true,
                 pull_failure: None,
+                rebuilt_agreed: 0,
             });
         }
         Some(c) if needs_resnapshot => {
@@ -354,6 +357,7 @@ async fn sync_tick_pull(
                         applied_item_ids: dedupe(applied_item_ids),
                         reached_server: true,
                         pull_failure: None,
+                        rebuilt_agreed: 0,
                     });
                 }
                 Err(e) => after_failed_snapshot(bridge, c, e.into())?,
@@ -377,6 +381,7 @@ async fn sync_tick_pull(
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: false,
                 pull_failure: Some(e),
+                rebuilt_agreed: 0,
             });
         }
     };
@@ -392,6 +397,7 @@ async fn sync_tick_pull(
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: true,
                 pull_failure: None,
+                rebuilt_agreed: 0,
             });
         }
         // `now_secs` (captured at tick start) is the prune freshness cutoff: it
@@ -424,6 +430,7 @@ async fn sync_tick_pull(
             applied_item_ids: dedupe(applied_item_ids),
             reached_server: true,
             pull_failure: None,
+            rebuilt_agreed: 0,
         });
     }
 
@@ -492,6 +499,7 @@ async fn sync_tick_pull(
         applied_item_ids: dedupe(applied_item_ids),
         reached_server: true,
         pull_failure: None,
+        rebuilt_agreed: 0,
     })
 }
 

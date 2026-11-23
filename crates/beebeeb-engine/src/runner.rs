@@ -929,6 +929,7 @@ async fn run(
                         let mut tick_changed = !tick.applied_item_ids.is_empty()
                             || completed_sync_work > 0
                             || !tick.conflicts.is_empty()
+                            || tick.rebuilt_agreed > 0
                             || shared_roots_changed;
                         enforce_cache_budget(&app, &bridge, &mut quota_warning_notifications);
 

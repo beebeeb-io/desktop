@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use beebeeb_engine::api_client::ApiClient;
-use beebeeb_engine::engine_bridge::{EngineBridge, sync_tick};
+use beebeeb_engine::engine_bridge::{EngineBridge, sync_tick, sync_tick_outcome};
 use beebeeb_engine::local_state::{REBUILT_CHECK_FILENAME, RebuiltCheck, StateDbCheck, move_corrupt_state_db_aside};
 use beebeeb_engine::state_db::{OperationKind, StateDb};
 use beebeeb_engine::state_paths::STATE_DIR_OVERRIDE;
@@ -197,4 +197,41 @@ async fn after_rebuild_a_changed_file_stays_held_and_nothing_is_overwritten() {
     assert_eq!(r.account.item_version(FILE), before, "the account's version is kept");
     let owed = RebuiltCheck::read(&state_dir).unwrap().expect("owed");
     assert!(owed.differing.contains(FILE), "not downloaded again");
+}
+
+/// RC3-4: the tick that agrees a rebuilt file reports it, so the runner counts that tick as a change and the windows
+/// read their lists again: "not checked yet" reaches 0 on screen, not only at the next slow refresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuilt_check_agreeing_files_is_reported_as_a_change_and_the_unchecked_row_clears() {
+    let r = rebuilt(SERVER_BYTES).await;
+    let state_dir = r.state_dir.clone();
+    in_state(&state_dir, async {
+        scan(&r);
+        assert_eq!(r.bridge.db.held_edit_overview(5).unwrap().unchecked, 1, "not checked yet");
+
+        let tick = sync_tick_outcome(&r.bridge, &r.sync_root).await.unwrap();
+        assert_eq!(
+            tick.rebuilt_agreed, 1,
+            "the check agreed the file: this tick changed what the windows list"
+        );
+        assert_eq!(r.bridge.db.held_edit_overview(5).unwrap().unchecked, 0, "0 not checked yet");
+
+        let quiet = sync_tick_outcome(&r.bridge, &r.sync_root).await.unwrap();
+        assert_eq!(quiet.rebuilt_agreed, 0, "nothing left to agree: a quiet tick");
+    })
+    .await;
+}
+
+/// RC3-4: a file found different stays held (still "not checked yet"): the tick is not counted as a change.
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuilt_check_finding_a_file_different_is_not_a_change() {
+    let r = rebuilt(b"changed on this PC").await;
+    let state_dir = r.state_dir.clone();
+    in_state(&state_dir, async {
+        scan(&r);
+        let tick = sync_tick_outcome(&r.bridge, &r.sync_root).await.unwrap();
+        assert_eq!(tick.rebuilt_agreed, 0);
+        assert_eq!(r.bridge.db.held_edit_overview(5).unwrap().unchecked, 1, "still held");
+    })
+    .await;
 }
