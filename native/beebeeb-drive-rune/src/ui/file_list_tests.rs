@@ -70,7 +70,7 @@ fn board_stamp_keeps_yesterday_and_the_weekday_on_any_day() {
 fn file_list_rc2_name_keeps_its_floor_at_125_with_details() {
     const W150_LIST_W: f32 = 520.0;
     // The floor is at least 20 characters of the 13 pt name beside its tile.
-    assert!(NAME_MIN_W >= 22.0 + 8.0 + 20.0 * 7.0);
+    const { assert!(NAME_MIN_W >= 22.0 + 8.0 + 20.0 * 7.0) };
     let fit = Fit::of(Some(W150_LIST_W));
     assert!(
         fit.name_w(W150_LIST_W) >= NAME_MIN_W,

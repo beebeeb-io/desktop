@@ -441,7 +441,7 @@ fn status_sending_counts_waiting_and_moving_rows_not_stopped_ones() {
         while engine.reads.load(Ordering::SeqCst) == 0 && start.elapsed() < WAIT {
             std::thread::sleep(Duration::from_millis(5));
         }
-        take_until(&mut calls, |c| c.sending() == sending || sending == false);
+        take_until(&mut calls, |c| c.sending() == sending || !sending);
         std::thread::sleep(Duration::from_millis(50));
         calls.take();
         assert_eq!(calls.sending(), sending);
