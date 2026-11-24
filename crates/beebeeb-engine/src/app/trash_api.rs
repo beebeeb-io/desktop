@@ -52,7 +52,7 @@ impl std::fmt::Debug for TrashListing {
 
 #[cfg(test)]
 #[path = "trash_api_tests.rs"]
-mod tests;
+mod local_mark_tests;
 
 impl<C: CredentialStores> Engine<C> {
     /// Every item in the account's Trash (`GET /api/v1/files?trashed=true`, every page), from the server only, for
