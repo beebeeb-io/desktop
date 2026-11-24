@@ -735,6 +735,9 @@ pub(super) fn held_only_for_kept(db: &StateDb, sync_root: &Path, dir: &Path, dep
     true
 }
 
+/// How far past the server's own time a row's time must sit before it is read as this PC's op-echo stamp.
+const STAMPED_NOW_GAP_SECS: i64 = 86_400;
+
 /// Apply one server metadata row during [`sync_tick`]'s recursive walk,
 /// running the same three-way decision the flat sweep used (new → cloud_only;
 /// local + remote-moved → conflict check; otherwise refresh metadata). On
@@ -872,8 +875,11 @@ pub(super) fn process_metadata_row(
                         // later than the server's own. The snapshot is the server's word: a row whose time is that
                         // stamp (no local write moved `modified_at` off it) takes the server's time, so the window
                         // shows the real date, not "Just now".
+                        // Only a stamp days away from the server's time is corrected: a snapshot at a slightly
+                        // older time is the time rule's skip and leaves the row as it is.
                         if remote_updated > 0
-                            && remote_updated < entry.remote_updated_at
+                            && f["is_uploading"].as_bool() != Some(true)
+                            && entry.remote_updated_at - remote_updated > STAMPED_NOW_GAP_SECS
                             && entry.modified_at == entry.remote_updated_at
                         {
                             let mut corrected = entry.clone();
