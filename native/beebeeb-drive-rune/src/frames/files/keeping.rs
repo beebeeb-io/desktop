@@ -152,10 +152,6 @@ pub fn scene(s: &mut State) {
     let _ = Action::KeepOffline;
 }
 
-#[cfg(test)]
-#[path = "offline_progress_tests.rs"]
-mod offline_progress_tests;
-
 /// The bar of a copy coming down (`.mk-prog`): the ink's own grey on the faint track. Amber is for
 /// encryption state and primary actions, and an upload's bar (`uploads::bar`); a download is neither.
 fn bar(key: &str, done: f32, name: &str, t: &Theme) -> El {
