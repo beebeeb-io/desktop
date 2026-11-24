@@ -23,11 +23,11 @@ use super::removal::{self, DomainRemoval, KeptFolder, RemovalFailure};
 /// How long the removal and the launch read wait for a busy gate: long enough for a call that is merely in flight
 /// (a working-set signal, the sweep) to return, short enough that a stuck `fileproviderd` still ends in a `timeout`.
 /// Inside the operation's own limit (`op_limit`: 10 s for `Observe`, 15 s for `RemoveDomain`).
-pub(super) const BRIDGE_GATE_WAIT: Duration = Duration::from_secs(3);
+pub(crate) const BRIDGE_GATE_WAIT: Duration = Duration::from_secs(3);
 
 /// The File Provider calls the reconciler makes. The real one is [`SystemBridge`]; tests put a fake here, so no test
 /// makes an FFI call. The caller holds the process-wide gate around each call.
-pub(super) trait FpBridge: Send + Sync + 'static {
+pub(crate) trait FpBridge: Send + Sync + 'static {
     fn add_domain(&self) -> Result<(), FpError>;
     fn domain_state(&self) -> Result<DomainState, FpError>;
     fn wait_for_domain_ready(&self, timeout: Duration) -> Result<(), FpError>;
@@ -37,7 +37,7 @@ pub(super) trait FpBridge: Send + Sync + 'static {
 }
 
 /// The real bridge.
-pub(super) struct SystemBridge;
+pub(crate) struct SystemBridge;
 
 impl FpBridge for SystemBridge {
     fn add_domain(&self) -> Result<(), FpError> {
@@ -58,7 +58,7 @@ impl FpBridge for SystemBridge {
 /// stop are NOT cut off by the ports (a future dropped after an engine spawned loses its `started` answer, and one
 /// dropped after it left its slot detaches the engine with the session's keys): `limit` bounds the wait for the slot
 /// inside the host.
-pub(super) trait FpHost: Send + Sync + 'static {
+pub(crate) trait FpHost: Send + Sync + 'static {
     fn vault_unlocked(&self) -> bool;
     fn auth_present(&self) -> bool;
     fn removal_owed(&self) -> bool;
@@ -80,21 +80,20 @@ pub(super) trait FpHost: Send + Sync + 'static {
 
 /// The macOS `Ports`: runs each `Op` against the bridge (through the one process-wide gate), the engine slot, the
 /// lifecycle log and the settings file. It decides nothing.
-pub(super) struct MacosPorts<H: FpHost, B: FpBridge> {
+pub(crate) struct MacosPorts<H: FpHost, B: FpBridge> {
     host: Arc<H>,
     bridge: Arc<B>,
     gate_wait: Duration,
 }
 
 impl<H: FpHost> MacosPorts<H, SystemBridge> {
-    #[allow(dead_code)] // dm-31's wiring
-    pub(super) fn new(host: Arc<H>) -> Self {
+    pub(crate) fn new(host: Arc<H>) -> Self {
         Self::with_bridge(host, Arc::new(SystemBridge), BRIDGE_GATE_WAIT)
     }
 }
 
 impl<H: FpHost, B: FpBridge> MacosPorts<H, B> {
-    pub(super) fn with_bridge(host: Arc<H>, bridge: Arc<B>, gate_wait: Duration) -> Self {
+    pub(crate) fn with_bridge(host: Arc<H>, bridge: Arc<B>, gate_wait: Duration) -> Self {
         Self {
             host,
             bridge,

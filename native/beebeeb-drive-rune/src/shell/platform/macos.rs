@@ -17,7 +17,7 @@ mod autostart;
 #[path = "macos_tray.rs"]
 mod tray;
 #[path = "macos_fp/mod.rs"]
-mod macos_fp;
+pub(crate) mod macos_fp;
 
 pub struct MacPlatform;
 

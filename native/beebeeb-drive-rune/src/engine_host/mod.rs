@@ -45,6 +45,7 @@ use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary
 pub mod account;
 mod app_lock;
 mod away;
+mod finder_setup;
 mod drive_errors;
 use drive_errors::{map_drive_err, map_new_file_err};
 pub mod backups;
@@ -442,6 +443,7 @@ impl<C: CredentialStores> LiveEngine<C> {
     /// until they end ([`EngineActions::session`]).
     pub fn wire_first_run(&self) {
         self.first_run.read(&*self.engine);
+        finder_setup::start(self.engine.clone(), self.identity);
     }
 
     /// What the first-run source asks of the shell: the one start path, the folder opener, the start-at-login

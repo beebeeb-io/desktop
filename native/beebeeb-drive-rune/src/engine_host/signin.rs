@@ -174,6 +174,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
         let started = thread::Builder::new().name("signin".into()).spawn(move || {
             for job in queue {
                 job(&for_worker);
+                super::finder_setup::session_changed();
             }
         });
         if started.is_err() {

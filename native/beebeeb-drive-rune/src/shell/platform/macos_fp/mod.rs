@@ -5,12 +5,10 @@
 //! error text.
 
 pub(crate) mod bridge;
-#[allow(dead_code)] // started by dm-31's wiring
-mod lifecycle_log;
+pub(crate) mod lifecycle_log;
 mod open;
-#[allow(dead_code)] // wired by dm-31
-mod ports;
-mod removal;
+pub(crate) mod ports;
+pub(crate) mod removal;
 
 use beebeeb_engine::file_provider_port::{FileProviderPort, WorkingSetSignalOutcome};
 use beebeeb_engine::finder_setup::error::FpError;

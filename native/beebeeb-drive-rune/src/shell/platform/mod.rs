@@ -20,7 +20,7 @@ pub mod packet_text;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 #[cfg(target_os = "macos")]
 mod macos_panels;
 #[cfg(windows)]
