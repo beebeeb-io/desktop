@@ -500,6 +500,7 @@ impl BoardSettings {
         self
     }
 
+    #[cfg(test)]
     pub fn with_notes_closed(mut self) -> Self {
         self.notes_closed = true;
         self

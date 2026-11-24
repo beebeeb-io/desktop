@@ -954,6 +954,7 @@ pub(crate) fn refused(refusal: Refusal) -> &'static str {
 
 /// The channel this build was cut on (`BEEBEEB_RELEASE_CHANNEL`, set by the release workflow from its channel
 /// input), when it names one. A fresh install of an alpha build starts on alpha, a beta one on beta.
+#[cfg(all(windows, not(test)))]
 fn built_channel() -> Option<ReleaseChannel> {
     parse_built(option_env!("BEEBEEB_RELEASE_CHANNEL"))
 }
@@ -971,10 +972,10 @@ fn parse_built(word: Option<&str>) -> Option<ReleaseChannel> {
 /// channel is a fresh install (no update has ever been handed off): it follows the channel the build was cut on
 /// (`built`), as [`seed_first_run`] writes it down.
 fn channels(config: Option<&DesktopConfig>, built: Option<ReleaseChannel>) -> (Channel, Channel) {
-    if let (Some(built), Some(config)) = (built, config) {
-        if config.installed_release_channel.is_none() {
-            return (channel_of(built), channel_of(built));
-        }
+    if let (Some(built), Some(config)) = (built, config)
+        && config.installed_release_channel.is_none()
+    {
+        return (channel_of(built), channel_of(built));
     }
     let chosen = config.map_or(ReleaseChannel::Stable, |config| config.release_channel);
     let from = config
