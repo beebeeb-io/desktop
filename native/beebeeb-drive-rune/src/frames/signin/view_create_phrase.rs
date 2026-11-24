@@ -335,7 +335,8 @@ pub fn ready(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             beebeeb_engine::device_word!(),
             "; the other apps can continue as {}."
         ),
-        first_name(email)
+        first_name(email),
+        email = email
     );
     au::column()
         .child(au::hero_tile(&icons::CHECK, Tone::Green, 0.0, t))

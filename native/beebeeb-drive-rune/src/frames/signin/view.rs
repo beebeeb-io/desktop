@@ -667,11 +667,14 @@ fn approved(by: &str, k: &mut Keys, t: &Theme) -> El {
         .child(au::hero_tile(&icons::CHECK, Tone::Green, 8.0, t))
         .child(au::heading(
             "Approved",
-            Some(&format!(concat!(
-                "{by} approved ",
-                beebeeb_engine::device_word!(),
-                ". Drive is opening with your account. Nothing was typed, and your password stayed with you."
-            ))),
+            Some(&format!(
+                concat!(
+                    "{by} approved ",
+                    beebeeb_engine::device_word!(),
+                    ". Drive is opening with your account. Nothing was typed, and your password stayed with you."
+                ),
+                by = by
+            )),
             true,
             t,
         ))
@@ -707,11 +710,14 @@ fn denied(by: &str, k: &mut Keys, t: &Theme) -> El {
         .child(au::hero_tile(&icons::CROSS, Tone::Neutral, 8.0, t))
         .child(au::heading(
             "Denied",
-            Some(&format!(concat!(
-                "{by} said no. Nothing was signed in on ",
-                beebeeb_engine::device_word!(),
-                ", and no keys were shared."
-            ))),
+            Some(&format!(
+                concat!(
+                    "{by} said no. Nothing was signed in on ",
+                    beebeeb_engine::device_word!(),
+                    ", and no keys were shared."
+                ),
+                by = by
+            )),
             true,
             t,
         ))

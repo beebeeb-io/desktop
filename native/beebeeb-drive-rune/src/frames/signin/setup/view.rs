@@ -77,14 +77,19 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
             (step.label(), state)
         })
         .collect();
-    let adding_words = format!(concat!(
-        "Adding {name} to ",
-        beebeeb_engine::file_manager!(),
-        "\u{2026}"
-    ));
-    let added_words = format!(concat!("{name} is in ", beebeeb_engine::file_manager!()));
-    let failed_words = format!(concat!("Couldn't add {name} to ", beebeeb_engine::file_manager!()));
-    let not_yet_words = format!(concat!("{name} isn't in ", beebeeb_engine::file_manager!(), " yet"));
+    let adding_words = format!(
+        concat!("Adding {name} to ", beebeeb_engine::file_manager!(), "\u{2026}"),
+        name = name
+    );
+    let added_words = format!(concat!("{name} is in ", beebeeb_engine::file_manager!()), name = name);
+    let failed_words = format!(
+        concat!("Couldn't add {name} to ", beebeeb_engine::file_manager!()),
+        name = name
+    );
+    let not_yet_words = format!(
+        concat!("{name} isn't in ", beebeeb_engine::file_manager!(), " yet"),
+        name = name
+    );
     let status = match &ui.explorer {
         // Nothing is being added while no folder is chosen, or where nothing adds one.
         _ if ui.asks_folder() || !ui.available(Step::Explorer) => Status {
@@ -393,11 +398,10 @@ fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         false,
         t,
     )
-    .label(format!(concat!(
-        "Space on ",
-        beebeeb_engine::device_word!(),
-        ", {limit}"
-    )));
+    .label(format!(
+        concat!("Space on ", beebeeb_engine::device_word!(), ", {limit}"),
+        limit = limit
+    ));
     setup::column()
         .child(au::heading("Thumbnails and previews", Some(PREVIEWS_SUB), false, t))
         .child(preview_card(ui, t))
