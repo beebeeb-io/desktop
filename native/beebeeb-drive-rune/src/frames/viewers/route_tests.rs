@@ -522,10 +522,10 @@ fn a_text_a_source_cannot_save_does_not_name_the_edit_key() {
         route_to_file(&mut rt);
         drawn(&rt)
     };
-    assert!(hint(false).contains("Ctrl+E to edit"));
+    assert!(hint(false).contains(&beebeeb_engine::os_words::for_this_os("Ctrl+E to edit")));
     let read_only = hint(true);
     assert!(read_only.contains(text::READ_ONLY_HINT), "{read_only}");
-    assert!(!read_only.contains("Ctrl+E to edit"), "{read_only}");
+    assert!(!read_only.contains(&beebeeb_engine::os_words::for_this_os("Ctrl+E to edit")), "{read_only}");
 }
 
 #[test]

@@ -484,7 +484,11 @@ pub fn column_headers(s: &State, t: &Theme) -> Option<El> {
         Column::new("date", date, Width::Fixed(COL_DATE_W)),
         Column::new("size", "Size", Width::Fixed(COL_SIZE_W)).align(Align::End),
         Column::new("shared", shared, Width::Fixed(shared_w)),
-        Column::new("pc", "PC", Width::Fixed(COL_PC_W))
+        Column::new(
+            "pc",
+            if cfg!(target_os = "macos") { "Mac" } else { "PC" },
+            Width::Fixed(COL_PC_W),
+        )
             .align(Align::Center)
             .spoken(concat!("On ", beebeeb_engine::device_word!())),
     ];
