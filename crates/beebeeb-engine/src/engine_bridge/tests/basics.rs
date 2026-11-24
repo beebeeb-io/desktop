@@ -49,6 +49,9 @@ fn relative_db_path_is_slash_joined_without_leading_slash() {
 fn test_temp_file_filter_covers_editor_and_system_names() {
     for name in [
         ".DS_Store",
+        "desktop.ini",
+        "Desktop.INI",
+        "Thumbs.db",
         "._report.pdf",
         "~$budget.xlsx",
         "draft.txt~",

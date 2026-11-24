@@ -555,7 +555,7 @@ use landing::*;
 pub use landing::{finder_staging_candidates, keep_both_name};
 mod staging_bases;
 pub use landing::{
-    FinderWriteItemKind, FinderWriteOutcome, FinderWriteTarget, VersionConflictEntry, is_ignored_finder_name,
+    FinderWriteItemKind, FinderWriteOutcome, FinderWriteTarget, VersionConflictEntry, is_ignored_finder_name, is_system_file_name,
     version_conflict_feed_from_db,
 };
 pub use staging_bases::FinderStagingBases;
