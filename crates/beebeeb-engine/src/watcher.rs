@@ -219,8 +219,16 @@ pub(crate) fn run_scan(
         // vault mirrors the on-disk `Backup/<device>/<folder>/<sub>` hierarchy
         // (task 0811 — without this, nested files uploaded FLAT to the root).
         // Idempotent: `ensure_local_folder` returns the existing id on later scans.
-        |dir_path: &std::path::Path, _stamp: &DiskStamp| {
+        |dir_path: &std::path::Path, stamp: &DiskStamp| {
             visited.set(visited.get() + 1);
+            // RE-e (11-24: 12 POST /files/folder on prod right after the first load): a Cloud Files placeholder
+            // folder was minted by the engine from a server row, so it is never a new local folder, even while no
+            // row is found at its path (the first pull still writing, a remote rename or a prune not reconciled
+            // yet, a name that differs only in case). Only a plain folder, one made on this PC, is created.
+            if is_placeholder_dir(dir_path, stamp) {
+                tracing::debug!("enumeration scan: a folder from the server (placeholder); not created again");
+                return;
+            }
             // Don't scaffold (enqueue CreateFolder for) a disabled backup folder's
             // subtree — same disable-race gate as files.
             if backup_disabled(dir_path) {

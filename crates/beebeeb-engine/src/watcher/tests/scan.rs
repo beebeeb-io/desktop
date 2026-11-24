@@ -242,3 +242,37 @@ fn re_e_a_placeholder_folder_is_never_created_on_the_server() {
         "a named placeholder is not created either"
     );
 }
+
+/// RE-e, the Windows-native half: a real Cloud Files folder placeholder (minted as the placeholder pass mints a server
+/// folder) with no row at its path is never created on the server; a plain folder made next to it is.
+#[cfg(target_os = "windows")]
+#[test]
+fn re_e_a_real_placeholder_folder_is_never_created_on_the_server() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    fs::create_dir(&root).unwrap();
+    crate::windows_cf::register_test_sync_root(&root).unwrap();
+    let (db, bridge) = test_bridge(&temp.path().join("state.db"));
+    db.set_sync_cursor(1).unwrap();
+    let minted = crate::windows_cf::placeholders::create_placeholder(
+        &root,
+        "00000000-0000-4000-8000-00000000e001",
+        "Photos",
+        0,
+        0,
+        true,
+    );
+    fs::create_dir(root.join("Mine")).unwrap();
+    let mut memo = ScanMemo::default();
+    scan_tick(&bridge, &root, &mut memo, &mut crate::watcher::NoFeed);
+    let creates: Vec<Option<String>> = db
+        .list_due_operations(i64::MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|op| op.kind == OperationKind::CreateFolder)
+        .map(|op| op.target_path)
+        .collect();
+    crate::windows_cf::unregister_any_sync_root(&root).unwrap();
+    assert!(minted.is_ok(), "the folder placeholder is minted: {minted:?}");
+    assert_eq!(creates, vec![Some("Mine".to_string())], "only the folder made on this PC");
+}
