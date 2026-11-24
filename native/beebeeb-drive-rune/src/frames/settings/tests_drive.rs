@@ -270,7 +270,7 @@ fn sync_pauses_resumes_and_syncs_anyway_on_a_metered_connection() {
     let mut rt = runtime("DW-0746e");
     assert_eq!(
         info(&rt, "item-1-0-sub").text.as_deref(),
-        Some("Waiting · this PC is on a metered connection · 7 changes wait")
+        Some(beebeeb_engine::os_words::for_this_os("Waiting · this PC is on a metered connection · 7 changes wait").as_str())
     );
     assert_eq!(info(&rt, "btn-2").label.as_deref(), Some("Sync anyway"));
     press(&mut rt, "btn-2");
@@ -310,7 +310,7 @@ fn turning_file_explorer_off_is_destructive_asks_and_cancel_keeps_it() {
         info(&rt, "dlg-sub")
             .text
             .unwrap_or_default()
-            .starts_with("4 files made in File Explorer"),
+            .starts_with(beebeeb_engine::os_words::for_this_os("4 files made in File Explorer").as_str()),
         "the alert counts what has not uploaded"
     );
     // Enter does NOT turn it off: a destructive answer is never the default button.

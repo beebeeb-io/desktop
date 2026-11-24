@@ -89,7 +89,7 @@ pub fn finished(steps: [Step; 3], moved_bytes: u64) -> SpeedTest {
     SpeedTest::Done(
         steps,
         format!(
-            "Measured just now, from this PC to Beebeeb's servers in Europe. The test moved {} MB.",
+            concat!("Measured just now, from ", beebeeb_engine::device_word!(), " to Beebeeb's servers in Europe. The test moved {} MB."),
             moved_bytes / 1_000_000
         ),
     )

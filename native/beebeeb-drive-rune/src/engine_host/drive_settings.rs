@@ -132,8 +132,8 @@ pub const INSIGHTS_LOCKED: &str = "Unlock Beebeeb to see where your storage goes
 
 /// What the window says when a change the person asked for did not happen. Fixed sentences.
 pub const KEEP_NOT_SYNCING: &str = "Sync isn't running, so the folders were not changed.";
-pub const KEEP_FAILED: &str = "Couldn't change what is kept on this PC. Try again.";
-pub const FREE_UP_FAILED: &str = "Couldn't free up space on this PC. Try again.";
+pub const KEEP_FAILED: &str = concat!("Couldn't change what is kept on ", beebeeb_engine::device_word!(), ". Try again.");
+pub const FREE_UP_FAILED: &str = concat!("Couldn't free up space on ", beebeeb_engine::device_word!(), ". Try again.");
 pub const PAUSE_FAILED: &str = "Couldn't pause or resume sync. Try again.";
 pub const OPEN_AT_LOGIN_FAILED: &str = "Couldn't change Open at login. Try again.";
 /// A change asked while no one is signed in with the vault open, or by an account that has left since.

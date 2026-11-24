@@ -186,7 +186,7 @@ fn a_windows_hello_answer_that_arrives_while_locked_changes_nothing() {
     // The engine's status event reads the session before the next poll does.
     rt.update(|s, _| assert!(s.shell.refresh(), "the lock shows"));
     settle(&mut rt);
-    assert_the_approval_is_gone(&rt, "locked with Windows Hello up");
+    assert_the_approval_is_gone(&rt, beebeeb_engine::os_words::for_this_os("locked with Windows Hello up").as_str());
     let sent = rt.state.account.source.as_deref().expect("the fixture").sent();
     assert_eq!(
         sent.iter().filter(|line| line.starts_with("cancel approval")).count(),

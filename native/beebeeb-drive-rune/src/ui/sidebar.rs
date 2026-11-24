@@ -67,11 +67,11 @@ impl SidebarSection {
     /// The board's tooltip: the name and its shortcut.
     pub fn shortcut(self) -> &'static str {
         match self {
-            Self::Files => "Ctrl+1",
-            Self::Shared => "Ctrl+2",
-            Self::Photos => "Ctrl+3",
-            Self::Backups => "Ctrl+4",
-            Self::Trash => "Ctrl+5",
+            Self::Files => concat!(beebeeb_engine::primary_key!(), "1"),
+            Self::Shared => concat!(beebeeb_engine::primary_key!(), "2"),
+            Self::Photos => concat!(beebeeb_engine::primary_key!(), "3"),
+            Self::Backups => concat!(beebeeb_engine::primary_key!(), "4"),
+            Self::Trash => concat!(beebeeb_engine::primary_key!(), "5"),
         }
     }
 }

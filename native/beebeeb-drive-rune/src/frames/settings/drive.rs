@@ -403,7 +403,7 @@ impl BoardDrive {
                         min_gb: 1,
                         max_gb: 186,
                         at: 0.27,
-                        says: "Using 18.4 GB now, 372 GB free on this PC. Files you open are kept here so they open faster. Over the limit, the oldest are removed. Available offline files don't count.".into(),
+                        says: concat!("Using 18.4 GB now, 372 GB free on ", beebeeb_engine::device_word!(), ". Files you open are kept here so they open faster. Over the limit, the oldest are removed. Available offline files don't count.").into(),
                     },
                 },
                 previews: KeptOnPc {
@@ -413,7 +413,7 @@ impl BoardDrive {
                         min_gb: 1,
                         max_gb: 93,
                         at: 0.20,
-                        says: "All 2,431 photos fit, about 3.1 GB. Over the limit, the oldest are removed from this PC and download again when needed. They stay in Beebeeb.".into(),
+                        says: concat!("All 2,431 photos fit, about 3.1 GB. Over the limit, the oldest are removed from ", beebeeb_engine::device_word!(), " and download again when needed. They stay in Beebeeb.").into(),
                     },
                 },
                 offline: "1.4 GB".into(),
@@ -489,7 +489,7 @@ impl BoardDrive {
     /// Sync waits on a metered connection (DW-0746e).
     pub fn with_metered_wait(mut self) -> Self {
         self.sync.status =
-            SyncStatus::WaitingMetered("Waiting · this PC is on a metered connection · 7 changes wait".into());
+            SyncStatus::WaitingMetered(concat!("Waiting · ", beebeeb_engine::device_word!(), " is on a metered connection · 7 changes wait").into());
         self.bandwidth = self.bandwidth.metered_wait();
         self
     }
@@ -616,7 +616,7 @@ impl DriveSettings for BoardDrive {
             self.sync.status = SyncStatus::Running("Up to date · last change 2 min ago".into());
         } else if !waited && self.bandwidth.waiting_metered() {
             self.sync.status =
-                SyncStatus::WaitingMetered("Waiting · this PC is on a metered connection · 7 changes wait".into());
+                SyncStatus::WaitingMetered(concat!("Waiting · ", beebeeb_engine::device_word!(), " is on a metered connection · 7 changes wait").into());
         }
     }
     fn run_speed_test(&mut self) {

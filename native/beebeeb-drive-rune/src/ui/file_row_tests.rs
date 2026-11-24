@@ -93,7 +93,7 @@ fn headers(_: &(), _: &mut rune::Cx<()>) -> El {
         &[
             Column::new("name", "Name", Width::Flex(1.0)),
             Column::new("size", "Size", Width::Fixed(84.0)).align(rune::Align::End),
-            Column::new("pc", "PC", Width::Fixed(34.0)).spoken("On this PC"),
+            Column::new("pc", "PC", Width::Fixed(34.0)).spoken(concat!("On ", beebeeb_engine::device_word!())),
         ],
         Some((1, false)),
         &t,
@@ -105,7 +105,7 @@ fn the_header_has_a_columnheader_per_column_and_one_sort_arrow() {
     let all = draw(headers);
     let h = info(&all, "column-headers");
     assert_eq!(h.role, "row");
-    for (k, label) in [("name", "Name"), ("size", "Size"), ("pc", "On this PC")] {
+    for (k, label) in [("name", "Name"), ("size", "Size"), ("pc", concat!("On ", beebeeb_engine::device_word!()))] {
         let cell = info(&all, &format!("col-{k}-cell"));
         assert_eq!(cell.role, "columnheader", "{k}");
         assert_eq!(cell.label.as_deref(), Some(label), "{k}");

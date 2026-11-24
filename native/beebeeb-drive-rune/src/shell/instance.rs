@@ -408,8 +408,10 @@ pub fn refusal_message(refusal: &Refusal, identity: AppIdentity) -> String {
                 _ => "Another Beebeeb program".to_owned(),
             };
             format!(
-                "{who} is already syncing on this PC (process {}). Quit it first, then open {name} again.",
-                holder.pid
+                concat!("{who} is already syncing on ", beebeeb_engine::device_word!(), " (process {}). Quit it first, then open {name} again."),
+                holder.pid,
+                who = who,
+                name = name
             )
         }
         Refusal::NotAnswering => format!(

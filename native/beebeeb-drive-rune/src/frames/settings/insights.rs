@@ -36,7 +36,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         shell::heading(
             "Storage insights",
             Some(
-                "Where your storage goes, by type and by your largest files. Worked out on this PC, from files that are already encrypted.",
+                concat!("Where your storage goes, by type and by your largest files. Worked out on ", beebeeb_engine::device_word!(), ", from files that are already encrypted."),
             ),
             t,
         ),

@@ -75,7 +75,7 @@ pub fn live_flows(rate: Option<(u64, u64)>, waiting_metered: bool) -> (String, F
             "Waiting for another network".into(),
             Flow {
                 speed: None,
-                says: "Waiting: this PC is on a metered connection".into(),
+                says: concat!("Waiting: ", beebeeb_engine::device_word!(), " is on a metered connection").into(),
             },
             Flow {
                 speed: None,
@@ -360,7 +360,7 @@ impl BoardBandwidth {
                 done("35.2", "Mbps", "3 of 3 \u{b7} 30 MB"),
                 done("94.0", "Mbps", "3 of 3 \u{b7} 30 MB"),
             ],
-            "Measured just now, from this PC to Beebeeb's servers in Europe. The test moved 60 MB.".into(),
+            concat!("Measured just now, from ", beebeeb_engine::device_word!(), " to Beebeeb's servers in Europe. The test moved 60 MB.").into(),
         )
     }
     /// No ping answered (DW-0786d).
@@ -506,7 +506,7 @@ impl BoardBandwidth {
                 "Waiting for another network",
                 flow(
                     None,
-                    "Waiting: this PC is on a metered connection \u{b7} 7 changes wait",
+                    concat!("Waiting: ", beebeeb_engine::device_word!(), " is on a metered connection \u{b7} 7 changes wait"),
                 ),
                 flow(None, "Files you open still download"),
             )
@@ -541,7 +541,7 @@ impl BoardBandwidth {
                 device(
                     DeviceKind::Computer,
                     "Anna-Laptop",
-                    "This PC",
+                    concat!(beebeeb_engine::device_word_cap!()),
                     DeviceState::Syncing,
                     Some(0.71),
                     format!("38 of 50 files \u{b7} 120 of 168 MB \u{b7} {speed} {unit} \u{b7} 4 s ago"),
@@ -568,7 +568,7 @@ impl BoardBandwidth {
                 device(
                     DeviceKind::Computer,
                     "Anna-Laptop",
-                    "This PC",
+                    concat!(beebeeb_engine::device_word_cap!()),
                     if waiting {
                         DeviceState::Paused
                     } else {

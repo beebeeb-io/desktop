@@ -106,7 +106,7 @@ impl SettingsPane {
             SettingsPane::Notifications => "Notifications",
             SettingsPane::Storage => "Storage",
             SettingsPane::Backups => "Backups",
-            SettingsPane::SyncAndFileExplorer => "Sync and File Explorer",
+            SettingsPane::SyncAndFileExplorer => concat!("Sync and ", beebeeb_engine::file_manager!()),
             SettingsPane::ThumbnailsAndPreviews => "Thumbnails and previews",
             SettingsPane::Bandwidth => "Bandwidth",
         }

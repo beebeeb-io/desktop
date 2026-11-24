@@ -338,7 +338,7 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
             ));
     }
     let said = match state {
-        Check::On => "kept on this PC",
+        Check::On => concat!("kept on ", beebeeb_engine::device_word!()),
         Check::Mixed => "mixed",
         Check::Off => "online only",
     };
@@ -370,7 +370,7 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
     match change {
         Some(change) => {
             let words = match change {
-                Change::Leaves => format!("Leaves this PC · {}", size(f.mb)),
+                Change::Leaves => format!(concat!("Leaves ", beebeeb_engine::device_word!(), " · {}"), size(f.mb)),
                 Change::Downloads => format!("Downloads · {}", size(f.mb)),
             };
             name = name.child(
@@ -451,7 +451,7 @@ fn legend(t: &Theme) -> El {
         .w_full()
         .center_y()
         .gap(sp::S16)
-        .child(entry(0, Check::On, "Kept on this PC"))
+        .child(entry(0, Check::On, concat!("Kept on ", beebeeb_engine::device_word!())))
         .child(entry(1, Check::Mixed, "Some folders inside kept"))
         .child(entry(2, Check::Off, "Online only"))
 }
@@ -481,7 +481,7 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
                 ViewState::Failed {
                     key: "tree-state",
                     title: "Couldn't load your folders.",
-                    why: "Nothing was changed. The folders you keep stay on this PC.",
+                    why: concat!("Nothing was changed. The folders you keep stay on ", beebeeb_engine::device_word!(), "."),
                     retry: Some(again),
                 },
                 t,
@@ -494,7 +494,7 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
                     key: "tree-state",
                     icon: &ic::FOLDER,
                     title: "No folders yet",
-                    body: "Once you add folders, you can choose which ones stay on this PC. Files you keep one by one are in Available offline.",
+                    body: concat!("Once you add folders, you can choose which ones stay on ", beebeeb_engine::device_word!(), ". Files you keep one by one are in Available offline."),
                     action: None,
                 },
                 t,
@@ -549,7 +549,7 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
                 );
             let on_pc = draft.kept_mb();
             let sum = format!(
-                "After Apply: {} on this PC · {} online only",
+                concat!("After Apply: {} on ", beebeeb_engine::device_word!(), " · {} online only"),
                 size(on_pc),
                 size((total_mb - on_pc).max(0.0))
             );
@@ -558,7 +558,7 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
                 legend(t),
                 dialogs::caption(
                     0,
-                    "Unchecking a folder removes its downloaded copies from this PC. The files stay in Beebeeb and download again when you open them. Changes that haven't uploaded yet stay on this PC until they have.",
+                    concat!("Unchecking a folder removes its downloaded copies from ", beebeeb_engine::device_word!(), ". The files stay in Beebeeb and download again when you open them. Changes that haven't uploaded yet stay on ", beebeeb_engine::device_word!(), " until they have."),
                     t,
                 ),
             ];
@@ -578,10 +578,10 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
         None => el().key("dlg-sum").grow(1.0),
     };
     dialogs::dialog(
-        "Keep on this PC",
+        concat!("Keep on ", beebeeb_engine::device_word!()),
         600.0,
-        "Keep on this PC",
-        Some("Folders you choose stay on this PC. Everything else downloads when you open it."),
+        concat!("Keep on ", beebeeb_engine::device_word!()),
+        Some(concat!("Folders you choose stay on ", beebeeb_engine::device_word!(), ". Everything else downloads when you open it.")),
         body,
         vec![lead, apply_button, cancel],
         t,
@@ -597,11 +597,11 @@ pub fn question(ui: &SettingsUi, first: usize, t: &Theme) -> El {
     let (leaves, downloads) = (of(Change::Leaves), of(Change::Downloads));
     let (title, mut says) = match leaves.as_slice() {
         [one] => (
-            format!("Stop keeping {} on this PC?", one.name),
+            format!(concat!("Stop keeping {} on ", beebeeb_engine::device_word!(), "?"), one.name),
             format!("Its {} ({}) become online only.", one.count, size(one.mb)),
         ),
         many => (
-            format!("Stop keeping {} folders on this PC?", many.len()),
+            format!(concat!("Stop keeping {} folders on ", beebeeb_engine::device_word!(), "?"), many.len()),
             format!(
                 "{} ({}) become online only.",
                 many.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "),
@@ -610,7 +610,7 @@ pub fn question(ui: &SettingsUi, first: usize, t: &Theme) -> El {
         ),
     };
     says.push_str(
-        " They stay in Beebeeb and download again when you open them. Changes that haven't uploaded yet stay on this PC until they have.",
+        concat!(" They stay in Beebeeb and download again when you open them. Changes that haven't uploaded yet stay on ", beebeeb_engine::device_word!(), " until they have."),
     );
     match downloads.as_slice() {
         [] => {}
@@ -630,7 +630,7 @@ pub fn question(ui: &SettingsUi, first: usize, t: &Theme) -> El {
             .on_press(|s: &mut State| s.settings.dialog = Some(Dialog::Keep)),
     ];
     alert(
-        "Stop keeping folders on this PC",
+        concat!("Stop keeping folders on ", beebeeb_engine::device_word!()),
         notices::tile(0, Tone::Neutral, &ic::OFFLINE_PIN, t),
         &title,
         &says,

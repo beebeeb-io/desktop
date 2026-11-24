@@ -26,7 +26,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         n += 1;
         controls::button(n - 1, label, None, Emphasis::Plain, t)
     };
-    let mut children = vec![shell::heading("Sync and File Explorer", None, t)];
+    let mut children = vec![shell::heading(concat!("Sync and ", beebeeb_engine::file_manager!()), None, t)];
 
     if sy.repair == Repair::Failed {
         let again = button("Repair…").on_press(|s: &mut State| s.settings.dialog = Some(Dialog::Repair));
@@ -34,7 +34,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             0,
             Tone::Red,
             &ic::WARN_CIRCLE,
-            "Couldn't repair Beebeeb in File Explorer.",
+            concat!("Couldn't repair Beebeeb in ", beebeeb_engine::file_manager!(), "."),
             "Nothing was changed that you need to undo. Try again.",
             Some(again),
             t,
@@ -43,13 +43,13 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 
     // File Explorer.
     let mut explorer = Vec::new();
-    let mut place = Item::new(Some(&ic::FOLDER_TAB), "Beebeeb in File Explorer").sub(if sy.in_explorer {
-        "In File Explorer's navigation pane"
+    let mut place = Item::new(Some(&ic::FOLDER_TAB), concat!("Beebeeb in ", beebeeb_engine::file_manager!())).sub(if sy.in_explorer {
+        concat!("In ", beebeeb_engine::file_manager!(), "'s navigation pane")
     } else {
         "Off"
     });
     let show = sy.in_explorer.then(|| {
-        button("Show in File Explorer").on_press(|s: &mut State| s.settings.ask(Intent::Open("file-explorer")))
+        button(concat!("Show in ", beebeeb_engine::file_manager!())).on_press(|s: &mut State| s.settings.ask(Intent::Open("file-explorer")))
     });
     if !sy.in_explorer {
         place = place.trailing(Trailing::Value("Turned off".into()));
@@ -61,17 +61,17 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     explorer.push(lists::item_with(
         0,
         1,
-        &Item::new(Some(&ic::REBUILD), "Repair Beebeeb in File Explorer")
+        &Item::new(Some(&ic::REBUILD), concat!("Repair Beebeeb in ", beebeeb_engine::file_manager!()))
             .sub(if repairing {
                 "Repairing…"
             } else {
-                "If File Explorer stops showing Beebeeb's files or their state"
+                concat!("If ", beebeeb_engine::file_manager!(), " stops showing Beebeeb's files or their state")
             })
             .ruled(),
         repair.into_iter().collect(),
         t,
     ));
-    children.push(lists::list(0, Some("File Explorer"), explorer, None, t));
+    children.push(lists::list(0, Some(concat!(beebeeb_engine::file_manager!())), explorer, None, t));
 
     // Sync: where it stands, and the one thing to do about it.
     let (icon, says, act): (&'static rune::Icon, String, El) = match &sy.status {
@@ -150,7 +150,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         lists::item_with(
             2,
             2,
-            &Item::new(Some(&ic::FOLDER), "Keep on this PC").sub("Choose folders that stay on this PC"),
+            &Item::new(Some(&ic::FOLDER), concat!("Keep on ", beebeeb_engine::device_word!())).sub(concat!("Choose folders that stay on ", beebeeb_engine::device_word!())),
             vec![button("Choose folders…").on_press(|s: &mut State| super::go(s, "DW-0784"))],
             t,
         ),
@@ -173,10 +173,10 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     ];
     children.push(lists::list(
         2,
-        Some("Space on this PC"),
+        Some(concat!("Space on ", beebeeb_engine::device_word!())),
         space,
         Some(
-            "Files download when you open them. Files you make available offline stay on this PC, also without a connection.",
+            concat!("Files download when you open them. Files you make available offline stay on ", beebeeb_engine::device_word!(), ", also without a connection."),
         ),
         t,
     ));
@@ -186,7 +186,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             3,
             None,
             vec![
-                lists::item_danger(3, 0, &ic::FOLDER_TAB, "Turn off Beebeeb in File Explorer…", t)
+                lists::item_danger(3, 0, &ic::FOLDER_TAB, concat!("Turn off Beebeeb in ", beebeeb_engine::file_manager!(), "…"), t)
                     .on_press(|s: &mut State| s.settings.dialog = Some(Dialog::TurnOffExplorer)),
             ],
             None,
@@ -248,9 +248,11 @@ fn metered_foot(t: &Theme) -> El {
 fn turn_off(not_uploaded: Option<&(u32, String)>, first: usize, t: &Theme) -> El {
     let says = match not_uploaded {
         Some((count, size)) => format!(
-            "{count} files made in File Explorer haven't uploaded yet ({size}). Turning off removes them from this PC. Everything else stays in Beebeeb."
+            concat!("{count} files made in ", beebeeb_engine::file_manager!(), " haven't uploaded yet ({size}). Turning off removes them from ", beebeeb_engine::device_word!(), ". Everything else stays in Beebeeb."),
+            count = count,
+            size = size
         ),
-        None => "Beebeeb leaves File Explorer. Everything stays in Beebeeb.".to_string(),
+        None => concat!("Beebeeb leaves ", beebeeb_engine::file_manager!(), ". Everything stays in Beebeeb.").to_string(),
     };
     let foot = vec![
         dialogs::button_danger(first, "Turn off", t).on_press(|s: &mut State| {
@@ -264,11 +266,11 @@ fn turn_off(not_uploaded: Option<&(u32, String)>, first: usize, t: &Theme) -> El
             alert: true,
             head: dialog::Head::Alert {
                 tile: notices::tile(0, Tone::Red, &ic::FOLDER_TAB, t),
-                title: "Turn off Beebeeb in File Explorer?",
+                title: concat!("Turn off Beebeeb in ", beebeeb_engine::file_manager!(), "?"),
                 sub: &says,
             },
             foot: dialog::Foot::Even(foot),
-            ..dialog::Dialog::new("dlg", "Turn off Beebeeb in File Explorer", 380.0)
+            ..dialog::Dialog::new("dlg", concat!("Turn off Beebeeb in ", beebeeb_engine::file_manager!()), 380.0)
         },
         t,
     );
@@ -301,11 +303,11 @@ fn repair_question(first: usize, t: &Theme) -> El {
         dialogs::button(first + 1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
     ];
     dialogs::alert(
-        "Repair Beebeeb in File Explorer",
+        concat!("Repair Beebeeb in ", beebeeb_engine::file_manager!()),
         380.0,
         notices::tile(0, Tone::Neutral, &ic::FOLDER_TAB, t),
-        "Repair Beebeeb in File Explorer?",
-        "Beebeeb removes its File Explorer location and turns off Open Beebeeb at login, then adds itself back to File Explorer. Files waiting to upload are kept.",
+        concat!("Repair Beebeeb in ", beebeeb_engine::file_manager!(), "?"),
+        concat!("Beebeeb removes its ", beebeeb_engine::file_manager!(), " location and turns off Open Beebeeb at login, then adds itself back to ", beebeeb_engine::file_manager!(), ". Files waiting to upload are kept."),
         foot,
         t,
     )

@@ -14,9 +14,9 @@ pub const NOTE_INPUT: &str = "fb-note-input";
 const PANEL_W: f32 = 360.0;
 const POPOVER_W: f32 = 340.0;
 
-pub const PRIVACY_LINE: &str = "The app sends a note nowhere: notes are files on this PC, in your own profile. When the lead's AI session opens a note, \
+pub const PRIVACY_LINE: &str = concat!("The app sends a note nowhere: notes are files on ", beebeeb_engine::device_word!(), ", in your own profile. When the lead's AI session opens a note, \
     its text goes to the AI provider, and its screenshot only if the session opens it. Screenshots show your file names and account email; \
-    password and key fields are blanked.";
+    password and key fields are blanked.");
 
 /// The app, with the feedback chrome over it. During the capture frame there is no chrome at
 /// all: the picture and the tree are the app's alone.

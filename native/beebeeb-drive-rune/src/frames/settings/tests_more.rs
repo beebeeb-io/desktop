@@ -182,7 +182,7 @@ fn export_asks_for_the_bundle_and_the_banner_says_where_it_went() {
         "{banner}"
     );
     // The banner's button comes first; Export… is still there, for another one.
-    assert_eq!(says(&rt, "btn-0-label"), "Show in File Explorer");
+    assert_eq!(says(&rt, "btn-0-label"), beebeeb_engine::os_words::for_this_os("Show in File Explorer").as_str());
     assert_eq!(says(&rt, "btn-1-label"), "Export…");
     click(&mut rt, "btn-0");
     assert_eq!(
@@ -219,7 +219,7 @@ fn the_banner_says_so_when_no_email_app_opened_and_when_nothing_was_saved() {
         "{}",
         named(&rt, "note-0")
     );
-    assert_eq!(says(&rt, "btn-0-label"), "Show in File Explorer");
+    assert_eq!(says(&rt, "btn-0-label"), beebeeb_engine::os_words::for_this_os("Show in File Explorer").as_str());
     let rt = with(Bundle::Failed("The disk is full.".into()));
     assert_eq!(
         named(&rt, "note-0"),
@@ -312,7 +312,7 @@ fn choose_folders_opens_the_tree_on_the_stored_choices_with_apply_dimmed() {
     key(&mut rt, Key::Enter);
     assert_eq!(ui(&rt).dialog, Some(Dialog::Keep));
     assert_eq!(ui(&rt).intents, Vec::new(), "nothing is asked of the shell");
-    assert_eq!(says(&rt, "dlg-title"), "Keep on this PC");
+    assert_eq!(says(&rt, "dlg-title"), beebeeb_engine::os_words::for_this_os("Keep on this PC").as_str());
     assert_eq!(info(&rt, "tree-rows").role, "tree");
     let boxes: Vec<String> = ["backups", "documents", "invoices-2026", "lisbon", "shoot-selects"]
         .iter()
@@ -322,8 +322,8 @@ fn choose_folders_opens_the_tree_on_the_stored_choices_with_apply_dimmed() {
         boxes,
         vec![
             "Backups, online only",
-            "Documents, kept on this PC",
-            "Invoices 2026, kept on this PC",
+            beebeeb_engine::os_words::for_this_os("Documents, kept on this PC").as_str(),
+            beebeeb_engine::os_words::for_this_os("Invoices 2026, kept on this PC").as_str(),
             "Lisbon trip, online only",
             "Shoot selects, online only",
         ]
@@ -332,7 +332,7 @@ fn choose_folders_opens_the_tree_on_the_stored_choices_with_apply_dimmed() {
     assert_eq!(says(&rt, "tree-backups-size"), "4 devices · 18.2 GB");
     assert_eq!(
         says(&rt, "dlg-sum"),
-        "After Apply: 1.4 GB on this PC · 27.8 GB online only"
+        beebeeb_engine::os_words::for_this_os("After Apply: 1.4 GB on this PC · 27.8 GB online only").as_str()
     );
     // Nothing changed: Apply does nothing, by pointer and by Enter.
     click(&mut rt, "btn-5");
@@ -360,13 +360,13 @@ fn the_disclosure_opens_a_folder_and_a_box_checks_by_keyboard() {
     assert!((child[0] - parent[0] - 22.0).abs() < 0.01);
     tab_to(&mut rt, "tree-lisbon/day-1-check");
     key(&mut rt, Key::Text(" ".into()));
-    assert_eq!(named(&rt, "tree-lisbon/day-1-check"), "Day 1, kept on this PC");
+    assert_eq!(named(&rt, "tree-lisbon/day-1-check"), beebeeb_engine::os_words::for_this_os("Day 1, kept on this PC").as_str());
     assert_eq!(named(&rt, "tree-lisbon-check"), "Lisbon trip, mixed");
     assert_eq!(says(&rt, "tree-lisbon-mixed"), "Some folders kept");
     assert_eq!(says(&rt, "tree-lisbon/day-1-note-text"), "Downloads · 1.3 GB");
     assert_eq!(
         says(&rt, "dlg-sum"),
-        "After Apply: 2.7 GB on this PC · 26.5 GB online only"
+        beebeeb_engine::os_words::for_this_os("After Apply: 2.7 GB on this PC · 26.5 GB online only").as_str()
     );
     // Nothing reached the source yet.
     assert!(
@@ -384,12 +384,12 @@ fn the_disclosure_opens_a_folder_and_a_box_checks_by_keyboard() {
 #[test]
 fn the_board_scene_is_two_choices_in_and_says_what_each_does() {
     let rt = runtime("DW-0784");
-    assert_eq!(says(&rt, "tree-documents-note-text"), "Leaves this PC · 1.4 GB");
+    assert_eq!(says(&rt, "tree-documents-note-text"), beebeeb_engine::os_words::for_this_os("Leaves this PC · 1.4 GB").as_str());
     assert_eq!(says(&rt, "tree-lisbon/day-1-note-text"), "Downloads · 1.3 GB");
     assert_eq!(named(&rt, "tree-documents-check"), "Documents, online only");
     assert_eq!(
         says(&rt, "dlg-sum"),
-        "After Apply: 1.3 GB on this PC · 27.9 GB online only"
+        beebeeb_engine::os_words::for_this_os("After Apply: 1.3 GB on this PC · 27.9 GB online only").as_str()
     );
     // The tree is the board's: a head and eight rows of 32 pt in a 552 pt card.
     let tree = info(&rt, "tree").rect;
@@ -402,17 +402,17 @@ fn unchecking_asks_first_and_cancel_returns_with_the_choices_kept() {
     click(&mut rt, "btn-5");
     assert_eq!(ui(&rt).dialog, Some(Dialog::KeepConfirm), "DW-0784b");
     assert_eq!(info(&rt, "dlg").role, "alertdialog");
-    assert_eq!(says(&rt, "dlg-title"), "Stop keeping Documents on this PC?");
+    assert_eq!(says(&rt, "dlg-title"), beebeeb_engine::os_words::for_this_os("Stop keeping Documents on this PC?").as_str());
     assert_eq!(
         says(&rt, "dlg-sub"),
-        "Its 48 items (1.4 GB) become online only. They stay in Beebeeb and download again when you open them. Changes that haven't uploaded yet stay on this PC until they have. Day 1 (1.3 GB) downloads now."
+        beebeeb_engine::os_words::for_this_os("Its 48 items (1.4 GB) become online only. They stay in Beebeeb and download again when you open them. Changes that haven't uploaded yet stay on this PC until they have. Day 1 (1.3 GB) downloads now.").as_str()
     );
     assert!(folder(&stored(&rt), "documents").kept, "asked, not done");
     click(&mut rt, "btn-6");
     assert_eq!(ui(&rt).dialog, Some(Dialog::Keep), "back to the dialog (DW-0784)");
     assert_eq!(
         says(&rt, "tree-documents-note-text"),
-        "Leaves this PC · 1.4 GB",
+        beebeeb_engine::os_words::for_this_os("Leaves this PC · 1.4 GB").as_str(),
         "the choices are kept"
     );
     // Esc in the question is Cancel too.
@@ -464,7 +464,7 @@ fn a_list_that_could_not_load_says_so_and_try_again_loads_it() {
     assert_eq!(says(&rt, "tree-state-title"), "Couldn't load your folders.");
     assert_eq!(
         says(&rt, "tree-state-text"),
-        "Nothing was changed. The folders you keep stay on this PC."
+        beebeeb_engine::os_words::for_this_os("Nothing was changed. The folders you keep stay on this PC.").as_str()
     );
     assert!(find(&rt, "tree-rows").is_none());
     assert_eq!(says(&rt, "tree-state-retry-label"), "Try again");
@@ -474,7 +474,7 @@ fn a_list_that_could_not_load_says_so_and_try_again_loads_it() {
     tab_to(&mut rt, "tree-state-retry");
     key(&mut rt, Key::Enter);
     assert_eq!(ui(&rt).dialog, Some(Dialog::Keep), "DW-0784");
-    assert_eq!(named(&rt, "tree-documents-check"), "Documents, kept on this PC");
+    assert_eq!(named(&rt, "tree-documents-check"), beebeeb_engine::os_words::for_this_os("Documents, kept on this PC").as_str());
     assert!(find(&rt, "tree-state-title").is_none());
 }
 
@@ -654,14 +654,14 @@ fn unchecking_one_folder_inside_releases_that_folder_and_not_the_one_above() {
     // By pointer: a box is unchecked.
     click(&mut rt, "tree-documents/taxes-check");
     assert_eq!(named(&rt, "tree-documents-check"), "Documents, mixed");
-    assert_eq!(says(&rt, "tree-documents/taxes-note-text"), "Leaves this PC · 600.0 MB");
+    assert_eq!(says(&rt, "tree-documents/taxes-note-text"), beebeeb_engine::os_words::for_this_os("Leaves this PC · 600.0 MB").as_str());
     assert!(
         find(&rt, "tree-documents-note-text").is_none(),
         "Documents itself does not leave"
     );
     click(&mut rt, "btn-5");
     assert_eq!(ui(&rt).dialog, Some(Dialog::KeepConfirm), "copies leave: asked first");
-    assert_eq!(says(&rt, "dlg-title"), "Stop keeping Taxes on this PC?");
+    assert_eq!(says(&rt, "dlg-title"), beebeeb_engine::os_words::for_this_os("Stop keeping Taxes on this PC?").as_str());
     assert!(told.borrow().keeps.is_empty(), "asked, not done");
     click(&mut rt, "btn-5");
     assert_eq!(
@@ -681,14 +681,14 @@ fn a_source_that_marks_only_the_folder_above_as_kept_draws_its_folders_checked()
     click(&mut rt, "tree-lisbon-disc");
     for day in ["day-1", "day-2", "day-3"] {
         assert!(
-            named(&rt, &format!("tree-lisbon/{day}-check")).ends_with("kept on this PC"),
+            named(&rt, &format!("tree-lisbon/{day}-check")).ends_with(beebeeb_engine::os_words::for_this_os("kept on this PC").as_str()),
             "{day} is inside a kept folder"
         );
     }
     click(&mut rt, "tree-lisbon/day-2-check");
     assert_eq!(named(&rt, "tree-lisbon/day-2-check"), "Day 2, online only");
-    assert_eq!(named(&rt, "tree-lisbon/day-1-check"), "Day 1, kept on this PC");
-    assert_eq!(says(&rt, "tree-lisbon/day-2-note-text"), "Leaves this PC · 1.6 GB");
+    assert_eq!(named(&rt, "tree-lisbon/day-1-check"), beebeeb_engine::os_words::for_this_os("Day 1, kept on this PC").as_str());
+    assert_eq!(says(&rt, "tree-lisbon/day-2-note-text"), beebeeb_engine::os_words::for_this_os("Leaves this PC · 1.6 GB").as_str());
     assert!(
         find(&rt, "tree-lisbon/day-1-note-text").is_none(),
         "Day 1 stays, and says nothing"
@@ -705,7 +705,7 @@ fn the_question_by_its_frame_id_without_a_choice_asks_nothing_and_tells_nothing(
     rt.update(|s, _| super::go(s, "DW-0784b"));
     settle(&mut rt);
     assert_eq!(ui(&rt).dialog, Some(Dialog::Keep), "nothing to ask: the tree opens");
-    assert_eq!(says(&rt, "dlg-title"), "Keep on this PC");
+    assert_eq!(says(&rt, "dlg-title"), beebeeb_engine::os_words::for_this_os("Keep on this PC").as_str());
     click(&mut rt, "btn-5");
     key(&mut rt, Key::Enter);
     assert!(told.borrow().keeps.is_empty(), "no choice, no call");
@@ -718,7 +718,7 @@ fn a_list_that_arrives_after_the_dialog_opened_is_adopted_at_the_first_press() {
     assert_eq!(says(&rt, "tree-state-title"), "No folders yet");
     *folders.borrow_mut() = board_folders();
     settle(&mut rt);
-    assert_eq!(named(&rt, "tree-documents-check"), "Documents, kept on this PC");
+    assert_eq!(named(&rt, "tree-documents-check"), beebeeb_engine::os_words::for_this_os("Documents, kept on this PC").as_str());
     click(&mut rt, "tree-shoot-selects-check");
     assert_eq!(says(&rt, "tree-shoot-selects-note-text"), "Downloads · 2.4 GB");
     click(&mut rt, "btn-5");
