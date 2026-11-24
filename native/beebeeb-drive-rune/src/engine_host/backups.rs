@@ -78,9 +78,9 @@ pub fn source_for<E: BackupsEngine>(engine: Arc<E>) -> Option<Box<dyn BackupsSou
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
 
 /// What the section says when this PC's local state is another account's.
-pub const NOT_YOURS: &str = "This PC holds another account's files. Backups shows none of them.";
+pub const NOT_YOURS: &str = concat!(beebeeb_engine::device_word_cap!(), " holds another account's files. Backups shows none of them.");
 /// What the section says when this PC's backup could not be read.
-pub const NOT_READ: &str = "Couldn't read this PC's backup. Try again in a moment.";
+pub const NOT_READ: &str = concat!("Couldn't read ", beebeeb_engine::device_word!(), "'s backup. Try again in a moment.");
 /// What the section says when a switch did not happen (the list then shows what the engine has).
 pub const NOT_SWITCHED: &str = "Couldn't change this folder's backup.";
 
@@ -626,7 +626,7 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
         };
         let rows: Vec<&BackupFolderRow> = self.rows().collect();
         if self.held().is_none() {
-            return plain("Backups", "Reading this PC's backup.", false);
+            return plain("Backups", concat!("Reading ", beebeeb_engine::device_word!(), "'s backup."), false);
         }
         if self.engine.pass_running() || self.engine.pass_requested() {
             return plain("Backing up", "Beebeeb is checking your folders for changes.", false);
@@ -703,7 +703,7 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
                 Some(NotBackedUp {
                     id: row.key.to_string(),
                     name: row.name.to_string(),
-                    folder: "This PC".into(),
+                    folder: concat!(beebeeb_engine::device_word_cap!()).into(),
                     why: row.stop_words.clone()?,
                     excluded: false,
                     kind: FileKind::Document,

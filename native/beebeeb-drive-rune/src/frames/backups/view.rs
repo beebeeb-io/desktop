@@ -58,7 +58,7 @@ fn status_card(status: &Status, t: &Theme) -> (El, usize) {
             let words = if from_this_pc.is_empty() {
                 format!("Last backup {last}")
             } else {
-                format!("Last backup {last} \u{00B7} {from_this_pc} from this PC")
+                format!(concat!("Last backup {} \u{00B7} {} from ", beebeeb_engine::device_word!()), last, from_this_pc)
             };
             let at = "Last backup ".len();
             let card = bk::card(0, t)
@@ -166,7 +166,7 @@ fn folder_row(index: usize, folder: &Folder, button: usize, t: &Theme) -> El {
 /// What a device row and page say for a device whose status file this PC cannot read.
 pub(super) const CANT_READ: &str = "Can't read this device's backup.";
 /// Why a device that may be this PC's own backup has no "Delete this backup" (the engine refuses it too).
-pub(super) const MAY_BE_THIS_PC: &str = "This may be this PC's own backup, so it can't be deleted from this PC.";
+pub(super) const MAY_BE_THIS_PC: &str = concat!("This may be ", beebeeb_engine::device_word!(), "'s own backup, so it can't be deleted from ", beebeeb_engine::device_word!(), ".");
 
 fn device_icon(kind: DeviceKind) -> &'static rune::Icon {
     match kind {
@@ -226,7 +226,7 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
         return (
             vec![
                 shell::heading("Backups", None, t),
-                view_state(ViewState::Loading { words: "Reading this PC's backup\u{2026}" }, t),
+                view_state(ViewState::Loading { words: concat!("Reading ", beebeeb_engine::device_word!(), "'s backup\u{2026}") }, t),
             ],
             0,
         );
@@ -240,7 +240,7 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
                 view_state(
                     ViewState::Failed {
                         key: "backups-failed",
-                        title: "Couldn't read this PC's backup",
+                        title: concat!("Couldn't read ", beebeeb_engine::device_word!(), "'s backup"),
                         why: words,
                         retry: Some(retry),
                     },
@@ -312,7 +312,7 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
                 body: if source.wired(Part::AddFolder) {
                     "Choose a folder with Add a folder\u{2026} and Beebeeb copies it here."
                 } else {
-                    "This PC has none of the folders Beebeeb backs up."
+                    concat!(beebeeb_engine::device_word_cap!(), " has none of the folders Beebeeb backs up.")
                 },
                 action: None,
             },
@@ -322,10 +322,10 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
     let root = source.root();
     children.push(lists::list(
         0,
-        Some("This PC"),
+        Some(concat!(beebeeb_engine::device_word_cap!())),
         rows,
         Some(&format!(
-            "Beebeeb copies these folders into Backups \u{203A} {}; they stay where they are. Deleting a file from this PC keeps its backup.",
+            concat!("Beebeeb copies these folders into Backups \u{203A} {}; they stay where they are. Deleting a file from ", beebeeb_engine::device_word!(), " keeps its backup."),
             root.device_folder
         )),
         t,
@@ -616,7 +616,7 @@ fn failures_page(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
             list,
             Some("Not backed up, by design"),
             rows,
-            Some("Files larger than 4 GB are never backed up from this PC. Everything else in the folders you back up is."),
+            Some(concat!("Files larger than 4 GB are never backed up from ", beebeeb_engine::device_word!(), ". Everything else in the folders you back up is.")),
             t,
         ));
     }

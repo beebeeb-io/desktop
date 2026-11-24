@@ -129,7 +129,10 @@ fn a_reason_this_build_does_not_know_says_only_that_it_is_held_back() {
     let problems = problems(&db);
     assert_eq!(problems.len(), 1);
     assert_eq!(problems[0].folder, "");
-    assert_eq!(problems[0].reason, "Not sent: this PC is holding this change back.");
+    assert_eq!(
+        problems[0].reason,
+        crate::os_words::for_this_os("Not sent: this PC is holding this change back.")
+    );
 }
 
 #[test]

@@ -184,7 +184,7 @@ fn backup_codes(f: &Form, t: &Theme) -> El {
     children.push(
         kit::label(
             "note-0",
-            "Keep them apart from this PC: in a password manager or printed.",
+            concat!("Keep them apart from ", beebeeb_engine::device_word!(), ": in a password manager or printed."),
             fm::CAP,
             t.text_tertiary,
         )

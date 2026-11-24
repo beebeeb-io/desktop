@@ -117,7 +117,7 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
         2,
         Some("This account uses"),
         products,
-        Some("State on this PC. One account and one phrase; each product keeps its own keys."),
+        Some(concat!("State on ", beebeeb_engine::device_word!(), ". One account and one phrase; each product keeps its own keys.")),
         t,
     );
 

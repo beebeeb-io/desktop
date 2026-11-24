@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use super::*;
 use crate::account_binding::Identity;
-use crate::app::EngineConfig;
 use crate::app::backups_api::{FolderState, StateRead};
+use crate::app::EngineConfig;
 use crate::host::ChannelHost;
 use crate::identity::TEST;
 use crate::signin::memory_store::MemoryCredentials;
@@ -578,10 +578,9 @@ fn a_call_for_another_session_writes_nothing() {
 fn choosing_a_moved_folders_source_settles_its_question() {
     let dir = tempfile::tempdir().unwrap();
     let db = owned_db(dir.path());
-    assert!(
-        db.ask_backup_source_question("documents", "/invented/Documents", "/invented/OneDrive/Documents", 5)
-            .unwrap()
-    );
+    assert!(db
+        .ask_backup_source_question("documents", "/invented/Documents", "/invented/OneDrive/Documents", 5)
+        .unwrap());
     assert_eq!(db.backup_source_questions().unwrap().len(), 1);
     source_chosen(&TEST, &db, "documents").unwrap();
     assert!(
@@ -757,7 +756,9 @@ fn trash_without_a_found_backup_changes_nothing() {
     assert!(!RemoveRefused::NoCopyFound.stopped_backing_up());
     assert_eq!(
         RemoveRefused::NoCopyFound.words(),
-        "This PC hasn't found this folder's backup yet, so it can't be moved to Trash. Nothing was changed."
+        crate::os_words::for_this_os(
+            "This PC hasn't found this folder's backup yet, so it can't be moved to Trash. Nothing was changed."
+        )
     );
     // "Stop and keep the backup" needs no backup found: the folder leaves the set, nothing is sent.
     let left = std::cell::Cell::new(false);
