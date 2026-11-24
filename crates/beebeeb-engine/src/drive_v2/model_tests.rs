@@ -7,9 +7,9 @@
 
 use std::collections::HashSet;
 
-use super::DriveError;
 use super::dto::*;
 use super::model::{self, Sort};
+use super::DriveError;
 use crate::state_db::{self, FileEntry, FileStatus, ItemKind, Namespace, StateDb};
 
 struct Fixture {
@@ -589,5 +589,27 @@ fn drive_v2_sync_summary_phase() {
     assert_eq!(
         (s.on_device, s.available_offline, s.online_only, s.pending),
         (4, 3, 4, 3)
+    );
+}
+
+/// system_files: desktop.ini / Thumbs.db rows already on the server are hidden from the listing, not deleted.
+#[test]
+fn system_files_are_hidden_from_listings_but_their_rows_stay() {
+    let f = fixture();
+    at(&f.db, "d1", "desktop.ini", None, false, true);
+    at(&f.db, "d2", "Thumbs.db", None, false, true);
+    at(&f.db, "keep", "report.pdf", None, false, true);
+    let listed: Vec<String> = model::list(&f.db, None, Sort::default(), false)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(listed, ["keep"]);
+    let (paged, total) = model::children_of(&f.db, None, Sort::default(), 0, 50).unwrap();
+    assert_eq!((paged.len(), total), (1, 1));
+    assert!(
+        f.db.get_file("d1").unwrap().is_some(),
+        "the row is hidden, never deleted"
     );
 }
