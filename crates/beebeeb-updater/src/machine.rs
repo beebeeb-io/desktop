@@ -134,6 +134,22 @@ pub trait Apply {
 
     /// The installer did not start after the engine was stopped: start the engine again.
     fn resume_engine(&mut self);
+
+    /// A Mac: opens the release's download page in the browser (the shell's NSWorkspace, never `/usr/bin/open`) and
+    /// says whether it opened. Nothing is downloaded or installed by this program. The default opens nothing.
+    fn open_download_page(&mut self, _offer: &Offer) -> bool {
+        false
+    }
+}
+
+/// What an install request on a Mac is refused with, before the updater is touched: the code a caller tells a refusal
+/// from a failure by, and the words.
+pub const INSTALL_UNSUPPORTED_CODE: &str = "update_install_unsupported";
+pub const INSTALL_UNSUPPORTED: &str = "Beebeeb on a Mac downloads updates and cannot install them in place.";
+
+/// `update_install_unsupported: Beebeeb on a Mac downloads updates and cannot install them in place.`
+pub fn install_unsupported_message() -> String {
+    format!("{INSTALL_UNSUPPORTED_CODE}: {INSTALL_UNSUPPORTED}")
 }
 
 /// Why a check was asked for: a background check holds an older channel build back, a manual one reports it.
@@ -158,6 +174,8 @@ pub enum Event {
     /// "Restart to update": start the staged installer.
     Apply,
     Dismiss,
+    /// A Mac's "Download update": opens the download page of the offered version. Only a Mac's trust takes it.
+    OpenDownloadPage,
 }
 
 /// What the UI shows. Plain data.
@@ -229,6 +247,18 @@ pub enum Failure {
     /// The engine did not stop, so the installer was not started. The staged update is kept.
     EngineStillRunning,
     InstallerDidNotStart,
+    /// A Mac was asked to download or install in place: it only opens the download page
+    /// ([`INSTALL_UNSUPPORTED_CODE`]). Nothing was downloaded.
+    InstallUnsupported,
+    /// A Mac's download page did not open.
+    DownloadPageDidNotOpen,
+}
+
+impl Failure {
+    /// The code a caller tells a refusal from a failure by, when this one has one.
+    pub fn code(self) -> Option<&'static str> {
+        matches!(self, Failure::InstallUnsupported).then_some(INSTALL_UNSUPPORTED_CODE)
+    }
 }
 
 /// Whether this install has recently heard from the release server in a way it could verify.
@@ -239,6 +269,19 @@ pub enum Freshness {
     /// No check has passed every rule for this many whole days, counted from the last one that did, or from when
     /// this build was made if none ever did. The UI says so; "up to date" alone would be a guess.
     Unverified { days: u64 },
+}
+
+/// The offer a state holds, if any.
+fn offer_of(state: State) -> Option<Offer> {
+    match state {
+        State::Available { offer }
+        | State::Downloading { offer, .. }
+        | State::Verifying { offer }
+        | State::ReadyToRestart { offer, .. }
+        | State::Restarting { offer } => Some(offer),
+        State::Failed { resume, .. } => resume,
+        _ => None,
+    }
 }
 
 pub struct Config {
@@ -321,6 +364,29 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
     pub fn step(&mut self, event: Event) -> &State {
         let state = std::mem::replace(&mut self.state, State::Idle);
         self.state = match (state, event) {
+            // A Mac never installs in place and never downloads: the request is refused first, with its code, before
+            // anything is fetched or started. The offer stays in `resume`, so the UI keeps showing it.
+            (state, Event::Download | Event::DownloadDowngrade(_) | Event::Apply) if self.is_mac() => State::Failed {
+                failure: Failure::InstallUnsupported,
+                resume: offer_of(state),
+            },
+            (state @ (State::Available { .. } | State::Failed { resume: Some(_), .. }), Event::OpenDownloadPage)
+                if self.is_mac() =>
+            {
+                match offer_of(state.clone()) {
+                    Some(offer) if !offer.downgrade => {
+                        if self.apply.open_download_page(&offer) {
+                            state
+                        } else {
+                            State::Failed {
+                                failure: Failure::DownloadPageDidNotOpen,
+                                resume: Some(offer),
+                            }
+                        }
+                    }
+                    _ => state,
+                }
+            }
             // A check never interrupts work in progress.
             (
                 busy @ (State::Checking { .. }
@@ -373,6 +439,15 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
             (state, _) => state,
         };
         &self.state
+    }
+
+    /// This trust is a Mac's: it downloads updates and cannot install them.
+    fn is_mac(&self) -> bool {
+        self.config
+            .trust
+            .targets
+            .iter()
+            .any(|target| target.starts_with("darwin-"))
     }
 
     fn manifest_url(&self, channel: Channel) -> String {
@@ -775,9 +850,7 @@ mod active_work_tests {
 
     use super::*;
     use crate::manifest::Channel;
-    use crate::testkit::{
-        BASE, FakeClock, FakeHttp, MemStore, NOW, Publish, TestKey, artifact_bytes, trust, version,
-    };
+    use crate::testkit::{BASE, FakeClock, FakeHttp, MemStore, NOW, Publish, TestKey, artifact_bytes, trust, version};
 
     #[derive(Default, Debug)]
     struct Engine {
@@ -926,6 +999,10 @@ mod active_work_tests {
         let engine = engine.borrow();
         assert!(engine.resumed, "the engine picks the parked work up again");
         assert_eq!((engine.uploads_parked, engine.hydrations_parked), (2, 1));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the staged update is kept");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "the staged update is kept"
+        );
     }
 }
