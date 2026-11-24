@@ -41,9 +41,9 @@ fn role_label_checked_and_theme_colours() {
         assert_eq!(s.label.as_deref(), Some("Sync"));
         assert!(s.focusable);
         let track = find(&rt, "s-track").expect("track");
-        assert!(close(track.fill, if on { t.selection } else { t.paper3 }), "on={on}: track");
+        assert!(close(track.fill, if on { t.accent } else { t.paper3 }), "on={on}: track");
         let knob = find(&rt, "s-knob").expect("knob");
-        assert!(close(knob.fill, t.white), "knob is white");
+        assert!(close(knob.fill, if on { t.accent_text_on } else { t.white }), "on={on}: knob");
         let l = find(&rt, "s-label").expect("label");
         assert_eq!(l.text.as_deref(), Some("Sync"));
         // The knob sits at the end of the track when on, at the start when off.

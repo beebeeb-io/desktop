@@ -1,5 +1,5 @@
 //! The `System` route inside the sandbox (Windows): the helper binary started as the app starts it, confined in the
-//! system-decoder profile without HEVC, plays AAC through Windows' decoder. That profile holds `lpacCom` (Guus,
+//! system-decoder profile without HEVC, plays AAC through Windows' decoder. That profile holds `lpacCom` (the owner,
 //! 2026-11-21); without it COM does not start there and a video plays silent (ux-57). Needs a desktop session: in
 //! session 0 the system's libraries do not initialise inside an AppContainer, so there the test says it measured
 //! nothing and stops. `scripts/windows/decoder-session-tests.ps1` runs it where it measures.

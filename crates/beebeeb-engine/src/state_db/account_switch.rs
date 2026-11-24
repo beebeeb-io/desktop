@@ -54,7 +54,7 @@ impl StateDb {
     /// upload sessions, and the edits held for review. A row this PC made and never sent goes with its queued
     /// create (its item is no longer the account's to send); a row the server knows stays, back at rest as an item
     /// with no bytes on this PC. The caller's removal of the synced items refuses while any of this is left (the
-    /// Windows purge's first gate), which is what kept every answered switch out (VM 401, rc3/f1).
+    /// Windows purge's first gate), which is what kept every answered switch out (the Windows test machine, rc3/f1).
     ///
     /// `Some`: the payload paths the forgotten rows named, for the caller to delete outside the sync folder.
     /// `None`, nothing changed: other work waits (see [`Self::work_in_the_folder`]).

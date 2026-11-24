@@ -1074,7 +1074,7 @@ mod edit_checks {
         assert_eq!(MAX_OP_TEXT_BYTES, 32 * 1024);
         assert_eq!(MAX_SAVE_BYTES, 2 * MAX_INPUT_BYTES);
         // The widest legal Edited rects stay in one frame.
-        assert!((MAX_SELECTION_RECTS + MAX_DIRTY_RECTS) * PageRect::BYTES < crate::frame::MAX_PAYLOAD / 2);
+        const { assert!((MAX_SELECTION_RECTS + MAX_DIRTY_RECTS) * PageRect::BYTES < crate::frame::MAX_PAYLOAD / 2) };
         let _ = EditKind::Docx;
     }
 

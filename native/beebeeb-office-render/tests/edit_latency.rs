@@ -5,7 +5,7 @@
 //!
 //! The gate is taken in a release build, like `tests/latency.rs` (a debug engine is several times slower); a debug
 //! build runs the same path and prints the numbers. On Linux this runs now; the Windows number comes in W6
-//! (`cargo test --release --locked --test edit_latency -- --nocapture` on VM 401).
+//! (`cargo test --release --locked --test edit_latency -- --nocapture` on the Windows test machine).
 //!
 //! Output carries counts and milliseconds only: never page text or a pixel value.
 

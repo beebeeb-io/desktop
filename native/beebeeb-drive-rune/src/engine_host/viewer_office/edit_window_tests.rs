@@ -579,7 +579,7 @@ fn new_document_from_the_files_menu_makes_a_new_file_on_the_server() {
 
 /// w24: the file a New document made is only queued when Create answers (its upload has not landed, so the local state
 /// holds no version for it yet). It opened as the read-only viewer ("Open in another app...", no Save), so Ctrl+S never
-/// saved (VM 401, run 9). It must open in the editor once it landed, and Ctrl+S there must store a new version.
+/// saved (the Windows test machine, run 9). It must open in the editor once it landed, and Ctrl+S there must store a new version.
 #[test]
 fn a_new_document_opens_in_the_editor_before_its_upload_lands_and_ctrl_s_saves_it() {
     let mut w = window("new-save");
@@ -614,7 +614,7 @@ fn a_new_document_opens_in_the_editor_before_its_upload_lands_and_ctrl_s_saves_i
     assert!(said.starts_with("Saved"), "the window says it is saved: {said:?}");
 }
 
-/// w36 (Guus's PC): the upload of a New document took minutes to land, so the wait for it ran out and the document came
+/// w36 (the owner's PC): the upload of a New document took minutes to land, so the wait for it ran out and the document came
 /// up as the read-only viewer, also when opened again. A document made here opens in the editor with NO upload pass
 /// at all, a save pressed then stores nothing and says why, and once the upload landed the save stores a new version.
 #[test]
@@ -731,7 +731,7 @@ fn text_typed_before_the_snapshot_timer_is_offered_after_a_screen_lock_and_an_un
     w.until("the last text is offered", |w| offered(w));
 }
 
-/// Bug 8 (VM 401 run 7): an edited document open, the screen locked and unlocked; the pane says the file was closed,
+/// Bug 8 (the Windows test machine run 7): an edited document open, the screen locked and unlocked; the pane says the file was closed,
 /// and Files and the Settings gear must answer at once (the recording saw ~60 s of nothing).
 #[test]
 fn after_a_screen_lock_with_unsaved_edits_files_and_the_settings_gear_answer_at_once() {

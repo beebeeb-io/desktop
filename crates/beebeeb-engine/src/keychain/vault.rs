@@ -546,7 +546,7 @@ impl<S: AuthSecretStore> AuthVault<S> {
     /// The full sign-out. Every removal is tried, and the first failure is the result (task 2447): a token that
     /// cannot be removed must not leave the vault key, the email or the owner tags behind as well.
     ///
-    /// R4 (Guus, 2026-11-21): signing out of an account removes that account's kept key too, so a sign-out still leaves
+    /// R4 (the owner, 2026-11-21): signing out of an account removes that account's kept key too, so a sign-out still leaves
     /// nothing of it. The account signing out is the session's owner (or, when that is unknown, the working key's).
     /// Another account's working key (one that was switched away from, still signed in on this PC) goes from the
     /// working slot but is kept in its own slot first. A switch never calls this.

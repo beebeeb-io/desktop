@@ -184,7 +184,9 @@ fn large_account_stays_inside_its_budgets() {
     let (host, _messages) = ChannelHost::new(|| {});
     // The engine's state folder is the process's: a folder of this run's own, never the person's.
     let base = tempfile::tempdir().expect("a state folder");
-    beebeeb_engine::state_paths::init_from_app_local_data_dir(&TEST, base.path()).expect("the state folder");
+    // Another part of this process may have resolved it first (the engine's test support does): then that folder, also a
+    // scratch one, is the folder; either way it is this run's, never the person's.
+    let _ = beebeeb_engine::state_paths::init_from_app_local_data_dir(&TEST, base.path());
     let state_dir = beebeeb_engine::state_paths::beebeeb_state_dir_for(&TEST).expect("the state folder");
     std::fs::create_dir_all(&state_dir).expect("the state folder");
     let config = EngineConfig {

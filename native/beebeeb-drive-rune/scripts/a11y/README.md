@@ -8,7 +8,7 @@ controls`. Exit 1 if any, 0 if none, 2 if no window was found.
 ## Run
 Self-test (no app): `powershell -NoProfile -File uia-walk.ps1 -SelfTest`
 
-On VM 401 the walk must run inside the logged-in desktop session (UIA sees no windows from a service session):
+On the Windows test machine the walk must run inside the logged-in desktop session (UIA sees no windows from a service session):
 
     scripts/coord/remote-build.sh win desktop <branch> --dir native/beebeeb-drive-rune/scripts/a11y -- \
       'powershell -NoProfile -File $env:BB_RUN_IN_DESKTOP -Script uia-walk.ps1'

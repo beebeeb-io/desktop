@@ -1395,7 +1395,7 @@ mod edit_tests {
         // Op text over the cap.
         let mut p = vec![1u8];
         p.extend_from_slice(&le32((MAX_OP_TEXT_BYTES + 1) as u32));
-        p.extend(std::iter::repeat(b'a').take(MAX_OP_TEXT_BYTES + 1));
+        p.extend(std::iter::repeat_n(b'a', MAX_OP_TEXT_BYTES + 1));
         assert_eq!(Message::decode(KIND_EDIT, &p), Err(DecodeError::TextTooLong));
     }
 
@@ -1410,7 +1410,7 @@ mod edit_tests {
         let mut p = 0u64.to_le_bytes().to_vec();
         p.push(0);
         p.extend_from_slice(&le32(2));
-        p.extend(std::iter::repeat(0u8).take(PageRect::BYTES));
+        p.extend(std::iter::repeat_n(0u8, PageRect::BYTES));
         assert_eq!(Message::decode(KIND_EDITED, &p), Err(DecodeError::LengthPastEnd));
         // Layout names.
         assert_eq!(

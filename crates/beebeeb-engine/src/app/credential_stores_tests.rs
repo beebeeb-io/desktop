@@ -743,7 +743,7 @@ mod key_slot_per_account {
         unlock_with_words(&credentials, KEY_A);
         assert_eq!(unlocks_without_words(&credentials).as_deref(), Some(&KEY_A[..]));
 
-        // Switch to B: A is not signed out (Guus, 2026-11-21), so nothing of A is forgotten.
+        // Switch to B: A is not signed out (the owner, 2026-11-21), so nothing of A is forgotten.
         sign_in(&credentials, USER_B, "b@example.eu");
         assert_eq!(unlocks_without_words(&credentials), None, "B never gets A's key");
         unlock_with_words(&credentials, KEY_B);

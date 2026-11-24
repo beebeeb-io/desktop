@@ -199,6 +199,12 @@ pub static SHARE: Icon = icon24!(
     r#"<path d="M18 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"></path>"#
 );
 
+/// Pin (a map pin: the folder is kept in the sidebar).
+pub static PIN: Icon = icon24!(
+    "pin",
+    r#"<path d="M12 22s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12zM12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"></path>"#
+);
+
 /// Version history (clock with arrow).
 pub static VERSION_HISTORY: Icon = icon24!(
     "version-history",

@@ -317,7 +317,7 @@ fn the_pulses_activity_counts_an_upload_that_is_due_and_not_one_in_retry_backoff
     );
 }
 
-/// RC4-1 (VM 401: 18 files copied into the folder root, "Up to date" at 129 of 134 polls). The status line says
+/// RC4-1 (the Windows test machine: 18 files copied into the folder root, "Up to date" at 129 of 134 polls). The status line says
 /// "Up to date" for an engine that reports `idle`. The scan queues the copied files at once; their uploads start at
 /// the next tick, up to 30 s later. All that time the engine must report `syncing` with the count, and `idle` only
 /// when the last one has left the queue. Sampled here as the pulse does, once a second, before any tick or upload.

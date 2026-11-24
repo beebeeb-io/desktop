@@ -62,6 +62,8 @@ impl State {
             Action::Move => {
                 self.begin_move(tx);
             }
+            // The folder is still the selected one while the message shows: the same press again.
+            Action::Pin | Action::Unpin => self.toggle_pin(tx),
             Action::OpenInFileExplorer => {
                 self.open_in_file_explorer(tx);
             }
@@ -93,6 +95,7 @@ impl State {
                     | ActionError::TooLarge
                     | ActionError::NameShared
                     | ActionError::NameSharedButCase
+                    | ActionError::PinLimit
             )
             && match action {
                 Action::Upload => !matches!(&self.actions.retry_upload, Some((_, files)) if files.is_empty()),

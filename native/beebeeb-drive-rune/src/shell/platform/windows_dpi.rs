@@ -5,7 +5,7 @@
 //! 0.30.13): when the display's scale changes while one of this app's windows is MAXIMIZED, Windows re-fits the
 //! window to the new work area but never gives it the new DPI. `GetDpiForWindow` stays at the old value, so winit
 //! emits no `ScaleFactorChanged` and the app keeps drawing at the old scale until the window is restored or
-//! resized. A window that is not maximized follows live (96 -> 120 -> 96 on VM 401). Plain per-monitor-v2 test
+//! resized. A window that is not maximized follows live (96 -> 120 -> 96 on the Windows test machine). Plain per-monitor-v2 test
 //! windows and Notepad do not have the gap; which call in the rune/winit window makes Windows skip it is not known.
 //!
 //! What un-sticks it: any real size change. One `SetWindowPos` one pixel shorter makes Windows apply the DPI at
@@ -103,7 +103,7 @@ struct Pass {
 /// empty area or one that does not fit the two words (no message is sent then).
 fn size_lparam(width: i32, height: i32) -> Option<LPARAM> {
     let fits = |v: i32| (1..=0xFFFF).contains(&v);
-    (fits(width) && fits(height)).then(|| ((height as LPARAM) << 16) | width as LPARAM)
+    (fits(width) && fits(height)).then_some(((height as LPARAM) << 16) | width as LPARAM)
 }
 
 /// Posts each window a `WM_SIZE` with its real client size and its real state (maximized or not). winit emits

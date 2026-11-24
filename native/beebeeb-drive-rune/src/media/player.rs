@@ -322,7 +322,7 @@ const TICK: Duration = Duration::from_millis(10);
 const OPEN_WAIT_MS: u64 = 10_000;
 /// Every want answered within 5 s.
 const ANSWER_WAIT_MS: u64 = 5_000;
-/// The helper's first frame or PCM within 20 s: a cold decoder start on a slow PC took more than 5 s (VM 401, RC1).
+/// The helper's first frame or PCM within 20 s: a cold decoder start on a slow PC took more than 5 s (the Windows test machine, RC1).
 const FIRST_ANSWER_WAIT_MS: u64 = 20_000;
 /// The longest recording or video the player accepts: 48 h.
 const MAX_DURATION_MS: u64 = 48 * 60 * 60 * 1000;

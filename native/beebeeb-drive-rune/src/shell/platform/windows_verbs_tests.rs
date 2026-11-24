@@ -371,17 +371,23 @@ fn a_verb_on_a_slow_folder_read_selects_its_row_once_it_lands() {
         held,
         asked: Cell::new(0),
     };
+    // The board starts with Contract draft.pdf selected (`state::init_from`): while the read is out the rows shown
+    // stay, and their selection with them.
+    let before = row_id(&rt);
+    assert_ne!(before.as_deref(), Some(file_s), "the file's row is not the one selected at the start");
     rt.update(|s, tx| handle_with(s, ExplorerVerb::Show, file_s, Some(&engine), tx));
     assert!(rt.state.folder_reads.pending.is_some(), "the read is out");
-    assert_eq!(row_id(&rt), None, "no row is selected before the read lands");
+    assert_ne!(rt.state.listing.folder.id.as_deref(), Some(folder_s), "the folder is not shown before its read lands");
+    assert_eq!(row_id(&rt), before, "the file's row is not selected before the read lands: the selection is as it was");
     let_one_read.send(()).unwrap();
     for _ in 0..200 {
-        if row_id(&rt).is_some() {
+        if row_id(&rt).as_deref() == Some(file_s) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
         settle(&mut rt);
     }
+    assert_eq!(rt.state.listing.folder.id.as_deref(), Some(folder_s), "the file's folder is shown");
     assert_eq!(row_id(&rt), Some(file_s.to_string()), "the row is selected once the read landed");
 }
 

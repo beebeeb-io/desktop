@@ -75,7 +75,7 @@ fn ask_px(zoom: u16, dpi: u16) -> f32 {
 
 #[test]
 fn office_slides_present_asks_within_the_cap_and_the_screen() {
-    // Guus's PC: 3840x2160 at 150 % is 2560x1440 points at dpi 144 (it asked 5120 wide and was refused).
+    // the owner's PC: 3840x2160 at 150 % is 2560x1440 points at dpi 144 (it asked 5120 wide and was refused).
     for (screen, dpi, phys_w) in [((2560.0, 1440.0), 144u16, 3840.0), ((2560.0, 1440.0), 96, 2560.0)] {
         let zoom = present_ask_zoom(screen, dpi);
         let px = ask_px(zoom, dpi);

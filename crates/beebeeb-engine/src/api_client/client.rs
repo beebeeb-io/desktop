@@ -46,6 +46,9 @@ impl Drop for ApiClient {
 // `session_zeroizes_master_key_on_drop` test.
 impl zeroize::ZeroizeOnDrop for ApiClient {}
 
+/// The longest a bulk GET may run in all, however steadily its body arrives.
+const BULK_GET_CEILING: Duration = Duration::from_secs(15 * 60);
+
 impl ApiClient {
     #[cfg(target_os = "windows")]
     pub fn credential_lifetime(&self) -> std::sync::Weak<()> {
@@ -311,6 +314,34 @@ impl ApiClient {
         Ok(resp.json::<T>().await?)
     }
 
+    /// GET a JSON body that can be tens of MB (the whole-tree snapshot of a large account). The app's 30 s
+    /// request timeout is a TOTAL cap, headers and body together, so a body that needs longer than 30 s to
+    /// arrive was cut off and surfaced as "error decoding response body" (0.9.0). Here no total cap applies:
+    /// a connect timeout, then `read_timeout` of silence on the connection (a stalled link still fails
+    /// in bounded time) and a [`BULK_GET_CEILING`] on the whole transfer.
+    pub(super) async fn get_typed_bulk<T: serde::de::DeserializeOwned>(&self, path: &str) -> ApiResult<T> {
+        self.get_typed_bulk_with(path, Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))
+            .await
+    }
+
+    pub(super) async fn get_typed_bulk_with<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        read_timeout: Duration,
+    ) -> ApiResult<T> {
+        let url = self.url(path);
+        let http = api_base_client_builder(&self.base_url)
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(read_timeout)
+            .default_headers(provenance_headers())
+            .build()
+            .expect("reqwest client");
+        let resp = self
+            .send_with_retry_on(&http, || http.get(&url).timeout(BULK_GET_CEILING))
+            .await?;
+        Ok(resp.json::<T>().await?)
+    }
+
     /// Internal: issue an arbitrary request (built by `build`) with bounded 429
     /// backoff + retry, returning a 2xx response or a descriptive error.
     ///
@@ -321,6 +352,15 @@ impl ApiClient {
     /// non-2xx at any point) is surfaced via `check_status`.
     pub(super) async fn send_with_retry(
         &self,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> ApiResult<reqwest::Response> {
+        self.send_with_retry_on(&self.client, build).await
+    }
+
+    /// [`Self::send_with_retry`] executed on `http` (a client with its own timeouts).
+    pub(super) async fn send_with_retry_on(
+        &self,
+        http: &reqwest::Client,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> ApiResult<reqwest::Response> {
         let mut spent: u64 = 0;
@@ -334,7 +374,7 @@ impl ApiClient {
                 .header("Authorization", format!("Bearer {}", self.token))
                 .build()?;
             let idempotent = is_idempotent(request.method());
-            let resp = match self.client.execute(request).await {
+            let resp = match http.execute(request).await {
                 Ok(resp) => resp,
                 Err(e) => {
                     if let Some(old) = held.take() {

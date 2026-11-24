@@ -107,7 +107,7 @@ pub enum Profile {
     /// The media helper, only for a file whose decoder is Windows' own (its route is `System`; decision 2541).
     ///
     /// Windows' decoders (Media Foundation) do not start without `registryRead`, and its audio decoders (AAC) and
-    /// WIC (HEIC, camera RAW) not without `lpacCom` (COM; Guus, 2026-11-21). With `hevc`, also the three further
+    /// WIC (HEIC, camera RAW) not without `lpacCom` (COM; the owner, 2026-11-21). With `hevc`, also the three further
     /// capabilities the HEVC decoder from Microsoft's Store extension needs: `lpacAppExperience`,
     /// `lpacIdentityServices` and `lpacMedia` (each one measured necessary, the five together enough).
     ///
@@ -125,7 +125,7 @@ pub enum Profile {
 const REGISTRY_READ: &str = "registryRead";
 
 /// COM inside a less-privileged AppContainer. Media Foundation's audio decoders (AAC) and WIC (HEIC, camera RAW)
-/// start COM objects and fail without it; held by [`Profile::SystemDecoder`] only (Guus, 2026-11-21). It reaches
+/// start COM objects and fail without it; held by [`Profile::SystemDecoder`] only (the owner, 2026-11-21). It reaches
 /// COM servers that admit less-privileged containers; it grants no file, network or registry-write access.
 const LPAC_COM: &str = "lpacCom";
 
@@ -878,7 +878,7 @@ mod tests {
     }
 
     /// `lpacCom` (COM, which Media Foundation's audio decoders and WIC need to start) is held by the system-decoder
-    /// profile only, both with and without HEVC (Guus, 2026-11-21). The default profile, every helper's, never.
+    /// profile only, both with and without HEVC (the owner, 2026-11-21). The default profile, every helper's, never.
     #[test]
     fn com_is_held_by_the_system_decoder_profile_only() {
         assert!(!Profile::NoCapabilities.capabilities().contains(&"lpacCom"));
