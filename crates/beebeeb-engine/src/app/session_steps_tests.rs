@@ -22,7 +22,7 @@ type TestEngine = Engine<MemoryCredentials>;
 
 const PASSWORD: &str = "an invented password for the session steps";
 
-/// One registered account on a fake server of its own, and its recovery words.
+/// One registered account on a fake server of its own, and its 12 words of your master key.
 fn account(tag: &str) -> (FakeApi, Arc<FakeAccount>, String) {
     let (account, phrase) = FakeAccount::register(&format!("{tag}@example.eu"), PASSWORD, TEST_PHRASE);
     let account = Arc::new(account);
@@ -41,7 +41,7 @@ fn opened(api: &FakeApi, slot: &str) -> Arc<TestEngine> {
     Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens"))
 }
 
-/// Signs in with the password and the recovery words: the lock is open.
+/// Signs in with the password and the 12 words of your master key: the lock is open.
 fn sign_in(engine: &TestEngine, account: &FakeAccount, phrase: &str) {
     engine
         .sign_in_password(&account.email, Zeroizing::new(PASSWORD.into()))
@@ -116,7 +116,7 @@ fn a_session_ending_step_counts_before_it_waits() {
     }
 }
 
-/// The start's restore, a password sign-in and the recovery words run while no session is open: none of them is a
+/// The start's restore, a password sign-in and the 12 words of your master key run while no session is open: none of them is a
 /// session-ending step, so a hand-off pressed before cannot be refused by them through the count.
 #[test]
 fn a_password_sign_in_counts_no_session_step() {

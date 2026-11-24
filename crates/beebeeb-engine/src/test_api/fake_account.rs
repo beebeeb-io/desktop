@@ -1140,13 +1140,13 @@ pub fn require_loopback(base: &str) -> Result<(), String> {
 
 // ── A pre-built tree for tests ──────────────────────────────────────────────────
 
-/// A recovery phrase valid in BIP-39 English (12 words). Every test uses this one; it is invented and has no
+/// A master key valid in BIP-39 English (12 words). Every test uses this one; it is invented and has no
 /// value (the BIP-39 crate validates the checksum).
 pub const TEST_PHRASE: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-/// Build a [`FakeAccount`] with a small tree: 2 folders, 5 files (0 bytes to a few MiB), the recovery phrase
-/// above, and the account started. Returns the account, the recovery phrase, and the fake API server.
+/// Build a [`FakeAccount`] with a small tree: 2 folders, 5 files (0 bytes to a few MiB), the master key
+/// above, and the account started. Returns the account, the master key, and the fake API server.
 pub fn test_account() -> (Arc<FakeAccount>, String, FakeApi) {
     let (account, phrase) = FakeAccount::register("test@example.eu", "correct horse battery", TEST_PHRASE);
     let account = Arc::new(account);

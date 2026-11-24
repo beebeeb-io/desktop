@@ -1,4 +1,4 @@
-//! Copy a secret to the clipboard and clear it after a timeout (the recovery phrase: B11 ruling, DW-0009).
+//! Copy a secret to the clipboard and clear it after a timeout (the master key: B11 ruling, DW-0009).
 //!
 //! The host provides clipboard access through [`ClipboardAccess`]; the engine owns the policy (what to copy,
 //! when to clear, and the digest-only comparison that never holds the secret longer than the copy itself).
@@ -87,13 +87,13 @@ mod tests {
 
     #[test]
     fn a_clipboard_changed_by_the_user_is_left_alone() {
-        let hash = digest("my recovery phrase");
+        let hash = digest("my master key");
         // The user copied something else in between: still_ours returns false, so the engine
         // leaves the clipboard alone.
         assert!(!still_ours(&hash, "user pasted something else"));
         // Empty clipboard (user cleared it manually): also left alone.
         assert!(!still_ours(&hash, ""));
         // Same text: still ours.
-        assert!(still_ours(&hash, "my recovery phrase"));
+        assert!(still_ours(&hash, "my master key"));
     }
 }

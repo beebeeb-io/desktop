@@ -24,7 +24,7 @@ Modules 1–33, sorted by path.
 | `cf_range.rs` | LD-0105 W2: the rules of the Windows fetch callback's streaming path, pure and compiled on every platform so they are tested everywhere (the | — |
 | `cf_range_commitment_tests.rs` | `cf_range::session_commitment`: which commitment a range session opens its frames against. | — |
 | `cf_range_tests.rs` | Tests of `cf_range` (LD-0105 W2, contract Amendment 4). | — |
-| `clipboard.rs` | Copy a secret to the clipboard and clear it after a timeout (the recovery phrase: B11 ruling, DW-0009). | — |
+| `clipboard.rs` | Copy a secret to the clipboard and clear it after a timeout (the master key: B11 ruling, DW-0009). | — |
 | `cloud_attrs.rs` | Whether a file's bytes are all on this PC, read from its Windows attributes only: a Cloud Files placeholder whose bytes are still in the clo | — |
 | `config.rs` | Persistent desktop config — `~/.config/beebeeb/desktop.toml`. | ConfigError (14), HeldConfig, UpdateError (2), default_sync_root_suggestion, ensure_directory, DesktopSettings (23), KnownFolderBackup (2), ConfigFs (4), ConfigHost (2), RealConfigFs, ConfigMode (4), DesktopConfig (45), … (+4 more) |
 | `conflict.rs` | Conflict detection primitives — pure functions over `VersionInfo`s, plus the policy timestamps Task 13's auto-resolution timer reads. | — |

@@ -5,7 +5,7 @@
 //! [`crate::state_db::StateDb::queue_diagnostics_with_paths`] hands them out: every string has already gone through
 //! the engine's export redaction (`crate::diagnostic_redaction`), with the sync folder's own names added to the names
 //! it removes. The file on disk is the redacted one; there is no unredacted copy. Never: a file or folder name, a
-//! path, the account's email, a device name, a key, a token or the recovery phrase. Nothing is sent anywhere.
+//! path, the account's email, a device name, a key, a token or the master key. Nothing is sent anywhere.
 //!
 //! For one session only (the press's): the bundle is not written once the session moved on. BLOCKS: a worker's.
 

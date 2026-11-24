@@ -1,5 +1,5 @@
 //! The contract of the engine handle for a host without Tauri (`beebeeb_engine::app::Engine`), against the local
-//! fake API and the in-memory credential store: restore, password sign-in, the recovery phrase, a first sync of
+//! fake API and the in-memory credential store: restore, password sign-in, the master key, a first sync of
 //! production-shaped rows, the listing, pause, resume, stop, a restart, and what is refused.
 //!
 //! One process, one fake server, invented accounts. `BB_API_BASE` is set once, before anything reads it.

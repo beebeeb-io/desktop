@@ -1,4 +1,4 @@
-//! S1, invariant I1 (contract §6): the recovery phrase, the key it derives and the session token appear in no log
+//! S1, invariant I1 (contract §6): the master key, the key it derives and the session token appear in no log
 //! line and nothing on stderr or stdout, over the wrong-phrase path and the whole happy path (sign-in, phrase, start,
 //! the first pull, stop).
 //!

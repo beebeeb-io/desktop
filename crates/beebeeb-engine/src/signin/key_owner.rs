@@ -22,7 +22,7 @@ use crate::keychain::{AuthResult, AuthSecretStore, AuthStoreError, AuthVault};
 
 /// What the loader says when the stored key is not the stored session's (the window then asks for the 12 words).
 pub const KEY_NOT_THIS_ACCOUNTS: &str =
-    "The key stored on this computer isn\u{2019}t this account\u{2019}s. Enter your recovery phrase to unlock.";
+    "The key stored on this computer isn\u{2019}t this account\u{2019}s. Enter your master key to unlock.";
 
 /// What a sign-in says when another account's key is still stored and could not be removed. Nothing was signed in.
 pub const FOREIGN_KEY_NOT_REMOVED: &str = "Another account\u{2019}s key is still stored on this computer and Beebeeb couldn\u{2019}t remove it. Nothing was signed in. Restart Beebeeb and try again.";
@@ -121,9 +121,9 @@ pub fn stored_key_ownership<S: AuthSecretStore>(vault: &AuthVault<S>) -> AuthRes
 pub enum StoredKey {
     /// A key the loader will accept: the lock screen.
     Usable,
-    /// No key: the recovery phrase (or another device).
+    /// No key: the master key (or another device).
     Absent,
-    /// A key the loader refuses: the recovery phrase replaces it.
+    /// A key the loader refuses: the master key replaces it.
     NotThisAccounts,
     /// The store could not answer. Neither "present" nor "absent".
     Unreadable,

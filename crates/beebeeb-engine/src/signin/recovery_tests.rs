@@ -1,4 +1,4 @@
-//! The recovery-phrase proof's rules, against a local fake of the server's check: an account with no check on file is
+//! The master-key proof's rules, against a local fake of the server's check: an account with no check on file is
 //! refused like a wrong phrase, and the phrase is normalized to 12 lower-case words before anything is sent. Ported from
 //! the old shell's `recovery_phrase_unlock_tests.rs` and `tests.rs`.
 
@@ -135,7 +135,7 @@ fn normalizes_recovery_phrase_in_rust() {
 /// changes (the derivation's refusal instead) and the asserts go red.
 #[tokio::test]
 async fn rejects_non_twelve_word_recovery_phrase() {
-    const SENTENCE: &str = "Recovery phrase must contain exactly 12 words.";
+    const SENTENCE: &str = "Your master key is 12 words.";
     let error = normalize_recovery_phrase_input("alpha bravo charlie").expect_err("phrase should be incomplete");
     assert_eq!(error, SENTENCE);
 

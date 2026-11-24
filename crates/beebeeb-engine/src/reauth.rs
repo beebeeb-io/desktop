@@ -95,7 +95,7 @@ pub enum SignInKind {
     NeedsKeyProof,
     /// The account on this Mac signs in again (the same user id), but the server says the vault key this Mac kept is no
     /// longer the account's: it was changed on another device. The token is replaced without that key, the key is
-    /// removed, and the recovery phrase is asked (spec §5.6). Only [`after_key_proof`] returns it.
+    /// removed, and the master key is asked (spec §5.6). Only [`after_key_proof`] returns it.
     KeyOutdated,
     /// The server could not say. Nothing changes: the new session is revoked and the person tries again.
     Unconfirmed,

@@ -1,5 +1,5 @@
 //! Signing in without a UI toolkit: the gate's rules, whose key is stored next to whose session, the password
-//! and recovery-phrase steps, and reading a stored session. The Tauri shell re-exports these under their old
+//! and master-key steps, and reading a stored session. The Tauri shell re-exports these under their old
 //! paths; the engine's own handle (`crate::app`) calls them directly.
 
 pub mod gate;

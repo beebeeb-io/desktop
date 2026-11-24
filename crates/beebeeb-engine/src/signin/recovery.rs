@@ -1,4 +1,4 @@
-//! The recovery-phrase unlock's proof: is the key derived from the typed phrase the signed-in account's? Moved
+//! The master-key unlock's proof: is the key derived from the typed phrase the signed-in account's? Moved
 //! out of the Tauri shell (`session_apply.rs`, `login_commands.rs`) as text.
 //!
 //! Must not: log the phrase, the key or its check; treat an unreachable or unreadable verifier as "valid".
@@ -48,7 +48,7 @@ pub async fn recovery_check_answer(
         })
         .send()
         .await
-        .map_err(|e| format!("Could not verify the recovery phrase (network error: {e}). Try again."))?;
+        .map_err(|e| format!("Could not verify your master key (network error: {e}). Try again."))?;
     let status = resp.status();
     if status == reqwest::StatusCode::BAD_REQUEST {
         let body = resp.text().await.unwrap_or_default();
@@ -60,7 +60,7 @@ pub async fn recovery_check_answer(
             Some(RECOVERY_CHECK_MISSING) => Ok(RecoveryCheckAnswer::NoCheckOnFile),
             // Any other 400 says nothing about the key: answered like a server error, never as a mismatch.
             _ => Err(format!(
-                "Could not verify the recovery phrase (server returned {status}). Try again."
+                "Could not verify your master key (server returned {status}). Try again."
             )),
         };
     }
@@ -69,21 +69,21 @@ pub async fn recovery_check_answer(
     }
     if !status.is_success() {
         return Err(format!(
-            "Could not verify the recovery phrase (server returned {status}). Try again."
+            "Could not verify your master key (server returned {status}). Try again."
         ));
     }
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("Could not verify the recovery phrase (unreadable response: {e}). Try again."))?;
+        .map_err(|e| format!("Could not verify your master key (unreadable response: {e}). Try again."))?;
     if body.get("valid").and_then(|v| v.as_bool()) == Some(true) {
         Ok(RecoveryCheckAnswer::Matches)
     } else {
-        Err("Could not verify the recovery phrase (unexpected response). Try again.".to_string())
+        Err("Could not verify your master key (unexpected response). Try again.".to_string())
     }
 }
 
-/// The recovery-phrase unlock's question: is the key from this phrase the signed-in account's? `Ok(true)` only on a
+/// The master-key unlock's question: is the key from this phrase the signed-in account's? `Ok(true)` only on a
 /// match. An account with no check on file proves nothing here either, so it stays `Ok(false)` (web applies the same
 /// policy); see [`recovery_check_answer`] for what is `Err`.
 pub async fn recovered_key_matches_account(
@@ -116,7 +116,7 @@ pub fn normalized_phrase(input: &str) -> Result<zeroize::Zeroizing<String>, Stri
         words += 1;
     }
     if words != 12 {
-        return Err("Recovery phrase must contain exactly 12 words.".to_string());
+        return Err("Your master key is 12 words.".to_string());
     }
     Ok(phrase)
 }
@@ -139,7 +139,7 @@ pub fn encode_base64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-pub const INCORRECT_RECOVERY_PHRASE: &str = "Incorrect recovery phrase. Check your words and try again.";
+pub const INCORRECT_RECOVERY_PHRASE: &str = "Incorrect master key. Check your words and try again.";
 
 /// Verification has no persistent side effects; callers fence installation.
 pub async fn verify_vault_key_from_phrase(
@@ -150,7 +150,7 @@ pub async fn verify_vault_key_from_phrase(
 ) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
     let recovery_phrase = normalized_phrase(recovery_phrase)?;
     let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
-        .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
+        .map_err(|_| "That is not a valid master key. Check the 12 words and their order.".to_string())?;
     if !recovered_key_matches_account(client, base_url, session_token, &master_key_struct).await? {
         // `master_key_struct` zeroizes on drop.
         return Err(INCORRECT_RECOVERY_PHRASE.to_string());

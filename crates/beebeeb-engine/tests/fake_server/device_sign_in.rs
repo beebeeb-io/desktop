@@ -3,7 +3,7 @@
 //! The engine asks to be signed in by another device (DW-A07 to DW-A10) on the fake's own address, exactly as a TEST build
 //! started with `--api-base http://127.0.0.1:<port>` does: the socket, the code, the wait. The approving device is the
 //! fake's second device, driven with one HTTP call as a check script drives it. Nothing in these tests gives the engine the
-//! password or the recovery phrase: the key it ends with came sealed to its own request.
+//! password or the master key: the key it ends with came sealed to its own request.
 //!
 //! The TEST identity is refused on macOS (`EngineIdentity::refusal_on`), so this file is not compiled there.
 

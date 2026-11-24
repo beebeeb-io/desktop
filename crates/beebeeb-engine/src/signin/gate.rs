@@ -27,7 +27,7 @@ pub enum GateState {
     /// Signed in, the vault is CLOSED: the key is in the credential store and not in memory, nothing syncs. The
     /// account's password, proven to the server, opens it (DW-A30).
     Locked,
-    /// Signed in, but no vault key in keychain at all: show the recovery phrase (DW-A23).
+    /// Signed in, but no vault key in keychain at all: show the master key (DW-A23).
     /// A first sign-in by password ends here; the 12 words (or another device) provision the key.
     NeedsRecoveryPhrase,
     /// Signed in and unlocked, but the account has no plan: show the choose-a-plan screen (DW-0014).
@@ -175,30 +175,30 @@ pub fn two_factor_error(code: &str) -> &'static str {
 
 // ── Recovery-phrase step (DW-A23 to DW-A25) ─────────────────────────────────
 
-/// The recovery-phrase step's error text (DW-A24).
-pub const WRONG_PHRASE: &str = "That phrase doesn\u{2019}t open this account. Nothing was restored.";
+/// The master-key step's error text (DW-A24).
+pub const WRONG_PHRASE: &str = "These words don\u{2019}t match your master key. Check them against what you saved.";
 
 /// DW-A24: after the server's attempt limit.
 pub const TOO_MANY_PHRASE_TRIES: &str = "Too many tries. Wait an hour.";
 
-/// P3: what a recovery-phrase unlock returns when the phrase was RIGHT (the vault is unlocked) and the engine start
+/// P3: what a master-key unlock returns when the phrase was RIGHT (the vault is unlocked) and the engine start
 /// then failed. Its own sentence, so no screen can show it as a wrong phrase; it is a sentence and not a code because
 /// the older sign-in screens print the command's error as it is.
 pub const UNLOCKED_SYNC_NOT_STARTED: &str =
-    "Your recovery phrase is right and this computer is unlocked. Sync didn\u{2019}t start yet. Try again.";
+    "Your master key is right and this computer is unlocked. Sync didn\u{2019}t start yet. Try again.";
 
-/// The recovery-phrase command's error for an engine start that failed after the phrase was accepted.
+/// The master-key command's error for an engine start that failed after the phrase was accepted.
 pub fn engine_not_started_after_unlock(error: String) -> String {
-    tracing::warn!(%error, "the recovery phrase unlocked the vault, but the engine did not start");
+    tracing::warn!(%error, "the master key unlocked the vault, but the engine did not start");
     UNLOCKED_SYNC_NOT_STARTED.to_string()
 }
 
-/// Map a recovery-phrase error to the board's words.
+/// Map a master-key error to the board's words.
 pub fn phrase_error(code: &str) -> &'static str {
     if code == UNLOCKED_SYNC_NOT_STARTED {
         return UNLOCKED_SYNC_NOT_STARTED;
     }
-    if code.contains("Incorrect recovery phrase") {
+    if code.contains("Incorrect master key") {
         return WRONG_PHRASE;
     }
     if code.contains("too many") || code.contains("Too many") {
@@ -208,9 +208,9 @@ pub fn phrase_error(code: &str) -> &'static str {
         return "You\u{2019}re offline. Nothing was sent.";
     }
     if code.contains("Sign in before") {
-        return "Sign in before entering the recovery phrase.";
+        return "Sign in before entering your master key.";
     }
-    "The phrase check didn\u{2019}t finish. Try again."
+    "The master key check didn\u{2019}t finish. Try again."
 }
 
 // ── Another-device step (DW-A07 to DW-A10) ─────────────────────────────────
@@ -268,7 +268,7 @@ pub fn engine_allowed(vault_unlocked: bool, has_plan: bool) -> bool {
 // ── Tauri commands ──────────────────────────────────────────────────────────
 
 /// Decide the gate state. `stored_key` (asked only for a signed-in, locked window) distinguishes the lock screen (a
-/// key the loader accepts: Windows Hello can unlock) from the recovery-phrase step (no key, or a key that is not this
+/// key the loader accepts: Windows Hello can unlock) from the master-key step (no key, or a key that is not this
 /// account's: the 12 words or another device provide it) and from a store that could not answer.
 pub fn decide_gate(logged_in: bool, vault_unlocked: bool, stored_key: StoredKey, has_no_plan: bool) -> GateState {
     if !logged_in {
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn phrase_wrong() {
-        assert!(phrase_error("Incorrect recovery phrase").contains("doesn\u{2019}t open"));
+        assert!(phrase_error("Incorrect master key").contains("don\u{2019}t match"));
     }
 
     #[test]
@@ -592,7 +592,7 @@ mod tests {
     fn an_engine_start_that_fails_after_a_right_phrase_is_never_the_wrong_phrase_error() {
         // Whatever the start's own text says (it is logged, never shown as the reason).
         for start_error in [
-            "network error: Incorrect recovery phrase",
+            "network error: Incorrect master key",
             "offline",
             "Too many open files",
         ] {
@@ -602,7 +602,7 @@ mod tests {
         }
         assert_ne!(UNLOCKED_SYNC_NOT_STARTED, WRONG_PHRASE);
         assert_eq!(
-            phrase_error("Incorrect recovery phrase. Check your words and try again."),
+            phrase_error("Incorrect master key. Check your words and try again."),
             WRONG_PHRASE
         );
     }

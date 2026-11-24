@@ -42,7 +42,7 @@ fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
-/// One registered account for every test here (a registration runs Argon2id once), and its recovery phrase.
+/// One registered account for every test here (a registration runs Argon2id once), and its master key.
 fn account() -> (Arc<FakeAccount>, String) {
     static ACCOUNT: OnceLock<(Arc<FakeAccount>, String)> = OnceLock::new();
     ACCOUNT

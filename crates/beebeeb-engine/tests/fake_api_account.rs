@@ -1,7 +1,7 @@
 //! Integration tests for the fake Beebeeb API: one process, one invented account, the real OPAQUE and recovery
 //! protocol, and every assertion proved to fail on a mutant (broken client).
 //!
-//! Tests the path: sign-in -> recovery phrase -> gate Ready -> start_sync -> the engine pulls the snapshot, decrypts
+//! Tests the path: sign-in -> master key -> gate Ready -> start_sync -> the engine pulls the snapshot, decrypts
 //! the names with the real master key, and state.db has COUNT 7 entries with the right decrypted names. Nothing
 //! touches the OS credential store or the network: everything is in-memory and on loopback.
 //!
@@ -177,7 +177,7 @@ fn wrong_password_refused_by_real_opaque() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 3. Wrong recovery phrase -> gate stays NeedsRecoveryPhrase
+// 3. Wrong master key -> gate stays NeedsRecoveryPhrase
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[cfg(not(target_os = "macos"))]
@@ -195,7 +195,7 @@ fn wrong_phrase_not_ready() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 4. Happy path: sign in -> recovery phrase -> gate Ready
+// 4. Happy path: sign in -> master key -> gate Ready
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[cfg(not(target_os = "macos"))]

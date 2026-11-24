@@ -98,7 +98,7 @@ Rust derives one `AccountView`, with one code path on all three operating system
     - at launch, while spec A's startup restore and its probe run for a stored token (`probe_startup_session`, capped at 5 s, `lib.rs:561`, `:563`, `:573`)
     - at launch, once the restore has finished, with a session and the key but no usable cached account part
     - after a sign-in that leaves the key in memory: a browser sign-in, or a password sign-in with the key in the Keychain
-    - after an unlock (the Keychain unlock or the recovery phrase) with no usable cached account part
+    - after an unlock (the Keychain unlock or the master key) with no usable cached account part
     - after the same account signs in again from Session ended (R8)
   - **Screen.** The busy screen: the window's busy indicator, with no new words.
   - **Exit.** Checking ends with the first fresh document, or when the document is unavailable (§10: an HTTP status, a 429, an unreadable body, or offline). If the document is unavailable, the cache decides if there is one; otherwise the app proceeds as today (C-R6, gate open).
@@ -255,7 +255,7 @@ C3's launch policy applies to macOS only in spec C. Windows and Linux keep today
 - **C-W7 The C-R4 screen is today's unlock flow; there is no new unlock UI.**
   - ~~**The key is in the Keychain:** the Keychain unlock, which is the Settings Account tab's Vault "Unlock" button (`unlock_vault`, spec A `src/MacSettings.tsx`). The click or launch opens the Settings window (`show_macos_settings_window`, `lib.rs:8682`).~~
   - **The key is in the Keychain:** the popover's "Unlock vault" unlocks in place (`unlock_vault`); the Beebeeb window's Settings › Account keeps its Vault "Unlock" row. No Settings window opens ([two-surface spec](2026-10-24-macos-two-surface-app.md) §6.3). — two-surface design, 2026-10-24
-  - **No key on this device:** the account window's recovery-phrase step (`UnlockStep`, `src/Onboarding.tsx:350`, calling `desktop_unlock_with_recovery_phrase`).
+  - **No key on this device:** the account window's master-key step (`UnlockStep`, `src/Onboarding.tsx:350`, calling `desktop_unlock_with_recovery_phrase`).
 - ~~**C-W8 The account window** is the existing `onboarding` window (`lib.rs:874-910`, and spec A's `open_reauth_window`), centred at 860×640 (popover ruling 6).~~
 - **C-W8 The account window** is the Beebeeb window (label `main`) in its signed-out state, not a separate window ([two-surface spec](2026-10-24-macos-two-surface-app.md) §7.4). The title still follows the screen; the size and position follow §7.2 there. — two-surface design, 2026-10-24
   - On macOS its title becomes "Sign in to Beebeeb"; today it is "Welcome to Beebeeb" (`lib.rs:896`). The title bar follows the heading of the screen it shows.
@@ -290,14 +290,14 @@ No popover exists yet (`src-tauri/tauri.conf.json:13-72` declares none). So afte
 
 - Title: "Sign in to Beebeeb".
 - Primary (amber): "Sign in with browser". It leads to the existing 1734 device-code screen, unchanged, with the code in mono. That screen lives in `src/WindowsFirstRun.tsx:300-715` today; it moves into one shared component that both windows mount, and its copy stays in `src/browserLoginCopy.ts`.
-- Text link: "Use email and password". It leads to email, password, 2FA if it is on, and the recovery phrase if this Mac has no key. These are today's flows, copy unchanged (`src/Onboarding.tsx:183`, `:350`).
+- Text link: "Use email and password". It leads to email, password, 2FA if it is on, and the master key if this Mac has no key. These are today's flows, copy unchanged (`src/Onboarding.tsx:183`, `:350`).
 - Footer: "New to Beebeeb? Create an account on beebeeb.io" (server link, system browser), and a small "Quit Beebeeb". Cmd-Q also quits (it already exists, `lib.rs:9247`).
 - Offline: the buttons are replaced by "Can't reach Beebeeb. Check your connection." + "Try again". "Create account" stays, with the built-in address.
 - When spec A reports `not_in_applications` before sign-in (spec A §6.2, check D7), its sentence and "Show in Finder" sit above the buttons. The copy is spec A's (spec A `src/finderSetupCopy.ts`).
 - **C-S1 One outcome for both sign-in paths.**
   - **Today on spec A's branch,** the browser path reports a different account in two raw ways: it emits an `account_mismatch` event that nothing consumes, and it returns the string `"account_mismatch"`. Its error arm also forwards that string in an `error` event (spec A `browser_login.rs`, `run_handoff` and `start_browser_login`).
   - **The shared contract.** `start_browser_login` returns the same `LoginOutcome` shape as `desktop_login` (spec A `lib.rs`). That shape always serializes `requires_2fa`, `reauthenticated`, `vault_unlocked` and `account_mismatch`, and `login_outcome_json_is_the_frontends_contract` pins it. The shape does not change.
-  - **A fresh browser sign-in** delivers the keys, so its outcome carries `vault_unlocked: true`, and it never lands on the recovery-phrase step.
+  - **A fresh browser sign-in** delivers the keys, so its outcome carries `vault_unlocked: true`, and it never lands on the master-key step.
   - **The Lane T change.** `settledFrom` (spec A `src/onboardingSignIn.ts`) drops `vault_unlocked` for a fresh result today; its `fresh` result gains `vaultUnlocked`. `afterSignIn` (spec A `src/Onboarding.tsx`) then sends a fresh, unlocked result to Checking instead of to `UnlockStep`.
   - **A different account** gets spec A's switch warning (`AccountSwitchStep`), exactly as on the password path. No raw code reaches the UI: neither the command's error nor any event carries `account_mismatch`.
   - Both paths revoke the session they just created for the other account (spec A `lib.rs`, the password path's `AccountMismatch` arm; `browser_login.rs`). After "Sign out and switch", the person therefore signs in again, by either method.
@@ -559,7 +559,7 @@ Each task file keeps its original line struck through. These are the replacement
 ### 1747 (macOS)
 
 - A debug `.app` bundle, `BB_API_BASE=http://localhost:3001` and `HOME=<scratch>` for every login.
-- Sign in by browser handoff, by password, and by password + 2FA. Each reaches Ready, with a capture of each. The browser sign-in on a Mac with no key never shows the recovery phrase.
+- Sign in by browser handoff, by password, and by password + 2FA. Each reaches Ready, with a capture of each. The browser sign-in on a Mac with no key never shows the master key.
 - A relaunch after a revoked session shows Session ended, with spec A's sign-in-again wording, the crossed b and "Beebeeb: Sign in again". A relaunch after a sign-out by choice shows Signed out.
 - "Create account" opens exactly the address the server document names.
 - A `needs_plan` account shows "Choose a plan". No Finder location is added and the engine does not start (lifecycle log). With the plan set active locally, the app continues by itself and spec A sets up Finder.
@@ -623,7 +623,7 @@ Each entry records a finding, with the ruling beneath it. Where a later ruling r
   - **Ruled:** every transition into Ready fires the account trigger, with a test per incoming edge. → C-R12.
 - **I-1 Linux shares the macOS sign-in window, and the removals would break its first run.**
   - **Ruled:** be honest. The state and gate are platform-neutral, and the shared sign-in changes reach Linux. Nothing Linux-specific is built. The icon follows the shared tray path. Tests plus a named open rung. → C-R14, §7.8, §11, §16.
-- **I-2 A fresh browser sign-in would land on the recovery phrase,** because `settledFrom` drops `vault_unlocked` for a fresh result.
+- **I-2 A fresh browser sign-in would land on the master key,** because `settledFrom` drops `vault_unlocked` for a fresh result.
   - **Ruled:** the outcome reports the vault unlocked, using the existing `vault_unlocked` field, and the parser carries it into Checking. → C-S1.
 - **I-3 Nothing reliably opened the C-R3, C-R4 and C-R5 windows:** clicks went to the compact window, and the launch decision came before the state settled.
   - **Ruled:** one rule for clicks, manual launches (a 5 s settle) and login launches. → C-W3 to C-W6.
@@ -632,7 +632,7 @@ Each entry records a finding, with the ruling beneath it. Where a later ruling r
 - **I-5 "Session ended" had no source of truth, and "off" conflicted with spec A's 401 handling.**
   - **Ruled:** C-R2 is spec A's auth-expired state, and spec C adds only the presentation. → §4.1, C-R2, §10.
 - **I-6 "Locked" could be read two ways.**
-  - **Ruled:** a valid session with no key in memory, shown through today's unlock flow: the Keychain unlock or the recovery phrase. → C-W7.
+  - **Ruled:** a valid session with no key in memory, shown through today's unlock flow: the Keychain unlock or the master key. → C-W7.
 - **I-7 The diagram contradicted the table** (`SessionEnded --> Ready` skipped Checking) and left out common transitions.
   - **Ruled:** rebuild it from the table and the precedence; remove `SessionEnded --> Ready`; Session ended goes back through Checking after the sign-in. → §4.3.
   - **Corrected (lead, 2026-10-07, after the re-review):** the removal was wrong.
