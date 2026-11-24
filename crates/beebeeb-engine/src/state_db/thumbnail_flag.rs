@@ -9,13 +9,16 @@ impl StateDb {
     /// it after the row's version was written). Returns whether a row was there; an unknown id changes nothing.
     pub fn set_server_has_thumbnail(&self, file_id: &str, has: bool) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        Ok(conn.execute(
-            "UPDATE files SET has_thumbnail = ?2, has_thumbnail_version = current_version
-             WHERE file_id = ?1 AND (has_thumbnail IS NOT ?2 OR has_thumbnail_version IS NOT current_version)",
-            params![file_id, i64::from(has)],
-        )? > 0
+        Ok(conn
+            .prepare_cached(
+                "UPDATE files SET has_thumbnail = ?2, has_thumbnail_version = current_version
+                 WHERE file_id = ?1 AND (has_thumbnail IS NOT ?2 OR has_thumbnail_version IS NOT current_version)",
+            )?
+            .execute(params![file_id, i64::from(has)])?
+            > 0
             || conn
-                .query_row("SELECT 1 FROM files WHERE file_id = ?1", params![file_id], |_| Ok(()))
+                .prepare_cached("SELECT 1 FROM files WHERE file_id = ?1")?
+                .query_row(params![file_id], |_| Ok(()))
                 .optional()?
                 .is_some())
     }

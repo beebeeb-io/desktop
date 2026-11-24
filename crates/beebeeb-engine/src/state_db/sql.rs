@@ -512,8 +512,8 @@ pub(super) fn record_file_change_conn<C: std::ops::Deref<Target = Connection>>(
     // The NEW parent is whatever the row says NOW. `parent_id` lives in the
     // files column (written by set_file_contract_state).
     let new_parent_id: Option<String> = conn
+        .prepare_cached("SELECT parent_id FROM files WHERE file_id = ?1")?
         .query_row(
-            "SELECT parent_id FROM files WHERE file_id = ?1",
             params![file_id],
             |row| row.get::<_, Option<String>>(0),
         )
@@ -529,21 +529,21 @@ pub(super) fn record_file_change_conn<C: std::ops::Deref<Target = Connection>>(
     // after asking File Provider to enumerate it — Finder received an empty
     // feed and missed every update.
     let recorded_at = now_secs();
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO fp_changes (seq, file_id, kind, old_parent_id, new_parent_id, recorded_at)
          VALUES (0, ?1, ?2, ?3, ?4, ?5)",
-        params![file_id, kind.as_str(), old_parent_id, new_parent_id, recorded_at],
-    )?;
+    )?
+    .execute(params![file_id, kind.as_str(), old_parent_id, new_parent_id, recorded_at])?;
     let seq = conn.last_insert_rowid();
-    conn.execute("UPDATE fp_changes SET seq = ?1 WHERE id = ?1", params![seq])?;
+    conn.prepare_cached("UPDATE fp_changes SET seq = ?1 WHERE id = ?1")?.execute(params![seq])?;
     // The anchor cursor tracks the log tip even before any consumer reads:
     // `list_file_changes` never rewinds it, so a poll that races a write
     // cannot lose changes.
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO fp_sync_anchor (domain_id, last_anchor) VALUES ('__default__', ?1)
          ON CONFLICT(domain_id) DO UPDATE SET last_anchor = MAX(last_anchor, excluded.last_anchor)",
-        params![seq],
-    )?;
+    )?
+    .execute(params![seq])?;
     Ok(())
 }
 
@@ -845,3 +845,4 @@ pub(super) fn has_table(conn: &Connection, table: &str) -> Result<bool> {
     let mut rows = stmt.query(params![table])?;
     Ok(rows.next()?.is_some())
 }
+
