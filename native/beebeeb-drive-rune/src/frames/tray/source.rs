@@ -95,7 +95,7 @@ impl Hidden {
         match self {
             Hidden::Locked => format!("Unlock {name} to see file names. Nothing shows while it's locked."),
             Hidden::SignedOut => "Sign in to see file names.".into(),
-            Hidden::NoKeys => "File names show once your keys are on this PC.".into(),
+            Hidden::NoKeys => concat!("File names show once your keys are on ", beebeeb_engine::device_word!(), ".").into(),
         }
     }
 }
@@ -128,7 +128,7 @@ impl Action {
             Action::ShowProblems => "Show",
             Action::AddStorage => "Add storage",
             Action::RestartToUpdate => "Restart to update",
-            Action::Unlock => "Unlock with Windows Hello",
+            Action::Unlock => concat!("Unlock with ", beebeeb_engine::unlock_name!()),
             Action::ChoosePlan => "Choose a plan on beebeeb.io",
             Action::SignIn => "Sign in",
         }
@@ -195,13 +195,14 @@ impl Status {
                 (None, _) => return None,
             },
             Status::Paused { waiting } => format!(
-                "{} {} on this PC",
+                "{} {} on {os}",
                 count(*waiting),
-                plural(*waiting, "change waits", "changes wait")
+                plural(*waiting, "change waits", "changes wait"),
+                os = beebeeb_engine::device_word!()
             ),
-            Status::WaitingMetered => "This PC is on a metered connection".into(),
+            Status::WaitingMetered => concat!(beebeeb_engine::device_word_cap!(), " is on a metered connection").into(),
             Status::NeedsDecision { .. } => "Changed in two places".into(),
-            Status::Offline => "Files on this PC are unchanged".into(),
+            Status::Offline => concat!("Files on ", beebeeb_engine::device_word!(), " are unchanged").into(),
             // Stopped by an error on this PC with no file given up: nothing to count.
             Status::Stopped { files: 0 } => return None,
             Status::Stopped { files } => format!(
@@ -211,17 +212,18 @@ impl Status {
             ),
             Status::StorageAlmostFull { used, plan } => format!("{used} of {plan}"),
             Status::StorageFull { waiting } => format!(
-                "{} {} can't upload. They stay on this PC.",
+                "{} {} can't upload. They stay on {os}.",
                 count(*waiting),
-                plural(*waiting, "change", "changes")
+                plural(*waiting, "change", "changes"),
+                os = beebeeb_engine::device_word!()
             ),
             Status::UpdateAvailable { .. } => "Restart to apply the update.".into(),
             Status::UpdateRequired => format!("This version of {name} is too old to connect. Update to continue."),
             Status::Locked => "Sync keeps running while it's locked.".into(),
             Status::LockedSyncOff => "Nothing syncs while it's locked.".into(),
-            Status::NeedsRecoveryPhrase => format!("Enter it in {name} to sync this PC."),
+            Status::NeedsRecoveryPhrase => format!("Enter it in {name} to sync {os}.", os = beebeeb_engine::device_word!()),
             Status::KeysUnreadable => "Windows didn't answer. Nothing syncs until it does.".into(),
-            Status::NotSyncing => "Files on this PC are unchanged.".into(),
+            Status::NotSyncing => concat!("Files on ", beebeeb_engine::device_word!(), " are unchanged.").into(),
             Status::NoPlan { waiting: false } => {
                 format!(
                     "Your account is ready. Choose a plan on beebeeb.io, including the free trial. {name} continues here by itself."
@@ -528,14 +530,14 @@ fn recent() -> Vec<Change> {
             "Moodboard v3.pdf",
             Tile::Document,
             ThisPc,
-            &format!("Uploaded from this PC {dot} Documents"),
+            &format!("Uploaded from {os} {dot} Documents", os = beebeeb_engine::device_word!()),
             "2 min",
         ),
         done(
             "Budget 2026.xlsx",
             Tile::Sheet,
             ThisPc,
-            &format!("Uploaded from this PC {dot} Files"),
+            &format!("Uploaded from {os} {dot} Files", os = beebeeb_engine::device_word!()),
             "29 min",
         ),
         done(
@@ -572,7 +574,7 @@ fn recent() -> Vec<Change> {
                 "Notes old.md",
                 Tile::Trashed,
                 ThisPc,
-                "Moved to Trash on this PC",
+                concat!("Moved to Trash on ", beebeeb_engine::device_word!()),
                 "Yesterday",
             )
         },
@@ -692,7 +694,7 @@ fn frame_content(frame: &str) -> (Status, Changes) {
         "DW-1213" => (
             Status::NoPlan { waiting: false },
             Changes::Empty {
-                text: "Changes show here once Beebeeb syncs this PC.".into(),
+                text: concat!("Changes show here once Beebeeb syncs ", beebeeb_engine::device_word!(), ".").into(),
             },
         ),
         "DW-1214" => (Status::UpdateRequired, rows(recent())),
@@ -713,7 +715,7 @@ fn frame_content(frame: &str) -> (Status, Changes) {
                         "Proposal draft 8.pdf",
                         Tile::Document,
                         ThisPc,
-                        &format!("Uploaded from this PC {dot} Documents"),
+                        &format!("Uploaded from {os} {dot} Documents", os = beebeeb_engine::device_word!()),
                         "23 Oct",
                     ),
                     done(
@@ -734,21 +736,21 @@ fn frame_content(frame: &str) -> (Status, Changes) {
                         "Rates 2026 v9.xlsx",
                         Tile::Sheet,
                         ThisPc,
-                        &format!("Uploaded from this PC {dot} Documents"),
+                        &format!("Uploaded from {os} {dot} Documents", os = beebeeb_engine::device_word!()),
                         "22 Oct",
                     ),
                     done(
                         "Client call 9.m4a",
                         Tile::Audio,
                         ThisPc,
-                        &format!("Downloaded to this PC {dot} Documents"),
+                        &format!("Downloaded to {os} {dot} Documents", os = beebeeb_engine::device_word!()),
                         "22 Oct",
                     ),
                     done(
                         "Proposal draft 9.pdf",
                         Tile::Document,
                         ThisPc,
-                        &format!("Uploaded from this PC {dot} Documents"),
+                        &format!("Uploaded from {os} {dot} Documents", os = beebeeb_engine::device_word!()),
                         "22 Oct",
                     ),
                     done(
@@ -770,7 +772,8 @@ fn frame_content(frame: &str) -> (Status, Changes) {
                     Tile::Document,
                     ThisPc,
                     &format!(
-                        "Uploaded from this PC {dot} Clients \u{203A} Northwind Studio \u{203A} Brand \u{203A} 2026 \u{203A} Final"
+                        "Uploaded from {os} {dot} Clients \u{203A} Northwind Studio \u{203A} Brand \u{203A} 2026 \u{203A} Final",
+                        os = beebeeb_engine::device_word!()
                     ),
                     "2 min",
                 ),

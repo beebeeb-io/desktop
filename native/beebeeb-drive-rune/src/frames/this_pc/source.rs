@@ -34,7 +34,7 @@ pub enum Origin {
 impl Origin {
     pub fn label(&self) -> &str {
         match self {
-            Origin::ThisPc => "This PC",
+            Origin::ThisPc => concat!(beebeeb_engine::device_word_cap!()),
             Origin::Phone(name) | Origin::Tablet(name) => name,
             Origin::SharedFolder => "Shared folder",
         }
@@ -200,7 +200,7 @@ impl KeptStatus {
     pub fn label(self) -> &'static str {
         match self {
             KeptStatus::UpToDate => "Up to date",
-            KeptStatus::NotOnPcYet => "Not on this PC yet",
+            KeptStatus::NotOnPcYet => concat!("Not on ", beebeeb_engine::device_word!(), " yet"),
         }
     }
 }
@@ -569,7 +569,7 @@ impl FixtureSource {
                 "p-notes",
                 "09:50",
                 "Notes.md",
-                "This PC no longer has the bytes of this change, so it can\u{2019}t be sent. The file on Beebeeb is as it was.",
+                concat!(beebeeb_engine::device_word_cap!(), " no longer has the bytes of this change, so it can\u{2019}t be sent. The file on Beebeeb is as it was."),
                 vec![Exit::RemoveFromList],
             ),
         ];

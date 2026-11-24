@@ -368,7 +368,7 @@ fn change_row<S: 'static>(
     .help(if change.in_trash {
         "Open Trash"
     } else {
-        "Show in File Explorer"
+        concat!("Show in ", beebeeb_engine::file_manager!())
     })
     // The list is the one focus stop: the arrow keys move through its rows (`active_descendant`).
     .role("listitem")
@@ -408,7 +408,7 @@ fn changes_list<S: 'static>(ui: &Ui, name: &str, host: Host<S>, t: &Theme) -> El
                 ViewState::Failed {
                     key: "failed",
                     title: "Couldn't read recent changes",
-                    why: "The list of changes on this PC didn't open. Nothing was lost.",
+                    why: concat!("The list of changes on ", beebeeb_engine::device_word!(), " didn't open. Nothing was lost."),
                     retry: Some(try_again("failed", t).on_press_tx(host.act(Ui::retry_changes))),
                 },
                 t,
@@ -539,13 +539,13 @@ fn footer<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El {
         .on_press_tx(host.act(Ui::open_beebeeb));
 
     // "Open in File Explorer is disabled only while Beebeeb is not in File Explorer" (DW-1201).
-    let (explorer, key, ink) = button(1, "Open in File Explorer", snapshot.explorer_ready);
+    let (explorer, key, ink) = button(1, concat!("Open in ", beebeeb_engine::file_manager!()), snapshot.explorer_ready);
     let mut explorer = explorer
         .child(
             // The board's glyph box is 17 x 15: the glyph is 15, centred in it.
             kit::glyph(format!("{key}-icon"), &icons::EXPLORER, 15.0, ink).w(17.0),
         )
-        .child(label(&key, "Open in File Explorer", ink));
+        .child(label(&key, concat!("Open in ", beebeeb_engine::file_manager!()), ink));
     if snapshot.explorer_ready {
         explorer = explorer.on_press_tx(host.act(Ui::open_in_file_explorer));
     }
