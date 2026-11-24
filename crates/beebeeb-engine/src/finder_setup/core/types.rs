@@ -247,3 +247,19 @@ impl CoreState {
         self.phase == Phase::Idle && !self.awaiting && !self.poll_pending
     }
 }
+
+/// What one removal left on this Mac (the tag's `finder_removal::KeptFolder`, data only; defined here until the engine ports `finder_removal`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum KeptFolder {
+    /// Nothing to tell the person.
+    #[default]
+    Nothing,
+    /// Files were kept in this folder, exactly as the system reported it.
+    Kept {
+        path: String,
+        contents_checked: bool,
+        empty: bool,
+    },
+    /// macOS reported kept files without a folder.
+    Unknown,
+}

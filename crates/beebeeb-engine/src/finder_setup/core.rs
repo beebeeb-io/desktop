@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use super::error::{FpError, app_code};
 use super::launch_location::LaunchLocation;
 use super::policy::{self, RetryPolicy};
-use crate::finder_removal::KeptFolder;
 use crate::surfaces::phase::{FinderFailureReason, FinderSetup};
 
 mod decide;
