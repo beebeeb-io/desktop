@@ -306,14 +306,18 @@ mod tests {
         ));
         assert!(matches!(platform.autostart_enabled(), Err(PlatformError::NotBuilt(_))));
         assert!(matches!(platform.set_autostart(true), Err(PlatformError::NotBuilt(_))));
-        assert!(matches!(
-            platform.serve_control(AppIdentity::Test, Arc::new(|_| Reply::Ok)),
-            Err(ServeError::NotBuilt(_))
-        ));
-        assert_eq!(
-            platform.send_control(AppIdentity::Test, &Request::Show, Duration::from_millis(1)),
-            Delivery::Unreachable
-        );
+        // macOS has a control channel (`macos_control.rs`, tested there in a temp folder).
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(matches!(
+                platform.serve_control(AppIdentity::Test, Arc::new(|_| Reply::Ok)),
+                Err(ServeError::NotBuilt(_))
+            ));
+            assert_eq!(
+                platform.send_control(AppIdentity::Test, &Request::Show, Duration::from_millis(1)),
+                Delivery::Unreachable
+            );
+        }
         assert!(!platform.name().is_empty());
         let shown = PlatformError::NotBuilt("the b").to_string();
         assert_eq!(shown, "not built yet: the b");
