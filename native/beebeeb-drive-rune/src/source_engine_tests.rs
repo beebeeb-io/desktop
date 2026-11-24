@@ -324,6 +324,11 @@ fn timings_and_query_plan_for_5000_children_in_a_70000_row_db() {
             .collect::<Result<_, _>>()
             .unwrap();
         println!("PLAN {label}: {plan:?}");
+        // macOS does not create `idx_files_parent_id` (state_db/schema.rs: it has neither the parent-first gate nor
+        // the reconcile pass that read it), so its listing scans; the page timing above is what it is held to.
+        if cfg!(target_os = "macos") {
+            continue;
+        }
         assert!(
             plan.iter().any(|step| step.contains("idx_files_parent_id")),
             "the listing reads through the parent index: {plan:?}"
