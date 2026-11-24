@@ -51,7 +51,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
             if session.this_device {
                 // This device has no sign-out here: that is on Sign-in and security.
                 it = it.tail(Tail::Pill {
-                    label: "This PC".into(),
+                    label: concat!(beebeeb_engine::device_word_cap!()).into(),
                     tone: Tone::Green,
                     dot: true,
                 });

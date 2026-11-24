@@ -423,7 +423,7 @@ impl FixtureSource {
                     "x-site",
                     "Site walkthrough.mkv",
                     "Desktop",
-                    "files larger than 4 GB are not backed up from this PC",
+                    concat!("files larger than 4 GB are not backed up from ", beebeeb_engine::device_word!()),
                     true,
                     FileKind::Image,
                 ),

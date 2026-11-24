@@ -154,7 +154,7 @@ pub enum Problem {
 const NOT_FOUND: &str = "We could not find a waiting request with that code. Check it on the other device.";
 const OFFLINE: &str = "Beebeeb can't be reached. Nothing was approved.";
 const WRONG_PASSWORD: &str = "That is not your account's password. Nothing was approved.";
-const NO_HELLO: &str = "Approving needs Windows Hello, which is not set up on this PC. Nothing was approved.";
+const NO_HELLO: &str = concat!("Approving needs ", beebeeb_engine::unlock_name!(), ", which is not set up on ", beebeeb_engine::device_word!(), ". Nothing was approved.");
 const REFUSED: &str = "Beebeeb did not take this request. Nothing was approved. Try again in a few minutes.";
 
 /// What the approval flow holds between presses.
@@ -535,7 +535,7 @@ fn password_field(a: &Approve, t: &Theme) -> El {
             message: Some(if wrong {
                 WRONG_PASSWORD
             } else {
-                "To confirm it's you. Used only after Windows Hello confirms it."
+                concat!("To confirm it's you. Used only after ", beebeeb_engine::unlock_name!(), " confirms it.")
             }),
             error: wrong,
             input_key: PASSWORD_KEY,
@@ -961,7 +961,7 @@ fn expired(handled: bool, t: &Theme) -> El {
     let (title, words) = if handled {
         (
             "Already handled",
-            "Another of your devices answered this request. Nothing was approved from this PC.",
+            concat!("Another of your devices answered this request. Nothing was approved from ", beebeeb_engine::device_word!(), "."),
         )
     } else {
         (
@@ -997,7 +997,7 @@ fn unsure(denying: bool, request: &SignInRequest, t: &Theme) -> El {
         Tone::Neutral,
         "Result not known",
         &format!(
-            "Beebeeb could not be reached after the keys were sent, so this PC does not know whether {} was signed in. A new session in Devices and sessions means it was.",
+            concat!("Beebeeb could not be reached after the keys were sent, so ", beebeeb_engine::device_word!(), " does not know whether {} was signed in. A new session in Devices and sessions means it was."),
             request.device()
         ),
         t,
@@ -1019,7 +1019,7 @@ fn too_late(request: &SignInRequest, t: &Theme) -> El {
         Tone::Neutral,
         "Already approved",
         &format!(
-            "This PC's approval reached Beebeeb before the denial. {} is signed in on {}. Sign that device out in Devices and sessions if that was a mistake.",
+            concat!(beebeeb_engine::device_word_cap!(), "'s approval reached Beebeeb before the denial. {} is signed in on {}. Sign that device out in Devices and sessions if that was a mistake."),
             request.product(),
             request.device()
         ),

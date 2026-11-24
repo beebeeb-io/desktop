@@ -52,7 +52,7 @@ fn why(kind: FactorKind) -> &'static str {
         FactorKind::TwoFactor => "A code from your phone at sign-in, so a stolen password is not enough.",
         FactorKind::StrongPassword => "A longer password is harder to guess.",
         FactorKind::RecoveryPhraseSaved => "Your 12 words get you back in when you forget your password.",
-        FactorKind::Passkeys => "Sign in with Windows Hello or your phone instead of typing your password.",
+        FactorKind::Passkeys => concat!("Sign in with ", beebeeb_engine::unlock_name!(), " or your phone instead of typing your password."),
         FactorKind::PasswordNotInBreach => "This password is in a known leak. Change it.",
         FactorKind::Sessions => "See which devices are signed in, and end the ones you don't use.",
     }
@@ -324,11 +324,11 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> Option<El> {
         1,
         0,
         &it.sub(if delay {
-            "Windows Hello · locks again after"
+            concat!(beebeeb_engine::unlock_name!(), " · locks again after")
         } else if on {
-            "Windows Hello"
+            concat!(beebeeb_engine::unlock_name!())
         } else {
-            "Off: anyone using this PC can open Beebeeb"
+            concat!("Off: anyone using ", beebeeb_engine::device_word!(), " can open Beebeeb")
         }),
         controls,
         t,
@@ -383,7 +383,7 @@ fn devices(facts: &SecurityFacts, source: &dyn AccountSource, hide_capture: bool
     });
     list_of(
         1,
-        Some("This PC and your devices"),
+        Some(concat!(beebeeb_engine::device_word_cap!(), " and your devices")),
         vec![
             app_lock_row(facts, t),
             leads(1, 1, sessions, State_::Marked(signed_in), "DW-A55", source, t),
@@ -463,7 +463,7 @@ fn sign_out(facts: &SecurityFacts, t: &Theme) -> Option<El> {
         all.then(|| {
             one(
                 1,
-                Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of all Beebeeb apps").sub("On this PC"),
+                Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of all Beebeeb apps").sub(concat!("On ", beebeeb_engine::device_word!())),
                 Dialog::SignOutAllApps,
             )
         })
@@ -474,9 +474,9 @@ fn sign_out(facts: &SecurityFacts, t: &Theme) -> Option<El> {
         Some("Sign out"),
         rows,
         Some(if all {
-            "Signing out of Drive signs out Drive on this PC only. The other Beebeeb apps stay signed in."
+            concat!("Signing out of Drive signs out Drive on ", beebeeb_engine::device_word!(), " only. The other Beebeeb apps stay signed in.")
         } else {
-            "Signing out of Drive signs out Drive on this PC only."
+            concat!("Signing out of Drive signs out Drive on ", beebeeb_engine::device_word!(), " only.")
         }),
         true,
         t,
@@ -540,7 +540,7 @@ pub fn pane(
     let over = match dialog {
         Some(Dialog::SignOutApp) if facts.can_sign_out => Some(sign_out_confirm(
             "Sign out of Drive?",
-            "This signs out Drive on this PC only. Drive, VPN, Chat and Mail stay signed in. Your data stays encrypted on this PC; signing in again opens it.",
+            concat!("This signs out Drive on ", beebeeb_engine::device_word!(), " only. Drive, VPN, Chat and Mail stay signed in. Your data stays encrypted on ", beebeeb_engine::device_word!(), "; signing in again opens it."),
             "Sign out",
             false,
             signing,
@@ -548,8 +548,8 @@ pub fn pane(
             t,
         )),
         Some(Dialog::SignOutAllApps) if facts.can_sign_out_all => Some(sign_out_confirm(
-            "Sign out of all Beebeeb apps on this PC?",
-            "Drive, Pass, VPN, Chat and Mail on this PC are signed out. Their data stays encrypted on this PC; signing in again opens it. Your other devices stay signed in.",
+            concat!("Sign out of all Beebeeb apps on ", beebeeb_engine::device_word!(), "?"),
+            concat!("Drive, Pass, VPN, Chat and Mail on ", beebeeb_engine::device_word!(), " are signed out. Their data stays encrypted on ", beebeeb_engine::device_word!(), "; signing in again opens it. Your other devices stay signed in."),
             "Sign out of all",
             true,
             signing,
@@ -764,13 +764,13 @@ pub fn sign_out_counts_words(waiting: u64, sealed: u64, office_recovery: u64) ->
     let mut out = Vec::new();
     if waiting > 0 {
         out.push(format!(
-            "{} not sent yet stay on this PC and send after you sign in again.",
+            concat!("{} not sent yet stay on ", beebeeb_engine::device_word!(), " and send after you sign in again."),
             plural(waiting, "change is", "changes are")
         ));
     }
     if sealed > 0 {
         out.push(format!(
-            "{} stay encrypted on this PC and open again after you sign in.",
+            concat!("{} stay encrypted on ", beebeeb_engine::device_word!(), " and open again after you sign in."),
             plural(sealed, "saved copy", "saved copies")
         ));
     }

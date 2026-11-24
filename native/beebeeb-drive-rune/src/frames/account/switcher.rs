@@ -310,7 +310,7 @@ pub fn panel(t: &Theme) -> Option<El> {
     let mut list = col()
         .key("switcher")
         .role("menu")
-        .label("Accounts on this PC")
+        .label(concat!("Accounts on ", beebeeb_engine::device_word!()))
         // One Tab stop whose items the arrows walk, to "Add another account" (RC2-8).
         .focus_group()
         .gap(crate::theme::scale::space::S2)
@@ -320,7 +320,7 @@ pub fn panel(t: &Theme) -> Option<El> {
         .fill(t.card)
         .border(kit::HAIR, t.separator)
         .child(
-            kit::label("switcher-head", "Accounts on this PC", type_::CAPTION, t.text_tertiary)
+            kit::label("switcher-head", concat!("Accounts on ", beebeeb_engine::device_word!()), type_::CAPTION, t.text_tertiary)
                 .px(crate::theme::scale::space::S6)
                 .py(crate::theme::scale::space::S2),
         );
