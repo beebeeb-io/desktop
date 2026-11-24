@@ -136,6 +136,7 @@ mod tray_tip_tests {
             monitor,
             work: Rect { x: work.0, y: work.1, w: work.2, h: work.3 },
             scale: 1.0,
+            icon: None,
         }
     }
 

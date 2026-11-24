@@ -27,6 +27,8 @@ pub struct Anchor {
     pub monitor: Rect,
     pub work: Rect,
     pub scale: f64,
+    /// The status item's frame, logical points, top-left origin (macOS). None on Windows.
+    pub icon: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +127,7 @@ mod tests {
             monitor: rect(monitor),
             work: rect(work),
             scale,
+            icon: None,
         }
     }
 

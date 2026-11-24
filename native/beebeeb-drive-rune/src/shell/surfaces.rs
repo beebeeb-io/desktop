@@ -175,6 +175,7 @@ pub fn primary_anchor(displays: &[Monitor], work: &[(flyout::Rect, flyout::Rect)
         monitor,
         work: area,
         scale: d.scale,
+        icon: None,
     })
 }
 
