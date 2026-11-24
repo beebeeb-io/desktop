@@ -6,7 +6,7 @@
 
 pub(crate) mod bridge;
 pub(crate) mod lifecycle_log;
-mod open;
+pub(crate) mod open;
 pub(crate) mod ports;
 pub(crate) mod removal;
 

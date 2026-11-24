@@ -252,10 +252,9 @@ fn open_path(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), fil
     }
     #[cfg(target_os = "macos")]
     {
-        // `open` on macOS: the path is passed as a single argv element, not through a shell.
-        launch::locked(|| still().then(|| std::process::Command::new("open").arg(path).spawn()))
-            .ok_or(files_source::ActionError::Unavailable)?
-            .map_err(|_| files_source::ActionError::Failed)?;
+        // No child `open` on a Mac (a child loses the URL's scope): the bridge's NSWorkspace opens the Finder
+        // location the press registered for this path (`macos_fp::open`).
+        launch::locked(|| still().then(|| macos_start(path))).ok_or(files_source::ActionError::Unavailable)??;
     }
     #[cfg(target_os = "linux")]
     {
@@ -369,6 +368,13 @@ mod explorer_select_tests {
     }
 }
 
+/// macOS: opens or reveals the Finder location the press registered for `path` (the File Provider's URL, never the
+/// path). The launch lock is held, the bridge gate is not.
+#[cfg(target_os = "macos")]
+fn macos_start(path: &std::path::Path) -> Result<(), files_source::ActionError> {
+    crate::shell::platform::macos::macos_fp::open::start_registered(path).map_err(|_| files_source::ActionError::Failed)
+}
+
 /// Reveal a file or folder in File Explorer / Finder / Files. Never passes the
 /// path through a shell interpreter. `still`: as [`open_path`]'s.
 fn reveal_in_file_explorer(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), files_source::ActionError> {
@@ -385,9 +391,7 @@ fn reveal_in_file_explorer(path: &std::path::Path, still: &dyn Fn() -> bool) -> 
     }
     #[cfg(target_os = "macos")]
     {
-        launch::locked(|| still().then(|| std::process::Command::new("open").arg("-R").arg(path).spawn()))
-            .ok_or(files_source::ActionError::Unavailable)?
-            .map_err(|_| files_source::ActionError::Failed)?;
+        launch::locked(|| still().then(|| macos_start(path))).ok_or(files_source::ActionError::Unavailable)??;
     }
     #[cfg(target_os = "linux")]
     {
@@ -615,6 +619,12 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     fn open_in_file_explorer(&self) -> Result<(), actions::ActionError> {
         let path = open_folder::beebeeb_folder(&self.engine)
             .map_err(|_| actions::ActionError::NotAvailable("sync is not running"))?;
+        #[cfg(target_os = "macos")]
+        if let Some(line) = crate::shell::platform::macos::macos_fp::open::not_ready_line(&finder_setup::view()) {
+            return Err(actions::ActionError::NotAvailable(line));
+        }
+        #[cfg(target_os = "macos")]
+        crate::shell::platform::macos::macos_fp::open::register_location(&path);
         let asked = self
             .launcher
             .open_for(&self.engine, open_path, path, "the folder did not open");
@@ -1293,8 +1303,14 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         let paths = self.local(|db, sync_root| {
             let mut paths = Vec::with_capacity(items.len());
             for item in items {
+                #[cfg(target_os = "macos")]
+                crate::shell::platform::macos::macos_fp::open::refuse_shared(db, &item.id)
+                    .map_err(|_| ActionError::NotOnThisSystem)?;
                 let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;
-                paths.push(file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)?);
+                let path = file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)?;
+                #[cfg(target_os = "macos")]
+                crate::shell::platform::macos::macos_fp::open::register_item(&path, &item.id);
+                paths.push(path);
             }
             Ok(paths)
         })?;
@@ -1431,9 +1447,16 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         let path = self.local(|db, sync_root| match folder {
             Some(id) => {
                 let entry = file_ops::resolve(db, id).map_err(map_drive_err)?;
-                file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)
+                let path = file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)?;
+                #[cfg(target_os = "macos")]
+                crate::shell::platform::macos::macos_fp::open::register_item(&path, id);
+                Ok(path)
             }
-            None => Ok(sync_root.to_path_buf()),
+            None => {
+                #[cfg(target_os = "macos")]
+                crate::shell::platform::macos::macos_fp::open::register_location(sync_root);
+                Ok(sync_root.to_path_buf())
+            }
         })?;
         let open = self.starts.open;
         self.start_later(files_source::Action::OpenInFileExplorer, vec![path], open)
