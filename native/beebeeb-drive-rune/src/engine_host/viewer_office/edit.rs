@@ -108,7 +108,7 @@ pub(super) struct Work {
     pub(super) made_on: Option<MadeOn>,
     /// The documents New document made here, with the session they were made for. Such a file is this PC's own
     /// until its upload lands: it opens in the editor although the local state holds no version for it yet (w36,
-    /// Guus's PC: the upload took minutes to land, and the new document came up read-only, also when reopened).
+    /// the owner's PC: the upload took minutes to land, and the new document came up read-only, also when reopened).
     pub(super) made_here: Vec<(String, SessionGeneration)>,
 }
 
@@ -155,7 +155,7 @@ pub(super) const NEW_NOT_SENT: &str = "Not saved yet: your new document is still
      Your edit stays open: save again in a moment.";
 
 /// A new file is only queued when `create_office` answers: the local state holds no version for it (0) until its
-/// upload lands (w24, VM 401). A worker's: bounded by `wait`, and it ends at once when the version cannot be read.
+/// upload lands (w24, the Windows test machine). A worker's: bounded by `wait`, and it ends at once when the version cannot be read.
 fn wait_until_landed<E: ViewerEngine>(engine: &E, session: SessionGeneration, file_id: &str, wait: Duration) {
     let deadline = Instant::now() + wait;
     while Instant::now() < deadline {

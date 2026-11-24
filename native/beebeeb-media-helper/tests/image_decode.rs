@@ -1,7 +1,7 @@
 //! The helper decodes one picture (task 048): the pure parts everywhere, the helper's process over its pipes with
 //! pictures this file makes itself (no third-party photos), and on Windows the WIC decoders.
 //!
-//! With `BB_IMAGE_EXTENSIONS=1` (VM 401: HEIF, HEVC and Raw Image extensions installed) a HEIC and a DNG must decode
+//! With `BB_IMAGE_EXTENSIONS=1` (the Windows test machine: HEIF, HEVC and Raw Image extensions installed) a HEIC and a DNG must decode
 //! to pixels. Without it, a missing codec must answer `NoDecoder`.
 
 mod image_decode {

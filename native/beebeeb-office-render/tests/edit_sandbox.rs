@@ -8,7 +8,7 @@
 //! the helper has no code that tries them and gets none for a test, so this file shows the editing helper runs under
 //! exactly that confinement and leaves no trace of any of the three.
 //!
-//! Windows only. Runs in W6 on VM 401: `cargo test --locked --test edit_sandbox -- --nocapture`.
+//! Windows only. Runs in W6 on the Windows test machine: `cargo test --locked --test edit_sandbox -- --nocapture`.
 //! Output carries counts only.
 #![cfg(windows)]
 

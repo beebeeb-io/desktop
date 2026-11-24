@@ -778,7 +778,7 @@ fn w29_a_plain_file_at_a_path_of_unknown_content_is_never_removed() {
     assert!(f.root.join("Plain.docx").exists());
 }
 
-// ---- RC3-1 (VM 401, rc3/f1): the switch's purge after a person's leftover file was taken out of a synced folder ----
+// ---- RC3-1 (the Windows test machine, rc3/f1): the switch's purge after a person's leftover file was taken out of a synced folder ----
 
 /// A synced folder placeholder with a synced file in it; a person made a new file in that folder (the engine made it
 /// a placeholder that is not in sync when it queued the upload), and "Keep them aside" took it out again. The folder

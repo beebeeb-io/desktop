@@ -36,13 +36,13 @@
 //! folder ("Beebeeb files from <that account's address>"), at its own path inside it, takes an original out only once
 //! every copy holds the same bytes, and starts. Nothing is deleted without one of the two answers.
 //!
-//! RC3-1 (VM 401, rc3/f1 f2): an answer finishes the switch. The answered work (the queued changes of the files
+//! RC3-1 (the Windows test machine, rc3/f1 f2): an answer finishes the switch. The answered work (the queued changes of the files
 //! taken out, their staged copies, the edits held for review) is forgotten in one transaction
 //! ([`StateDb::forget_work_in_the_folder`]) before the OS is asked to remove the synced items: the Windows purge
 //! refuses while the database holds any of it. The kept folder's record is written with steps Windows accepts
 //! ([`KeptRecordFs`]). If the removal still refuses, the previous account's synced rows and owner record stay.
 //!
-//! dc-167, the account switcher (Guus 2026-11-21: a switch keeps the key, a sign-out forgets): every account signed
+//! dc-167, the account switcher (the owner 2026-11-21: a switch keeps the key, a sign-out forgets): every account signed
 //! in on this PC keeps its session (token, owner, email, lock entries) in a parked slot of its own
 //! ([`parked_slot_name`]) while another account is the current one, and its vault key in its R4 slot. A switch parks
 //! the current session, moves the target's parked session into the install slot ([`AuthVault::bind_session_owner`]
@@ -186,7 +186,7 @@ impl<C: CredentialStores> Engine<C> {
                 unasked.push(path.clone());
             }
         }
-        // RC3-1 (VM 401, rc3/f1): the answered work is forgotten before the removal is asked. The OS's removal
+        // RC3-1 (the Windows test machine, rc3/f1): the answered work is forgotten before the removal is asked. The OS's removal
         // (the Windows purge) refuses, before it looks at the folder, while the database holds a queued change or a
         // file that is not at rest; left there, every answered switch ended in the plain refusal. From here on the
         // previous account's rows describe only what is still in the folder.
@@ -531,7 +531,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
-/// RC3-1 (VM 401, rc3/f2): the durable write's file-system steps, as they work on every OS this runs on.
+/// RC3-1 (the Windows test machine, rc3/f2): the durable write's file-system steps, as they work on every OS this runs on.
 /// `config::RealConfigFs` flushes the new file through a handle opened for reading and opens the directory as a file;
 /// Windows refuses both ("Access is denied"), so every "Discard and switch" there ended after its copy was made and
 /// before anything was taken out. Here the file is flushed through a handle opened for writing. The directory is

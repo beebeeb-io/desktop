@@ -243,7 +243,7 @@ fn in_session_zero() -> bool {
     known && session == 0
 }
 
-/// Windows' decoders start in the system-decoder profile, with and without HEVC: COM (`lpacCom`, Guus 2026-11-21),
+/// Windows' decoders start in the system-decoder profile, with and without HEVC: COM (`lpacCom`, the owner 2026-11-21),
 /// Media Foundation, Microsoft's AAC decoder (a video's sound) and WIC (HEIC and camera RAW pictures). The default
 /// profile cannot start them. The plain probe first: the instrument can say `ok`.
 /// It measures in a desktop session only: in session 0 `ole32.dll` does not initialise in any container (1114,

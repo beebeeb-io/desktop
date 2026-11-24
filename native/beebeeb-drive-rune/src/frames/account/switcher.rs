@@ -1,4 +1,4 @@
-//! dc-167, the account switcher (Guus 2026-11-21: a switch keeps the key, a sign-out forgets). Pressing the account
+//! dc-167, the account switcher (the owner 2026-11-21: a switch keeps the key, a sign-out forgets). Pressing the account
 //! pill at the foot of the sidebar opens a list, in place above it: every account signed in on this PC (the current
 //! one marked), "Add another account", and a Sign out per account that is not the current one (the current one signs
 //! out in Settings > Security, as before).
@@ -11,7 +11,7 @@
 //! The engine is reached through [`Switcher`], which the engine host installs once at start ([`install`]). Every
 //! call runs on a thread of its own, never the window's. Nothing of an account (email, id) is logged.
 //!
-//! RC3-1 (VM 401, rc3/f3b f4: "Switch to" pressed 1.3 s after the list opened did nothing, with no log line; after a
+//! RC3-1 (the Windows test machine, rc3/f3b f4: "Switch to" pressed 1.3 s after the list opened did nothing, with no log line; after a
 //! restart the list showed no account). Reading the list and acting on it are apart: a read never disables a row and
 //! never drops a press. One action runs at a time (`Menu::acting`); a press while one runs is said in the list and
 //! logged, never dropped. The list is read once at [`install`], and the press that opens it waits a moment for its

@@ -127,7 +127,7 @@ fn a_key_in_its_slot(pc: &Pc) -> Option<Vec<u8>> {
         .map(|key| key.expose_for_crypto().to_vec())
 }
 
-/// The red test (VM 401, RC1): files A left refuse B's start with a reason that has a fix, not the plain
+/// The red test (the Windows test machine, RC1): files A left refuse B's start with a reason that has a fix, not the plain
 /// `OtherAccountsData`; nothing was moved, removed or recorded for it, and both answers are offered.
 #[test]
 fn files_the_previous_account_left_refuse_with_a_reason_a_person_can_answer() {
@@ -259,7 +259,7 @@ fn a_queued_change_of_the_previous_account_is_not_kept_aside() {
     assert!(!aside(&pc).exists());
 }
 
-/// dc-175 (VM 401): A left only empty folders no row names. They are nothing to keep: the start removes them and the
+/// dc-175 (the Windows test machine): A left only empty folders no row names. They are nothing to keep: the start removes them and the
 /// switch completes, with no refusal for a person to answer. A folder holding a synced copy is never removed this way.
 #[test]
 fn empty_folders_the_previous_account_left_do_not_stop_the_switch() {
@@ -277,7 +277,7 @@ fn empty_folders_the_previous_account_left_do_not_stop_the_switch() {
     assert!(!aside(&pc).exists(), "nothing was kept aside: there was nothing to keep");
 }
 
-// ---- RC2-5 (VM 401, rc2/o3, o4): what the previous account made or changed while sync was paused ----
+// ---- RC2-5 (the Windows test machine, rc2/o3, o4): what the previous account made or changed while sync was paused ----
 
 const NEW_OF_A: &str = "New of A.txt";
 
@@ -444,7 +444,7 @@ fn account_switch_rc2_held_edits_of_a_rebuilt_state_db_offer_the_choice() {
     assert_eq!(pc.db().owner().unwrap(), Some(other()));
 }
 
-// ---- RC3-1 (VM 401, rc3/f1 f2 f3b): the choice was offered, and neither answer finished the switch ----
+// ---- RC3-1 (the Windows test machine, rc3/f1 f2 f3b): the choice was offered, and neither answer finished the switch ----
 
 const FOLDER_OF_A: &str = "Folder of A";
 const NEW_IN_FOLDER: &str = "Folder of A/leftover of A.txt";
@@ -601,7 +601,7 @@ fn account_switch_rc3_a_removal_refused_after_the_answer_leaves_the_synced_rows_
     assert_eq!(std::fs::read(aside(&pc).join(NEW_IN_FOLDER)).unwrap(), b"made by A while paused");
 }
 
-/// The same answers through the real Windows port (the real purge, the real file-system steps): what VM 401 ran.
+/// The same answers through the real Windows port (the real purge, the real file-system steps): what the Windows test machine ran.
 #[cfg(target_os = "windows")]
 mod on_windows {
     use super::*;

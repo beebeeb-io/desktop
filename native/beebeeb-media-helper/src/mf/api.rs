@@ -97,9 +97,9 @@ fn start() -> Result<Api, Unavailable> {
     };
     // SAFETY: no reserved pointer; this thread joins the process's multithreaded apartment. The sandbox's default
     // profile refuses this (0x80070005, measured): Windows' decoders then do not run here.
-    // Measured on VM 401 (ux-57, 2026-11-21): the default profile already fails at `ole32.dll` above, and the system
+    // Measured on the Windows test machine (ux-57, 2026-11-21): the default profile already fails at `ole32.dll` above, and the system
     // decoder's profile without the HEVC capabilities (`registryRead` alone) was refused HERE, so Media Foundation
-    // did not start in it. That profile now holds `lpacCom` too (Guus, 2026-11-21), so COM starts there; where it
+    // did not start in it. That profile now holds `lpacCom` too (the owner, 2026-11-21), so COM starts there; where it
     // still does not, the session plays a video of ours without that sound (`routes::settled`).
     if unsafe { co_initialize(null(), MULTITHREADED) }.is_err() {
         return Err(Unavailable::NotHere);

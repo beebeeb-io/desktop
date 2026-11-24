@@ -213,7 +213,7 @@ fn the_modals_try_again_asks_for_one_start() {
     assert_eq!(starts(&engine), 1, "Close asks for nothing");
 }
 
-/// dc-RC-b, the red test (VM 401, RC1: "no fix in this version", Close only): files the previous account left offer
+/// dc-RC-b, the red test (the Windows test machine, RC1: "no fix in this version", Close only): files the previous account left offer
 /// both answers, "Keep them aside" first, and never the sentence that there is no fix. "Keep them aside" asks the
 /// engine once and closes the modal; "Close" asks for nothing, so nothing moves without the person's choice.
 #[test]
@@ -251,7 +251,7 @@ fn leftover_files_offer_keep_aside_and_discard_and_keep_aside_asks_the_engine_on
     assert_eq!(asked(&engine), 1, "the engine was asked once");
 }
 
-/// dc-175 (VM 401): "Discard and switch" when the engine offers nothing to discard (the previous account left only
+/// dc-175 (the Windows test machine): "Discard and switch" when the engine offers nothing to discard (the previous account left only
 /// empty folders) is a plain start that closes the modal, never a press that does nothing.
 #[test]
 fn discard_with_nothing_to_discard_starts_instead_of_doing_nothing() {

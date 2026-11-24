@@ -204,7 +204,7 @@ fn open_with_names_the_app_by_the_identity_it_was_handed() {
 /// The toast an online-only "Service agreement.docx" (38 KB) shows while Windows fetches it.
 const DOWNLOADING: Toast = Toast::Downloading(Some(38 * 1024));
 
-/// Guus 11-21: an online-only file is handed over like a kept one (Windows' Cloud Files fetches it), and the window
+/// the owner 11-21: an online-only file is handed over like a kept one (Windows' Cloud Files fetches it), and the window
 /// says how much is coming down. Each line that hands it to another app: an app, and Other….
 #[test]
 fn an_app_press_on_a_file_not_kept_hands_it_over_and_says_the_download_size() {

@@ -293,7 +293,7 @@ fn run(
 }
 
 #[test]
-#[ignore = "latency: VM 401, release build, --ignored"]
+#[ignore = "latency: the Windows test machine, release build, --ignored"]
 fn latency_open_to_first_page() {
     if skipped("latency_open_to_first_page") {
         return;
@@ -321,7 +321,7 @@ fn latency_open_to_first_page() {
 }
 
 #[test]
-#[ignore = "latency: VM 401, release build, --ignored"]
+#[ignore = "latency: the Windows test machine, release build, --ignored"]
 fn latency_page_p95_within_16ms() {
     if skipped("latency_page_p95_within_16ms") {
         return;
@@ -400,7 +400,7 @@ fn latency_page_p95_within_16ms() {
 }
 
 #[test]
-#[ignore = "latency: VM 401, release build, --ignored"]
+#[ignore = "latency: the Windows test machine, release build, --ignored"]
 fn latency_what_o_cp2_does_not_measure() {
     if skipped("latency_what_o_cp2_does_not_measure") {
         return;
@@ -413,7 +413,7 @@ fn latency_what_o_cp2_does_not_measure() {
 /// the app's hands, p95 at most 16 ms. 200 ranges (row starts every 10 rows, in a fixed shuffled order), after one
 /// warm-up that is printed and left out. A 20 ms sleep before each answer in the helper turns it red.
 #[test]
-#[ignore = "latency: VM 401, release build, --ignored"]
+#[ignore = "latency: the Windows test machine, release build, --ignored"]
 fn latency_cells_p95_within_16ms() {
     if skipped("latency_cells_p95_within_16ms") {
         return;
