@@ -58,13 +58,11 @@ impl ApiClient {
     /// and to recover the encrypted name when the local mirror entry
     /// is sparse (e.g. fresh placeholder).
     pub async fn get_file(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(self.file_url(FileId::new(file_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        // Through `send_with_retry`: bounded 429/5xx backoff, and the answer (a 401 included) reaches the link
+        // monitor. The session token is one opaque server session with no refresh route, so a 401 here means the
+        // session itself ended.
+        let url = self.file_url(FileId::new(file_id));
+        let resp = self.send_with_retry(|| self.client.get(&url)).await?;
         Ok(resp.json().await?)
     }
 
