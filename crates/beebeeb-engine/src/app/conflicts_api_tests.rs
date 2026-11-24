@@ -219,6 +219,55 @@ fn a_session_that_moved_on_lists_and_resolves_nothing() {
     );
 }
 
+/// The first run: no state database yet. Nothing waits; that is an answer, not a read that failed (RD-g: the
+/// Files window said "the files that wait for a choice could not be read" on every start).
+#[test]
+fn nothing_synced_yet_is_an_empty_list_not_a_failure() {
+    let rig = rig();
+    rig.engine
+        .use_local_state_for_test(rig.root.parent().unwrap().join("not-made-yet.db"));
+    let listed = rig
+        .engine
+        .conflicts_for(rig.session)
+        .expect("an empty list, not a refusal");
+    assert!(listed.files.is_empty() && listed.unread == 0);
+    assert_eq!(listed.session, rig.session);
+    assert_eq!(requests(&rig), 0, "no request");
+}
+
+/// A database made and not yet owned (a sync that has not written its first row): nothing waits either.
+#[test]
+fn an_empty_state_with_no_owner_is_an_empty_list_not_a_failure() {
+    let rig = rig();
+    let path = rig.root.parent().unwrap().join("fresh.db");
+    drop(StateDb::open(&path).unwrap());
+    rig.engine.use_local_state_for_test(path);
+    let listed = rig
+        .engine
+        .conflicts_for(rig.session)
+        .expect("an empty list, not a refusal");
+    assert!(listed.files.is_empty() && listed.unread == 0);
+}
+
+/// A start behind the screen lock: a person reads nothing, so nothing is listed, and it is no failure.
+#[test]
+fn a_locked_screen_lists_nothing_and_is_not_a_failure() {
+    let rig = rig();
+    rig.engine.lock_screen().expect("the screen locks");
+    let now = rig.engine.session_turn();
+    let listed = rig.engine.conflicts_for(now).expect("an empty list, not a refusal");
+    assert!(
+        listed.files.is_empty() && listed.unread == 0,
+        "nothing is shown behind the lock"
+    );
+    assert_eq!(requests(&rig), 0, "no request");
+    assert_eq!(
+        rig.engine.conflicts_for(rig.session).unwrap_err(),
+        ConflictsRefused::NotSignedIn,
+        "the session from before the lock gets nothing"
+    );
+}
+
 /// This account's folder of replaced versions, as the engine names it.
 fn replaced_folder(rig: &Rig) -> PathBuf {
     replaced_folder_in(
