@@ -21,7 +21,6 @@ use super::core::{self, CoreState, Effect, Input, Next, Op, OpResult, Trigger};
 use super::error::{FailureRecord, FpError, app_code};
 use super::launch_location::LaunchLocation;
 use super::policy::RetryPolicy;
-use self::lifecycle_log::LifecycleEvent;
 use self::removal::{DomainRemoval, KeptFolder, RemovalFailure};
 use crate::surfaces::phase::{FinderFailureReason, FinderSetup};
 
@@ -39,7 +38,9 @@ mod state;
 use details::*;
 
 // The re-exports below are the surface; nothing else in this file uses the children directly.
-pub use details::copy_details;
+pub use details::{copy_details, copy_details_from};
+// The shell's lifecycle log (macOS) writes these events and reads them back for "Copy details".
+pub use lifecycle_log::{LifecycleEvent, TAIL_LINES, token};
 pub use handle::{Event, FinderSetupHandle, RemoveAnswer};
 pub use ports::{Clock, Ports};
 pub use state::FinderSetupView;

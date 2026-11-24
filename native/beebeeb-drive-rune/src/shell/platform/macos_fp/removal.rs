@@ -237,23 +237,6 @@ pub(crate) fn removal_from_bridge(
 /// Bytes the bridge may write into the location buffer (path, NUL included).
 const LOCATION_BUFFER_LEN: usize = 4096;
 
-// The bridge's own declarations (`bridge.rs`) are private to that file; these are the same signatures.
-unsafe extern "C" {
-    fn beebeeb_fp_remove(
-        location_buffer: *mut c_char,
-        location_buffer_len: usize,
-        kept_state: *mut i32,
-        out_error: *mut BeebeebFpErrorC,
-    ) -> i32;
-    fn beebeeb_fp_remove_domain_by_id(
-        identifier: *const c_char,
-        location_buffer: *mut c_char,
-        location_buffer_len: usize,
-        kept_state: *mut i32,
-        out_error: *mut BeebeebFpErrorC,
-    ) -> i32;
-}
-
 /// The one decode site of a removal: settles a missing folder first (the bridge's own check, a real sleep), then
 /// decides. Both removal paths go through it.
 fn decode_removal(
@@ -321,10 +304,16 @@ fn busy(error: FpError) -> RemovalFailure {
 #[allow(dead_code)] // the reconciler's and sign-out's call (dm-23, dm-30)
 pub(crate) fn remove_keeping_unsynced() -> Result<DomainRemoval, RemovalFailure> {
     let _gate = Gate::try_enter().map_err(busy)?;
+    remove_keeping_unsynced_gated()
+}
+
+/// [`remove_keeping_unsynced`] for a caller that already holds the gate (the reconciler's `RemoveDomain`, which
+/// waits for it a little before it calls). Calling this without the gate runs beside another File Provider call.
+pub(crate) fn remove_keeping_unsynced_gated() -> Result<DomainRemoval, RemovalFailure> {
     let mut buffer = vec![0 as c_char; LOCATION_BUFFER_LEN];
     let mut kept_state = KEPT_NONE_REPORTED;
     let mut error = BeebeebFpErrorC::zeroed();
-    let code = unsafe { beebeeb_fp_remove(buffer.as_mut_ptr(), buffer.len(), &mut kept_state, &mut error) };
+    let code = unsafe { bridge::beebeeb_fp_remove(buffer.as_mut_ptr(), buffer.len(), &mut kept_state, &mut error) };
     decode_removal(code, kept_state, &buffer, error)
 }
 
@@ -338,7 +327,7 @@ pub(crate) fn remove_domain(identifier: &str) -> Result<DomainRemoval, RemovalFa
     let mut kept_state = KEPT_NONE_REPORTED;
     let mut error = BeebeebFpErrorC::zeroed();
     let code = unsafe {
-        beebeeb_fp_remove_domain_by_id(
+        bridge::beebeeb_fp_remove_domain_by_id(
             identifier.as_ptr(),
             buffer.as_mut_ptr(),
             buffer.len(),

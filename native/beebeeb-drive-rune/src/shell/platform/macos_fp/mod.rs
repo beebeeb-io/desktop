@@ -5,8 +5,10 @@
 //! error text.
 
 pub(crate) mod bridge;
+#[allow(dead_code)] // started by dm-31's wiring
 mod lifecycle_log;
 mod open;
+#[allow(dead_code)] // wired by dm-31
 mod ports;
 mod removal;
 

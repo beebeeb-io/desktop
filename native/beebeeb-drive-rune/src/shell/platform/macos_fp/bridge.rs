@@ -3,12 +3,14 @@
 //! state of a removal), plus the one-per-process gate every File Provider call goes through. Must not decide what
 //! Finder shows, and never logs: an `FpError` message is the OS's own prose and may name a file.
 
-use std::ffi::{c_void, CString};
+use std::ffi::{CString, c_void};
 use std::os::raw::c_char;
 use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::time::{Duration, Instant};
 
 use beebeeb_engine::file_provider_port::WorkingSetSignalOutcome;
-use beebeeb_engine::finder_setup::error::{app_code, FpError, FpErrorCode};
+use beebeeb_engine::finder_setup::core::DomainState;
+use beebeeb_engine::finder_setup::error::{FpError, FpErrorCode, app_code};
 
 /// Mirror of `BeebeebFpError` in the bridge. The C side `_Static_assert`s the same size and offsets, and the tests
 /// compare `sizeof`, `alignof` and every `offsetof` exported from Objective-C against this struct.
@@ -64,7 +66,9 @@ fn c_array_to_string(array: &[c_char]) -> String {
     String::from_utf8_lossy(&bytes).trim().to_string()
 }
 
-#[allow(dead_code)] // the declarations of the calls dm-23 and dm-24 make
+// The one set of bridge declarations. `removal.rs` calls the two remove functions through here (dm-24 once declared
+// its own copy).
+#[allow(dead_code)]
 unsafe extern "C" {
     fn beebeeb_fp_resolve_location(out_handle: *mut *mut c_void, out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_fp_resolve_item(
@@ -76,7 +80,14 @@ unsafe extern "C" {
     fn beebeeb_fp_domain_user_enabled(out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_fp_add_domain(out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_fp_wait_for_domain_ready(timeout_seconds: f64, out_error: *mut BeebeebFpErrorC) -> i32;
-    fn beebeeb_fp_remove(
+    pub(super) fn beebeeb_fp_remove(
+        location_buffer: *mut c_char,
+        location_buffer_len: usize,
+        kept_state: *mut i32,
+        out_error: *mut BeebeebFpErrorC,
+    ) -> i32;
+    pub(super) fn beebeeb_fp_remove_domain_by_id(
+        identifier: *const c_char,
         location_buffer: *mut c_char,
         location_buffer_len: usize,
         kept_state: *mut i32,
@@ -181,7 +192,7 @@ pub(crate) fn kept_state_for_path(path: &str) -> KeptState {
 /// holding a NUL) is the bridge's `NoIdentifier` error, never `Ok(None)`. The caller holds the gate.
 #[allow(dead_code)] // dm-24's reveal
 pub(crate) fn resolve_item(item_id: &str) -> Result<Option<UrlHandle>, FpError> {
-    use beebeeb_engine::finder_setup::error::{bridge_code, BRIDGE_DOMAIN};
+    use beebeeb_engine::finder_setup::error::{BRIDGE_DOMAIN, bridge_code};
     let Ok(identifier) = CString::new(item_id) else {
         return Err(FpError::new(
             BRIDGE_DOMAIN,
@@ -196,6 +207,10 @@ pub(crate) fn resolve_item(item_id: &str) -> Result<Option<UrlHandle>, FpError> 
 }
 
 static GATE: Mutex<()> = Mutex::new(());
+
+/// Tests that take the process-wide gate run one at a time (the gate is one per process; tests run in parallel).
+#[cfg(test)]
+pub(crate) static GATE_TESTS: Mutex<()> = Mutex::new(());
 
 /// The one File Provider call in flight per process. A call that finds it taken is told so at once
 /// ([`beebeeb_engine::file_provider_port::is_gate_busy`]) and owes its work to the next tick; it never queues behind
@@ -215,15 +230,57 @@ impl Gate {
     }
 }
 
+impl Gate {
+    /// Like [`Gate::try_enter`], but a busy gate is waited for, at most `wait` (polling on this thread: call it on a
+    /// blocking thread, never on the async executor). For the calls that must not be lost to one merely in flight.
+    pub fn enter_waiting(wait: Duration) -> Result<Self, FpError> {
+        let deadline = Instant::now() + wait;
+        loop {
+            match Self::try_enter() {
+                Ok(gate) => return Ok(gate),
+                Err(error) if Instant::now() >= deadline => return Err(error),
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    }
+}
+
 /// Run one bridge primitive; a negative return carries the filled error.
 fn call(function: unsafe extern "C" fn(*mut BeebeebFpErrorC) -> i32) -> Result<i32, FpError> {
     let mut out = BeebeebFpErrorC::zeroed();
     let code = unsafe { function(&mut out) };
-    if code >= 0 {
-        Ok(code)
-    } else {
-        Err(out.into_fp_error())
+    if code >= 0 { Ok(code) } else { Err(out.into_fp_error()) }
+}
+
+/// The domain's `userEnabled`, read from the OS's live registry. `NotRegistered` is a fresh install or the state after
+/// a clean removal. The caller holds the gate.
+pub(crate) fn domain_state() -> Result<DomainState, FpError> {
+    decode_domain_state(call(beebeeb_fp_domain_user_enabled))
+}
+
+/// The bridge's `1` / `0` / `2` as a state; any other answer is an app error, never a guess.
+fn decode_domain_state(answer: Result<i32, FpError>) -> Result<DomainState, FpError> {
+    match answer? {
+        1 => Ok(DomainState::Enabled),
+        0 => Ok(DomainState::Disabled),
+        2 => Ok(DomainState::NotRegistered),
+        other => Err(FpError::app(
+            app_code::UNEXPECTED_BRIDGE_RETURN,
+            format!("beebeeb_fp_domain_user_enabled returned {other}"),
+        )),
     }
+}
+
+/// `addDomain` only; it does not wait for the domain to stabilise. The caller holds the gate.
+pub(crate) fn add_domain() -> Result<(), FpError> {
+    call(beebeeb_fp_add_domain).map(|_| ())
+}
+
+/// Waits for the domain to be usable, at most `timeout` on the bridge's own clock. The caller holds the gate.
+pub(crate) fn wait_for_domain_ready(timeout: Duration) -> Result<(), FpError> {
+    let mut out = BeebeebFpErrorC::zeroed();
+    let code = unsafe { beebeeb_fp_wait_for_domain_ready(timeout.as_secs_f64(), &mut out) };
+    if code < 0 { Err(out.into_fp_error()) } else { Ok(()) }
 }
 
 /// One best-effort working-set signal, through the gate. `0` is signaled, or the domain is not registered (nothing to
@@ -242,7 +299,7 @@ pub(crate) fn signal_working_set() -> Result<WorkingSetSignalOutcome, FpError> {
 #[cfg(test)]
 mod bridge_error_tests {
     use super::*;
-    use beebeeb_engine::finder_setup::error::{app_code, bridge_code, FpErrorCode, APP_DOMAIN, BRIDGE_DOMAIN};
+    use beebeeb_engine::finder_setup::error::{APP_DOMAIN, BRIDGE_DOMAIN, FpErrorCode, app_code, bridge_code};
     use std::ffi::CString;
     use std::mem::{align_of, offset_of, size_of};
 
@@ -431,7 +488,34 @@ mod bridge_error_tests {
     }
 
     #[test]
+    fn the_domain_state_reads_one_zero_two_and_nothing_else() {
+        assert_eq!(decode_domain_state(Ok(1)), Ok(DomainState::Enabled));
+        assert_eq!(decode_domain_state(Ok(0)), Ok(DomainState::Disabled));
+        assert_eq!(decode_domain_state(Ok(2)), Ok(DomainState::NotRegistered));
+        let error = decode_domain_state(Ok(7)).expect_err("an undocumented answer is an error");
+        assert_eq!(
+            (error.domain.as_str(), error.code),
+            (APP_DOMAIN, app_code::UNEXPECTED_BRIDGE_RETURN)
+        );
+    }
+
+    #[test]
+    fn a_waiting_entry_gets_the_gate_when_it_frees_and_gives_up_when_it_does_not() {
+        let _serial = GATE_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let held = Gate::try_enter().expect("idle");
+        let started = Instant::now();
+        let error = Gate::enter_waiting(Duration::from_millis(60))
+            .err()
+            .expect("still held");
+        assert!(started.elapsed() >= Duration::from_millis(60));
+        assert!(beebeeb_engine::file_provider_port::is_gate_busy(&error));
+        drop(held);
+        assert!(Gate::enter_waiting(Duration::from_millis(60)).is_ok());
+    }
+
+    #[test]
     fn the_gate_answers_busy_at_once_while_a_call_is_in_flight() {
+        let _serial = GATE_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let first = Gate::try_enter().expect("an idle gate lets one in");
         let busy = Gate::try_enter().err().expect("a second call meets a busy gate");
         assert!(beebeeb_engine::file_provider_port::is_gate_busy(&busy));

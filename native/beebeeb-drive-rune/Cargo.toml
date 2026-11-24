@@ -99,6 +99,9 @@ cpal = "=0.18.2"
 cc = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The File Provider ports (`shell/platform/macos_fp/ports.rs`): the blocking spawn of a bridge call, the removal's answer
+# channel and the op limit's timeout. The tokio the engine already links; no new crate is built.
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 # The Mac shell (`shell/platform/macos_*.rs`): the menu-bar item, the login item, Touch ID. The versions already in the lock
 # through winit and cpal, except objc2-local-authentication.
 objc2 = "0.6"
@@ -121,7 +124,7 @@ tempfile = "3"
 beebeeb-updater = { path = "../../crates/beebeeb-updater", features = ["testkit"] }
 # The timing test asks SQLite for its query plan; same version the engine links.
 rusqlite = { version = "0.41", default-features = false, features = ["bundled", "cache"] }
-tokio = { version = "1", features = ["rt"] } # the tray tests hold a task in the engine's slot (`hold_running`)
+tokio = { version = "1", features = ["rt", "sync", "time"] } # the tray tests hold a task in the engine's slot (`hold_running`)
 # For headless golden-PNG tests.
 
 [[bin]]

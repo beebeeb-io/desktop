@@ -60,7 +60,7 @@ pub fn copy_details(view: &FinderSetupView, app_version: &str, macos_version: &s
     copy_details_from(view, app_version, macos_version, lifecycle_log::tail)
 }
 
-pub(super) fn copy_details_from(
+pub fn copy_details_from(
     view: &FinderSetupView,
     app_version: &str,
     macos_version: &str,
