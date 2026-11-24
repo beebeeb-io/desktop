@@ -23,6 +23,11 @@ pub(super) fn job<C: CredentialStores + 'static>(engine: &Arc<Engine<C>>, seen: 
     Box::new(move || {
         let before = engine.lock_state();
         let AwayAnswer { state, check_again_in } = engine.away_for(measured, seen);
+        if before == LockState::Open && state == LockState::ScreenLocked {
+            // The Finder reconciler holds (cancels a running check), acknowledged before this returns; a no-op
+            // where it does not run.
+            super::finder_setup::lock();
+        }
         actions::AwayAnswer {
             locked: before == LockState::Open && state == LockState::ScreenLocked,
             check_again_in,

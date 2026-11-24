@@ -458,6 +458,11 @@ pub fn run() {
         tray_tip_app = tray_tip_app.keep_running();
         if !show_window {
             main_app = main_app.windowless();
+            // A start with no window has no Dock icon (menu-bar-and-windows.md §3 rule 5).
+            #[cfg(target_os = "macos")]
+            {
+                main_app = main_app.accessory();
+            }
         }
     }
     let (main, flyout_handle, tray_tip_handle) = (main_app.handle(), flyout_app.handle(), tray_tip_app.handle());
@@ -576,6 +581,7 @@ pub(crate) fn main_app(spec: AppSpec<State>) -> App<State> {
         .on_focus(|s: &mut State, focused, _| {
             crate::frames::signin::on_window_focus(s, focused);
             crate::frames::files::pins::on_focus(s, focused);
+            // dm-31's `finder_setup::on_app_activated()` goes here once `engine_host` exports it (it is private).
         })
         .on_ime(on_ime)
 }
