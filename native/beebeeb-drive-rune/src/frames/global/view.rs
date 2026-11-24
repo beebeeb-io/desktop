@@ -11,6 +11,7 @@ use crate::ui::{blocked_preview, global_icons, load_strip, status_offline};
 fn banner_el(kind: BannerKind, status: &source::GlobalStatus, t: &Theme) -> El {
     let (tone, icon) = match kind {
         BannerKind::SignedOut => (Tone::Warn, &global_icons::KEY),
+        BannerKind::ListFailed => (Tone::Red, &global_icons::ALERT),
         BannerKind::StorageFull => (Tone::Red, &global_icons::STORAGE),
         BannerKind::SyncProblem | BannerKind::BackupProblem => (Tone::Red, &global_icons::ALERT),
         BannerKind::StorageAlmostFull => (Tone::Warn, &global_icons::STORAGE),
@@ -34,7 +35,7 @@ fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -43,11 +44,11 @@ fn grouped(n: u64) -> String {
 }
 
 fn strip_el(loading: &source::Loading, t: &Theme) -> El {
-    let mut count = vec![Run::Figure(format!(
-        "{} of {}",
-        grouped(loading.listed),
-        grouped(loading.total)
-    ))];
+    // w31: no "0 of 0" while the list's size is not known yet.
+    let mut count = vec![match loading.figure(grouped) {
+        Some(figure) => Run::Figure(figure),
+        None => Run::Words(source::LIST_ON_ITS_WAY.to_string()),
+    }];
     if let Some(left) = &loading.left {
         count.push(Run::Words(format!(" \u{00B7} {left} left")));
     }

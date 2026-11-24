@@ -108,12 +108,17 @@ impl VerifiedInstaller {
     /// Starts the installer the way Tauri's updater does for 0.8.x (`/P` passive: progress only; `/R` start the
     /// app afterwards; `/UPDATE` keep shortcuts and the autostart entry). A per-user install: no elevation. The
     /// installer waits for this process to exit; it never ends it.
+    ///
+    /// `under_launch_lock` is the app's own start (`launch::spawn`): the installer starts while the app holds the
+    /// launch lock every other start of a process takes, so it never runs in the moment a helper's pipe ends are
+    /// inheritable. This crate cannot name that lock; the app hands the start in.
     #[cfg(windows)]
-    pub fn start_nsis(&self, _stopped: EngineStopped) -> bool {
-        std::process::Command::new(&self.path)
-            .args(["/P", "/R", "/UPDATE"])
-            .spawn()
-            .is_ok()
+    pub fn start_nsis(
+        &self,
+        _stopped: EngineStopped,
+        under_launch_lock: impl FnOnce(&mut std::process::Command) -> std::io::Result<std::process::Child>,
+    ) -> bool {
+        under_launch_lock(std::process::Command::new(&self.path).args(["/P", "/R", "/UPDATE"])).is_ok()
     }
 }
 
@@ -758,5 +763,169 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
             self.apply.resume_engine();
             kept(Failure::InstallerDidNotStart, offer)
         }
+    }
+}
+
+/// An OTA update with uploads and a hydration in flight: the installer replaces the running program, so it must
+/// not start until the engine has stopped and every piece of in-flight work is persisted and resumable.
+#[cfg(test)]
+mod active_work_tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::manifest::Channel;
+    use crate::testkit::{
+        BASE, FakeClock, FakeHttp, MemStore, NOW, Publish, TestKey, artifact_bytes, trust, version,
+    };
+
+    #[derive(Default, Debug)]
+    struct Engine {
+        uploads_running: u32,
+        hydrations_running: u32,
+        uploads_parked: u32,
+        hydrations_parked: u32,
+        resumed: bool,
+        installer_started_with_work_in_flight: bool,
+        launched: bool,
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Stop {
+        /// Drains: running uploads and hydrations are persisted, then the proof.
+        Drains,
+        /// The engine does not confirm: the work keeps running.
+        Unconfirmed,
+    }
+
+    struct Shell {
+        engine: Rc<RefCell<Engine>>,
+        stop: Stop,
+        installer_starts: bool,
+    }
+
+    impl Apply for Shell {
+        fn stop_engine(&mut self) -> Option<EngineStopped> {
+            let mut engine = self.engine.borrow_mut();
+            if self.stop == Stop::Unconfirmed {
+                return None;
+            }
+            engine.uploads_parked += std::mem::take(&mut engine.uploads_running);
+            engine.hydrations_parked += std::mem::take(&mut engine.hydrations_running);
+            Some(EngineStopped::engine_stopped_and_uploads_parked())
+        }
+
+        fn launch(&mut self, _: &VerifiedInstaller, _: &Offer, _: EngineStopped) -> bool {
+            let mut engine = self.engine.borrow_mut();
+            engine.installer_started_with_work_in_flight = engine.uploads_running + engine.hydrations_running > 0;
+            engine.launched = self.installer_starts;
+            self.installer_starts
+        }
+
+        fn resume_engine(&mut self) {
+            self.engine.borrow_mut().resumed = true;
+        }
+    }
+
+    fn settle(updater: &mut Updater<FakeHttp, FakeClock, MemStore, Shell>, event: Event) -> State {
+        let mut state = updater.step(event).clone();
+        for _ in 0..100_000 {
+            if !matches!(
+                state,
+                State::Checking { .. } | State::Rechecking { .. } | State::Downloading { .. } | State::Verifying { .. }
+            ) {
+                return state;
+            }
+            state = updater.step(Event::Tick).clone();
+        }
+        panic!("the updater did not settle");
+    }
+
+    fn ready(
+        dir: &tempfile::TempDir,
+        stop: Stop,
+        installer_starts: bool,
+    ) -> (Updater<FakeHttp, FakeClock, MemStore, Shell>, Rc<RefCell<Engine>>) {
+        let key = TestKey::generate();
+        let mut http = FakeHttp::default();
+        Publish::new(Channel::Stable, "0.9.1", artifact_bytes(300_000)).serve(&mut http, &key);
+        let engine = Rc::new(RefCell::new(Engine {
+            uploads_running: 2,
+            hydrations_running: 1,
+            ..Engine::default()
+        }));
+        let config = Config {
+            trust: trust(&key),
+            base_url: BASE.to_string(),
+            installed: version("0.9.0"),
+            staging_dir: dir.path().to_path_buf(),
+        };
+        let shell = Shell {
+            engine: engine.clone(),
+            stop,
+            installer_starts,
+        };
+        let mut updater = Updater::new(
+            config,
+            http,
+            FakeClock(std::cell::Cell::new(NOW)),
+            MemStore::default(),
+            shell,
+        );
+        let check = Event::Check {
+            channel: Channel::Stable,
+            intent: Intent::Background,
+        };
+        assert!(matches!(settle(&mut updater, check), State::Available { .. }));
+        assert!(matches!(
+            settle(&mut updater, Event::Download),
+            State::ReadyToRestart { .. }
+        ));
+        (updater, engine)
+    }
+
+    #[test]
+    fn the_installer_starts_only_after_uploads_and_a_hydration_are_parked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut updater, engine) = ready(&dir, Stop::Drains, true);
+        assert!(matches!(updater.step(Event::Apply), State::Restarting { .. }));
+        let engine = engine.borrow();
+        assert!(engine.launched);
+        assert!(!engine.installer_started_with_work_in_flight);
+        assert_eq!((engine.uploads_parked, engine.hydrations_parked), (2, 1));
+        assert!(!engine.resumed, "a started installer does not resume the engine");
+    }
+
+    #[test]
+    fn work_that_does_not_stop_keeps_the_installer_from_starting_and_stays_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut updater, engine) = ready(&dir, Stop::Unconfirmed, true);
+        assert!(matches!(
+            updater.step(Event::Apply),
+            State::Failed {
+                failure: Failure::EngineStillRunning,
+                resume: Some(_)
+            }
+        ));
+        let engine = engine.borrow();
+        assert!(!engine.launched);
+        assert_eq!((engine.uploads_running, engine.hydrations_running), (2, 1));
+    }
+
+    #[test]
+    fn an_installer_that_does_not_start_after_the_drain_resumes_the_engine_and_keeps_the_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut updater, engine) = ready(&dir, Stop::Drains, false);
+        assert!(matches!(
+            updater.step(Event::Apply),
+            State::Failed {
+                failure: Failure::InstallerDidNotStart,
+                resume: Some(_)
+            }
+        ));
+        let engine = engine.borrow();
+        assert!(engine.resumed, "the engine picks the parked work up again");
+        assert_eq!((engine.uploads_parked, engine.hydrations_parked), (2, 1));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the staged update is kept");
     }
 }

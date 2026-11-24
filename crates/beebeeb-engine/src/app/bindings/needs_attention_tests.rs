@@ -13,7 +13,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
@@ -33,7 +33,7 @@ fn engine(slot: &str) -> (Arc<TestEngine>, Arc<TransferBoard>) {
         api_base: "http://127.0.0.1:9".into(),
     };
     (
-        Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens")),
+        Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens")),
         board,
     )
 }
@@ -438,7 +438,7 @@ fn only_a_poison_in_this_accounts_own_state_reaches_the_step() {
 }
 
 /// A discard that ended the row takes it out of the kept rows, and a read that started before it does not bring it
-/// back (review P3-6 of desktop #225); a refused discard leaves the kept rows as they were. The process's kept rows
+/// back; a refused discard leaves the kept rows as they were. The process's kept rows
 /// are shared, so this test keeps its own generation. Red on the mutant "no forget after the discard".
 #[test]
 fn a_discard_that_ended_the_row_takes_it_out_of_the_kept_rows() {

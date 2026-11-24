@@ -237,7 +237,7 @@ fn the_lists_are_read_when_shared_opens_and_drawn_from_what_beebeeb_answered() {
     assert_eq!(invitations.len(), 1);
     assert_eq!(
         (invitations[0].id.as_str(), invitations[0].name.as_str()),
-        (INV_IN, "Encrypted item")
+        (INV_IN, "Opening shared folder\u{2026}")
     );
     assert_eq!(invitations[0].kind, Kind::Folder);
     assert_eq!(invitations[0].from_line, "sender@example.eu wants to share this folder");
@@ -615,6 +615,9 @@ fn the_window_draws_the_lists_its_states_a_notice_and_nothing_of_the_account_bef
         "{seen}"
     );
     assert!(crate::ui::sidebar::badge_for(&rt.state, crate::ui::sidebar::SidebarSection::Shared).is_some());
+    // The footer names the signed-in account, never the board's sample.
+    assert!(seen.contains(fake.first.email.as_str()), "the footer names the account: {seen}");
+    assert!(!seen.contains("Anna Visser") && !seen.contains("anna@northwind.studio"), "{seen}");
 
     // Every control is bound now (slice B4 bound the last one): the lists stay drawn.
     poll(&mut rt);
@@ -622,7 +625,8 @@ fn the_window_draws_the_lists_its_states_a_notice_and_nothing_of_the_account_bef
 
     let _ = engine.lock();
     poll(&mut rt);
-    let seen = words(&rt);
+    // The footer still names the account (its email holds "one@example.eu"): leave it out of the share words.
+    let seen = words(&rt).replace(fake.first.email.as_str(), "");
     for gone in ["Invented trip", "one@example.eu", "two@example.eu", "sender@example.eu"] {
         assert!(!seen.contains(gone), "{gone} is still drawn after the lock");
     }
@@ -635,7 +639,10 @@ fn the_window_draws_the_lists_its_states_a_notice_and_nothing_of_the_account_bef
     poll(&mut rt);
     crate::frames::go(&mut rt.state, Section::Shared);
     poll(&mut rt);
+    // The footer names the second account (its email holds "two@example.eu"): leave that out of the share words.
     let seen = words(&rt);
+    assert!(seen.contains(fake.second.email.as_str()), "the footer names the second account: {seen}");
+    let seen = seen.replace(fake.second.email.as_str(), "");
     for gone in [
         "Invented trip",
         "one@example.eu",
@@ -718,8 +725,8 @@ fn share_invite_goes_once_per_share_answers_from_the_engine_and_a_late_answer_is
     assert_eq!(source.invite_answer(), None, "each answer once");
     assert_eq!(invites(&fake.fake), 1);
     // The person is never inserted here: the lists were read again (the invite's own read of the sent list, then
-    // the lists after the answer).
-    assert_eq!(sent_reads(&fake.fake), before + 2);
+    // the lists after the answer, and the trust read that follows them: People's "compared" marks).
+    assert_eq!(sent_reads(&fake.fake), before + 3);
 
     // Refused, in words: not one of the account's own items on this computer. Nothing was sent.
     assert!(source.start_invite(THEIRS, "new@example.eu"));
@@ -821,3 +828,22 @@ fn an_unfinished_invite_says_whether_the_approval_left() {
 // plan40 batch 1, slice B4: the tests of Make available offline on someone else's file.
 #[path = "shared_offline_tests.rs"]
 mod offline;
+
+#[test]
+fn a_link_row_keeps_the_item_it_is_a_link_to() {
+    let fake = fake("link-item");
+    let mut source = EngineSharedSource::new(signed_in(&fake));
+    opened(&mut source);
+    let held = source.held.as_ref().expect("lists are held");
+    assert_eq!(held.link_items.get(REQ).map(String::as_str), Some(TRIP));
+    assert_eq!(held.link_items.get(INV_A).map(String::as_str), Some(THEIRS));
+    assert_eq!(held.link_items.len(), held.links.len());
+}
+
+// w17-shared-links: the tests of the link calls.
+#[path = "shared_links_tests.rs"]
+mod shared_links_tests;
+
+// w18-people-safety-number: the tests of People's safety calls.
+#[path = "shared_safety_tests.rs"]
+mod shared_safety_tests;

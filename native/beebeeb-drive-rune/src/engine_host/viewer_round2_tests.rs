@@ -344,7 +344,9 @@ fn a_picture_that_declares_more_than_the_viewer_decodes_is_refused_from_its_head
     // A few bytes that declare a canvas far over the limits: said with its figures, not "can't read".
     fake.put("f-wide", "Invented wide.png", &png_header(SIDE_MAX + 1, 10));
     fake.put("f-many", "Invented many.png", &png_header(8_000, 7_000));
-    assert!(8_000 * 7_000 > PIXELS_MAX);
+    const {
+        assert!(8_000 * 7_000 > PIXELS_MAX);
+    }
     for (id, width, height) in [("f-wide", SIDE_MAX + 1, 10), ("f-many", 8_000, 7_000)] {
         let (source, _, body) = opened(&fake, id);
         assert_eq!(
@@ -444,8 +446,8 @@ fn a_webp_whose_last_chunk_has_no_pad_byte_is_decoded_and_shown() {
     // A 2 MiB metadata chunk, padded, with the length right.
     let mut large = still;
     large.extend_from_slice(b"EXIF");
-    large.extend_from_slice(&((2u32 << 20) as u32).to_le_bytes());
-    large.extend(std::iter::repeat(0u8).take(2 << 20));
+    large.extend_from_slice(&(2u32 << 20).to_le_bytes());
+    large.extend(std::iter::repeat_n(0u8, 2 << 20));
     restate(&mut large);
     for (which, bytes) in [("no pad byte", unpadded), ("2 MiB of metadata", large)] {
         assert!(viewer_picture::check(&bytes).is_ok(), "{which}");
@@ -600,6 +602,45 @@ fn only_the_last_pages_are_kept_and_an_earlier_one_is_rendered_again_when_it_is_
     // Shown again: rendered again.
     let _ = page_of(&mut source, "f-long", 1);
     assert_eq!(source.page_state("f-long", 1), PageState::Ready);
+}
+
+#[test]
+fn a_pdf_whose_helper_stops_at_a_page_shows_failed_once_and_try_again_opens_it_anew() {
+    let fake = Fake::new();
+    let mut hostile = sample_pdf(2, 612, 792);
+    hostile.extend_from_slice(viewer_pdf::tests::STOPS_AT_A_PAGE);
+    fake.put("f-pdf", "Invented hostile.pdf", &hostile);
+    let (mut source, _, body) = opened(&fake, "f-pdf");
+    assert!(matches!(body, Body::Pdf(ref doc) if doc.pages == 2), "{body:?}");
+    // The page is asked of the helper, and the helper ends on it: only the helper. The view is told Failed (the
+    // state with Try again), once, and no page of this opening is waited for or shown after it.
+    assert!(source.picture("f-pdf", Picture::Page(1)).is_none());
+    let began = Instant::now();
+    let said = loop {
+        if let Some(body) = source.poll("f-pdf") {
+            break body;
+        }
+        assert!(began.elapsed() < Duration::from_secs(20), "the stop was never said");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(said, Body::Stopped(Stopped::HelperStopped), "the helper's stop has its own words (RC2-3)");
+    assert_eq!(source.poll("f-pdf"), None, "said once");
+    assert!(source.picture("f-pdf", Picture::Page(1)).is_none());
+    assert!(!source.finds(), "nothing of the stopped opening is searched");
+    // Try again: the file is read and opened anew, in a new helper.
+    // The retry's download runs on its worker, so it is counted once the retry opened, never right after `retry`
+    // returns (that count raced the worker: RC5-3).
+    assert!(source.retry("f-pdf").is_ok());
+    let began = Instant::now();
+    let again = loop {
+        if let Some(body @ Body::Pdf(_)) = source.poll("f-pdf") {
+            break body;
+        }
+        assert!(began.elapsed() < Duration::from_secs(20), "the retry never opened");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(matches!(again, Body::Pdf(ref doc) if doc.pages == 2), "{again:?}");
+    assert_eq!(fake.s().fetches.len(), 2, "the first open's download, and the retry's: read anew");
 }
 
 #[test]
@@ -796,12 +837,10 @@ fn a_source_that_cannot_save_or_keep_offline_says_so_on_the_press() {
     let mut cannot = crate::frames::viewers::Ui::open(Box::new(CannotSave(inner)), "f-state").expect("it opened");
     cannot.edit();
     assert!(cannot.editor.is_none());
-    assert_eq!(cannot.toast.as_deref(), Some("Not built yet: Edit and save from here"));
+    // The press queues its intent for the shell's router, which says "Not built yet" where nothing takes it.
+    assert_eq!(cannot.take_intents(), [crate::frames::viewers::Intent::Edit]);
     cannot.toggle_offline();
     assert!(!cannot.file.details.offline, "nothing was switched");
-    assert_eq!(
-        cannot.toast.as_deref(),
-        Some("Not built yet: Available offline from here")
-    );
+    assert_eq!(cannot.take_intents(), [crate::frames::viewers::Intent::KeepOffline]);
     assert!(!cannot.knows_offline());
 }

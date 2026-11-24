@@ -139,7 +139,7 @@ fn the_poll_line_drains_frame_intents() {
     use crate::frames::Intent as Frame;
     let mut rt = runtime(FixtureEngine::ready());
     rt.update(|s, tx| {
-        s.frames.intents.push(Frame::Frame("DW-0406"));
+        s.frames.intents.push(Frame::Frame("DW-0404"));
         s.frames.intents.push(Frame::OpenItem("an-invented-id".into()));
         poll(s, 0.0, tx);
         assert!(
@@ -148,4 +148,164 @@ fn the_poll_line_drains_frame_intents() {
             s.frames.intents
         );
     });
+}
+
+/// A press in the viewer reaches the shell's viewer route: Share opens Files' dialog for the open file.
+#[test]
+fn a_viewer_share_press_reaches_the_viewer_route_and_opens_files_share_dialog() {
+    use crate::frames::viewers;
+    let mut rt = runtime(FixtureEngine::ready());
+    rt.update(|s, tx| {
+        assert!(viewers::open_from(s, Box::new(viewers::source::FixtureViewerSource::new()), crate::frames::viewers::source::board::AUDIO));
+        viewers::ui(s).expect("open").intent(viewers::Intent::Share);
+        assert!(drain_in_poll(s, tx), "the viewer's queue was taken");
+        let ui = viewers::ui(s).expect("open");
+        assert!(ui.take_intents().is_empty());
+        assert_eq!(ui.toast, None);
+        assert!(matches!(&s.actions.dialog, Some(crate::frames::files::dialogs::Dialog::Share(sh)) if sh.items[0].id == crate::frames::viewers::source::board::AUDIO));
+    });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The office editor's lines in the shell (w05-wire-shell)
+// ---------------------------------------------------------------------------------------------------------------
+
+fn texts(rt: &Runtime<State>) -> String {
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting)
+        .flat_map(|e| [e.text, e.label].into_iter().flatten())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Files' New menu, "New document…": the press queues `Frame("DW-1558")`, the shell's poll takes it and the office
+/// editor's dialog is over Files, on Docs, for the folder shown.
+#[test]
+fn new_document_from_the_files_menu_opens_dw_1558() {
+    use crate::frames::files::MenuKind;
+    use crate::frames::viewers::new_file::{Kind, Step};
+    let mut rt = runtime(FixtureEngine::ready());
+    rt.update(|s, tx| {
+        s.toggle_menu(MenuKind::New);
+        let at = s
+            .menu_entries(MenuKind::New)
+            .iter()
+            .position(|entry| entry.id() == Some("new-document"))
+            .expect("New document is in the New menu");
+        s.pick_menu(at, tx);
+        assert!(
+            s.actions.intents.contains(&crate::frames::files::Intent::Frame("DW-1558")),
+            "the press asks for DW-1558"
+        );
+    });
+    rt.frame(1.0);
+    rt.frame(1.0);
+    rt.update(|s, _| {
+        assert!(
+            !s.actions.intents.contains(&crate::frames::files::Intent::Frame("DW-1558")),
+            "the poll took it"
+        );
+        let dialog = s.viewer.new_file.as_ref().expect("New document is open");
+        assert_eq!(dialog.step, Step::Document);
+        assert_eq!(dialog.kind, Kind::Word);
+        assert_eq!(dialog.folder, s.listing.folder.id);
+    });
+    let drawn = texts(&rt);
+    assert!(drawn.contains(crate::frames::office::edit::new_document::TITLE), "{drawn}");
+    assert!(drawn.contains("Meeting notes"), "Docs' templates are offered: {drawn}");
+}
+
+/// New file's Continue on an office type goes on to New document on that app.
+#[test]
+fn new_files_continue_on_an_office_type_opens_new_document_on_that_app() {
+    use crate::frames::viewers::new_file::{self, Kind, Step};
+    let mut rt = runtime(FixtureEngine::ready());
+    rt.update(|s, _| {
+        assert!(new_file::begin(s));
+        new_file::choose(s, Kind::Excel);
+        new_file::go_on(s);
+        assert!(s.viewer.new_file.is_none(), "New file closed");
+    });
+    rt.frame(1.0);
+    rt.frame(1.0);
+    rt.update(|s, _| {
+        let dialog = s.viewer.new_file.as_ref().expect("New document is open");
+        assert_eq!((dialog.step, dialog.kind), (Step::Document, Kind::Excel));
+    });
+}
+
+/// A source that says which files have a kept editing.
+struct Kept(crate::frames::viewers::source::FixtureViewerSource, Vec<(String, String)>);
+
+impl crate::frames::viewers::source::ViewerSource for Kept {
+    fn open(
+        &mut self,
+        id: &str,
+    ) -> Result<crate::frames::viewers::source::OpenFile, crate::frames::viewers::source::OpenError> {
+        self.0.open(id)
+    }
+    fn poll(&mut self, id: &str) -> Option<crate::frames::viewers::source::Body> {
+        self.0.poll(id)
+    }
+    fn cancel(&mut self, id: &str) {
+        self.0.cancel(id)
+    }
+    fn retry(
+        &mut self,
+        id: &str,
+    ) -> Result<crate::frames::viewers::source::OpenFile, crate::frames::viewers::source::OpenError> {
+        self.0.retry(id)
+    }
+    fn recovery_pending(&self) -> Vec<(String, String)> {
+        self.1.clone()
+    }
+}
+
+fn runtime_keeping(kept: usize) -> Runtime<State> {
+    let mut state = state::init_with(Shell::fixture_on(
+        Arc::new(FixtureEngine::ready()),
+        Arc::new(FakePlatform::default()),
+    ));
+    crate::frames::viewers::wire(
+        &mut state,
+        Box::new(move || {
+            let files = (0..kept).map(|n| (format!("invented-{n}"), "14:32".to_string())).collect();
+            Box::new(Kept(crate::frames::viewers::source::FixtureViewerSource::new(), files))
+        }),
+    );
+    let mut rt = Runtime::new(state, registry::view, (1280.0, 800.0), ENV);
+    rt.poll = Some(poll);
+    super::poll_drains_for_this_test();
+    rt.frame(0.0);
+    rt.frame(0.016);
+    rt
+}
+
+/// The first poll that sees the session gate open says what unsaved editing this PC kept: Files' notice, in the
+/// editor's words, for as many files as the source lists. Nothing kept: nothing said.
+#[test]
+fn the_gate_opening_says_what_unsaved_editing_this_pc_kept() {
+    use crate::frames::files::Toast;
+    let rt = runtime_keeping(2);
+    assert_eq!(rt.state.actions.toast, Some(Toast::KeptEdits(2)));
+    let drawn = texts(&rt);
+    assert!(drawn.contains("Unsaved changes to 2 files were kept on this PC."), "{drawn}");
+
+    let rt = runtime_keeping(1);
+    assert_eq!(rt.state.actions.toast, Some(Toast::KeptEdits(1)));
+    assert!(texts(&rt).contains("Unsaved changes to a file were kept on this PC."));
+}
+
+#[test]
+fn nothing_kept_says_nothing_and_the_notice_is_said_once() {
+    let rt = runtime_keeping(0);
+    assert_eq!(rt.state.actions.toast, None);
+
+    let mut rt = runtime_keeping(1);
+    rt.update(|s, _| s.actions.toast = None);
+    for _ in 0..3 {
+        rt.frame(0.016);
+    }
+    assert_eq!(rt.state.actions.toast, None, "once per opening of the gate, not every poll");
 }

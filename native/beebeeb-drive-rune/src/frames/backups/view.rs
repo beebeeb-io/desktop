@@ -3,15 +3,19 @@
 
 use rune::{Cx, El, col, row};
 
-use super::source::{Backed, BackupsSource, Device, DeviceKind, FileKind, Folder, NotBackedUp, Part, Status};
+use super::source::{Backed, BackupsSource, Device, DeviceKind, Folder, NotBackedUp, Part, Status};
 use super::{BackupsUi, Dialog, Page, mail_view};
 use crate::State;
 use crate::frames::settings;
-use crate::frames::this_pc::icons as pc_icons;
 use crate::shell::{placeholder, registry};
+use crate::theme::scale::space;
 use crate::theme::icons as drive_icons;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{self, Theme};
+use crate::theme::file_icons::icon_for;
+use crate::ui::file_row::RowLook;
+use crate::ui::file_tile::{self, TilePicture, TileSize};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::backups_kit::{self as bk, Leading, Md, RowItem, TileTone};
 use crate::ui::settings_card as cards;
 use crate::ui::settings_controls::{self as controls, Emphasis};
@@ -24,7 +28,7 @@ pub(super) fn thousands(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -32,47 +36,17 @@ pub(super) fn thousands(n: u32) -> String {
     out
 }
 
-/// The settings sidebar with Backups selected. The same items, in the same order, as
-/// `frames::settings` draws them; a press goes through `settings::go`, which keeps the
-/// shell's route in step.
+/// The settings sidebar with Backups selected: the shared list; Backups itself goes back to the
+/// section's own page, the rest through `settings::go`, which keeps the shell's route in step.
 fn sidebar(t: &Theme) -> El {
-    const SETTINGS: &[(&str, &rune::Icon, &str)] = &[
-        ("General", &ic::GEAR, "DW-0701"),
-        ("Account", &ic::PEOPLE, "DW-A51"),
-        ("Security", &ic::SHIELD, "DW-A52"),
-        ("Devices and sessions", &ic::LAPTOP, "DW-A55"),
-        ("Notifications", &ic::BELL, "DW-0750"),
-    ];
-    const DRIVE: &[(&str, &rune::Icon, &str)] = &[
-        ("Storage", &ic::CHEV_RIGHT, "DW-0712"),
-        ("Backups", &ic::CHEV_RIGHT, "DW-0737"),
-        ("Sync and File Explorer", &ic::CHEV_RIGHT, "DW-0746"),
-        ("Thumbnails and previews", &ic::CHEV_RIGHT, "DW-0744"),
-        ("Bandwidth", &ic::CHEV_RIGHT, "DW-0785"),
-    ];
-    let items = |sections: &'static [(&'static str, &'static rune::Icon, &'static str)]| -> Vec<El> {
-        sections
-            .iter()
-            .map(|&(label, icon, frame)| {
-                let item = shell::nav_item(label, icon, 16.0, label == "Backups", t);
-                if label == "Backups" {
-                    // Already here: back to the section's own page.
-                    item.on_press(|s: &mut State| s.backups.show(Page::Section))
-                } else {
-                    item.on_press(move |s: &mut State| settings::go(s, frame))
-                }
-            })
-            .collect()
-    };
-    let back = shell::nav_item("Back to Drive", &ic::BACK, 15.0, false, t)
-        .shortcut_hint("Esc")
-        .on_press(|s: &mut State| settings::go(s, "DW-0401"));
-    shell::sidebar(
-        back,
-        vec![("Settings", items(SETTINGS)), ("Drive", items(DRIVE))],
-        "Settings open inside the app. Esc goes back.",
-        t,
-    )
+    fn go(s: &mut State, frame: &'static str) {
+        if frame == "DW-0737" {
+            s.backups.show(Page::Section);
+        } else {
+            settings::go(s, frame);
+        }
+    }
+    shell::app_sidebar(Some("Backups"), true, go, t)
 }
 
 /// The status card: all backed up with Back up now, or a backup running with its bar.
@@ -147,7 +121,7 @@ fn status_card(status: &Status, t: &Theme) -> (El, usize) {
                         .key("card-0-words")
                         .grow(1.0)
                         .min_w(0.0)
-                        .gap(6.0)
+                        .gap(space::S6)
                         .child(cards::head(0, &format!("Backing up {folder}"), t))
                         .child(bk::sub_rich(0, &words, &[0..count.len()], t))
                         .child(bk::bar(
@@ -183,7 +157,7 @@ fn folder_row(index: usize, folder: &Folder, button: usize, t: &Theme) -> El {
         bk::ghost_button(button, "Remove", &format!("Remove {}", folder.name), t)
             .on_press(move |s: &mut State| s.backups.ask_stop_folder(&id))
     } else {
-        lists::switch(&format!("item-0-{index}"), &folder.name, folder.on, t)
+        crate::ui::switch::switch_sized(&format!("{}-switch", &format!("item-0-{index}")), "", folder.on, true, crate::ui::button::Size::Md, t).label(&folder.name)
             .on_press(move |s: &mut State| s.backups.toggle_folder(&id))
     };
     lists::item_with(0, index, &item, vec![control], t)
@@ -249,11 +223,32 @@ fn device_row(index: usize, device: &Device, t: &Theme) -> El {
 fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
     // Nothing is drawn as read before the engine answered: the loading state, then the answer or why there is none.
     if source.loading() {
-        return (vec![shell::heading("Backups", Some("Reading this PC's backup."), t)], 0);
+        return (
+            vec![
+                shell::heading("Backups", None, t),
+                view_state(ViewState::Loading { words: "Reading this PC's backup\u{2026}" }, t),
+            ],
+            0,
+        );
     }
     let refusal = source.refusal();
     if let (Some(words), true) = (refusal, source.folders().is_empty()) {
-        return (vec![shell::heading("Backups", Some(words), t)], 0);
+        let retry = try_again("backups-failed", t).on_press(|s: &mut State| s.backups.read_again());
+        return (
+            vec![
+                shell::heading("Backups", None, t),
+                view_state(
+                    ViewState::Failed {
+                        key: "backups-failed",
+                        title: "Couldn't read this PC's backup",
+                        why: words,
+                        retry: Some(retry),
+                    },
+                    t,
+                ),
+            ],
+            1,
+        );
     }
     let (mut children, mut buttons) = if source.wired(Part::Status) {
         let (card, buttons) = status_card(&source.status(), t);
@@ -308,6 +303,22 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
             .on_press(|s: &mut State| s.backups.add_folder()),
         );
     }
+    if folders.is_empty() {
+        children.push(view_state(
+            ViewState::Empty {
+                key: "backups-empty",
+                icon: &drive_icons::BACKUPS,
+                title: "No folders are backed up",
+                body: if source.wired(Part::AddFolder) {
+                    "Choose a folder with Add a folder\u{2026} and Beebeeb copies it here."
+                } else {
+                    "This PC has none of the folders Beebeeb backs up."
+                },
+                action: None,
+            },
+            t,
+        ));
+    }
     let root = source.root();
     children.push(lists::list(
         0,
@@ -330,12 +341,31 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
         ));
     }
 
-    let (devices, note) = if source.wired(Part::Devices) {
-        (source.devices(), source.devices_note())
+    let (devices, note, failed) = if source.wired(Part::Devices) {
+        (source.devices(), source.devices_note(), source.devices_failed())
     } else {
-        (Vec::new(), None)
+        (Vec::new(), None, false)
     };
-    if !devices.is_empty() {
+    let devices_retry = || try_again("backups-devices-failed", t).on_press(|s: &mut State| s.backups.read_again());
+    if failed && devices.is_empty() {
+        // Could not be read and nothing older is held: the failed state with Try again, as the other views.
+        children.push(lists::list(
+            1,
+            Some("Other devices"),
+            vec![view_state(
+                ViewState::Failed {
+                    key: "backups-devices-failed",
+                    title: "Couldn't read your other devices",
+                    why: "The list could not be read just now.",
+                    retry: Some(devices_retry()),
+                },
+                t,
+            )],
+            None,
+            t,
+        ));
+        buttons += 1;
+    } else if !devices.is_empty() {
         children.push(lists::list(
             1,
             Some("Other devices"),
@@ -343,6 +373,11 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
             note,
             t,
         ));
+        if failed {
+            // The older list stays, said under it; Try again reads it again.
+            children.push(row().px(space::S14).child(devices_retry()));
+            buttons += 1;
+        }
     } else if let Some(note) = note {
         // Still reading, or why there is no list: said in the list's place, never an empty card.
         children.push(lists::list(
@@ -490,13 +525,18 @@ fn device_page(device: &Device, links: bool, t: &Theme) -> Vec<El> {
     page
 }
 
-fn file_glyph(kind: FileKind) -> &'static rune::Icon {
-    match kind {
-        FileKind::Video => &pc_icons::DOC_VIDEO,
-        FileKind::Document => &ic::DOCUMENT,
-        FileKind::Sheet => &drive_icons::DOC_SPREADSHEET,
-        FileKind::Image => &ic::IMAGE,
-    }
+/// A file row's tile: the shared small tile with the registry's icon for the name.
+fn file_tile(index: usize, name: &str, t: &Theme) -> El {
+    file_tile::tile(
+        &format!("tile-{index}"),
+        name,
+        TilePicture::Icon(icon_for(name, false, None)),
+        name,
+        None,
+        RowLook::default(),
+        TileSize::Small,
+        t,
+    )
 }
 
 /// DW-0741: what could not back up, and what never does. Returns the children and how many
@@ -528,7 +568,7 @@ fn failures_page(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
                     list,
                     i,
                     RowItem {
-                        leading: Leading::El(bk::tile(i, TileTone::Neutral, file_glyph(f.kind), 28.0, t)),
+                        leading: Leading::El(file_tile(i, &f.name, t)),
                         title: f.name.clone(),
                         title_color: None,
                         sub: Some(format!("{} \u{00B7} {}", f.folder, f.why)),
@@ -560,13 +600,7 @@ fn failures_page(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
                     list,
                     i,
                     RowItem {
-                        leading: Leading::El(bk::tile(
-                            failed.len() + i,
-                            TileTone::Neutral,
-                            file_glyph(f.kind),
-                            28.0,
-                            t,
-                        )),
+                        leading: Leading::El(file_tile(failed.len() + i, &f.name, t)),
                         title: f.name.clone(),
                         title_color: None,
                         sub: Some(f.folder.clone()),
@@ -818,8 +852,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(sidebar(&t))
-        .child(shell::pane(children, &t));
+        .child(crate::ui::focus::pane(row().h_full().child(sidebar(&t)), "backups-sidebar"))
+        .child(crate::ui::focus::pane(row().grow(1.0).min_w(0.0).h_full().child(shell::pane(children, &t)), "backups-main"));
     if let Some(overlay) = overlay {
         body = body.child(overlay);
     }
@@ -834,3 +868,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
         .child(body)
 }
+
+#[cfg(test)]
+#[path = "icon_tests.rs"]
+mod icon_tests;

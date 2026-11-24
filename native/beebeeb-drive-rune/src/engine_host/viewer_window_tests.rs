@@ -24,6 +24,7 @@ use crate::State;
 use crate::engine_host::LiveEngine;
 use crate::engine_host::open::Opened;
 use crate::frames::global::source::{GlobalFixture, board};
+use crate::frames::signin::setup::guide::Step;
 use crate::frames::viewers;
 use crate::frames::viewers::source::Body;
 use crate::shell::actions::{ActionError, EngineActions, HostActions};
@@ -57,6 +58,10 @@ fn report_pdf() -> Vec<u8> {
     super::viewer_pdf::tests::sample_pdf(2, 612, 792)
 }
 
+const CLIP: &str = "b0000000-0000-4000-8000-000000000607";
+const CLIP_NAME: &str = "clip-of-the-first-account-viewer.mp4";
+const DOC: &str = "b0000000-0000-4000-8000-000000000608";
+const DOC_NAME: &str = "letter-of-the-first-account-viewer.docx";
 const LETTER: &str = "b0000000-0000-4000-8000-000000000606";
 const LETTER_NAME: &str = "letter-of-the-first-account-viewer.pdf";
 
@@ -233,6 +238,8 @@ fn window(tag: &str) -> Window {
     first.add_file_with_content(REPORT, None, REPORT_NAME, &report_pdf());
     first.add_file_with_content(LETTER, None, LETTER_NAME, &letter_pdf());
     first.add_file_with_content(LONG, None, LONG_NAME, long_text().as_bytes());
+    first.add_file_with_content(CLIP, None, CLIP_NAME, b"not really a video");
+    first.add_file_with_content(DOC, None, DOC_NAME, b"PK not really a document");
     first.add_file_with_content(PICTURE, None, PICTURE_NAME, &super::tests::png_bytes(8, 6));
     let hold = Arc::new(Hold::default());
     let fake = two_accounts(first.clone(), second.clone(), hold.clone());
@@ -257,6 +264,8 @@ fn window(tag: &str) -> Window {
     put(&db, REPORT, REPORT_NAME, report_pdf().len() as i64);
     put(&db, LETTER, LETTER_NAME, letter_pdf().len() as i64);
     put(&db, LONG, LONG_NAME, long_text().len() as i64);
+    put(&db, CLIP, CLIP_NAME, 18);
+    put(&db, DOC, DOC_NAME, 24);
     put(&db, PICTURE, PICTURE_NAME, super::tests::png_bytes(8, 6).len() as i64);
     db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email)))
         .unwrap();
@@ -307,6 +316,18 @@ fn sign_in(engine: &Engine<MemoryCredentials>, account: &FakeAccount, phrase: &s
 
 impl Window {
     /// Lets leaving elements finish leaving, and the poll see what changed.
+    /// Settles until `done` holds, at most 30 s (a loaded rig answers late, never wrongly).
+    fn settle_until(&mut self, done: impl Fn(&Window) -> bool) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            self.settle();
+            if done(self) || std::time::Instant::now() >= until {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     fn settle(&mut self) {
         for _ in 0..2 {
             self.rt.frame(0.016);
@@ -343,6 +364,19 @@ impl Window {
         }
     }
 
+    /// Frames until the first-time guide is on for the account (its mark is read on a worker; "not done" starts it,
+    /// and brings it back after an unlock). Its first step is a window of its own by the b: nothing of it is drawn
+    /// here and it takes none of this window's keys.
+    #[track_caller]
+    fn until_the_guide_is_on(&mut self) {
+        self.settle_until(|w| w.rt.state.guide.step.is_some());
+        assert_eq!(
+            self.rt.state.guide.step,
+            Some(Step::Tray),
+            "the guide is on its first step for the signed-in account"
+        );
+    }
+
     fn press(&mut self, key: Key, mods: Mods) {
         self.rt.key(KeyEvent { key, mods });
         self.settle();
@@ -366,6 +400,8 @@ impl Window {
     /// The Files window's own Open on the row of `name`: a click on the row, then Enter.
     #[track_caller]
     fn open_row(&mut self, name: &str) {
+        // The Files list is read on a worker: the rows are there once it lands.
+        self.until_drawn(name);
         let row = self
             .rt
             .state
@@ -413,13 +449,15 @@ impl Window {
 
 #[test]
 fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_its_account() {
+    // The shell's poll takes the viewer's intents (the Edit toast below is its router's).
+    crate::shell::intents::poll_drains_for_this_test();
     let mut w = window("opens");
     w.settle();
     w.assert_nothing_of_the_file("signed out");
 
     sign_in(&w.engine, &w.first, TEST_PHRASE);
-    w.settle();
-    assert!(w.drawn().contains(NOTE_NAME), "the first account sees its list");
+    // The list is read on a worker: wait for it to land.
+    w.until_drawn(NOTE_NAME);
 
     // Open: the viewer is there at once, saying what it is doing, while Beebeeb still holds the first chunk.
     w.hold.hold();
@@ -427,7 +465,7 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     assert_eq!(w.route_item().as_deref(), Some(NOTE), "the route is on the file");
     assert!(w.rt.state.viewer.ui.is_some(), "the file is open in the window");
     let drawn = w.drawn();
-    assert!(drawn.contains("Decrypting on this PC"), "{drawn}");
+    assert!(drawn.contains(&format!("Decrypting {NOTE_NAME} on this PC")), "{drawn}");
     assert!(
         !drawn.contains(NOTE_WORDS),
         "nothing of the content before it is decrypted"
@@ -438,7 +476,7 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     w.until_drawn(NOTE_WORDS);
     let drawn = w.drawn();
     assert!(drawn.contains("the last line"), "the whole text is there");
-    assert!(!drawn.contains("Decrypting on this PC"));
+    assert!(!drawn.contains(&format!("Decrypting {NOTE_NAME} on this PC")));
     assert!(w.chunk_requests() >= 2, "the content came chunk by chunk from Beebeeb");
 
     // The details panel (Alt+Shift+P): where the file is, and the Available offline switch, whose state the local
@@ -472,7 +510,7 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     );
     assert!(w.rt.state.viewer.ui.as_ref().unwrap().editor.is_none());
     assert!(
-        w.drawn().contains("Not built yet: Edit and save from here"),
+        w.drawn().contains("Not on this PC: keep it available offline to edit it here"),
         "{}",
         w.drawn()
     );
@@ -493,6 +531,10 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
     let mut w = window("lock");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
+    // The sign-in starts the first-time guide for the account, on the answer of a worker (its mark is read from
+    // the local state). This test waits for it: a lock then leaves a guide to come back to, and what that does to
+    // an open file is tested below on every run, not only when the worker happens to answer first.
+    w.until_the_guide_is_on();
 
     // Shown, then locked.
     w.open_row(NOTE_NAME);
@@ -500,13 +542,25 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
     w.engine.lock();
     w.settle();
     w.assert_nothing_of_the_file("locked, the file was shown");
+    assert_eq!(w.rt.state.guide.step, None, "a lock ends the guide");
 
     // Unlocked: the route is where it was, so the file opens again, by a new download for the new session.
     let before = w.chunk_requests();
     w.engine
         .unlock_with_phrase(Zeroizing::new(TEST_PHRASE.to_string()))
         .expect("the phrase unlocks");
+    // The guide comes back on its worker's answer, before the file is shown again or after it (it moved the window
+    // to its step's place, which closed the file whenever its answer came while the route was on the file: the
+    // file was gone in a loaded run and there in a run alone). Waited for first, so the file is asked for AFTER the
+    // guide is back, on every run: it is still the route's, open and shown.
+    w.until_the_guide_is_on();
+    assert_eq!(
+        w.route_item().as_deref(),
+        Some(NOTE),
+        "the guide came back without moving the window off the file"
+    );
     w.until_drawn(NOTE_WORDS);
+    assert!(w.rt.state.viewer.ui.is_some(), "the file is open");
     assert_eq!(w.route_item().as_deref(), Some(NOTE));
     assert!(
         w.chunk_requests() > before,
@@ -521,7 +575,7 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
     // On its way, then locked: the answer never reaches a window.
     w.hold.hold();
     w.open_row(NOTE_NAME);
-    assert!(w.drawn().contains("Decrypting on this PC"));
+    assert!(w.drawn().contains(&format!("Decrypting {NOTE_NAME} on this PC")));
     w.engine.lock();
     w.settle();
     w.assert_nothing_of_the_file("locked, the download was on its way");
@@ -534,22 +588,19 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
 }
 
 #[test]
-fn a_kind_with_no_viewer_stays_its_own_apps_and_a_route_to_it_says_so_with_two_buttons_that_answer() {
+fn a_kind_with_no_preview_never_opens_the_viewer_from_a_list_and_its_route_says_so_with_two_buttons() {
     let mut w = window("zip");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
-    // The Files window's Open on an archive: not this viewer's (the Files window opens it in its own app, as before;
-    // with no sync running here that is refused by the Files window itself).
+    // The Files window's Open on a kind the viewer has no preview for goes on by `open_file`'s steps 2 and 3 (the
+    // system's app, else the file manager): the route stays on the list. No sync runs here, so the file is not on
+    // this PC and nothing is started; the window says so (and nothing was downloaded).
     w.open_row(PLAN_NAME);
-    assert_eq!(
-        w.route_item(),
-        None,
-        "the route does not go to a file the viewer cannot show"
-    );
+    assert_eq!(w.route_item(), None, "a list's Open does not go to a file the viewer cannot show");
     assert!(w.rt.state.viewer.ui.is_none());
-    assert!(!w.drawn().contains("No preview for this kind of file yet"));
+    assert_eq!(w.chunk_requests(), 0);
 
-    // A route that names it anyway (as Search's Open and a link do): the honest state, and nothing downloaded.
+    // A route that names it anyway (a link, Back and Forward): the viewer's honest state, and nothing downloaded.
     w.rt.update(|s, _| {
         host::dispatch(s, Event::OpenItem(PLAN.to_string()));
     });
@@ -559,7 +610,7 @@ fn a_kind_with_no_viewer_stays_its_own_apps_and_a_route_to_it_says_so_with_two_b
     assert!(drawn.contains("No preview for this kind of file yet"), "{drawn}");
     // "Save a copy…" has nowhere to go on this source: it is not drawn (never a button that only says "not built").
     assert!(drawn.contains("Open in another app\u{2026}") && !drawn.contains("Save a copy"));
-    assert!(!drawn.contains("Decrypting on this PC"));
+    assert!(!drawn.contains(&format!("Decrypting {NOTE_NAME} on this PC")));
     w.settle();
     assert_eq!(w.chunk_requests(), 0, "nothing was downloaded");
 
@@ -657,10 +708,9 @@ fn a_file_kept_on_this_pc_opens_from_its_copy_without_a_download_and_says_so() {
     w.assert_nothing_of_the_file("after a lock");
 }
 
-/// "Open in its app" on the preview panel hands the file to its own app, never to the window's viewer, also
-/// for a file the viewer shows. (No sync runs here, so the Files window's own open refuses and says so.)
+/// The preview panel's "Open" opens the file in the window's viewer (w29), also for a file the panel itself shows.
 #[test]
-fn open_in_its_app_never_opens_the_windows_viewer() {
+fn the_preview_panels_open_opens_the_windows_viewer() {
     let mut w = window("itsapp");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
@@ -679,17 +729,10 @@ fn open_in_its_app_never_opens_the_windows_viewer() {
     let by_the_panel = w.chunk_requests();
     w.rt.update(|s, tx| s.open_from_preview(tx));
     w.settle();
-    assert_eq!(w.route_item(), None, "the route did not go to the viewer");
-    assert!(w.rt.state.viewer.ui.is_none());
-    assert_eq!(
-        w.chunk_requests(),
-        by_the_panel,
-        "Open in its app downloaded nothing through the viewer"
-    );
-    // Enter on the same row is the viewer's (the file is not on this PC).
-    w.press(Key::Enter, Mods::default());
+    let _ = by_the_panel;
     w.until_drawn(NOTE_WORDS);
-    assert_eq!(w.route_item().as_deref(), Some(NOTE));
+    assert_eq!(w.route_item().as_deref(), Some(NOTE), "the route went to the viewer");
+    assert!(w.rt.state.viewer.ui.is_some());
 }
 
 /// A PDF, end to end on the real engine: downloaded and decrypted in memory, its page rendered on this PC and
@@ -778,8 +821,8 @@ fn a_pdf_page_that_may_lack_text_says_so_under_the_page_and_a_page_that_does_not
 }
 
 #[test]
-fn the_boards_sample_window_still_leaves_an_office_file_to_its_own_app() {
-    // The board's fixture has no such file: the router says "not this group's", and Files opens it as before.
+fn the_boards_sample_window_opens_an_office_file_in_the_viewer_not_its_own_app() {
+    // The board's fixture has no such file: the viewer says so itself; nothing goes to the OS (w29).
     let mut s = crate::init();
     let item = crate::source::DriveItem {
         id: "no-such-sample".into(),
@@ -796,8 +839,7 @@ fn the_boards_sample_window_still_leaves_an_office_file_to_its_own_app() {
         pc_status: None,
         is_protected: false,
     };
-    assert!(!viewers::open_item(&mut s, &item));
-    assert!(s.viewer.ui.is_none());
+    assert!(viewers::open_item(&mut s, &item));
 }
 
 #[test]
@@ -909,3 +951,77 @@ fn a_picture_is_shown_and_no_action_claims_a_state_that_was_not_read() {
 
 #[path = "viewer_edit_lock_tests.rs"]
 mod edit_lock;
+
+/// w29: a PDF, a picture, a text and a Word document, each opened from Files (a row and Enter) and from
+/// Search (`open_file`), on the real engine: every one is the window's own viewer. A kind with no preview
+/// (`.zip` here; a video too, in a window with no player) is not: `open_file` sends it on to steps 2 and 3, and with no sync running here nothing is started.
+#[test]
+fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_preview_does_not() {
+    use crate::frames::open_file::{Opened, Target, item_named, open_file};
+    let mut w = window("sixkinds");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    let kinds = [
+        (REPORT_NAME, REPORT),
+        (PICTURE_NAME, PICTURE),
+        (NOTE_NAME, NOTE),
+        (DOC_NAME, DOC),
+    ];
+    let leave = |w: &mut Window| {
+        w.rt.update(|s, _| {
+            s.viewer.ui = None;
+            host::dispatch(s, Event::Escape);
+        });
+        w.settle_until(|w| w.route_item().is_none());
+        assert_eq!(w.route_item(), None);
+    };
+    let mut in_app = 0;
+    for (name, id) in kinds {
+        w.open_row(name);
+        w.settle_until(|w| w.route_item().as_deref() == Some(id) && w.rt.state.viewer.ui.is_some());
+        assert!(
+            w.route_item().as_deref() == Some(id) && w.rt.state.viewer.ui.is_some(),
+            "Files: {name} did not open in the app; the window draws:\n{}",
+            w.drawn()
+        );
+        in_app += 1;
+        leave(&mut w);
+        let mut opened = Opened::Failed(crate::frames::files::source::ActionError::Failed);
+        w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(id, name))));
+        w.settle_until(|w| w.route_item().as_deref() == Some(id));
+        assert_eq!((opened, w.route_item().as_deref()), (Opened::InApp, Some(id)), "Search: {name}");
+        in_app += 1;
+        leave(&mut w);
+    }
+    assert_eq!(in_app, 8, "4 kinds, from Files and from Search");
+    // The last open's decrypt may still be on its way when its window is left (the viewer is drawn before the
+    // content is in): let the downloads of the opens above finish, so only the no-preview opens are counted.
+    let mut before = w.chunk_requests();
+    let mut quiet = 0;
+    while quiet < 10 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        w.settle();
+        let now = w.chunk_requests();
+        quiet = if now == before { quiet + 1 } else { 0 };
+        before = now;
+    }
+    // The kind with no preview: not in the app, nothing downloaded, nothing started (no copy on this PC).
+    w.open_row(PLAN_NAME);
+    assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
+    let mut opened = Opened::InApp;
+    w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(PLAN, PLAN_NAME))));
+    assert_eq!(opened, Opened::Failed(crate::frames::files::source::ActionError::Unavailable));
+    // A video, in this window (no player here), is the same: step 2, never the viewer's frame.
+    w.open_row(CLIP_NAME);
+    assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
+    assert_eq!(w.chunk_requests(), before, "nothing was downloaded for them");
+}
+
+/// The real Windows port of step 2: the system knows an app for `.txt`, and none for a kind nobody registered.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_knows_an_app_for_text_and_none_for_an_unregistered_kind() {
+    assert!(crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\notes.txt")));
+    assert!(!crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\file.bbunregisteredkind")));
+    assert!(!crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\no-extension")));
+}

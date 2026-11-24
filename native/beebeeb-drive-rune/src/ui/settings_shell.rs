@@ -10,6 +10,7 @@
 //! | Sidebar item | `nav_item(label, icon, icon_size, on, t)` | `<label>-row`, `<label>-icon`, `<label>` |
 //! | Sidebar heading | `nav_title(text, t)` | `side-title-<slug>` |
 //! | Sidebar | `sidebar(back, sections, foot, t)` | `sidebar`, `side-foot-box`, `side-foot` |
+//! | The whole settings sidebar, one Tab stop, arrows and type-select | `app_sidebar(selected, previews, go, t)` | as `sidebar` |
 //! | Pane | `pane(children, t)` | `set-main`, `set-col` |
 //! | Way back to the parent pane | `crumb(label, t, back)` | `crumb-row`, `crumb-icon`, `crumb` |
 //! | Pane heading | `heading(title, sub, t)` | `set-title`, `set-sub` |
@@ -20,6 +21,8 @@ use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Icon, TextStyle, col, el, row};
 
 use super::kit;
+use crate::State;
+use crate::theme::icons_settings as ic;
 
 /// The settings sidebar is 224 pt wide on the board (the Drive sidebar is 220).
 pub const SIDEBAR_W: f32 = 224.0;
@@ -201,4 +204,78 @@ pub fn heading(title: &str, sub: Option<&str>, t: &Theme) -> El {
         h = h.child(kit::label("set-sub", sub, SUB, t.text_tertiary).wrap().w(454.22));
     }
     h
+}
+
+/// Where a sidebar item leads: the frame it shows. The frame lane owns what a press does.
+pub type Go = fn(&mut State, &'static str);
+
+/// The SETTINGS group of the sidebar: label, icon, board frame.
+pub const SETTINGS_ITEMS: &[(&str, &Icon, &str)] = &[
+    ("General", &ic::GEAR, "DW-0701"),
+    ("Account", &ic::PEOPLE, "DW-A51"),
+    ("Security", &ic::SHIELD, "DW-A52"),
+    ("Devices and sessions", &ic::LAPTOP, "DW-A55"),
+    ("Notifications", &ic::BELL, "DW-0750"),
+];
+/// The DRIVE group. The board draws a chevron here; the owner wants a glyph like the SETTINGS group,
+/// so a pane's row never reads as an expandable folder.
+pub const DRIVE_ITEMS: &[(&str, &Icon, &str)] = &[
+    ("Storage", &ic::DATABASE, "DW-0712"),
+    ("Backups", &ic::CLOCK, "DW-0737"),
+    ("Sync and File Explorer", &ic::SYNC, "DW-0746"),
+    ("Thumbnails and previews", &ic::IMAGE, "DW-0744"),
+    ("Bandwidth", &ic::GAUGE, "DW-0785"),
+];
+
+/// The whole settings sidebar as the board draws it (Back to Drive, Settings, Drive): the one list
+/// every settings frame and the not-built placeholder share. `selected` is an item's label (none:
+/// no item selected); `previews`: list Thumbnails and previews; `go` is called with the board frame
+/// an item shows (`DW-0401`: Back to Drive).
+pub fn app_sidebar(selected: Option<&str>, previews: bool, go: Go, t: &Theme) -> El {
+    let items = |list: &'static [(&'static str, &'static Icon, &'static str)]| -> Vec<El> {
+        list.iter()
+            // Not listed where nothing answers for it: a pane that only says "not built yet" is a dead door.
+            .filter(|(label, _, _)| previews || *label != "Thumbnails and previews")
+            .map(|&(label, icon, frame)| {
+                let on = selected == Some(label);
+                roving_item(nav_item(label, icon, 16.0, on, t), on, t).on_press(move |s: &mut State| go(s, frame))
+            })
+            .collect()
+    };
+    let back = roving_item(nav_item("Back to Drive", &ic::BACK, 15.0, false, t), false, t)
+        .shortcut_hint("Esc")
+        .on_press(move |s: &mut State| go(s, "DW-0401"));
+    // One Tab stop (Tab lands on the selected item, else Back to Drive): Up/Down/Home/End
+    // move, typing a name's first letters goes to it (Rune's list focus group).
+    sidebar(
+        back,
+        vec![("Settings", items(SETTINGS_ITEMS)), ("Drive", items(DRIVE_ITEMS))],
+        "Settings open inside the app. Esc goes back.",
+        t,
+    )
+    .role("list")
+    .label("Settings sidebar")
+    .focus_group()
+}
+
+/// An item of the roving sidebar: the group's Tab stop when `on`, and the shared ring (a list's
+/// items draw none of their own) so the keyboard's place shows on an unselected item.
+fn roving_item(item: El, on: bool, t: &Theme) -> El {
+    super::focus::apply(item.focus_selected(on), t.accent_deep)
+}
+
+#[cfg(test)]
+mod sidebar_icon_tests {
+    use super::*;
+
+    #[test]
+    fn no_sidebar_entry_uses_a_chevron() {
+        for (label, icon, _) in SETTINGS_ITEMS.iter().chain(DRIVE_ITEMS) {
+            assert!(!icon.name.contains("chev"), "{label} shows a chevron");
+        }
+        let mut names: Vec<_> = DRIVE_ITEMS.iter().map(|(_, i, _)| i.name).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), DRIVE_ITEMS.len(), "each Drive entry has its own icon");
+    }
 }

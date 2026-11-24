@@ -106,11 +106,13 @@ pub enum Profile {
     NoCapabilities,
     /// The media helper, only for a file whose decoder is Windows' own (its route is `System`; decision 2541).
     ///
-    /// Windows' decoders (Media Foundation) do not start without `registryRead`. With `hevc`, also the four
-    /// capabilities the HEVC decoder from Microsoft's Store extension needs: `lpacCom`, `lpacAppExperience`,
+    /// Windows' decoders (Media Foundation) do not start without `registryRead`, and its audio decoders (AAC) and
+    /// WIC (HEIC, camera RAW) not without `lpacCom` (COM; the owner, 2026-11-21). With `hevc`, also the three further
+    /// capabilities the HEVC decoder from Microsoft's Store extension needs: `lpacAppExperience`,
     /// `lpacIdentityServices` and `lpacMedia` (each one measured necessary, the five together enough).
     ///
-    /// What it adds, measured: the helper can READ the machine's and the user's registry. What stays denied, as in
+    /// What it adds: the helper can READ the machine's and the user's registry (measured) and activate COM servers
+    /// that admit less-privileged containers (`lpacCom`). What stays denied, as in
     /// every profile: reading a file of the user, writing anywhere, the network (loopback too) and starting a
     /// process.
     SystemDecoder {
@@ -121,6 +123,11 @@ pub enum Profile {
 
 /// The capability Media Foundation needs to start in a less-privileged AppContainer.
 const REGISTRY_READ: &str = "registryRead";
+
+/// COM inside a less-privileged AppContainer. Media Foundation's audio decoders (AAC) and WIC (HEIC, camera RAW)
+/// start COM objects and fail without it; held by [`Profile::SystemDecoder`] only (the owner, 2026-11-21). It reaches
+/// COM servers that admit less-privileged containers; it grants no file, network or registry-write access.
+const LPAC_COM: &str = "lpacCom";
 
 /// The process mitigations a helper is created under, as plain names (no system type), one table per [`Profile`]:
 /// [`Profile::mitigations`]. On Windows each one that is on is set at the helper's creation and read back from the
@@ -151,10 +158,10 @@ impl Profile {
     pub const fn capabilities(self) -> &'static [&'static str] {
         match self {
             Profile::NoCapabilities => &[],
-            Profile::SystemDecoder { hevc: false } => &[REGISTRY_READ],
+            Profile::SystemDecoder { hevc: false } => &[REGISTRY_READ, LPAC_COM],
             Profile::SystemDecoder { hevc: true } => &[
                 REGISTRY_READ,
-                "lpacCom",
+                LPAC_COM,
                 "lpacAppExperience",
                 "lpacIdentityServices",
                 "lpacMedia",
@@ -420,8 +427,8 @@ impl Sandbox {
     /// Starts `helper_exe` confined and returns it with its pipes.
     ///
     /// `helper_exe` must be an absolute path to a file; nothing is searched and no shell is involved. The helper
-    /// gets no arguments. Its environment is exactly [`helper_environment_names`]. Its standard error is not
-    /// connected.
+    /// gets no arguments ([`Mode::Plain`]). Its environment is exactly [`helper_environment_names`]. Its standard
+    /// error is not connected.
     ///
     /// Never starts an unconfined process: see the crate documentation. On Windows the helper's token is read back
     /// before it runs, and a token whose capabilities are not exactly the profile's ends it.
@@ -431,12 +438,39 @@ impl Sandbox {
     pub fn spawn(&self, helper_exe: &Path) -> Result<Child, SandboxError> {
         // Taken here, before the platform call, so the one lock is the same on every system; the platform releases
         // it as soon as the helper's pipe ends are no longer inheritable.
+        self.spawn_in_mode(helper_exe, Mode::Plain)
+    }
+
+    /// [`Sandbox::spawn`], with the one fixed word of `mode` as the helper's only argument. The confinement is the
+    /// same in every mode: a mode chooses what the helper does, never how it is confined.
+    pub fn spawn_in_mode(&self, helper_exe: &Path, mode: Mode) -> Result<Child, SandboxError> {
         let launch = launch_lock();
-        let (inner, pipes) = platform::spawn(helper_exe, self.limits, self.profile, launch)?;
+        let (inner, pipes) = platform::spawn(helper_exe, self.limits, self.profile, mode, launch)?;
         Ok(Child {
             inner,
             pipes: Some(pipes),
         })
+    }
+}
+
+/// What a helper is started to do: a closed list chosen in code by the caller, like a [`Profile`]. It is the only
+/// thing that can put a word on a helper's command line, and each word is a constant of this crate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// No argument at all. Every helper unless its caller names another mode.
+    #[default]
+    Plain,
+    /// The media helper decodes one picture and exits (`--image`, the media protocol's image mode).
+    Image,
+}
+
+impl Mode {
+    /// The helper's one argument in this mode, if it has one.
+    pub fn argument(self) -> Option<&'static str> {
+        match self {
+            Mode::Plain => None,
+            Mode::Image => Some("--image"),
+        }
     }
 }
 
@@ -813,7 +847,10 @@ mod tests {
     fn each_profile_asks_for_exactly_its_measured_capabilities() {
         assert_eq!(Profile::default(), Profile::NoCapabilities);
         assert_eq!(Profile::NoCapabilities.capabilities(), &[] as &[&str]);
-        assert_eq!(Profile::SystemDecoder { hevc: false }.capabilities(), &["registryRead"]);
+        assert_eq!(
+            Profile::SystemDecoder { hevc: false }.capabilities(),
+            &["registryRead", "lpacCom"]
+        );
         assert_eq!(
             Profile::SystemDecoder { hevc: true }.capabilities(),
             &[
@@ -837,7 +874,21 @@ mod tests {
                 counted += 1;
             }
         }
-        assert_eq!(counted, 6, "the instrument counted every name of every profile");
+        assert_eq!(counted, 7, "the instrument counted every name of every profile");
+    }
+
+    /// `lpacCom` (COM, which Media Foundation's audio decoders and WIC need to start) is held by the system-decoder
+    /// profile only, both with and without HEVC (the owner, 2026-11-21). The default profile, every helper's, never.
+    #[test]
+    fn com_is_held_by_the_system_decoder_profile_only() {
+        assert!(!Profile::NoCapabilities.capabilities().contains(&"lpacCom"));
+        assert!(!Profile::default().capabilities().contains(&"lpacCom"));
+        for hevc in [false, true] {
+            assert!(
+                Profile::SystemDecoder { hevc }.capabilities().contains(&"lpacCom"),
+                "SystemDecoder {{ hevc: {hevc} }} holds lpacCom"
+            );
+        }
     }
 
     #[test]

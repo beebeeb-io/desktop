@@ -74,7 +74,7 @@ impl SessionGeneration {
 }
 
 /// What moved an account's [`SessionGeneration`] last, so a transition that is refused can say why in words that fit
-/// (Task 12 fix round 1, item 8).
+///.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTransition {
     /// A session was written: a sign-in, an unlock, the restore, the naming of a session.
@@ -83,7 +83,7 @@ pub enum SessionTransition {
     SignOut = 2,
 }
 
-/// One flight of the request that asks the server who an unidentified session is (Task 12 fix round 1, item 4): at most
+/// One flight of the request that asks the server who an unidentified session is: at most
 /// one at a time per account, and app activation asks at most once a minute.
 #[derive(Debug, Default)]
 pub struct IdentifyFlight {
@@ -137,11 +137,11 @@ pub struct AccountRuntime {
     /// The identify request's single flight and its debounce (see [`IdentifyFlight`]).
     pub identify_flight: Mutex<IdentifyFlight>,
     /// The naming could not write the session's email to the Keychain; the next naming trigger writes it again
-    /// (Task 12 fix round 2, item 3).
+    ///.
     pub keychain_email_pending: AtomicBool,
     /// The viewer's saves, per opening of a file (`app::viewer_edit_api`): emptied whenever the session moves.
     pub(crate) viewer_saves: crate::app::viewer_edit_api::ViewerSavesStore,
-    /// The last binding refusal of an engine start for the current session (Task 12 fix round 2, ruling P), shown as
+    /// The last binding refusal of an engine start for the current session, shown as
     /// `sync_status.engine_refusal`. A start that runs clears it, and so does every session transition.
     pub engine_refusal: Mutex<Option<crate::account_binding::Refusal>>,
     /// Lead ruling F9 (spec 2026-10-06 R8): how many sign-ins have asked for the operations paused for `auth` to be due

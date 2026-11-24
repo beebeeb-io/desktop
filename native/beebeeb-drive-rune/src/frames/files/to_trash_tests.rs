@@ -18,10 +18,12 @@ use std::time::Duration;
 type R = Result<(), ActionError>;
 
 /// What the test keeps of the source: what it was asked, and what it will answer.
+type Asked = Arc<Mutex<Vec<(Action, Vec<String>)>>>;
+
 #[derive(Default, Clone)]
 struct Spy {
     later: Arc<Mutex<Vec<Change>>>,
-    asked: Arc<Mutex<Vec<(Action, Vec<String>)>>>,
+    asked: Asked,
     /// The next move to Trash is refused at once with this.
     refuse: Arc<Mutex<Option<ActionError>>>,
 }
@@ -272,7 +274,7 @@ fn what_was_selected_since_the_press_stays_selected_when_the_answer_moves_the_ro
     let at = rt.state.listing.items.iter().position(|item| item.id == other).unwrap();
     assert_eq!(at, 0, "the two rows above it left");
     let selected: Vec<String> = rt.state.selected_items().into_iter().map(|item| item.id).collect();
-    assert_eq!(selected, [other.clone()], "the same item, at its new place");
+    assert_eq!(selected, std::slice::from_ref(&other), "the same item, at its new place");
     assert_eq!(rt.state.actions.rename.as_ref().map(|r| r.row), Some(0));
 
     // Undo: the rows come back above it, and it is still the one selected.
@@ -280,7 +282,7 @@ fn what_was_selected_since_the_press_stays_selected_when_the_answer_moves_the_ro
     spy.answer(Action::Restore, &[(&ids[0], None), (&ids[1], None)]);
     assert!(frame(&mut rt));
     let selected: Vec<String> = rt.state.selected_items().into_iter().map(|item| item.id).collect();
-    assert_eq!(selected, [other.clone()]);
+    assert_eq!(selected, std::slice::from_ref(&other));
     let at = rt.state.listing.items.iter().position(|item| item.id == other).unwrap();
     assert_eq!(rt.state.actions.rename.as_ref().map(|r| r.row), Some(at));
 }

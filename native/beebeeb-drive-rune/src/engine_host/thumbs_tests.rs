@@ -312,3 +312,121 @@ fn what_cannot_get_better_by_waiting_owes_no_redraw() {
     assert!(matches!(inner.held.get(&key(6)), Some(Held::Picture { .. })));
     assert!(!inner.retry_pending());
 }
+
+mod local_decode {
+    use std::io::{Cursor, Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    use beebeeb_media_protocol::image::{ImageAnswer, ImageRefusal};
+    use beebeeb_media_protocol::write_msg;
+
+    use crate::engine_host::media::decode_over;
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn answer(a: &ImageAnswer) -> Box<dyn Read + Send> {
+        let mut out = Vec::new();
+        write_msg(&mut out, a).unwrap();
+        Box::new(Cursor::new(out))
+    }
+
+    #[test]
+    fn pixels_of_the_asked_size_come_back() {
+        let rgba = vec![7u8; 2 * 2 * 4];
+        let from = answer(&ImageAnswer::Pixels {
+            width: 2,
+            height: 2,
+            rgba: rgba.clone(),
+        });
+        let got = decode_over(from, Box::new(Sink::default()), b"pic", 512).unwrap();
+        assert_eq!((got.width, got.height, got.rgba.to_vec()), (2, 2, rgba));
+    }
+
+    #[test]
+    fn a_picture_over_what_was_asked_is_refused() {
+        let from = answer(&ImageAnswer::Pixels {
+            width: 8,
+            height: 2,
+            rgba: vec![0; 64],
+        });
+        assert!(matches!(
+            decode_over(from, Box::new(Sink::default()), b"pic", 4),
+            Err(ImageRefusal::Damaged)
+        ));
+    }
+
+    #[test]
+    fn a_refusal_is_passed_on_and_no_helper_means_no_decoder() {
+        let from = answer(&ImageAnswer::Refused(ImageRefusal::NoDecoder));
+        assert!(matches!(
+            decode_over(from, Box::new(Sink::default()), b"pic", 64),
+            Err(ImageRefusal::NoDecoder)
+        ));
+        assert!(matches!(
+            crate::engine_host::media::decode_picture(b"x", 64),
+            Err(ImageRefusal::NoDecoder)
+        ));
+    }
+
+    #[test]
+    fn only_a_server_with_no_thumbnail_lets_the_one_made_here_be_sent() {
+        use crate::engine_host::thumbs::server_has_none;
+        use beebeeb_engine::app::photos_api::ThumbRefused;
+        // A stored picture that does not decode exists on the server: never replaced from here.
+        assert!(server_has_none(ThumbRefused::NoThumbnail));
+        for other in [
+            ThumbRefused::Unreadable,
+            ThumbRefused::Offline,
+            ThumbRefused::Failed,
+            ThumbRefused::NotSignedIn,
+            ThumbRefused::SessionEnded,
+            ThumbRefused::NotYours,
+        ] {
+            assert!(!server_has_none(other));
+        }
+    }
+
+    #[test]
+    fn a_thumbnail_made_here_is_cut_to_the_middle_like_a_stored_one() {
+        use beebeeb_engine::app::photos_api::{ThumbCut, ThumbPixels};
+
+        use crate::engine_host::thumbs::cut_made_here;
+
+        // 4 wide, 2 high: each pixel says its column.
+        let whole = || ThumbPixels {
+            session: beebeeb_engine::account::SessionGeneration::for_test(1),
+            width: 4,
+            height: 2,
+            rgba: zeroize::Zeroizing::new((0..8u8).flat_map(|i| [i % 4; 4]).collect()),
+        };
+        let square = cut_made_here(whole(), ThumbCut::Square);
+        assert_eq!((square.width, square.height), (2, 2));
+        assert_eq!(square.rgba.to_vec(), [1u8, 2, 1, 2].iter().flat_map(|c| [*c; 4]).collect::<Vec<u8>>());
+        let strip = cut_made_here(whole(), ThumbCut::Strip);
+        assert_eq!((strip.width, strip.height), (1, 2));
+        let same = cut_made_here(whole(), ThumbCut::Whole);
+        assert_eq!((same.width, same.height, same.rgba.len()), (4, 2, 32));
+        // A length that does not match its size is never indexed.
+        let short = cut_made_here(ThumbPixels { rgba: zeroize::Zeroizing::new(vec![0; 5]), ..whole() }, ThumbCut::Square);
+        assert_eq!(short.rgba.len(), 5);
+    }
+
+    #[test]
+    fn a_heif_is_told_from_a_cameras_raw_by_its_first_bytes() {
+        use crate::engine_host::media::looks_like_heif;
+        assert!(looks_like_heif(b"\0\0\0\x18ftypheic\0\0\0\0"));
+        assert!(!looks_like_heif(b"\0\0\0\x18ftypcrx \0\0\0\0"));
+        assert!(!looks_like_heif(b"II*\0\x08\0\0\0"));
+        assert!(!looks_like_heif(b"ftyp"));
+    }
+}

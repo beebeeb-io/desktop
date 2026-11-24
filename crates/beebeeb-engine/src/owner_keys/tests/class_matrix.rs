@@ -26,7 +26,7 @@ fn name_under(key: &FileKey, name: &str) -> String {
 fn bridge_for(fixture: &Fixture) -> crate::engine_bridge::EngineBridge {
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -144,7 +144,7 @@ fn a3_l8_envelope_served_on_an_owner_id_is_ignored() {
     });
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::TEST, db.clone(), Arc::new(fixture.api()));
     let row = json!({"id":owner,"name_encrypted":name_under(&derived,"enveloped.txt"),"parent_id":null,
         "is_folder":false,"version_number":1,"size_bytes":4,"updated_at":1,
         "acted_via_share_id":null,"uploaded_by":null,
@@ -198,7 +198,7 @@ fn a5_foreign_wrap_under_proven_custody_is_adopted_once_and_verified() {
     }],"next_cursor":null});
     let (fixture, seen) = world(root, &row, &folder, inventory, winner.clone());
     let bridge = bridge_for(&fixture);
-    let prepared = run(bridge.prepare_owned_rows(&[row.clone()])).expect("A5 prepares the row");
+    let prepared = run(bridge.prepare_owned_rows(std::slice::from_ref(&row))).expect("A5 prepares the row");
     assert_eq!(prepared.len(), 1);
     assert!(prepared[0].readable);
     assert_eq!(

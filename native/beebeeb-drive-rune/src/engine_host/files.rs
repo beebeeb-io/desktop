@@ -102,7 +102,8 @@ impl<C: CredentialStores> FilesEngine for Engine<C> {
         Engine::free_up_space_of(self, ids)
     }
     fn states_of(&self, ids: &[String]) -> Result<Vec<Option<Option<String>>>, LocalStateRefused> {
-        Engine::local_state(self)?.with(|db| marks_in(db, ids))
+        let sync_root = self.sync_root().ok();
+        Engine::local_state(self)?.with(|db| marks_in(db, sync_root.as_deref(), ids))
     }
     fn backups_root(&self) -> Result<Option<String>, LocalStateRefused> {
         Engine::local_state(self)?.with(|db| {
@@ -122,8 +123,15 @@ impl<C: CredentialStores> FilesEngine for Engine<C> {
 /// which would leave the menu offering Keep on this PC for an item that is kept, and never Remove from this PC.
 /// Only then: a kept file that is uploading, in conflict or in error reads the listing's own mark of that state,
 /// never "available_offline" over it (review of 2468, L256.4).
+/// A row whose place on this PC (below `sync_root`) is another item's reads the listing's mark of that
+/// (`case_place::mark_shared_places`), kept or not.
 /// `None`: no such row, or it could not be read.
-fn marks_in(db: &beebeeb_engine::state_db::StateDb, ids: &[String]) -> Vec<Option<Option<String>>> {
+fn marks_in(
+    db: &beebeeb_engine::state_db::StateDb,
+    sync_root: Option<&std::path::Path>,
+    ids: &[String],
+) -> Vec<Option<Option<String>>> {
+    use beebeeb_engine::drive_v2::dto::LocalState;
     use beebeeb_engine::state_db::{FileStatus, PinState};
     ids.iter()
         .map(|id| {
@@ -137,13 +145,28 @@ fn marks_in(db: &beebeeb_engine::state_db::StateDb, ids: &[String]) -> Vec<Optio
                 entry.status,
                 FileStatus::Local | FileStatus::Downloading | FileStatus::CloudOnly
             );
-            if kept && nothing_unsent && !entry.is_dir() {
+            let mut row = beebeeb_engine::drive_v2::model::item_from(&entry, contract.as_ref(), None);
+            if let Some(sync_root) = sync_root {
+                beebeeb_engine::drive_v2::case_place::mark_shared_places(db, sync_root, std::slice::from_mut(&mut row));
+            }
+            let shared = matches!(row.local, Some(LocalState::NameShared | LocalState::NameSharedButCase));
+            if kept && nothing_unsent && !entry.is_dir() && !shared {
                 return Some(Some("available_offline".to_string()));
             }
-            let row = beebeeb_engine::drive_v2::model::item_from(&entry, contract.as_ref(), None);
             Some(crate::source_engine::item(row).pc_status)
         })
         .collect()
+}
+
+/// Why Keep on this PC or Remove from this PC left an item, from the engine's fixed words: another item at its place
+/// on this PC (`kept_api::SHARED_PLACE*`: asking again changes nothing), else a plain failure.
+pub(crate) fn kept_refusal(why: &str) -> ActionError {
+    use beebeeb_engine::app::kept_api::{SHARED_PLACE, SHARED_PLACE_BUT_CASE};
+    match why {
+        SHARED_PLACE => ActionError::NameShared,
+        SHARED_PLACE_BUT_CASE => ActionError::NameSharedButCase,
+        _ => ActionError::Failed,
+    }
 }
 
 /// Is what the action asked for there, by the mark the engine gives the item now? For a job whose own word is not
@@ -561,9 +584,10 @@ fn run<E: FilesEngine>(engine: &E, job: &Job) -> Answer {
         }
         match action {
             Action::KeepOffline | Action::RemoveOffline => {
-                if engine.set_kept(id, action == Action::KeepOffline).is_ok() {
-                    left[at] = None;
-                }
+                left[at] = engine
+                    .set_kept(id, action == Action::KeepOffline)
+                    .err()
+                    .map(|why| kept_refusal(&why));
             }
             // The reclaim never touches a kept file: what was kept is released for it, and kept again below
             // when the reclaim did not free it.

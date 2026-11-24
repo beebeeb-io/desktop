@@ -41,7 +41,7 @@ pub fn load_session_from_vault<S: keychain::AuthSecretStore>(
     vault
         .unlock()
         .map_err(|e| keychain_error("unlock vault key from Keychain", e))?;
-    // Wiped when this function returns (Task 12 fix round 1, item 10): the one copy that outlives it is the session's.
+    // Wiped when this function returns: the one copy that outlives it is the session's.
     let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
     master_key.copy_from_slice(vault.master_key().map_err(|e| keychain_error("read vault key", e))?);
     // Prefer an email already known in memory (e.g. carried through from a live

@@ -2,6 +2,7 @@
 
 use super::parts::table::{Extra, Kind, Row, Thumb};
 use crate::ui::file_list::PcState;
+use zeroize::Zeroizing;
 
 /// Someone wants to share something with the person (DW-0501's card).
 #[derive(Clone, Debug, PartialEq)]
@@ -193,6 +194,10 @@ pub enum Notice {
     AlreadyAccepted,
     /// "Remove from my list" met a file request that is still open.
     RequestStillOpen,
+    /// Show in File Explorer met an item that is not kept on this PC.
+    NotOnThisPc,
+    /// View files met a request that has no folder of its own.
+    NoFolder,
 }
 
 /// How an invitation sent with [`SharedSource::start_invite`] ended (DW-0514).
@@ -217,6 +222,74 @@ impl InviteResult {
     }
 }
 
+/// What a person pressed in the safety-number dialogs (DW-0513, DW-0515), for the source to run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SafetyAsk {
+    /// Work the number out.
+    Number,
+    /// "They match": the local mark.
+    Matches,
+    /// "They don't match": the local mark.
+    Differs,
+    /// "Share anyway" on a changed key: only ever started by that button.
+    Anyway,
+}
+
+/// Where one person's safety call stands. The number is twelve groups of five digits: nothing else of a key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SafetyState {
+    Idle,
+    /// Asked, not answered.
+    Asking(SafetyAsk),
+    Number(Vec<String>),
+    /// The mark was written; `number` is the one compared.
+    Marked { matched: bool, number: Vec<String> },
+    /// "Share anyway" shared with them.
+    Shared,
+    /// "Share anyway" on a folder: the refused invite was withdrawn, nothing is shared.
+    Withdrawn,
+    /// Nothing was done, in the words to show.
+    Refused(&'static str),
+}
+
+/// One change to a live link (DW-0511's Change expiry, Password).
+#[derive(Clone, PartialEq)]
+pub enum LinkEdit {
+    /// Hours from now; `None` = never.
+    Expiry(Option<u32>),
+    /// `None` = remove the password.
+    Password(Option<Zeroizing<String>>),
+}
+
+impl std::fmt::Debug for LinkEdit {
+    /// Never names a password.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkEdit::Expiry(hours) => f.debug_tuple("Expiry").field(hours).finish(),
+            LinkEdit::Password(Some(_)) => f.write_str("Password(set)"),
+            LinkEdit::Password(None) => f.write_str("Password(remove)"),
+        }
+    }
+}
+
+/// What a new file request asks for (DW-0504).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RequestForm {
+    pub title: String,
+    pub note: String,
+    pub target_folder: Option<String>,
+    pub max_files: Option<u32>,
+    pub max_total_bytes: Option<u64>,
+    pub expires_in_hours: Option<u32>,
+}
+
+/// What a row of Shared is, for the item behind it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowTarget {
+    Item { id: String, is_folder: bool },
+    Folder(String),
+}
+
 /// What [`SharedSource::pump`] took in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pumped {
@@ -232,6 +305,15 @@ pub trait SharedSource {
     /// frame instead of a section of sample values.
     fn wired(&self) -> bool {
         true
+    }
+    /// A number that changes whenever the answer's rows change; `None`: the source cannot say, so the view never
+    /// holds a copy of its rows (a sample or a stub that changes under it).
+    fn rev(&self) -> Option<u64> {
+        None
+    }
+    /// "Try again" on a view that failed: read the list now, even if the last answer is not old.
+    fn retry(&mut self) {
+        self.opened();
     }
     fn invitations(&self) -> Vec<Invitation>;
     /// Shared with the person, newest first.
@@ -251,6 +333,39 @@ pub trait SharedSource {
     fn close_request(&mut self, id: &str) -> bool;
     /// Take a closed or expired request out of the list.
     fn remove_request(&mut self, id: &str) -> bool;
+    /// The link row's link to the clipboard. The default answers "Not available yet" (`false`).
+    fn copy_row_link(&mut self, _id: &str) -> bool {
+        false
+    }
+    /// Change a live link's expiry or password. Default: not available.
+    fn change_link(&mut self, _share_id: &str, _change: LinkEdit) -> bool {
+        false
+    }
+    /// Change an open request's expiry (`None` = never). Default: not available.
+    fn change_request_expiry(&mut self, _id: &str, _hours: Option<u32>) -> bool {
+        false
+    }
+    /// Leave a share someone made with the person. Default: not available.
+    fn leave(&mut self, _id: &str) -> bool {
+        false
+    }
+    /// The account's top-level folders a new request can send its files to: (id, name). Default: none, so the
+    /// menu offers All files only.
+    fn folders(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// Make a file request. Default: not available.
+    fn create_request(&mut self, _form: RequestForm) -> bool {
+        false
+    }
+    /// A link a source made (a new request's) for the clipboard: only the window's `Tx` can put it there. Taken once.
+    fn take_link(&mut self) -> Option<crate::frames::files::link::LinkText> {
+        None
+    }
+    /// The item behind a row, when the source knows.
+    fn target_of(&self, _id: &str) -> Option<RowTarget> {
+        None
+    }
     /// The people of a share with people, the owner first (DW-0511). Empty: no such share.
     fn members(&self, share: &str) -> Vec<Member>;
     /// What one person may do with a share, changed at once (DW-0512). `false`: no such
@@ -276,12 +391,34 @@ pub trait SharedSource {
     }
     /// The Shared section opened: read the lists if they are missing or old.
     fn opened(&mut self) {}
+    /// A sync check finished: what this PC knows of the account may have changed. A source that reads late reads
+    /// the lists again when someone looked at them in this session; otherwise the next opening reads.
+    fn refresh(&mut self) {}
     /// Take in what arrived since the last call (the window's poll).
     fn pump(&mut self) -> Pumped {
         Pumped::default()
     }
     /// The session or the account changed: drop every name, address and count at once.
     fn forget(&mut self) {}
+
+    /// Whether this source works out safety numbers: `false`, the dialogs only record what was pressed.
+    fn safety_wired(&self) -> bool {
+        false
+    }
+    /// Run `ask` for the person `person` of `share`, once at a time per person; answered through
+    /// [`Self::safety_state`] after a pump. `false`: nothing was started.
+    fn safety_start(&mut self, _share: &str, _person: &str, _ask: SafetyAsk) -> bool {
+        false
+    }
+    fn safety_state(&self, _share: &str, _person: &str) -> SafetyState {
+        SafetyState::Idle
+    }
+    /// Forget what a person's last call ended in (a new comparison starts clean).
+    fn safety_clear(&mut self, _share: &str, _person: &str) {}
+    /// The person whose key stopped the last invitation to `share`: People warns over them.
+    fn key_changed_person(&self, _share: &str) -> Option<String> {
+        None
+    }
 }
 
 /// The board's sample (DW-0501, DW-0502, DW-0503), or nothing at all (DW-0508, DW-0509, DW-0510).
@@ -296,6 +433,9 @@ pub struct BoardShared {
     requests: Vec<Request>,
     /// The answers to invitations sent, in order (the board answers at once).
     invite_answers: std::collections::VecDeque<(String, InviteResult)>,
+    /// A test's stand-in for an engine that works safety numbers out (never made by a build).
+    #[cfg(test)]
+    pub(crate) safety: Option<std::collections::HashMap<(String, String), SafetyState>>,
 }
 
 fn from(id: &str, name: &str, kind: Kind, date: &str, size: &str, who: (&str, &str, char), pc: PcState) -> Row {
@@ -311,6 +451,8 @@ fn from(id: &str, name: &str, kind: Kind, date: &str, size: &str, who: (&str, &s
             hue: who.2,
         },
         pc: Some(pc),
+        bytes: None,
+        at: None,
     }
 }
 
@@ -404,6 +546,8 @@ impl BoardShared {
                         hue: 'd',
                     },
                     pc: Some(PcState::OnlineOnly),
+                    bytes: None,
+                    at: None,
                 },
             }],
             with_me: vec![
@@ -573,6 +717,8 @@ impl BoardShared {
                 ),
             ],
             invite_answers: Default::default(),
+            #[cfg(test)]
+            safety: None,
         }
     }
 
@@ -719,57 +865,46 @@ impl SharedSource for BoardShared {
     fn invite_answer(&mut self) -> Option<(String, InviteResult)> {
         self.invite_answers.pop_front()
     }
-}
-
-/// The source of a build that ships before the engine lane has wired Shared: it answers
-/// nothing, and the view draws the shell's "not built yet" frame instead of the section.
-/// No value of it is ever shown.
-pub struct Unwired;
-
-impl SharedSource for Unwired {
-    fn wired(&self) -> bool {
-        false
+    #[cfg(test)]
+    fn safety_wired(&self) -> bool {
+        self.safety.is_some()
     }
-    fn invitations(&self) -> Vec<Invitation> {
-        Vec::new()
+    /// Test double: answers at once with invented digits.
+    #[cfg(test)]
+    fn safety_start(&mut self, share: &str, person: &str, ask: SafetyAsk) -> bool {
+        let key = (share.to_string(), person.to_string());
+        let Some(map) = self.safety.as_mut() else {
+            return false;
+        };
+        let held = match map.get(&key) {
+            Some(SafetyState::Number(n)) => n.clone(),
+            _ => Vec::new(),
+        };
+        let next = match ask {
+            SafetyAsk::Number => SafetyState::Number((1..=12).map(|i| format!("{:05}", i * 111)).collect()),
+            SafetyAsk::Matches => SafetyState::Marked { matched: true, number: held },
+            SafetyAsk::Differs => SafetyState::Marked { matched: false, number: held },
+            SafetyAsk::Anyway => SafetyState::Shared,
+        };
+        map.insert(key, next);
+        if ask == SafetyAsk::Matches
+            && let Some(m) = self.people_of(share).and_then(|p| p.iter_mut().find(|m| m.id == person))
+        {
+            m.compared = true;
+        }
+        true
     }
-    fn with_me(&self) -> Vec<Row> {
-        Vec::new()
+    #[cfg(test)]
+    fn safety_state(&self, share: &str, person: &str) -> SafetyState {
+        self.safety
+            .as_ref()
+            .and_then(|m| m.get(&(share.to_string(), person.to_string())).cloned())
+            .unwrap_or(SafetyState::Idle)
     }
-    fn people_shares(&self) -> Vec<PeopleShare> {
-        Vec::new()
-    }
-    fn links(&self) -> Vec<LinkShare> {
-        Vec::new()
-    }
-    fn requests(&self) -> Vec<Request> {
-        Vec::new()
-    }
-    fn accept(&mut self, _id: &str) -> bool {
-        false
-    }
-    fn decline(&mut self, _id: &str) -> bool {
-        false
-    }
-    fn keep_offline(&mut self, _id: &str) -> bool {
-        false
-    }
-    fn stop_sharing(&mut self, _id: &str) -> bool {
-        false
-    }
-    fn close_request(&mut self, _id: &str) -> bool {
-        false
-    }
-    fn remove_request(&mut self, _id: &str) -> bool {
-        false
-    }
-    fn members(&self, _share: &str) -> Vec<Member> {
-        Vec::new()
-    }
-    fn set_access(&mut self, _share: &str, _person: &str, _access: Access) -> bool {
-        false
-    }
-    fn remove_access(&mut self, _share: &str, _person: &str) -> bool {
-        false
+    #[cfg(test)]
+    fn safety_clear(&mut self, share: &str, person: &str) {
+        if let Some(m) = self.safety.as_mut() {
+            m.remove(&(share.to_string(), person.to_string()));
+        }
     }
 }

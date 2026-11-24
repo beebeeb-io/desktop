@@ -23,8 +23,10 @@
 //! 4. asks for the next frame (`WantVideo` at the drawn size in device pixels, capped at 1920 x 1080; asked only once
 //!    the view said its size) and the next PCM (`WantAudio` at the device's format), one of each at a time;
 //! 5. shows a frame when its time is at or before the clock (the sound device's clock; without sound, a wall clock
-//!    started at Play), and drops a frame more than one frame-time late (unless nothing was shown for 250 ms: a slow
-//!    PC shows a halting picture, not a black one).
+//!    started at Play). With sound, a frame more than one frame-time late is dropped (unless nothing was shown for
+//!    250 ms: a slow PC shows a halting picture, not a black one). Without sound nothing has to stay in step with
+//!    the picture, so a late frame is shown and the wall clock goes on from that frame's time: a PC that decodes
+//!    slower than the file plays shows every frame, slower, and the place said is the place of the picture.
 //!
 //! **Stopping is never a request to the worker.** What a run holds that must end at once (the helper's link, the
 //! sound) sits in its `Slots`; `stop` (a lock, a sign-out, an account change, a close), `next`, `previous` and `open`
@@ -44,13 +46,20 @@
 //! before `Opened` is killed and ONE new helper is started in the profile `transport::profile_for_file` names (only
 //! while the switch is on); the same answer from that one is the PC's answer. Never a third helper for one item.
 //!
-//! **TEST builds only** (the build's identity, never the real app): after 1 s of playback, one `media.played` line
-//! (the codec's protocol number, the frames shown and the RMS of the sound in that second, whether the helper was
-//! confined), read by the VM 401 rung. No name, id, tag or byte is logged, here or anywhere in the player.
+//! **The window is woken** ([`PlayerHandle::set_waker`]) whenever what a view draws of the player changed, so a
+//! frame, a place or a refusal reaches the screen without waiting for a press.
+//!
+//! **TEST builds only** (the build's identity, never the real app), read by the Windows test machine rungs: after 1 s of playback,
+//! one `media.played` line (the codec's protocol number, the frames shown and the RMS of the sound in that second,
+//! whether the helper was confined); at the first frame, one `media.start` line (each step's time since the press:
+//! the bytes, the helper, `Opened`, the sound device, the first want, frame and show) and, when a view first takes
+//! that frame, one `media.seen` line; once a second, a `media.pace` line (frames received, shown and dropped, the
+//! clock, the time of the frame on screen, the place said). Milliseconds and counts only: no name, id, tag or byte
+//! is logged, here or anywhere in the player.
 
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -67,6 +76,9 @@ use super::transport::LinkError;
 use super::video::VideoSurface;
 
 mod worker;
+
+#[cfg(test)]
+mod vm_probe;
 
 use worker::{Start, Worker};
 
@@ -111,6 +123,11 @@ pub trait AudioSink: Send {
     /// The device is gone for good (lost and not rebuilt). Asked after each push. Default: never.
     fn failed(&self) -> bool {
         false
+    }
+    /// The gain applied where samples leave for the device (0.0 silent, 1.0 as decoded): heard within one device
+    /// buffer, not after what is queued. Default: ignored.
+    fn set_gain(&mut self, gain: f32) {
+        let _ = gain;
     }
 }
 
@@ -201,17 +218,26 @@ impl fmt::Debug for MediaItem {
     }
 }
 
-/// Why nothing plays. The view says it with "Open in another app…" one press away.
+/// Why nothing plays. The view says it with "Open in another app…" one press away ("Open in default app" where the
+/// PC has no system decoder). The sentences are the view's (`frames::viewers::video::refusal_words`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// No decoder here for this format, or its route is off: "This PC can't play <name> files here." The name is
     /// the format's (`Codec::name`), never the file's; empty when the format has no name (the view says "this
     /// kind of file").
     NoDecoder(String),
-    /// The codec's route is the system's decoder and this PC has none for it. HEVC (decision D-MED-2): "This PC
-    /// can't play HEVC video without Microsoft's HEVC extension."; any other `System` codec (H.264 streams FilmCraft
-    /// cannot decode, AAC, E-AC-3, MPEG-4 Part 2, VC-1, WMA): "This PC can't play <name> files here.", the name
-    /// from `Codec::name`. Never the helper's own decoder in its place.
+    /// A 10-bit H.264 stream no decoder on this PC takes (ux-24).
+    TenBit,
+    /// The video is a codec Beebeeb does not recognise at all, e.g. in a Matroska file (ux-24).
+    UnknownCodec,
+    /// A HEIC photo: the picture decoder here does not open it (ux-24).
+    Heic,
+    /// A camera RAW photo: the picture decoder here does not open it (ux-24).
+    Raw,
+    /// The codec's route is the system's decoder and this PC has none for it. HEVC (decision D-MED-2): the words
+    /// name Microsoft's "HEVC Video Extensions"; any other `System` codec (H.264 streams FilmCraft cannot decode,
+    /// AAC, E-AC-3, MPEG-4 Part 2, VC-1, WMA): "Windows has no <name> decoder on this PC.", the name from
+    /// `Codec::name`. Never the helper's own decoder in its place.
     NoSystemDecoder(Codec),
     /// The codec's route is the system's decoder and this Windows has no media codecs at all (an N or KN edition
     /// without the Media Feature Pack; the legal brief of 2026-11-15, F3 caveat 1): "This PC can't play <name>
@@ -296,6 +322,8 @@ const TICK: Duration = Duration::from_millis(10);
 const OPEN_WAIT_MS: u64 = 10_000;
 /// Every want answered within 5 s.
 const ANSWER_WAIT_MS: u64 = 5_000;
+/// The helper's first frame or PCM within 20 s: a cold decoder start on a slow PC took more than 5 s (the Windows test machine, RC1).
+const FIRST_ANSWER_WAIT_MS: u64 = 20_000;
 /// The longest recording or video the player accepts: 48 h.
 const MAX_DURATION_MS: u64 = 48 * 60 * 60 * 1000;
 /// A frame-time when the helper gave no frame rate.
@@ -343,6 +371,8 @@ struct Player {
     links: Arc<dyn LinkFactory>,
     audio: Arc<dyn AudioFactory>,
     now_playing: Option<Box<dyn NowPlayingSink>>,
+    /// Wakes the window's loop ([`PlayerHandle::set_waker`]); `None`: nobody draws this player (its tests).
+    waker: Option<Waker>,
     surface: VideoSurface,
     /// The drawn stage in device pixels (`set_view_size`); frames are asked at this size, capped at 1920 x 1080.
     view: (u32, u32),
@@ -359,6 +389,13 @@ struct Player {
     art: Option<rune::Pixels>,
     /// A frame was shown since the last blank.
     has_frame: bool,
+    /// When the current item was opened (the press), and whether a view took a frame of it since
+    /// ([`PlayerHandle::frame`]): the TEST build's `media.seen` line.
+    pressed: Option<Instant>,
+    seen: bool,
+    /// The volume, 0.0 to 1.0, and the mute: the session's, kept across items and stop, never saved.
+    volume: f32,
+    muted: bool,
     /// The items Next and Previous move through, and where the player is in it.
     queue: Vec<MediaItem>,
     at: usize,
@@ -368,6 +405,9 @@ struct Player {
     /// What the tests read. Filled in test builds only.
     record: Record,
 }
+
+/// Wakes the window's loop, from a worker's thread: what a view draws of the player changed.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
 /// What the tests read of the player (`player_tests.rs`). Nothing is put in it outside the tests.
 #[derive(Default)]
@@ -379,6 +419,11 @@ struct Record {
     received: Vec<u64>,
     /// How often the frame was blanked.
     blanked: usize,
+    /// The worker's steps from the press to the first frame shown: the step and its time in ms.
+    steps: Vec<(&'static str, u64)>,
+    /// One row a second: ms since the press, frames received, shown, dropped, the clock, the time of the frame on
+    /// screen, the position told.
+    pace: Vec<[u64; 7]>,
 }
 
 /// One opened item's worker, as the player holds it.
@@ -389,12 +434,25 @@ struct Run {
 }
 
 /// What a run holds that a stop must end at once, from any thread, without the worker.
-#[derive(Default)]
 struct Slots {
     /// Set by [`Slots::end`]; the worker's reads take it too.
     cancel: AtomicBool,
     link: Mutex<Option<Box<dyn Link>>>,
     sound: Mutex<Option<Box<dyn AudioSink>>>,
+    /// The gain the sound plays at (`f32` bits): set before the sound is locked, read with it locked, so a sound
+    /// handed over while the volume changes still gets the new gain.
+    gain: AtomicU32,
+}
+
+impl Default for Slots {
+    fn default() -> Slots {
+        Slots {
+            cancel: AtomicBool::new(false),
+            link: Mutex::new(None),
+            sound: Mutex::new(None),
+            gain: AtomicU32::new(1.0f32.to_bits()),
+        }
+    }
 }
 
 impl Slots {
@@ -425,13 +483,22 @@ impl Slots {
     }
 
     /// Hands the opened sound to the run. A run cancelled meanwhile drops it instead: `false`.
-    fn put_sound(&self, sound: Box<dyn AudioSink>) -> bool {
+    fn put_sound(&self, mut sound: Box<dyn AudioSink>) -> bool {
         let mut slot = lock(&self.sound);
         if self.cancelled() {
             return false;
         }
+        sound.set_gain(f32::from_bits(self.gain.load(Ordering::SeqCst)));
         *slot = Some(sound);
         true
+    }
+
+    /// The sound plays at `gain` from now on, and so does a sound handed over later.
+    fn set_gain(&self, gain: f32) {
+        self.gain.store(gain.to_bits(), Ordering::SeqCst);
+        if let Some(sound) = lock(&self.sound).as_mut() {
+            sound.set_gain(gain);
+        }
     }
 }
 
@@ -481,6 +548,8 @@ impl Player {
         self.end_run();
         self.generation += 1;
         self.blank();
+        self.pressed = Some(Instant::now());
+        self.seen = false;
         self.phase = Phase::Opening;
         self.shown = Some(PlayState {
             file_id: item.file_id.clone(),
@@ -495,6 +564,7 @@ impl Player {
             no_sound: None,
         });
         let slots = Arc::new(Slots::default());
+        slots.gain.store(self.gain().to_bits(), Ordering::SeqCst);
         let (commands, taken) = mpsc::channel();
         // The worker opens the item for the press that came with it, through this run's own opener.
         let opener: Arc<dyn MediaOpener> = Arc::new(PressedOpener {
@@ -509,6 +579,7 @@ impl Player {
             links: Arc::clone(&self.links),
             audio: Arc::clone(&self.audio),
             clock: Arc::clone(&self.clock),
+            waker: self.waker.clone(),
             system_on: self.system_on,
             slots: Arc::clone(&slots),
             commands: taken,
@@ -527,6 +598,7 @@ impl Player {
                 Ok(())
             }
             Err(_) => {
+                super::refusal_log::not_started(super::refusal_log::NotStarted::WorkerThread);
                 self.failed(Refusal::CouldNotPlay);
                 Err(Refusal::CouldNotPlay)
             }
@@ -562,6 +634,18 @@ impl Player {
         }
         self.blank();
         self.clear_controls();
+    }
+
+    /// What the sound plays at: the volume, or silence when muted (the volume kept).
+    fn gain(&self) -> f32 {
+        if self.muted { 0.0 } else { self.volume }
+    }
+
+    /// Hands the gain to the current run's sound.
+    fn apply_gain(&self) {
+        if let Some(run) = &self.run {
+            run.slots.set_gain(self.gain());
+        }
     }
 
     fn command(&self, cmd: Cmd) {
@@ -608,6 +692,7 @@ impl PlayerHandle {
                     links,
                     audio,
                     now_playing,
+                    waker: None,
                     surface,
                     view: (0, 0),
                     clock: Arc::new(Monotonic(Instant::now())),
@@ -617,6 +702,10 @@ impl PlayerHandle {
                     shown: None,
                     art: None,
                     has_frame: false,
+                    pressed: None,
+                    seen: false,
+                    volume: 1.0,
+                    muted: false,
                     queue: Vec::new(),
                     at: 0,
                     run: None,
@@ -643,6 +732,14 @@ impl PlayerHandle {
         self.with(|player| player.system_on = on);
     }
 
+    /// The window's waker. A worker calls it (never holding the player) whenever what a view draws of the player
+    /// changed: the file opened, its first frame, the place (four times a second), play and pause, the end, no
+    /// sound, a refusal. The view is not run by a frame alone: the toolkit redraws a picture only where a scene
+    /// already shows it, and the first frame of a run is in no scene yet.
+    pub fn set_waker(&self, waker: Waker) {
+        self.with(|player| player.waker = Some(waker));
+    }
+
     /// The same player (not a copy of its state).
     pub(super) fn same_as(&self, other: &PlayerHandle) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
@@ -663,6 +760,35 @@ impl PlayerHandle {
             player.at = at;
             player.start_current()
         })
+    }
+
+    /// The volume, clamped to 0.0 to 1.0 (NaN: unchanged). Heard within one device buffer; kept across items,
+    /// Next, Previous and stop for this session, not saved. Muting keeps it.
+    pub fn set_volume(&self, volume: f32) {
+        if volume.is_nan() {
+            return;
+        }
+        self.with(|player| {
+            player.volume = volume.clamp(0.0, 1.0);
+            player.apply_gain();
+        });
+    }
+
+    /// The volume, 0.0 to 1.0 (1.0 until set); muting does not change it.
+    pub fn volume(&self) -> f32 {
+        self.with(|player| player.volume)
+    }
+
+    /// Mutes (gain 0, the volume kept) or unmutes.
+    pub fn set_muted(&self, muted: bool) {
+        self.with(|player| {
+            player.muted = muted;
+            player.apply_gain();
+        });
+    }
+
+    pub fn muted(&self) -> bool {
+        self.with(|player| player.muted)
     }
 
     pub fn play(&self) {
@@ -739,9 +865,25 @@ impl PlayerHandle {
         self.with(|player| player.phase)
     }
 
-    /// The video's current frame.
+    /// The video's current frame, for the view that draws it. The first take of a run is the moment the picture
+    /// reaches the window (the TEST build's `media.seen` line says how long after the press).
     pub fn frame(&self) -> Option<rune::Pixels> {
-        self.with(|player| player.has_frame.then(|| player.surface.pixels()))
+        self.with(|player| {
+            if !player.has_frame {
+                return None;
+            }
+            if !std::mem::replace(&mut player.seen, true)
+                && let Some(pressed) = player.pressed
+            {
+                worker::log_seen(u64::try_from(pressed.elapsed().as_millis()).unwrap_or(u64::MAX));
+            }
+            Some(player.surface.pixels())
+        })
+    }
+
+    /// Whether there is a frame to draw (asked by the poll; the view's own take is [`PlayerHandle::frame`]).
+    pub fn has_frame(&self) -> bool {
+        self.with(|player| player.has_frame)
     }
 
     /// The recording's picture from its tags.

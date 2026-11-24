@@ -82,7 +82,7 @@ impl DesktopConfig {
         })?;
         let mut cfg: Self = toml::from_str(&s).map_err(|source| ConfigError::ParseFile {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         })?;
 
         // Reject relative paths defensively. Hand-editing the TOML to a
@@ -122,7 +122,7 @@ impl DesktopConfig {
         }
     }
 
-    /// Forget the old `finder_install_last_error` on macOS (lead ruling T4-3). 0.8.11 saved the
+    /// Forget the old `finder_install_last_error` on macOS. 0.8.11 saved the
     /// OS's own message there, and that prose can name a file or a folder. macOS no longer
     /// writes the `finder_install_*` keys (it reads Finder's state from the OS, spec §9), so
     /// nothing there needs the text and the next update drops it from disk. The other old
@@ -316,8 +316,8 @@ pub trait ConfigFs {
     fn sync_dir(&self, dir: &Path) -> std::io::Result<()>;
 }
 
-// Outside tests, only the macOS sign-out builds one (spec 2026-10-10 W5).
-#[cfg_attr(not(any(target_os = "macos", any(test, feature = "test-support"))), allow(dead_code))]
+// Outside tests, the macOS sign-out and the discard-and-switch keep path (macOS, Windows) build one (spec 2026-10-10 W5).
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows", any(test, feature = "test-support"))), allow(dead_code))]
 pub struct RealConfigFs;
 
 impl ConfigFs for RealConfigFs {

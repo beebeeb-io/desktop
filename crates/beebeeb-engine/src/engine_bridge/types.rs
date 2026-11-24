@@ -163,11 +163,56 @@ pub struct TransferLoopOutcome {
     /// trail. Each entry is `"<op_id>: <error>"`.
     pub post_complete_errors: Vec<String>,
     /// Spec 2026-10-10 §6.4: an attempt failed at the link level (`offline`), the server refused the session
-    /// (`session`), or, by the §15 question 4 ruling, the account refused a Finder write it can cure (`account`).
+    /// (`session`), or, the account refused a Finder write it can cure (`account`).
     pub link_failed: bool,
     pub session_refused: bool,
     pub account_refused: bool,
+    /// Task 2054 (drive-complete-100): uploads the server refused with `409 region_unavailable_strict` this pass. Each
+    /// file stays queued and is tried again on the normal backoff; the person is told the country.
+    pub storage_country_refusals: Vec<StorageCountryRefusal>,
 }
+
+/// One queued upload refused because the person's storage country cannot take new files now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StorageCountryRefusal {
+    pub op_id: String,
+    /// The country's name, e.g. `Finland`. Never a city.
+    pub country: String,
+}
+
+/// The server's `409 region_unavailable_strict` ("only store in <country>", the chosen country cannot take the write).
+/// Carries the COUNTRY only: the body's `city` is a deprecated alias of the country and `datacenter` is an internal id,
+/// so neither is read. An empty `country` is `None` inside, and the words then name no country.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageCountryRefused {
+    pub country: Option<String>,
+}
+
+impl StorageCountryRefused {
+    pub const ERROR_CODE: &'static str = "region_unavailable_strict";
+
+    /// `Some` when `body`'s `error` is [`Self::ERROR_CODE`].
+    pub fn from_body(body: &serde_json::Value) -> Option<Self> {
+        if body.get("error").and_then(|v| v.as_str()) != Some(Self::ERROR_CODE) {
+            return None;
+        }
+        let country = body
+            .get("country")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string);
+        Some(Self { country })
+    }
+}
+
+impl std::fmt::Display for StorageCountryRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("upload refused: the chosen storage country cannot take new files now")
+    }
+}
+
+impl std::error::Error for StorageCountryRefused {}
 
 /// The two states a pin toggle can ask for. The Tauri command still takes a
 /// flag; naming it here keeps `true` from having to stand for "pin".
@@ -366,6 +411,22 @@ pub(super) struct FetchActivity {
 /// its placeholders.
 pub(super) static FETCHES_IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<HashMap<String, FetchActivity>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Task 2199 (dc-103b): the content sequence a dehydrate's candidate wipe is made against, read while no fetch of
+/// the file is in flight in this process. `None` (a fetch in flight, or no row): no wipe. A fetch in flight may have
+/// recorded its version before this read and still be transferring, so only a file with none is wiped; a fetch that
+/// starts after this read records its version (moving `content_seq` on) before it transfers anything, which the
+/// wipe's own condition sees. Read under the tracker's lock (lock order: the tracker, then the database).
+#[cfg_attr(not(any(target_os = "windows", test, feature = "test-support")), allow(dead_code))]
+pub(crate) fn content_seq_for_wipe(db: &crate::state_db::StateDb, file_id: &str) -> Option<i64> {
+    let fetches = FETCHES_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if fetches.contains_key(file_id) {
+        return None;
+    }
+    db.content_seq(file_id).ok().flatten()
+}
 
 /// Task 1640 (self-review #1): one fetch of a file, from before it records anything until its
 /// transfer ended (when it is dropped). It is "alone" when it was the file's only fetch in flight in
@@ -767,7 +828,8 @@ pub struct ConflictDetected {
 ///
 /// 3. **Known and not in `Local`** — pending download/upload, etc.
 ///    Leave alone; the upload/download path owns those transitions.
-/// Task 1697 review fix (T3): what one sync tick did. The remote ingestion
+///
+/// What one sync tick did. The remote ingestion
 /// path (delta ops + snapshot bootstrap) records every item id it APPLIED so
 /// the runner can signal the File Provider working set about REMOTE changes
 /// — previously only local ops (`operations_applied`) signaled, so Finder
@@ -787,6 +849,9 @@ pub struct SyncTickOutcome {
     /// (`AuthHealth::note_tick`): only an HTTP 401 answer there is a refusal, so a run of refused ticks closes the
     /// vault; offline or a 5xx is a failure that proves nothing about the session.
     pub pull_failure: Option<anyhow::Error>,
+    /// RC3-4: files the rebuilt-`state.db` check agreed this tick (`check_after_rebuild`). They leave the "not
+    /// checked yet" row, so the runner counts the tick as one that changed what the windows list.
+    pub rebuilt_agreed: usize,
 }
 
 /// Drop duplicate ids from one tick's applied batch (an item can be applied
@@ -905,4 +970,71 @@ pub(super) enum RowSource {
     /// op rows are always applied. Re-applying an op after a crash before the
     /// cursor persisted is idempotent: ops replay in order to the same state.
     Op,
+}
+
+#[cfg(test)]
+mod region_strict_tests {
+    use super::*;
+
+    #[test]
+    fn region_strict_body_yields_the_country_and_never_the_city() {
+        let body = serde_json::json!({"error":"region_unavailable_strict","datacenter":"fi","country":"Finland",
+            "country_code":"FI","city":"Helsinki","reason":"unavailable","message":"x"});
+        let refused = StorageCountryRefused::from_body(&body).unwrap();
+        assert_eq!(refused.country.as_deref(), Some("Finland"));
+        let words = crate::drive_v2::status::storage_country_words(refused.country.as_deref().unwrap_or_default());
+        assert!(words.contains("Finland") && !words.contains("Helsinki"), "{words}");
+    }
+
+    #[test]
+    fn region_strict_ignores_other_errors_and_an_empty_country() {
+        assert!(StorageCountryRefused::from_body(&serde_json::json!({"error":"stale_base"})).is_none());
+        let none = StorageCountryRefused::from_body(&serde_json::json!({"error":"region_unavailable_strict","country":" "}));
+        assert_eq!(none, Some(StorageCountryRefused { country: None }));
+    }
+
+    #[test]
+    fn region_strict_refusal_is_found_through_the_error_chain() {
+        let error = anyhow::Error::new(StorageCountryRefused { country: Some("Finland".into()) }).context("upload");
+        assert!(crate::engine_bridge::engine_cause::<StorageCountryRefused>(&error).is_some());
+    }
+}
+
+#[cfg(test)]
+mod range_wipe_tests {
+    use super::*;
+
+    /// Task 2199 (dc-103b): no wipe sequence while a fetch of the file is in flight (it may have recorded its version
+    /// before the read and still be transferring); one once it has ended.
+    #[test]
+    fn range_wipe_is_refused_while_a_fetch_is_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
+        let file = "2199b000-0000-4000-8000-000000000001";
+        db.upsert_file(&crate::state_db::FileEntry {
+            file_id: file.into(),
+            path: "notes.txt".into(),
+            status: crate::state_db::FileStatus::Local,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: crate::state_db::ItemKind::File,
+        })
+        .unwrap();
+        let ticket = {
+            let mut fetches = FETCHES_IN_FLIGHT.lock().unwrap();
+            let activity = fetches.entry(file.to_string()).or_default();
+            activity.in_flight += 1;
+            activity.events += 1;
+            FetchTicket {
+                file_id: file.to_string(),
+                alone_since: None,
+            }
+        };
+        assert_eq!(content_seq_for_wipe(&db, file), None, "a fetch in flight");
+        drop(ticket);
+        assert!(content_seq_for_wipe(&db, file).is_some(), "none in flight");
+    }
 }

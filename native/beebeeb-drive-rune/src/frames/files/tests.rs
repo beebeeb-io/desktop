@@ -264,10 +264,12 @@ fn the_board_fixture_honours_the_folder_id() {
 #[test]
 fn enter_on_a_file_asks_to_open_it_and_space_asks_for_the_preview() {
     let (mut rt, calls, _) = spied();
-    // A file of a type the window has no viewer for goes to its own app. (A PDF, a photo, …
-    // open in the window: `frames::viewers::open_item`, tested there.)
+    // Every file opens in the window's viewer (a kind with none gets its "No preview" frame), never in another app
+    // (w29; `frames::viewers::open_item`, tested there).
     click(&mut rt, "row-9-date");
     press(&mut rt, Key::Enter, NONE);
+    rt.update(|s, _| crate::frames::viewers::close(s));
+    settle(&mut rt);
     click(&mut rt, "row-6-date");
     press(&mut rt, Key::Text(" ".into()), NONE);
     // The preview is over the window (DW-0408; `actions_tests.rs`): Esc closes it.
@@ -282,7 +284,7 @@ fn enter_on_a_file_asks_to_open_it_and_space_asks_for_the_preview() {
         [Intent::Frame("DW-0408"), Intent::Frame("DW-0411")]
     );
     assert!(rt.state.actions.dialog.is_some(), "Details is open (DW-0411)");
-    assert_eq!(asked(&calls), [Call::Open(ids(&["q4plan"]))]);
+    assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
 }
 
 // ---- Selection ----
@@ -640,17 +642,18 @@ fn new_opens_its_menu_and_every_entry_and_shortcut_goes_to_its_frame() {
     let mut rt = runtime();
     click(&mut rt, "new-btn");
     assert_eq!(info(&rt, "menu").label.as_deref(), Some("New"));
-    // 0.9.0 has no New document (the Office editor is 0.9.1): four entries, DW-1558 not among them.
+    // The Office editor is in 0.9.0: New document (DW-1558) sits after New file.
     assert_eq!(
         menu_labels(&rt),
         [
             "New folder",
             "New file\u{2026}",
+            "New document\u{2026}",
             "Upload files\u{2026}",
             "Upload a folder\u{2026}"
         ]
     );
-    for (n, expected) in ["DW-0417", "DW-1521", "DW-0415", "DW-0480"].into_iter().enumerate() {
+    for (n, expected) in ["DW-0417", "DW-1521", "DW-1558", "DW-0415", "DW-0480"].into_iter().enumerate() {
         if rt.state.actions.menu.is_none() {
             click(&mut rt, "new-btn");
         }
@@ -690,11 +693,7 @@ fn every_shortcut_a_tooltip_names_does_something() {
     assert!(find(&rt, "detail-pane").is_some());
     press(&mut rt, Key::Text("P".into()), Mods { shift: true, ..ALT });
     assert!(find(&rt, "detail-pane").is_none());
-    // Ctrl+1..5: the sections.
-    press(&mut rt, Key::Command('5'), CTRL);
-    assert!(rt.state.sidebar_section == crate::ui::sidebar::SidebarSection::Trash);
-    press(&mut rt, Key::Command('1'), CTRL);
-    assert!(rt.state.sidebar_section == crate::ui::sidebar::SidebarSection::Files);
+    // Ctrl+1..7 (the sections) are the window's keys since RC2-8: `shell/host_tests_rc2_keys.rs`.
     // Forward is off, and says so, until Back has left a folder.
     assert!(!rt.state.can_go_forward());
     press(&mut rt, Key::Right, ALT);
@@ -787,4 +786,30 @@ fn menus_toasts_and_the_path_have_their_roles_and_names() {
     let up = info(&rt, "crumb-0");
     assert_eq!((up.role, up.focusable), ("link", true));
     assert_eq!(info(&rt, "rows").label.as_deref(), Some("Lisbon trip"));
+}
+
+/// A double-click as in a window: the pointer stays where it is, and frames are drawn between the two
+/// presses (what the first one selected is on screen, and moving, when the second goes down).
+fn double_click_with_frames(rt: &mut Runtime<State>, key: &str) {
+    let (x, y) = centre(rt, key);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    for _ in 0..4 {
+        rt.frame(0.03);
+    }
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(rt);
+}
+
+#[test]
+fn a_double_click_on_a_far_column_opens_the_folder_though_the_first_click_opens_the_details_pane() {
+    let mut rt = runtime_of(init());
+    double_click_with_frames(&mut rt, "row-3-date");
+    assert_eq!(names(&rt).len(), 7, "Lisbon trip is open");
+    assert!(rt.state.selected.is_none(), "a folder just opened has nothing selected");
+    // The first click selects Day 1 and the pane opens; the list must not move out from under the pointer,
+    // or the second click lands on the pane (it did, on the PC column) and the row never opens.
+    double_click_with_frames(&mut rt, "row-0-pc");
+    assert_eq!(names(&rt).len(), 0, "Day 1 is open (it is empty)");
 }

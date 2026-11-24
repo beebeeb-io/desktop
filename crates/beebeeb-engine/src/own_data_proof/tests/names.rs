@@ -196,6 +196,8 @@ fn a_name_sealed_under_the_legacy_key_derivation_proves_ownership() {
 /// Review P3-3 (main): a name sealed the way core seals names for v2 content, under the name subkey
 /// (`beebeeb/name/v1`, task 1908), is this account's own; a plaintext name never proves anything.
 #[test]
+// Seals names with the legacy sealer on purpose: the fixture predates the NewItemId/WriteTarget sealers (task 2275).
+#[allow(deprecated)]
 fn a_name_sealed_under_the_name_subkey_proves_ownership_and_a_plaintext_name_never_does() {
     let id = IDS[0];
     let mk = beebeeb_core::kdf::MasterKey::from_bytes(MINE);

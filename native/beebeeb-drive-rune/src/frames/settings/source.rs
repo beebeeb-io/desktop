@@ -343,7 +343,7 @@ pub trait SettingsSource {
         let _ = pane;
         true
     }
-    /// `false` where no updater runs: About then draws the versions only (no Check now, channel or notes).
+    /// `false` where no updater runs: About draws the Updates section disabled, with one line saying why.
     fn updates_available(&self) -> bool {
         true
     }
@@ -441,6 +441,8 @@ pub struct BoardSettings {
     unconfirmed: bool,
     /// The release notes have nothing to show (the app with no newer version on offer): DW-0789b does not open.
     notes_closed: bool,
+    /// A test or local build: no updater runs, About draws its Updates section disabled.
+    no_updater: bool,
 }
 
 impl BoardSettings {
@@ -480,6 +482,7 @@ impl BoardSettings {
             recent: board_recent(),
             unconfirmed: false,
             notes_closed: false,
+            no_updater: false,
         }
     }
 
@@ -491,6 +494,12 @@ impl BoardSettings {
     }
 
     /// As the app is with no newer version on offer: the release notes (DW-0789b) do not open.
+    #[cfg(test)]
+    pub fn with_no_updater(mut self) -> Self {
+        self.no_updater = true;
+        self
+    }
+
     #[cfg(test)]
     pub fn with_notes_closed(mut self) -> Self {
         self.notes_closed = true;
@@ -717,6 +726,10 @@ impl SettingsSource for BoardSettings {
     }
     fn opens(&self, frame: &str) -> bool {
         !(self.notes_closed && frame == "DW-0789b")
+    }
+
+    fn updates_available(&self) -> bool {
+        !self.no_updater
     }
     fn notifications_unconfirmed(&self) -> bool {
         self.unconfirmed

@@ -280,7 +280,7 @@ fn the_versions_are_read_when_asked_and_listed_current_first() {
     );
     assert_eq!(source.versions_state(&notes()), Read::Answered);
     let shown = source.versions(&notes());
-    assert_eq!(shown[1].when, crate::ui::file_list::format_date("2026-09-03T10:00:00Z"));
+    assert!(shown[1].when.contains("Sep 2026, "), "{}", shown[1].when);
     assert_eq!(shown[1].size, crate::source::format_size(3_300));
     assert_eq!(
         shown[1].changed_on, None,
@@ -643,4 +643,22 @@ fn another_account_sees_no_version_of_the_first() {
             .any(|e| e.key.as_deref().is_some_and(|k| k.starts_with("item-0-"))),
         "a version row of the first account is in the tree"
     );
+}
+
+/// The server writes a version's time with fractions of a second; the row still says the date and the time.
+#[test]
+fn a_version_with_fractions_of_a_second_still_shows_its_date_and_time() {
+    let entry = |at: &str| VersionEntry {
+        id: "v".into(),
+        created_at: at.into(),
+        size: 40_000,
+        current: false,
+    };
+    for at in ["2026-11-03T10:00:00.123456Z", "2026-11-03T10:00:00Z", "2026-11-03T10:00:00+00:00"] {
+        let when = shown(&entry(at)).when;
+        assert!(
+            when.contains("Nov 2026, ") && when.contains(':'),
+            "{at} read as {when:?}: a date and a time"
+        );
+    }
 }

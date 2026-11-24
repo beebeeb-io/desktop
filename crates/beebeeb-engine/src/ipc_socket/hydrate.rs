@@ -2,6 +2,8 @@
 
 use super::*;
 
+// `Reply` is the common case and the enum is short-lived; boxing would add an allocation per reply.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum HydrateOutcome {
     Reply(IpcResponse),
     ClientGone,

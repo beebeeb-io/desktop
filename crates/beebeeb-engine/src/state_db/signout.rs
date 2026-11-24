@@ -98,6 +98,7 @@ impl StateDb {
         fold_agreed_into_candidate_conn(&tx, file_id)?;
         tx.execute(
             "UPDATE files SET
+                 content_seq = content_seq + 1,
                  fetched_hash = CASE
                      WHEN fetched_min_version = 0 THEN ?3
                      WHEN fetched_min_version = ?2 AND fetched_hash = ?3 THEN fetched_hash
@@ -194,6 +195,30 @@ impl StateDb {
     }
     // Windows account cleanup must not silently discard paused/exhausted writes.
     // Portable so both Windows CI and Linux exercise the exact DB policy.
+    /// dc-005: what a sign-out holds, counted apart: uploads waiting (queue rows and unsynced files) and sealed
+    /// staged copies no queue row names (kept encrypted, opened again after sign-in). Office recovery copies live
+    /// on disk, not here; the host adds them.
+    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    pub fn windows_signout_counts(&self) -> Result<SignoutCounts> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let waiting: i64 = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM operation_queue)
+                  + (SELECT COUNT(*) FROM files WHERE status IN ('uploading', 'conflict', 'error', 'trashing'))",
+            [],
+            |r| r.get(0),
+        )?;
+        let sealed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM staged_payloads
+             WHERE completed = 0
+               AND path NOT IN (SELECT payload_path FROM operation_queue WHERE payload_path IS NOT NULL)",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(SignoutCounts {
+            waiting: u64::try_from(waiting).unwrap_or(0),
+            sealed_copies: u64::try_from(sealed).unwrap_or(0),
+        })
+    }
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     pub fn windows_signout_preflight(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -365,7 +390,7 @@ impl StateDb {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(account_rows(&conn)? > 0)
     }
-    /// Task 2267 (fix round 2): every `files` row as the ownership proof judges it, read once. A row this PC made and
+    /// every `files` row as the ownership proof judges it, read once. A row this PC made and
     /// never uploaded has `current_version` and `remote_updated_at` both at 0 AND a queued create names it (lead review
     /// of round 2, P2-1: absence of a server version alone is not evidence). Every other row is judged: a snapshot row
     /// carries the server's version, a delta or a landing stamps the time (`remote_updated_at` alone is not enough: the
@@ -391,7 +416,7 @@ impl StateDb {
         })?;
         rows.collect()
     }
-    /// Task 2267 (fix round 2): every queued operation by what it acts on: its own row and its parent.
+    /// every queued operation by what it acts on: its own row and its parent.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     pub fn own_data_proof_ops(&self) -> Result<Vec<ProofOp>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -399,7 +424,7 @@ impl StateDb {
         let rows = stmt.query_map([], proof_op_from_row)?;
         rows.collect()
     }
-    /// Task 2267 (fix round 2): record `owner`, and hold for the person's review every queued operation the proof did
+    /// record `owner`, and hold for the person's review every queued operation the proof did
     /// not prove (`found_while_paused`), in ONE transaction. Only if the recorded owner is still `expected` and account
     /// data is still here, so a proof never replaces an owner recorded while it ran, nor names an owner of a database a
     /// sign-out emptied meanwhile. An operation queued after the proof read the queue is not in `proven`, so it is held
@@ -419,7 +444,7 @@ impl StateDb {
             return Ok(None);
         }
         write_owner(&tx, owner)?;
-        // Lead review of round 2, P3-2: whatever the pause (quota, permission, a locked file …): queued again, an op
+        // whatever the pause (quota, permission, a locked file …): queued again, an op
         // loses its pause, and an unproven one would then be sent unjudged.
         let candidates: Vec<String> = {
             let mut stmt =
@@ -439,7 +464,7 @@ impl StateDb {
         tx.commit()?;
         Ok(Some(held))
     }
-    /// Task 2267 (fix round 2): the queued operations held for the person's review (`found_while_paused`), by what
+    /// the queued operations held for the person's review (`found_while_paused`), by what
     /// they act on, oldest first.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     pub fn found_while_paused_ops(&self) -> Result<Vec<ProofOp>> {
@@ -454,7 +479,7 @@ impl StateDb {
         )?;
         rows.collect()
     }
-    /// Task 2267 (fix round 2), "Keep on this PC only": the rows whose upload has begun, so the server may already
+    /// the rows whose upload has begun, so the server may already
     /// hold part of them: a queued upload with a resumable session, or an upload that landed and awaits its
     /// finalization (its operation is gone then; the finalization names the row).
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
@@ -467,7 +492,7 @@ impl StateDb {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
     }
-    /// Task 2267 (fix round 2), "Keep on this PC only": the one move in progress (`found_while_paused::Journal`, as
+    /// the one move in progress (`found_while_paused::Journal`, as
     /// JSON), written before the move and removed in the transaction that finishes it, so a crash in between is
     /// finished or undone at the next start.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
@@ -495,14 +520,14 @@ impl StateDb {
         conn.execute("DELETE FROM sync_state WHERE key = ?1", params![KEEP_JOURNAL_KEY])?;
         Ok(())
     }
-    /// Task 2267 (self-review of round 3, F3): the staged copies the queued operations acting on the item `ids` hold,
+    /// the staged copies the queued operations acting on the item `ids` hold,
     /// read before the keep forgets them, so an only copy is kept first.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     pub fn keep_staged_copies(&self, ids: &[String]) -> Result<Vec<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(keep_ops_conn(&conn, ids)?.1)
     }
-    /// Task 2267 (fix round 2), "Keep on this PC only", after the item `ids` was moved to `kept_dir`: in ONE
+    /// Task 2267, "Keep on this PC only", after the item `ids` was moved to `kept_dir`: in ONE
     /// transaction, forget every queued operation acting on those rows (with its upload records) and the rows, remove
     /// the journal and remember `kept_dir` for "Show in Explorer". Returns the staged copies the removed operations
     /// held (as [`Self::keep_staged_copies`]).
@@ -527,7 +552,7 @@ impl StateDb {
         tx.commit()?;
         Ok(staged)
     }
-    /// Task 2267 (fix round 2): the folder the last "Keep on this PC only" moved items into.
+    /// the folder the last "Keep on this PC only" moved items into.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     pub fn last_kept_dir(&self) -> Result<Option<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -538,9 +563,9 @@ impl StateDb {
         )
         .optional()
     }
-    /// Task 2267 (lead review round 3, P2-2): every change held as `found_while_paused`, by kind, for the card,
+    /// every change held as `found_while_paused`, by kind, for the card,
     /// oldest first. A change is in a shared folder when its row, or any folder up the parent links from its row or
-    /// from the folder it acts in, is not a My Files row (self-review of round 3, F8: not only the direct parent).
+    /// from the folder it acts in, is not a My Files row.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     pub fn found_while_paused_changes(&self) -> Result<Vec<HeldChange>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
@@ -597,7 +622,7 @@ impl StateDb {
         tx.commit()?;
         Ok(released)
     }
-    /// Task 2267 (lead review round 3, P3-3): whether the journal names the staged copy at `path`, and the live file
+    /// whether the journal names the staged copy at `path`, and the live file
     /// it was copied from: `None` when no journal row names it, `Some(None)` when the row has no source.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     pub fn staged_payload_source(&self, path: &str) -> Result<Option<Option<String>>> {
@@ -609,7 +634,7 @@ impl StateDb {
         )
         .optional()
     }
-    /// R10, the upgrade path (fix round 1 of Task 10): record `candidate` as the owner of local data that has
+    /// R10, the upgrade path: record `candidate` as the owner of local data that has
     /// no owner, AT MOST ONCE per database, in one transaction. Once means the first startup after the upgrade:
     /// whatever this call finds, it shuts the window (`ADOPTION_CLOSED`), so a later startup, however it looks,
     /// never adopts, and neither does data an R10 build has already bound or purged. `candidate` is the account
@@ -643,7 +668,7 @@ impl StateDb {
         }
         conn.pragma_update(None, "user_version", ADOPTION_CLOSED)
     }
-    /// R10 ruling 8 in the native build (lead ruling 2026-11-15 17:35), at the first startup: shut the adoption window
+    /// R10 ruling 8 in the native build, at the first startup: shut the adoption window
     /// of the database at `path`, writing nothing but the `user_version` mark, and never making a database (no
     /// schema check, no migration, no table: the startup must not write account data or create a file). `Ok(None)`:
     /// no database there. `Ok(Some(true))`: the window was open, and this call shut it (this is the first startup).
@@ -663,7 +688,7 @@ impl StateDb {
         conn.pragma_update(None, "user_version", ADOPTION_CLOSED)?;
         Ok(Some(true))
     }
-    /// R10 ruling 8 in the native build (lead ruling 2026-11-15 17:35), inside the start: record `session` as the
+    /// R10 ruling 8 in the native build, inside the start: record `session` as the
     /// owner of local data that has no owner, in one transaction. A recorded owner is never replaced, and data with no
     /// account rows is not adopted. The window this belongs to is the engine's (`app/own_data_start.rs`): shut on disk
     /// at the first startup, and held in memory for the account whose vault key the store held then, which the caller
@@ -686,10 +711,10 @@ impl StateDb {
     /// the sync cursor and the owner record included, in one transaction.
     ///
     /// L7d: the custody memory survives, because it belongs to the device and an account switch must not
-    /// shrink it. B05e's share rows survive too (lead ruling 2026-11-09): the person's compared marks and the keys
+    /// shrink it. B05e's share rows survive too: the person's compared marks and the keys
     /// their shares were sealed to, public keys and fingerprints only, keyed by the own account id, so signing in
-    /// again keeps the safety-number pin, and another account on this PC never reads them. A reset of local data
-    /// removes them first ([`Self::forget_share_trust_rows`]). Every other `sync_state` row is cleared.
+    /// again keeps the safety-number pin, and another account on this PC never reads them. An account switch
+    /// removes the leaving account's after this clear ([`Self::forget_share_trust_rows`]). Every other `sync_state` row is cleared.
     ///
     /// `owe_finder_removal` is written in the SAME transaction: a Mac whose previous account's Finder domain is
     /// still registered owes a removal, and no engine may start until it is confirmed (`finder_removal_owed`).
@@ -713,22 +738,32 @@ impl StateDb {
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
-    /// B05e: a reset of local data (R10's `reset`) removes the share marks, sealed, offered and accepted keys that a
-    /// sign-out keeps (`share_marks::SHARE_TRUST_ROWS`), of every account on this PC, in one statement. The
-    /// first-time guide marks (`guide_mark`) are the other rows a sign-out keeps, and go with them: after a reset
-    /// nothing of an earlier account is left here.
-    pub fn forget_share_trust_rows(&self) -> Result<()> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let kept: Vec<&str> = share_marks::SHARE_TRUST_ROWS
+    /// B05e: an account switch that removed `account`'s local data (`app::account_switch`) removes the share marks,
+    /// sealed, offered and accepted keys that a sign-out keeps (`share_marks::SHARE_TRUST_ROWS`), and its first-time
+    /// guide mark (`guide_mark`), of THAT account only (dc-014): every row is keyed `<kind>:<user id>:…` (the guide's
+    /// `guide_done:<user id>`), and another account's pins on this PC stay. One statement. Compared as an exact
+    /// prefix, never as a `LIKE` pattern, so an id is never read as a wildcard; a blank id removes nothing.
+    pub fn forget_share_trust_rows(&self, account: &str) -> Result<()> {
+        let account = account.trim();
+        if account.is_empty() {
+            return Ok(());
+        }
+        let prefixes: Vec<String> = share_marks::SHARE_TRUST_ROWS
             .iter()
-            .copied()
-            .chain([guide_mark::GUIDE_DONE_ROWS])
+            .map(|pattern| format!("{}{account}:", pattern.trim_end_matches('%')))
             .collect();
-        let any = vec!["key LIKE ?"; kept.len()].join(" OR ");
-        conn.execute(
-            &format!("DELETE FROM sync_state WHERE {any}"),
-            rusqlite::params_from_iter(kept),
-        )?;
+        let guide = format!("{}{account}", guide_mark::GUIDE_DONE_ROWS.trim_end_matches('%'));
+        let mut sql = String::from("DELETE FROM sync_state WHERE key = ?");
+        for _ in &prefixes {
+            sql.push_str(" OR substr(key, 1, length(?)) = ?");
+        }
+        let mut values: Vec<&str> = vec![guide.as_str()];
+        for prefix in &prefixes {
+            values.push(prefix);
+            values.push(prefix);
+        }
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(&sql, rusqlite::params_from_iter(values))?;
         Ok(())
     }
     pub fn finder_domain_gone(&self) -> Result<bool> {
@@ -750,7 +785,9 @@ impl StateDb {
         conn.execute("DELETE FROM sync_state WHERE key = ?1", params![FINDER_DOMAIN_GONE_KEY])?;
         Ok(())
     }
-    /// Is a Finder domain removal owed before any engine may start?
+    /// Is a Finder domain removal owed before any engine may start? Read by tests only: no shell reads the debt
+    /// here (backlog 1868), so a build without tests does not carry the reader.
+    #[cfg(test)]
     pub fn finder_removal_owed(&self) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let owed: Option<String> = conn
@@ -994,4 +1031,11 @@ impl StateDb {
             local_placeholder_paths,
         })
     }
+}
+
+/// dc-005: the counts a sign-out says in words (see `StateDb::windows_signout_counts`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignoutCounts {
+    pub waiting: u64,
+    pub sealed_copies: u64,
 }

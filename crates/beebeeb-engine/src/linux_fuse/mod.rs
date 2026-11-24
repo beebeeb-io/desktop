@@ -1,11 +1,12 @@
+//! The Linux FUSE mount: `BeebeebFS` answers the kernel's file and directory calls from
+//! `state.db` and the engine bridge. Unmounted prototype; must not decide sync policy.
+
 #![cfg(target_os = "linux")]
 // Unmounted prototype (CLAUDE.md): nothing mounts `BeebeebFS` yet, so on its one platform
 // every item in this module reads as unused. Delete this allow when the mount is wired into
 // the runner; until then it must still compile and stay policy-free.
 #![allow(dead_code)]
 
-//! The Linux FUSE mount: `BeebeebFS` answers the kernel's file and directory calls from
-//! `state.db` and the engine bridge. Unmounted prototype; must not decide sync policy.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -219,7 +220,7 @@ fn file_attr(ino: u64, entry: &FileEntry) -> fuser::FileAttr {
     fuser::FileAttr {
         ino,
         size,
-        blocks: (size + 511) / 512,
+        blocks: size.div_ceil(512),
         atime: UNIX_EPOCH,
         mtime: UNIX_EPOCH + Duration::from_secs(modified_at),
         ctime: UNIX_EPOCH,

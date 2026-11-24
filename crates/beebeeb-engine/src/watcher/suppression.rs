@@ -29,13 +29,25 @@ pub(super) fn engine_delete_suppress() -> &'static Mutex<HashMap<PathBuf, Instan
     ENGINE_DELETE_SUPPRESS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// How the set compares paths. On a volume that compares names without case (Windows, macOS) the engine removes
+/// the entry by the pruned row's spelling (`report.pdf`) while the delete notice names the entry as spelled on disk
+/// (`Report.pdf`, the other case twin's row). The two are one entry, so they are one key: a miss would reach
+/// `handle_delete`, find the OTHER row at the notice's path and queue a server trash of an item nobody deleted.
+fn key(path: &Path) -> PathBuf {
+    use crate::drive_v2::case_place::CaseRule;
+    match CaseRule::host() {
+        CaseRule::Insensitive => PathBuf::from(path.to_string_lossy().to_lowercase()),
+        CaseRule::Sensitive => path.to_path_buf(),
+    }
+}
+
 /// Register `path` as an ENGINE-ORIGINATED delete so the watcher drops the
 /// `NOTIFY_DELETE_COMPLETION` it will fire instead of queuing a redundant server
 /// trash. Call this IMMEDIATELY BEFORE `windows_cf::delete_placeholder` on the
 /// remote-deletion reconcile path (task 0806). Idempotent; refreshes the timer.
 pub fn suppress_engine_delete(path: &Path) {
     if let Ok(mut set) = engine_delete_suppress().lock() {
-        set.insert(path.to_path_buf(), Instant::now());
+        set.insert(key(path), Instant::now());
     }
 }
 
@@ -45,7 +57,7 @@ pub fn suppress_engine_delete(path: &Path) {
 /// keeps the set self-draining so a later user delete of the same path is honoured.
 pub(super) fn take_engine_delete_suppressed(path: &Path) -> bool {
     match engine_delete_suppress().lock() {
-        Ok(mut set) => set.remove(path).is_some(),
+        Ok(mut set) => set.remove(&key(path)).is_some(),
         Err(_) => false,
     }
 }

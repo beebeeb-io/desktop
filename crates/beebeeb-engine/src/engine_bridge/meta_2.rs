@@ -38,9 +38,11 @@ pub(super) fn shared_invite_id_matches(invite: &serde_json::Value, share_id: &st
 }
 
 pub(super) fn shared_root_from_invite(invite: &serde_json::Value) -> Option<SharedRootMapping> {
-    if invite.get("status").and_then(|value| value.as_str()) != Some("approved") {
-        return None;
-    }
+    let claimed = match invite.get("status").and_then(|value| value.as_str()) {
+        Some("approved") => false,
+        Some("claimed") => true,
+        _ => return None,
+    };
 
     let invite_id = string_field(invite, &["id", "invite_id"])?;
     let file_id = string_field(invite, &["file_id"])?;
@@ -50,7 +52,12 @@ pub(super) fn shared_root_from_invite(invite: &serde_json::Value) -> Option<Shar
         .or_else(|| invite.get("is_folder").and_then(|value| value.as_bool()))
         .unwrap_or(false);
     let item_kind = if is_folder { ItemKind::Folder } else { ItemKind::File };
-    let display_name = shared_placeholder_name(&item_kind).to_string();
+    let display_name = if claimed {
+        shared_claimed_name(&item_kind)
+    } else {
+        shared_placeholder_name(&item_kind)
+    }
+    .to_string();
     let content_type = string_field(invite, &["mime_type", "content_type"]);
     let size_bytes = invite.get("size_bytes").and_then(|value| value.as_i64()).unwrap_or(0);
     let mut permission_bits = PERMISSION_READ;
@@ -82,6 +89,7 @@ pub(super) fn shared_root_from_invite(invite: &serde_json::Value) -> Option<Shar
             .get("approved_at")
             .and_then(|value| value.as_str())
             .and_then(parse_rfc3339_secs),
+        claimed,
     })
 }
 
@@ -284,6 +292,14 @@ pub(super) fn item_kind_from_metadata(f: &serde_json::Value) -> ItemKind {
     }
 }
 
+/// The name of an accepted share whose sealed key has not arrived (w24).
+pub(super) fn shared_claimed_name(item_kind: &ItemKind) -> &'static str {
+    match item_kind {
+        ItemKind::Folder => "Opening shared folder…",
+        ItemKind::File => "Opening shared file…",
+    }
+}
+
 pub(super) fn shared_placeholder_name(item_kind: &ItemKind) -> &'static str {
     match item_kind {
         ItemKind::Folder => "Encrypted folder",
@@ -316,13 +332,11 @@ pub(super) fn shared_name_from_metadata(
     item_kind: &ItemKind,
     file_key: Option<&beebeeb_core::kdf::FileKey>,
 ) -> String {
-    if let (Some(key), Some(name_encrypted)) = (file_key, f["name_encrypted"].as_str()) {
-        if let Some(name) = decrypt_shared_name_with_key(key, name_encrypted) {
-            if let Some(leaf) = safe_shared_leaf_name(&name) {
+    if let (Some(key), Some(name_encrypted)) = (file_key, f["name_encrypted"].as_str())
+        && let Some(name) = decrypt_shared_name_with_key(key, name_encrypted)
+            && let Some(leaf) = safe_shared_leaf_name(&name) {
                 return leaf;
             }
-        }
-    }
 
     shared_placeholder_name(item_kind).to_string()
 }
@@ -407,6 +421,8 @@ pub(super) fn apply_shared_context(metadata: &mut serde_json::Value, contract: O
     metadata["uploaded_by"] = serde_json::json!("authenticated_desktop_user");
 }
 
+// Mirrors the server row plus its ownership context; callers pass each part from a different place.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_metadata_file_row(
     db: &StateDb,
     f: &serde_json::Value,
@@ -434,10 +450,21 @@ pub(super) fn apply_metadata_file_row(
     // P3-2 (task 2445): the typed return distinguishes blocked from named.
     // A blocked record keeps the path empty so the row retries its name on
     // the next sync with the right key; it is never stored as the path.
+    // dc-136b: a name the server sent that does not decrypt (a wrong key, a damaged blob) never becomes a path. The
+    // leaf stays empty, so the row keeps its last good path below, and the row is marked.
+    // dc-136c: every name core's reader gives (see `read_server_name`) is the name; only the rest is marked.
+    let mut name_unreadable = false;
     let leaf = match stored {
         crate::owner_keys::StoredName::Blocked => String::new(),
         crate::owner_keys::StoredName::Name(name) => name,
-        crate::owner_keys::StoredName::None => resolve_relative_path(f, file_id, master_key),
+        crate::owner_keys::StoredName::None => match read_server_name(f, existing.as_ref(), file_id, master_key) {
+            ServerName::Readable(name) => name,
+            ServerName::Unreadable => {
+                name_unreadable = true;
+                String::new()
+            }
+            ServerName::Absent => resolve_relative_path(f, file_id, master_key),
+        },
     };
     // Compose the nested path. An empty leaf means the name didn't decrypt;
     // keep it empty so the placeholder seeder skips the row (and retries next
@@ -552,6 +579,7 @@ pub(super) fn apply_metadata_file_row(
         contract.last_sync_at = now;
     })?;
     apply_system_role_field(db, file_id, f)?;
+    record_name_readability(db, file_id, name_unreadable, &entry.path)?;
     // Task 1640 (review F1): a move changes no byte, but the candidate is never promoted at the
     // new place: it becomes mixed, its version kept.
     if moved {
@@ -568,6 +596,89 @@ pub(super) fn apply_metadata_file_row(
         db.put_unknown_orphan(&entry.path, file_id, true)?;
     }
     Ok(Some(entry))
+}
+
+/// dc-136c: what a row's `name_encrypted` gives this PC.
+enum ServerName {
+    /// The row carries no `name_encrypted` (a row this desktop built from a move, an old listing): the plaintext
+    /// fields are read, as before.
+    Absent,
+    /// The name, trimmed and never empty.
+    Readable(String),
+    /// A value is there and no key this PC holds opens it, or nothing authenticates a name that would replace the
+    /// one this PC has.
+    Unreadable,
+}
+
+/// dc-136c: read a row's `name_encrypted` with core's one name reader (`decrypt_name`), the reader the web and the
+/// CLI list with, so a file they show is never "unreadable" here. It opens every shape the server can hold:
+/// - a legacy plaintext name (rows from before names were encrypted, folders the server made);
+/// - a v1 envelope under the file's own key, native (`cipher_suite` + byte arrays) or web (`{nonce, ciphertext}`
+///   in base64 or arrays), the key derived from the id as text or as its 16 bytes, holding the name/mime JSON or
+///   a bare name;
+/// - an envelope under the name subkey, with or without a recorded chunk format and a version commitment (v2),
+///   and one recording a chunk format a newer client wrote: the name authenticated, only the content is refused.
+///
+/// What stays unreadable: an envelope no key opens (a wrong key, a damaged blob, the uppercase-id repair
+/// convention, which core's shared reader leaves out on purpose) and a raw-key envelope claiming v2 or a version
+/// (core's downgrade refusal). The check dc-136b made with `decrypt_file_metadata` also refused a plaintext name
+/// and an unknown chunk format: that reader is the pin for a file's CONTENT, and it hid files whose name reads.
+///
+/// One rule is this desktop's own (dc-136b, desktop #59): nothing authenticates a plaintext value, so on a FILE
+/// it names a row that has no name yet, or repeats the name the row has; it never renames a file this PC already
+/// names. A folder keeps core's reader as it is.
+fn read_server_name(
+    f: &serde_json::Value,
+    existing: Option<&FileEntry>,
+    file_id: &str,
+    master_key: &[u8; 32],
+) -> ServerName {
+    let Some(name_encrypted) = f["name_encrypted"].as_str().filter(|value| !value.trim().is_empty()) else {
+        return ServerName::Absent;
+    };
+    let mk = beebeeb_core::kdf::MasterKey::from_bytes(*master_key);
+    let Ok(name) = beebeeb_core::encrypt::decrypt_name(&mk, file_id, name_encrypted) else {
+        return ServerName::Unreadable;
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return ServerName::Unreadable;
+    }
+    let is_folder = item_kind_from_metadata(f) == ItemKind::Folder || existing.is_some_and(FileEntry::is_dir);
+    // Core's own test for "not an envelope" (`decrypt_name`'s plaintext fast path).
+    let plaintext = !name_encrypted.starts_with('{');
+    if plaintext && !is_folder {
+        // The row's path ends in this very name (an old plaintext name may itself hold a `/`).
+        let leaf = name.trim_matches('/');
+        let repeats = |path: &str| path == leaf || path.strip_suffix(leaf).is_some_and(|parent| parent.ends_with('/'));
+        if existing.is_some_and(|entry| !entry.path.is_empty() && !repeats(&entry.path)) {
+            return ServerName::Unreadable;
+        }
+    }
+    ServerName::Readable(name.to_string())
+}
+
+/// dc-136b: store whether the row's newest server name could be read. The first time a name is unreadable the
+/// row is marked (the window shows "name could not be read") and a re-snapshot is asked for, so the real name is
+/// read again from the server's list; a later list whose name decrypts (the keys changed, another client fixed
+/// the name) clears the mark. An unchanged mark asks nothing, so a name that stays unreadable is no loop.
+/// dc-136c: when the keys change, `StateDb::retry_unreadable_names` asks for that list again, and
+/// `process_metadata_row` applies a marked row from it whatever its times say.
+fn record_name_readability(db: &StateDb, file_id: &str, unreadable: bool, path: &str) -> Result<(), EngineError> {
+    if unreadable {
+        if db.set_name_unreadable(file_id, true)? {
+            // Zero-knowledge: the id only, never the blob nor the kept name.
+            tracing::warn!(
+                file_id = %file_id,
+                category = "name_unreadable",
+                "the server's name for this item could not be decrypted; its last readable name is kept"
+            );
+            db.request_resnapshot()?;
+        }
+    } else if !path.is_empty() && db.set_name_unreadable(file_id, false)? {
+        tracing::info!(file_id = %file_id, "the name of this item can be read again");
+    }
+    Ok(())
 }
 
 /// LD-0113 (spec §5.4): a server row's `system_role` (`"backups_root"` or `null`) into
@@ -754,7 +865,9 @@ pub(super) fn process_metadata_row(
                         return Ok(Some((entry.path, entry.item_kind)));
                     }
                     Some(std::cmp::Ordering::Greater) if f["is_uploading"].as_bool() != Some(true) => {}
-                    _ if remote_updated <= entry.remote_updated_at => {
+                    // dc-136c: a row whose name could not be read is applied again from every list (the keys may
+                    // have arrived since); its unchanged times say nothing about its name.
+                    _ if remote_updated <= entry.remote_updated_at && !bridge.db().name_unreadable(file_id)? => {
                         return Ok(Some((entry.path, entry.item_kind)));
                     }
                     _ => {}
@@ -781,8 +894,9 @@ pub(super) fn process_metadata_row(
             // metadata (and always report path/kind so folders are descended).
             // Task 2445 / P3-3: an empty path without a pending op (not Uploading,
             // not Conflict) is re-applied so the heal can name it.
-            let heal_empty =
-                entry.path.is_empty() && !matches!(entry.status, FileStatus::Uploading | FileStatus::Conflict);
+            // dc-136c: the same for a row whose name could not be read and that kept its last good path.
+            let heal_empty = !matches!(entry.status, FileStatus::Uploading | FileStatus::Conflict)
+                && (entry.path.is_empty() || bridge.db().name_unreadable(file_id)?);
             if matches!(entry.status, FileStatus::CloudOnly | FileStatus::Downloading) || heal_empty {
                 return apply(bridge);
             }
@@ -795,3 +909,8 @@ pub(super) fn process_metadata_row(
 #[cfg(test)]
 #[path = "restore_elsewhere_tests.rs"]
 mod restore_elsewhere_tests;
+
+// dc-136c: which server names are readable, and the retry of the unreadable ones when the keys change.
+#[cfg(test)]
+#[path = "name_unreadable_tests.rs"]
+mod name_unreadable_tests;

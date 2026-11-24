@@ -244,3 +244,18 @@ fn a_problem_is_a_stop_a_block_a_park_or_an_unmarked_upload() {
     assert!(!is_problem(&change("5", None, "edit", "waiting")));
     assert!(!is_problem(&change("6", None, "new_file", "waiting_for_folder")));
 }
+
+#[test]
+fn file_with_queued_upload_is_waiting_never_synced() {
+    let e = entry("n", "new.txt", None, false, 5);
+    let item = model::item_from(&e, None, None);
+    assert_eq!(item.local, Some(super::dto::LocalState::Downloaded));
+    assert_eq!(
+        model::with_queue(item.local.clone(), true),
+        Some(super::dto::LocalState::Syncing)
+    );
+    assert_eq!(
+        model::with_queue(item.local, false),
+        Some(super::dto::LocalState::Downloaded)
+    );
+}

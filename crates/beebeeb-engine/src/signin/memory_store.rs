@@ -9,12 +9,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::keychain::{AuthResult, AuthSecretStore, AuthStoreError, LockFlag, SecretBytes, SessionToken};
 
+type StoredSecrets = HashMap<(String, &'static str), zeroize::Zeroizing<Vec<u8>>>;
+
 /// Values are wiped when they are replaced, removed or dropped, as a platform store would not leave them.
 #[derive(Clone, Default)]
-pub struct MemoryCredentials(
-    Arc<Mutex<HashMap<(String, &'static str), zeroize::Zeroizing<Vec<u8>>>>>,
-    Arc<Probes>,
-);
+pub struct MemoryCredentials(Arc<Mutex<StoredSecrets>>, Arc<Probes>);
 
 /// The items of one account in a [`MemoryCredentials`].
 #[derive(Clone)]
@@ -50,7 +49,7 @@ impl MemoryCredentials {
         self.1.fail_lock_writes.store(fail, Ordering::SeqCst);
     }
 
-    /// How often a vault key entry was read, over every account.
+    /// How often an account's vault key entry was read, over every account (the old flat layout's slot is not one).
     pub fn key_reads(&self) -> usize {
         self.1.key_reads.load(Ordering::SeqCst)
     }
@@ -130,7 +129,11 @@ impl AuthSecretStore for MemoryStore {
         self.save("vault-key", wrapped.expose_for_crypto())
     }
     fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
-        self.all.1.key_reads.fetch_add(1, Ordering::SeqCst);
+        // The old flat layout is a different item: the start-up check that it holds nothing is not a read of the
+        // account's key entry, which is what `key_reads` counts.
+        if self.account != crate::app::credential_stores::LEGACY_FLAT_SLOT {
+            self.all.1.key_reads.fetch_add(1, Ordering::SeqCst);
+        }
         self.load("vault-key").map(SecretBytes::new).transpose()
     }
     fn delete_wrapped_master_key(&self) -> AuthResult<()> {

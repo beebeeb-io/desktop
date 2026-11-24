@@ -45,16 +45,13 @@ fn search_field(s: &State, t: &Theme) -> El {
     )
 }
 
-/// The search field's keys while it has focus: Enter asks for what is typed (the Search
-/// group shows the results, DW-0802). Every other key is the field's.
+/// The search field's keys while it has focus: Enter asks for what is typed; the section lists only the rows whose
+/// name holds it, and Enter on an empty field lists them all again (`actions_sort`). Every other key is the field's.
 pub fn search_key(s: &mut State, ev: &rune::KeyEvent) -> bool {
     if ev.key != rune::Key::Enter || !crate::frames::plain(ev) {
         return false;
     }
     let typed = s.frames.search.text.trim().to_string();
-    if typed.is_empty() {
-        return false;
-    }
     s.frames.intents.push(crate::frames::Intent::Do("search", typed));
     true
 }
@@ -64,7 +61,7 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
     let (back, forward) = crate::frames::history(s);
     let title = col()
         .key("folder-info")
-        .px(4.0)
+        .px(crate::theme::scale::space::S4)
         .min_w(0.0)
         .child(kit::label("folder-title", bar.title, type_::TITLE, t.text).truncate())
         .child(kit::label("item-count", bar.sub, type_::TITLE_SUB, t.text_tertiary));
@@ -92,21 +89,22 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
                 },
             ),
             title,
-            slot: Some(row().key("toolbar-slot").center_y().gap(8.0).children(bar.slot)),
+            slot: Some(row().key("toolbar-slot").center_y().gap(crate::theme::scale::space::S8).children(bar.slot)),
             slot_sep: bar.slot_sep,
             // List or grid does not apply to these sections: the board draws the switch dimmed, neither side chosen.
             view: View::NotHere,
             on_view: None,
             sort: Sort::Idle,
-            on_sort: press(|s, _| s.frames.intents.push(crate::frames::Intent::Frame("DW-0406"))),
+            on_sort: press(|s, _| s.frames.intents.push(crate::frames::Intent::Frame("DW-0404"))),
             details: Details::NotHere,
             on_details: None,
             inert: false,
+            gate_closed: false,
             // These sections show no folder: the Beebeeb location.
             on_explorer: Box::new(tb::open_beebeeb_location),
             // New is unavailable in Trash: drawn at 40 %, not focusable.
             new: if bar.new_off { New::Off } else { New::Idle },
-            on_new: press(|s, _| s.frames.intents.push(crate::frames::Intent::Frame("DW-0415"))),
+            on_new: press(|s, _| s.frames.intents.push(crate::frames::Intent::Frame("DW-0414"))),
             search: search_field(s, t),
             trailing_inset: 0.0,
         },

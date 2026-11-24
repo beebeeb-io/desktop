@@ -86,56 +86,54 @@ fn mono_epoch() -> Instant {
 }
 
 impl DirectIo for RangeIo<'_> {
-    fn api(&self, call: ApiCall) -> impl Future<Output = ApiReply> + Send {
-        async move {
-            let url = self.api.url(&call.path);
-            let mut request = match call.method {
-                ApiMethod::Get => self.api.client.get(url),
-                ApiMethod::Post => self.api.client.post(url),
-                ApiMethod::Put => self.api.client.put(url),
-            }
-            .header("Authorization", format!("Bearer {}", self.api.token))
-            .timeout(call.timeout);
-            if let Some(capability) = call.capabilities {
-                request = request.header(dt::CAPABILITIES_HEADER, capability);
-            }
-            if let Some(body) = call.body {
-                request = request.header("Content-Type", "application/json").body(body);
-            }
-            let Ok(mut resp) = request.send().await else {
-                return ApiReply::default();
-            };
-            let header = |name: &str| {
-                resp.headers()
-                    .get(name)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string)
-            };
-            let (content_type, retry_after) = (header("content-type"), header("retry-after"));
-            let status = resp.status().as_u16();
-            // A pinned chunk's body is a download (S0: counted per read); a JSON answer is not.
-            let counted = call.path.contains("/chunks/");
-            let mut body = Vec::new();
-            while body.len() < call.max_body {
-                match resp.chunk().await {
-                    Ok(Some(piece)) => {
-                        if counted {
-                            self.arrived(piece.len() as u64).await;
-                        }
-                        let room = call.max_body - body.len();
-                        body.extend_from_slice(&piece[..piece.len().min(room)]);
+    async fn api(&self, call: ApiCall) -> ApiReply {
+        let url = self.api.url(&call.path);
+        let mut request = match call.method {
+            ApiMethod::Get => self.api.client.get(url),
+            ApiMethod::Post => self.api.client.post(url),
+            ApiMethod::Put => self.api.client.put(url),
+        }
+        .header("Authorization", format!("Bearer {}", self.api.token))
+        .timeout(call.timeout);
+        if let Some(capability) = call.capabilities {
+            request = request.header(dt::CAPABILITIES_HEADER, capability);
+        }
+        if let Some(body) = call.body {
+            request = request.header("Content-Type", "application/json").body(body);
+        }
+        let Ok(mut resp) = request.send().await else {
+            return ApiReply::default();
+        };
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let (content_type, retry_after) = (header("content-type"), header("retry-after"));
+        let status = resp.status().as_u16();
+        // A pinned chunk's body is a download (S0: counted per read); a JSON answer is not.
+        let counted = call.path.contains("/chunks/");
+        let mut body = Vec::new();
+        while body.len() < call.max_body {
+            match resp.chunk().await {
+                Ok(Some(piece)) => {
+                    if counted {
+                        self.arrived(piece.len() as u64).await;
                     }
-                    Ok(None) => break,
-                    // A body that broke off: what arrived is not the answer.
-                    Err(_) => return ApiReply::default(),
+                    let room = call.max_body - body.len();
+                    body.extend_from_slice(&piece[..piece.len().min(room)]);
                 }
+                Ok(None) => break,
+                // A body that broke off: what arrived is not the answer.
+                Err(_) => return ApiReply::default(),
             }
-            ApiReply {
-                status,
-                content_type,
-                retry_after,
-                body,
-            }
+        }
+        ApiReply {
+            status,
+            content_type,
+            retry_after,
+            body,
         }
     }
 
@@ -191,15 +189,15 @@ impl DirectIo for RangeIo<'_> {
         }
     }
 
-    fn storage_put(
+    async fn storage_put(
         &self,
         _url: &SignedUrl,
         _body: bytes::Bytes,
         _headers: &[(&'static str, String)],
         _total: Duration,
-    ) -> impl Future<Output = u16> + Send {
+    ) -> u16 {
         // Downloads only: a range session never uploads.
-        async { 0 }
+        0
     }
 
     fn sleep(&self, d: Duration) -> impl Future<Output = ()> + Send {

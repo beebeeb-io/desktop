@@ -117,9 +117,13 @@ fn a_verified_prompt_of_an_earlier_turn_opens_nothing() {
     assert_eq!(source.poll(), None, "an answer of a prompt that was left is dropped");
 
     // Asked under the first account; it signed out and ANOTHER account signed in and locked its screen
-    // before the prompt answered: the yes is not that account's.
+    // before the prompt answered: the yes is not that account's. The sign-out ended the lock the prompt was asked
+    // for, so the source's next poll takes the prompt away and tells the screen (`signin_hello_end_tests.rs`).
     source.begin_hello();
+    let taken_before = prompts.taken_away.load(Ordering::SeqCst);
     engine.sign_out_keeping_local_data().expect("signed out");
+    assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
+    assert_eq!(prompts.taken_away.load(Ordering::SeqCst), taken_before + 1);
     source.begin_sign_in(&fake.second.email, PASSWORD);
     assert_eq!(
         next(&mut source),
@@ -132,7 +136,7 @@ fn a_verified_prompt_of_an_earlier_turn_opens_nothing() {
     );
     assert_eq!(engine.lock_screen(), Ok(()));
     prompts.answer(HelloResult::Verified);
-    assert_eq!(next(&mut source), SignInEvent::Hello(HelloOutcome::Cancelled));
+    assert_eq!(source.poll(), None, "the taken-away prompt's yes reaches no screen");
     assert_eq!(engine.lock_state(), LockState::ScreenLocked);
     assert_eq!(engine.user_id().as_deref(), Some(fake.second.user_id.as_str()));
 }
@@ -284,11 +288,19 @@ fn an_unlock_that_was_left_and_finished_anyway_is_locked_again_at_its_level_neve
         source.begin_two_factor(TOTP, CodeKind::Authenticator);
         wait_until("the code to be sent", || requests(&fake, "/auth/2fa/verify") == 1);
         source.discard_partial_sign_in();
+        let plan_asked = requests(&fake, "/billing/subscription");
         fake.code_door.open();
 
         wait_until("the lock to be put back", || engine.lock_state() == level);
+        // The lock never left `level` before the late code was answered, so the wait above can return at once. The
+        // finished unlock ends with the engine's plan check (a request), and the lock is put back after it: wait
+        // for that request (it is asked once per session, so give up after a while), then for the worker's wake.
+        let began = std::time::Instant::now();
+        while requests(&fake, "/billing/subscription") == plan_asked && began.elapsed() < Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(5));
+        }
         // The worker is done with the step once its wake arrived; the state holds.
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(300));
         assert_eq!(engine.lock_state(), level, "{level:?}");
         assert_eq!(
             engine.user_id().as_deref(),
@@ -468,3 +480,6 @@ fn screen_password_the_servers_limit_is_a_limit_and_every_answer_maps() {
     assert_eq!(seconds_up(30_000), 30);
     assert_eq!(seconds_up(30_001), 31);
 }
+
+#[path = "signin_hello_end_tests.rs"]
+mod hello_end;

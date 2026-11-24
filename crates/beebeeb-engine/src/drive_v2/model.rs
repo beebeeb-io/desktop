@@ -103,7 +103,7 @@ pub fn has_thumbnail(name: &str) -> bool {
 pub fn initials(name: &str) -> String {
     let base = name.split('@').next().unwrap_or(name);
     let mut out: String = base
-        .split(|c: char| c == '.' || c == ' ' || c == '_' || c == '-')
+        .split(['.', ' ', '_', '-'])
         .filter_map(|part| part.chars().next())
         .take(2)
         .flat_map(char::to_uppercase)
@@ -126,6 +126,24 @@ pub fn local_state(status: &FileStatus, is_folder: bool, pinned: bool) -> Option
         FileStatus::Downloading | FileStatus::Uploading => LocalState::Syncing,
         FileStatus::Conflict | FileStatus::Error | FileStatus::Trashing => LocalState::Failed,
     })
+}
+
+/// A file whose upload is still queued (parked while sync is paused included) has not reached the server: it
+/// shows as waiting (`Syncing`), never as synced. Reads the queue, not the file status.
+pub fn with_queue(mut local: Option<LocalState>, upload_queued: bool) -> Option<LocalState> {
+    if upload_queued && matches!(local, Some(LocalState::Downloaded | LocalState::AvailableOffline)) {
+        local = Some(LocalState::Syncing);
+    }
+    local
+}
+
+fn queued_local(db: &StateDb, entry: &FileEntry, item: &mut DriveItem) {
+    // dc-136b: the honest state of a row whose newest server name did not decrypt.
+    item.name_unreadable = db.name_unreadable(&entry.file_id).unwrap_or(false).then_some(true);
+    if !entry.is_dir() && entry.status == FileStatus::Local {
+        let queued = db.sync_folder_upload_queued(&entry.file_id).unwrap_or(false);
+        item.local = with_queue(item.local.take(), queued);
+    }
 }
 
 fn is_pinned(contract: Option<&FileContractState>) -> bool {
@@ -171,6 +189,7 @@ pub fn item_from(entry: &FileEntry, contract: Option<&FileContractState>, child_
         local: local_state(&entry.status, is_folder, is_pinned(contract)),
         read_only,
         has_thumbnail: !is_folder && has_thumbnail(&name),
+        name_unreadable: None,
         backup: crate::backup_actions::BackupMark::default(),
         name,
     }
@@ -184,7 +203,9 @@ pub fn item_for_entry(db: &StateDb, entry: &FileEntry) -> Result<DriveItem, Driv
     } else {
         None
     };
-    Ok(item_from(entry, contract.as_ref(), count))
+    let mut item = item_from(entry, contract.as_ref(), count);
+    queued_local(db, entry, &mut item);
+    Ok(item)
 }
 
 /// The row behind an id: a server id, or a provisional `local:<path>` id for an item this PC just
@@ -280,30 +301,35 @@ pub fn backups_root_first(items: &mut [DriveItem]) {
 /// each by its own id, even when two share a path; a row the server never confirmed folds into the server's row at its
 /// path, and several such rows at a path with no server row are one (see `prefer`). Kinds never mix.
 pub fn live_rows(db: &StateDb) -> Result<Vec<FileEntry>, DriveError> {
+    Ok(live_rows_pinned(db)?.into_iter().map(|(entry, _)| entry).collect())
+}
+
+/// [`live_rows`] with each row's effective pinned flag, from the same read.
+pub fn live_rows_pinned(db: &StateDb) -> Result<Vec<(FileEntry, bool)>, DriveError> {
     let rows = db.file_overview_rows().map_err(DriveError::db)?;
     let mut kept = Vec::new();
     // Per (kind, path): the best row the server has not confirmed, kept only when no server row shares the path.
-    let mut unsent: HashMap<(bool, String), FileEntry> = HashMap::new();
+    let mut unsent: HashMap<(bool, String), (FileEntry, bool)> = HashMap::new();
     let mut served: HashSet<(bool, String)> = HashSet::new();
-    for (entry, _) in rows {
+    for (entry, pinned) in rows {
         if entry.status == FileStatus::Trashing {
             continue;
         }
         let path = entry.path.trim_matches('/').to_lowercase();
         if path.is_empty() {
-            kept.push(entry);
+            kept.push((entry, pinned));
             continue;
         }
         let key = (entry.is_dir(), path);
         if entry.remote_updated_at > 0 {
             served.insert(key);
-            kept.push(entry);
+            kept.push((entry, pinned));
             continue;
         }
         match unsent.get(&key) {
-            Some(best) if !prefer(&entry, best) => {}
+            Some((best, _)) if !prefer(&entry, best) => {}
             _ => {
-                unsent.insert(key, entry);
+                unsent.insert(key, (entry, pinned));
             }
         }
     }
@@ -317,7 +343,7 @@ pub fn live_rows(db: &StateDb) -> Result<Vec<FileEntry>, DriveError> {
 }
 
 /// Whether `a` should stay at a shared path instead of `b` (rows the server has not confirmed; a confirmed row never
-/// loses to another): the server's row (a remote time recorded), then a row that is not merely local, then the smaller id.
+/// loses to another): a row with a remote time recorded (none can reach here today, so this clause is idle), then a row that is not merely local, then the smaller id.
 fn prefer(a: &FileEntry, b: &FileEntry) -> bool {
     let known = |e: &FileEntry| e.remote_updated_at > 0;
     let not_local = |e: &FileEntry| e.status != FileStatus::Local;
@@ -437,7 +463,9 @@ pub fn list(db: &StateDb, folder_id: Option<&str>, sort: Sort, stale: bool) -> R
     let mut items: Vec<DriveItem> = Vec::with_capacity(all.len());
     for (entry, contract, child_count) in &all {
         let count = if entry.is_dir() { Some(*child_count) } else { None };
-        items.push(item_from(entry, Some(contract), count));
+        let mut item = item_from(entry, Some(contract), count);
+        queued_local(db, entry, &mut item);
+        items.push(item);
     }
     sort_items(&mut items, sort);
     let path = crumbs(db, folder.as_ref())?;
@@ -483,6 +511,7 @@ pub fn children_of(
         }
         let count = if entry.is_dir() { Some(*child_count) } else { None };
         let mut item = item_from(entry, Some(contract), count);
+        queued_local(db, entry, &mut item);
         item.backup = crate::backup_actions::BackupMark::at(backups.position(&entry.path));
         items.push(item);
     }

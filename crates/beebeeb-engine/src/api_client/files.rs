@@ -43,7 +43,7 @@ impl ApiClient {
     /// `get_typed`, so a transient 429 backs off + retries (honouring
     /// Retry-After / x-ratelimit-reset) instead of erroring immediately.
     pub async fn sync_snapshot(&self) -> anyhow::Result<crate::api_client::SyncSnapshot> {
-        Ok(self.get_typed("/api/v1/sync/snapshot").await?)
+        Ok(self.get_typed_bulk("/api/v1/sync/snapshot").await?)
     }
 
     /// `GET /api/v1/sync/ops?since={seq_id}` — every op with `seq_id > since`,
@@ -104,7 +104,7 @@ impl ApiClient {
     ) -> anyhow::Result<Vec<u8>> {
         let mut resp = self
             .client
-            .get(&self.chunk_url(FileId::new(file_id), chunk_idx))
+            .get(self.chunk_url(FileId::new(file_id), chunk_idx))
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await?

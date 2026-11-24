@@ -60,7 +60,7 @@ pub fn without_items(source: &str, attrs: &[&str]) -> String {
                 if line.ends_with(';') {
                     break;
                 }
-                // A one-line item (`fn f() {}`): its braces close on the line it starts on (fix round 1, m1).
+                // A one-line item (`fn f() {}`): its braces close on the line it starts on.
                 if line.ends_with('}') && line.contains('{') && line.matches('{').count() == line.matches('}').count() {
                     break;
                 }

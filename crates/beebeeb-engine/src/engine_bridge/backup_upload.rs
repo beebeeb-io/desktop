@@ -31,7 +31,7 @@ pub enum BackupDrop {
     /// no longer has.
     SessionNotResumable,
     /// A `Changed` upload whose remote file the server refused a new version of (409: trashed, or an upload of it in
-    /// flight). The next pass reads the tree again and decides (a trashed copy is never given a version, ruling A).
+    /// flight). The next pass reads the tree again and decides (a trashed copy is never given a version).
     RemoteRefused,
 }
 

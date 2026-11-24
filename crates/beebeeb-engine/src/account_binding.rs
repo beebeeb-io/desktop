@@ -134,12 +134,18 @@ pub const IDENTITY_UNKNOWN: &str = "Beebeeb couldn’t confirm which account thi
 /// (`own_data_proof`). It never tells a person they have another account: the reported PCs had one.
 pub const OTHER_ACCOUNT_ON_WINDOWS: &str = "Beebeeb couldn’t confirm that the files on this PC belong to the account you’re signed in to, so sync didn’t start. Nothing was uploaded or deleted. Contact support@beebeeb.io.";
 
-/// The sentence for an engine start refused because an earlier engine stop was never confirmed: its task may still
-/// run with the keys, so every start refuses until Beebeeb restarts (spec §5.6).
+/// The sentence for an engine start (and a sign-out) refused because an engine stop was never confirmed: its task may
+/// still run with the keys, and nothing confirms its end later, so only a restart of Beebeeb ends the refusal (the
+/// record is in memory only; `app::unfinished_sign_out`). The refusal that ends by itself is [`ENGINE_STOP_FINISHING`].
 pub const ENGINE_STOP_UNCONFIRMED: &str =
     "Beebeeb’s sync didn’t confirm it stopped. Quit and reopen Beebeeb before syncing again.";
 
-/// An engine-start refusal the person is shown (Task 12 fix round 2, ruling P): a closed code and its constant
+/// The sentence for a start refused while a stopped ownership proof still holds its client: that write ends by itself
+/// and the refusal with it, so the person is told to try again, never to restart.
+pub const ENGINE_STOP_FINISHING: &str =
+    "Beebeeb’s sync is still finishing its last stop. Nothing was changed. Try again in a moment.";
+
+/// An engine-start refusal the person is shown: a closed code and its constant
 /// sentence, recorded by the engine start and exposed as `engine_refusal` on `sync_status`. The two binding refusals,
 /// and a start refused because an earlier engine stop was never confirmed (spec §5.6). Nothing in it names an account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +231,7 @@ pub fn adopt_unbound(data: &dyn LocalData, vault_key_account: Option<&Identity>)
     data.adopt_once(vault_key_account.filter(|account| account.is_known()))
 }
 
-/// R10 ruling 8 in the native build (lead ruling 2026-11-15 17:35): whether a start's `session` may adopt this
+/// R10 ruling 8 in the native build: whether a start's `session` may adopt this
 /// computer's unowned local data on the upgrade's path. `candidate` is the account whose vault key the credential
 /// store held at the build's first startup (`None`: it held none, or none that is known); the session must be that
 /// same account by the binding's own rule. An unknown session, an unknown candidate or one that cannot be compared
@@ -233,6 +239,77 @@ pub fn adopt_unbound(data: &dyn LocalData, vault_key_account: Option<&Identity>)
 pub fn is_the_upgrade_candidate(candidate: Option<&Identity>, session: &Identity) -> bool {
     session.is_known()
         && candidate.is_some_and(|candidate| candidate.is_known() && same_account(candidate, session) == Some(true))
+}
+
+// dc-111, "Discard and switch" (`app::account_switch`): what the confirmation shows, and its two answers.
+
+/// How many names the confirmation shows; the rest are a count.
+pub const NAMES_SHOWN: usize = 5;
+
+/// What "Discard and switch" would lose, as the confirmation shows it: every unsent file of the previous account, by
+/// count, and the names (never a path) of the first [`NAMES_SHOWN`]. The full set is held here, so the discard does
+/// exactly what was confirmed or nothing. Made by `Engine::discard_and_switch_ask`; dropping it is the Cancel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardAsk {
+    /// How many files would be taken out of the sync folder (each kept as a copy first).
+    pub files: usize,
+    /// The names of the first of them, at most [`NAMES_SHOWN`].
+    pub names: Vec<String>,
+    pub(crate) paths: Vec<String>,
+}
+
+impl DiscardAsk {
+    pub(crate) fn of(paths: Vec<String>) -> Self {
+        let names = paths
+            .iter()
+            .take(NAMES_SHOWN)
+            .map(|path| {
+                path.rsplit('/')
+                    .find(|part| !part.is_empty())
+                    .unwrap_or(path)
+                    .to_string()
+            })
+            .collect();
+        Self {
+            files: paths.len(),
+            names,
+            paths,
+        }
+    }
+
+    /// The files beyond the named ones ("and 3 more").
+    pub fn more(&self) -> usize {
+        self.files - self.names.len()
+    }
+}
+
+/// Why "Discard and switch" did nothing. No variant carries a name, a path or an id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardRefused {
+    /// No session, or nothing of another account's is unsent here (the plain start is the way on).
+    NothingToDiscard,
+    /// What is unsent now is not what the person confirmed: ask again.
+    Changed,
+    /// Something else of the previous account's needs a person's answer (a queued change, a held edit…).
+    OtherWork,
+    /// The previous account's key could not be kept in its own slot: nothing was copied or removed (R4).
+    KeyNotKept,
+    /// A copy could not be made or recorded: nothing was removed from the sync folder.
+    KeepFailed,
+    /// Sync runs: there is nothing to switch.
+    SyncRunning,
+    /// This OS cannot remove another account's synced items, so a switch cannot finish here: nothing is offered.
+    Unsupported,
+    /// The local state could not be read.
+    Unreadable,
+}
+
+/// A discard that went through: where the copies are, and the start that followed (014's clear, then B's start).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardDone {
+    pub kept_in: std::path::PathBuf,
+    pub kept: usize,
+    pub start: Result<crate::app::SyncStart, crate::app::SyncStartRefused>,
 }
 
 #[cfg(test)]

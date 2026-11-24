@@ -27,7 +27,6 @@ use rusqlite::{Connection, OptionalExtension, Result, params};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::sync::Mutex;
 
 #[cfg(test)]
 #[path = "reconcile_measure_tests.rs"]
@@ -41,7 +40,7 @@ thread_local! {
     static FAIL_LANDINGS: std::cell::Cell<(u32, bool)> = const { std::cell::Cell::new((0, false)) };
 }
 
-/// Task 2267 (fix round 2): one `files` row as the ownership proof judges it.
+/// one `files` row as the ownership proof judges it.
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofRow {
@@ -53,11 +52,11 @@ pub struct ProofRow {
     /// In the person's own files (`namespace = 'my_files'`), not a folder shared with them.
     pub my_files: bool,
     /// Judged against the server's tree: not made on this PC. A row made here has `current_version` and
-    /// `remote_updated_at` both at 0 and a queued create names it (lead review of round 2, P2-1).
+    /// `remote_updated_at` both at 0 and a queued create names it.
     pub server_named: bool,
 }
 
-/// Task 2267 (fix round 2): one queued operation, by what it acts on.
+/// one queued operation, by what it acts on.
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofOp {
@@ -68,7 +67,7 @@ pub struct ProofOp {
     pub kind: String,
 }
 
-/// Task 2267 (lead review round 3, P2-2): one change held as `found_while_paused`, as the card counts it.
+/// one change held as `found_while_paused`, as the card counts it.
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldChange {
@@ -102,7 +101,7 @@ pub fn fail_next_landings_as_locked_for_test(n: u32) {
 /// `Connection` is `Send` but `!Sync` on its own). Lock contention is
 /// fine for our access pattern: the daemon does one tick every 5
 /// seconds and OS-extension callbacks are infrequent.
-pub struct StateDb(Mutex<Connection>, std::sync::atomic::AtomicU64);
+pub struct StateDb(conn_lock::ConnLock, std::sync::atomic::AtomicU64);
 
 #[cfg(test)]
 mod tests {
@@ -151,6 +150,20 @@ mod tests {
             .unwrap()
     }
 
+    /// This test binary, as a path a child can start even when a rebuild or a cleanup replaced or removed the file at
+    /// `current_exe()` during the run (a full suite beside other builds): on Linux `/proc/self/exe` names the running
+    /// inode itself.
+    fn own_binary() -> std::path::PathBuf {
+        #[cfg(target_os = "linux")]
+        {
+            std::path::PathBuf::from("/proc/self/exe")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            std::env::current_exe().unwrap()
+        }
+    }
+
     /// Task 2240: runs `measure` in a fresh copy of this test binary that runs only the test `name`.
     ///
     /// A page-read count must not depend on the tests running beside it. The SQLite that rusqlite 0.32 bundled was
@@ -165,7 +178,7 @@ mod tests {
             println!("task 2240 child {name}: {}", measure());
             return;
         }
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
+        let out = std::process::Command::new(own_binary())
             .args([
                 "--exact",
                 &format!("state_db::tests::open_and_cache::{name}"),
@@ -332,6 +345,9 @@ mod tests {
     }
 
     mod landing_and_snapshots;
+    // Task 2199 (dc-103b).
+    mod content_seq;
+    mod thumbnail_flag;
 
     // ── orphan-subtree + delete_file_subtree coverage (task 0806) ──────────────
 
@@ -624,10 +640,19 @@ pub use share_marks::{MarkKind, is_unreadable_mark, normalized_email};
 // Task 2523: copies on this PC whose agreed content is behind the current version.
 mod stale_copies;
 pub use stale_copies::StaleCopy;
+// dc-103c: placeholders holding ranges of a version the server moved past.
+mod stale_ranges;
+#[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
+pub use stale_ranges::StaleRanges;
+mod account_switch;
 mod signout;
 mod sync;
 // LD-0113: the server's `system_role` of a row (the Backups root).
 mod system_role;
+// dc-168: the server's `has_thumbnail` of a row.
+mod thumbnail_flag;
+// dc-136b: a row whose newest server name could not be read.
+mod name_unreadable;
 mod test_hooks;
 // Task 2409: the changes "Not sent" counts, one row each.
 mod unsent;
@@ -667,6 +692,9 @@ pub use sql::{ALIAS_MAX_AGE_SECS, GuardedRow, LOCAL_ACTIVITY_MAX_ROWS, TRANSFER_
 pub use sql::{is_file_provider_trash, page_cache_limit_kib, tree_holds_a_file};
 
 mod conn;
+// dc-163: the re-entrant connection lock and the first pull's write batch.
+mod conn_lock;
+pub use conn_lock::{PULL_BATCH_ROWS, WriteBatch};
 use conn::*;
 
 mod read_only;

@@ -174,7 +174,7 @@ pub fn viewer_of(name: &str) -> Option<Viewer> {
         "zip" | "tar" | "gz" | "tgz" | "7z" | "rar" => Viewer::Archive,
         "md" | "markdown" => Viewer::Markdown,
         "txt" | "log" | "py" | "rs" | "js" | "ts" | "json" | "toml" | "yaml" | "yml" | "sh" | "css" | "html"
-        | "xml" => Viewer::Text,
+        | "xml" | "svg" => Viewer::Text,
         _ => return None,
     })
 }
@@ -188,22 +188,6 @@ pub fn needs_a_player(name: &str) -> bool {
         .map(|(_, ext)| ext.to_ascii_lowercase())
         .unwrap_or_default();
     viewer_of(name) == Some(Viewer::Video) || PLAYER_ONLY_AUDIO.contains(&ext.as_str())
-}
-
-/// Whether the file's own app SHOWS it: a document, a picture, a table, a note. `false` for source code,
-/// scripts, web pages and data files: the system's Open would run a script with its interpreter, load a web
-/// page as a local file in the browser, or find no app at all; reading one is what the window's viewer is for.
-/// For a list's Open of a file that is kept on this PC (`viewers::open_item`).
-pub fn its_app_shows_it(name: &str) -> bool {
-    let ext = name
-        .rsplit_once('.')
-        .map(|(_, ext)| ext.to_ascii_lowercase())
-        .unwrap_or_default();
-    match viewer_of(name) {
-        Some(Viewer::Text) => matches!(ext.as_str(), "txt" | "log"),
-        Some(_) => true,
-        None => true,
-    }
 }
 
 /// "4:02", "28:40": minutes and seconds.
@@ -252,15 +236,17 @@ pub enum OfficeRoute {
     NoPreview(OfficeKind),
 }
 
-/// The Office type of a file, by its name's extension. `None`: not an Office file.
+/// The Office type of a file, by its name's extension. `None`: not an Office file, or one of the types O-CP3 did not
+/// measure (`.docm .dotx .dotm .dot .xlsm .xltx .pptm .ppsx`): those stay their own app's, as before (a measuring row
+/// lists them).
 pub fn office_of(name: &str) -> Option<OfficeKind> {
     let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
     Some(match ext.as_str() {
-        "docx" | "docm" | "dotx" | "dotm" => OfficeKind::Docx,
-        "doc" | "dot" => OfficeKind::Doc,
-        "xlsx" | "xlsm" | "xltx" => OfficeKind::Xlsx,
+        "docx" => OfficeKind::Docx,
+        "doc" => OfficeKind::Doc,
+        "xlsx" => OfficeKind::Xlsx,
         "xls" => OfficeKind::Xls,
-        "pptx" | "pptm" | "ppsx" => OfficeKind::Pptx,
+        "pptx" => OfficeKind::Pptx,
         "ppt" | "pps" => OfficeKind::Ppt,
         _ => return None,
     })

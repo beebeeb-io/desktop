@@ -26,10 +26,12 @@ const LINK: &str = "https://app.beebeeb.io/s/an-invented-token#key=an-invented-k
 const BEFORE: &str = "what was on the clipboard before";
 
 /// What the test keeps of the source: what it was asked, and what it will answer.
+type Asked = Arc<Mutex<Vec<(Action, Vec<String>)>>>;
+
 #[derive(Default, Clone)]
 struct Spy {
     later: Arc<Mutex<Vec<Change>>>,
-    asked: Arc<Mutex<Vec<(Action, Vec<String>)>>>,
+    asked: Asked,
     /// The next link is refused at once with this.
     refuse: Arc<Mutex<Option<ActionError>>>,
     /// The source has no link on its way any more (the answer of the last press was dropped).
@@ -396,6 +398,7 @@ fn what_asking_again_cannot_change_is_said_in_its_own_words_without_try_again() 
     for (why, words) in [
         (ActionError::HasLink, "already has a link"),
         (ActionError::NotYet, "not available yet"),
+        (ActionError::NotAFile, "Only a file"),
     ] {
         rt.update(|s, tx| assert!(s.copy_link(tx)));
         spy.answer(Action::CopyLink, Err(why));

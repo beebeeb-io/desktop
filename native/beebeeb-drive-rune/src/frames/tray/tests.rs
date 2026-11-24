@@ -12,6 +12,7 @@ use crate::{State, init};
 
 /// Every flyout frame of the board: its title, its line, its button and whether that button
 /// is the amber one (`None`: the state has no button).
+#[allow(clippy::type_complexity)]
 const BUILT: [(&str, &str, &str, Option<(&str, bool)>); 19] = [
     (
         "DW-1202",
@@ -276,7 +277,7 @@ fn long_copy_wraps_and_long_names_are_cut() {
     assert_eq!(info(&rt, "st-title").rect[3], 34.0, "two lines of 17");
     assert_eq!(info(&rt, "st-line").rect[3], 32.0, "two lines of 16");
     let name = info(&rt, "row-0-name").rect;
-    assert_eq!(name[3], 15.0, "one line");
+    assert_eq!(name[3], 17.0, "one line");
     assert!(
         name[0] + name[2] <= info(&rt, "row-0-time").rect[0],
         "cut before the time"
@@ -352,10 +353,10 @@ fn each_status_button_does_what_the_board_says() {
         (
             "DW-1210",
             Action::RestartToUpdate,
-            &[Close],
+            &[Intent::OpenSettings, Close],
             "Version 0.9.2 is available",
         ),
-        ("DW-1214", Action::RestartToUpdate, &[Close], "Update Beebeeb"),
+        ("DW-1214", Action::RestartToUpdate, &[Intent::OpenSettings, Close], "Update Beebeeb"),
         ("DW-1211", Action::Unlock, &[OpenWindow, Close], "Beebeeb is locked"),
         ("DW-1213", Action::ChoosePlan, &[Close], "Choose a plan"),
         (

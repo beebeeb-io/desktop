@@ -300,7 +300,7 @@ async fn test_conflict_content_preview_reports_a_local_read_failure_without_fail
 
 #[tokio::test]
 async fn test_conflict_content_preview_skips_remote_download_when_metadata_reports_oversized_file() {
-    // Codex round 2, finding 1: the remote size must be checked from
+    // the remote size must be checked from
     // metadata BEFORE any chunk is downloaded. `requests: 1` means the
     // mock server serves ONLY the metadata GET and then stops — if the
     // implementation regresses to downloading anyway, the resulting

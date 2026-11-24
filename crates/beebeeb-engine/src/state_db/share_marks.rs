@@ -7,7 +7,7 @@
 //!   server's lists). Only a digest of it is kept, so a row a sign-out keeps never holds the address.
 //!
 //! Local only (the server never learns who compared whom). A sign-out keeps them, as it keeps the
-//! custody ids (lead ruling 2026-11-09, `state_db/signout.rs`); a reset of local data removes them.
+//! custody ids; a reset of local data removes them.
 
 use super::*;
 

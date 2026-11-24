@@ -7,7 +7,7 @@
 //! path: only the session token changes, the replaced session is ended at the server, a sign-in that cannot be stored
 //! leaves nothing behind, and a sign-in while another account is signed in asks nothing and changes nothing.
 //!
-//! Three tests are ignored until tasks 2543 and 2544 are fixed; each names its task.
+//! One test is ignored until its fix; it names its task.
 //!
 //! Each test runs in a process of its own (`in_own_process`): the state folder is a process-wide global
 //! (`state_paths`), and `tests/common` makes a new one per setup. Everything is invented; nothing reaches the network
@@ -286,10 +286,11 @@ fn a_token_removed_during_the_phrase_proof_stores_nothing() {
 /// `an_unreadable_owner_record_or_state_db_settles_nothing_and_the_same_account_then_stays_in_place`, where the engine
 /// reads this computer's record of its account: the start. A `state.db` that cannot be read is neither "no owner" nor
 /// another account's: the start is refused, the file is left exactly as it was, nothing is registered and no engine
-/// runs. Once the record reads again, the same account's start (paused, so it sends nothing) keeps its row and queue.
+/// runs. Unreadable, not corrupt: a corrupt one (SQLite's not-a-database) is moved aside and rebuilt since dc-144b, so
+/// the record here is a folder where `state.db` should be, which no open reads and nothing moves. Once the record reads again, the same account's start (paused, so it sends nothing) keeps its row and queue.
 /// The second start, with the same folder and port, is what shows the first was refused for the unreadable file.
-/// Mutant: `LocalState::for_engine_start` answers an open error by removing the file and opening a new one: the first
-/// start runs on an empty `state.db` and the file's bytes are gone.
+/// Mutant: `LocalState::for_engine_start` answers an open error by removing the record and opening a new one: the
+/// first start runs on an empty `state.db` and the record is gone.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn an_unreadable_state_db_settles_nothing_and_the_same_account_then_keeps_its_data() {
@@ -300,7 +301,6 @@ fn an_unreadable_state_db_settles_nothing_and_the_same_account_then_keeps_its_da
             use beebeeb_engine::config::DesktopConfig;
             use beebeeb_engine::identity::TEST;
 
-            const UNREADABLE: &[u8] = b"an invented file that is not a database, so nothing can read an owner from it";
             let s = common::setup();
             s.sign_in();
             s.unlock();
@@ -313,22 +313,25 @@ fn an_unreadable_state_db_settles_nothing_and_the_same_account_then_keeps_its_da
             std::fs::create_dir_all(&folder).unwrap();
             assert!(!s.state_db().exists(), "the premise: no state.db yet");
             std::fs::create_dir_all(&s.state_dir).unwrap();
-            std::fs::write(s.state_db(), UNREADABLE).unwrap();
+            // Unreadable, not corrupt (a corrupt one is moved aside and rebuilt): a folder where the file should be.
+            std::fs::create_dir(s.state_db()).unwrap();
+            std::fs::write(s.state_db().join("inside"), b"kept").unwrap();
             let port = common::Port::free();
 
             assert!(
                 s.engine.start_sync_with(folder.clone(), &port).is_err(),
                 "an unreadable record of this computer's account settles nothing"
             );
-            assert!(
-                std::fs::read(s.state_db()).unwrap() == UNREADABLE,
-                "the file is left as it was"
+            assert_eq!(
+                std::fs::read(s.state_db().join("inside")).ok().as_deref(),
+                Some(&b"kept"[..]),
+                "the record is left as it was"
             );
             assert_eq!(port.registers(), 0, "nothing is registered");
             assert!(!s.engine.is_syncing(), "no engine runs");
 
             // The record reads again: this account's own data, one row and one queued change.
-            std::fs::remove_file(s.state_db()).unwrap();
+            std::fs::remove_dir_all(s.state_db()).unwrap();
             s.state_db_with_one_row(&s.this_account());
             pc::queue_one_change(&s);
             assert_eq!(
@@ -344,10 +347,9 @@ fn an_unreadable_state_db_settles_nothing_and_the_same_account_then_keeps_its_da
     );
 }
 
-/// Task 2543: a kept vault key that the server no longer accepts never opens the vault, and the local data stays.
+/// A kept vault key that the server no longer accepts never opens the vault, and the local data stays.
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "task 2543: un-ignore with its fix"]
 fn a_kept_key_the_server_no_longer_accepts_is_never_installed() {
     in_own_process("a_kept_key_the_server_no_longer_accepts_is_never_installed", || {
         use std::sync::atomic::Ordering;
@@ -388,10 +390,9 @@ fn a_kept_key_the_server_no_longer_accepts_is_never_installed() {
     });
 }
 
-/// Task 2543: when the server cannot say whether the kept vault key is still the account's, nothing changes.
+/// When the server cannot say whether the kept vault key is still the account's, nothing changes.
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "task 2543: un-ignore with its fix"]
 fn a_kept_key_proof_that_cannot_complete_changes_nothing() {
     in_own_process("a_kept_key_proof_that_cannot_complete_changes_nothing", || {
         use std::sync::atomic::Ordering;

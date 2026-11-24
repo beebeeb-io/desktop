@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use zeroize::Zeroizing;
@@ -67,6 +68,28 @@ fn from_call(error: AccountCallError) -> PreviewsRefused {
         AccountCallError::Offline => PreviewsRefused::Offline,
         AccountCallError::ServerError | AccountCallError::Unreadable => PreviewsRefused::Failed,
     }
+}
+
+/// How long a read of the account's preview setting serves the thumbnail upload's looks.
+const SETTING_LIFETIME: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The setting last read for the thumbnail upload: which session of which account (and server) it was read for, when,
+/// and what it said. Dropped when the setting is changed here ([`Engine::set_photo_previews_for`]).
+type SettingRead = ((SessionGeneration, String, String), std::time::Instant, PreviewSetting);
+static SETTING_READ: std::sync::Mutex<Option<SettingRead>> = std::sync::Mutex::new(None);
+
+/// What [`Engine::upload_made_thumbnail_for`] came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MadeUpload {
+    Sent,
+    /// Not a thumbnail to send: none kept for this version, the server had one, or it was sent already.
+    NothingToSend,
+    /// The setting is off, or a metered-network or battery-saver hold stands: it stays kept and is tried at a later look.
+    NotNow(crate::photo_previews::thumbs_upload::NotNow),
+    Paused,
+    SessionMoved,
+    Offline,
+    Failed,
 }
 
 /// What Thumbnails and previews shows, read for one session.
@@ -179,10 +202,19 @@ impl<C: CredentialStores> Engine<C> {
         session: SessionGeneration,
         setting: PreviewSetting,
     ) -> Result<(), PreviewsRefused> {
-        self.account_call_for(session, move |api| async move {
-            Ok(api.set_photo_previews_setting(&setting).await?)
-        })
-        .map_err(from_call)
+        let set = self
+            .account_call_for(session, move |api| async move {
+                Ok(api.set_photo_previews_setting(&setting).await?)
+            })
+            .map_err(from_call);
+        // Whatever was read before is not the setting now: the next look reads it again.
+        let mine = (session, self.config.account_id.clone(), self.config.api_base.clone());
+        let mut read = SETTING_READ.lock().unwrap_or_else(PoisonError::into_inner);
+        if read.as_ref().is_some_and(|(at, ..)| *at == mine) {
+            read.take();
+        }
+        drop(read);
+        set
     }
 
     /// Make and upload the previews the account's setting asks for, for `session`: one photo at a time, the newest
@@ -349,6 +381,137 @@ impl<C: CredentialStores> Engine<C> {
         end
     }
 
+    /// A thumbnail this PC made (the local thumbnail cache, 079/095) of the owner's photo `file_id` at `version`, sent
+    /// to the server once, sealed with core's thumbnail recipe, so web and phone show it and no device makes it again.
+    /// `server_404`: the caller's fetch of the server's thumbnail answered "none" (noted in the cache entry). An entry
+    /// is sent when so noted or when the row's stored `has_thumbnail` (dc-168) says the server has none at `version`,
+    /// and never when that flag says it has one (unless the caller's 404 is fresh). Respects the account's preview setting (read now), the metered-network and
+    /// battery-saver hold, and a paused sync; every send asks the session again. Called by the host right after it kept
+    /// or looked up a thumbnail it made because the server had none. WORKER call: the network.
+    pub fn upload_made_thumbnail_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        version: i64,
+        server_404: bool,
+    ) -> MadeUpload {
+        use crate::photo_previews::thumbs_upload::{MadeThumb, NotNow, SendResult, Sent, send_all};
+        if self.acct.session.is_poisoned() || !self.acct.session_unchanged_since(session) {
+            return MadeUpload::SessionMoved;
+        }
+        let Some((entry, _)) = self.with_thumb_cache(session, |cache| {
+            if server_404 {
+                let _ = cache.mark_server_404(file_id, version);
+            }
+            cache.get_at(file_id, version)
+        }) else {
+            return MadeUpload::SessionMoved;
+        };
+        // dc-168: what the server's listing and ops said of this file's thumbnail at `version` (`files.has_thumbnail`).
+        // A thumbnail the server has is never sent again; one it said it has not is sent without a 404 first. Not
+        // known (an older row, another version): the cache entry's 404 decides, as before. A 404 the caller saw just
+        // now is newer than the row and wins.
+        let server_has = match self.local_state() {
+            Ok(state) if state.session() == session => {
+                state.with(|db| db.server_has_thumbnail(file_id, version).ok().flatten()).ok().flatten()
+            }
+            _ => None,
+        };
+        let Some(entry) = entry.filter(|entry| {
+            !entry.uploaded && (server_404 || server_has.map_or(entry.server_404, |has| !has))
+        }) else {
+            return MadeUpload::NothingToSend;
+        };
+        if self.is_paused() {
+            return MadeUpload::Paused;
+        }
+        let metered = crate::config::DesktopConfig::load_for(self.identity).ok().and_then(|c| c.metered);
+        let hold = crate::power::hold_now(metered, &crate::power::SystemPower);
+        if let Some(hold) = hold {
+            return MadeUpload::NotNow(NotNow::Hold(hold));
+        }
+        let Ok(Some((token, key))) = self.person_session(|current, generation| {
+            (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
+        }) else {
+            return MadeUpload::SessionMoved;
+        };
+        // The row's own pin, as the upload path reads it.
+        let pin = match self.local_state() {
+            Ok(state) if state.session() == session => {
+                state.with(|db| crate::engine_bridge::recorded_pin(db, &key, file_id))
+            }
+            _ => return MadeUpload::SessionMoved,
+        };
+        let Ok(Some(pin)) = pin else {
+            return MadeUpload::Failed;
+        };
+        let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
+        let read_key = (session, self.config.account_id.clone(), self.config.api_base.clone());
+        let cached = SETTING_READ
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|(at, read, _)| *at == read_key && read.elapsed() < SETTING_LIFETIME)
+            .map(|(_, _, setting)| *setting);
+        let read = match cached {
+            Some(setting) => Ok(setting),
+            None => self.runtime.block_on(api.photo_previews_setting()),
+        };
+        let setting = match read {
+            Ok(setting) => {
+                *SETTING_READ.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some((read_key, std::time::Instant::now(), setting));
+                setting
+            }
+            Err(error) => {
+                return match super::settings_api::kind_of(&anyhow::Error::from(error)) {
+                    AccountCallError::NotSignedIn | AccountCallError::SessionEnded => MadeUpload::SessionMoved,
+                    AccountCallError::Offline => MadeUpload::Offline,
+                    _ => MadeUpload::Failed,
+                };
+            }
+        };
+        let thumb = MadeThumb {
+            file_id: file_id.to_owned(),
+            version,
+            width: entry.width,
+            height: entry.height,
+            rgba: entry.rgba,
+            pin,
+        };
+        let mut offline = false;
+        let mut send = |id: &str, sealed: &[u8]| {
+            // Right before the send: still the very session the key and the token were copied from.
+            if !self.session_is_still(session, &key) {
+                return SendResult::Stop(Stopped::Failed);
+            }
+            match self.runtime.block_on(api.upload_thumbnail(id, "medium", sealed, None)) {
+                Ok(()) => SendResult::Sent,
+                Err(error) if error.downcast_ref::<crate::api_client::DesktopApiError>().is_none() => {
+                    offline = true;
+                    SendResult::Stop(Stopped::Offline)
+                }
+                Err(_) => SendResult::Refused,
+            }
+        };
+        let mut sent = Sent::default();
+        let end = match send_all(&key, &setting, None, std::slice::from_ref(&thumb), &mut sent, &mut send) {
+            Ok(end) => end,
+            Err(why) => return MadeUpload::NotNow(why),
+        };
+        if end.sent == 1 {
+            let _ = self.with_thumb_cache(session, |cache| cache.mark_uploaded(file_id, version));
+            return MadeUpload::Sent;
+        }
+        if offline {
+            MadeUpload::Offline
+        } else if !self.acct.session_unchanged_since(session) {
+            MadeUpload::SessionMoved
+        } else {
+            MadeUpload::Failed
+        }
+    }
+
     /// Whether this session's first reconcile pass has committed (the engine's queue sends nothing before it either):
     /// every session put in memory asks for one (`auth_resume_asked`), and the engine marks it served once its pass
     /// committed (`auth_resume_done`). Waits for it in short steps; `false` as soon as `stop` is set, sync is paused or
@@ -386,6 +549,17 @@ impl<C: CredentialStores> Engine<C> {
                 | LocalStateRefused::SessionEnded,
             ) => Some(Made::SessionMoved),
             Err(_) => Some(Made::NotHere),
+        }
+    }
+
+    /// Whether the entry at `photo`'s place is its own row's ([`plan::own_place`]), read for `session`: `false` once
+    /// the session moved, or when it cannot be read.
+    fn place_is_its_own(&self, session: SessionGeneration, sync_root: &Path, photo: &plan::LocalPhoto) -> bool {
+        match self.local_state() {
+            Ok(state) if state.session() == session => {
+                state.with(|db| plan::own_place(db, sync_root, photo)).unwrap_or(false)
+            }
+            _ => false,
         }
     }
 
@@ -428,6 +602,10 @@ impl<C: CredentialStores> Engine<C> {
         // later run.
         if let Some(made) = self.row_moved(session, photo) {
             return made;
+        }
+        // Another item's entry at its place (one name, or one name but for case): never read as this photo.
+        if !self.place_is_its_own(session, sync_root, photo) {
+            return Made::NotHere;
         }
         let Some(path) = plan::ready_to_read(sync_root, photo) else {
             return Made::NotHere;
@@ -554,6 +732,10 @@ impl<C: CredentialStores> Engine<C> {
             .filter(|photo| plan::may_be_source(photo, &owned))
             .take(SAMPLE_TRIES)
         {
+            // Another item's entry at its place (one name, or one name but for case) is never its sample.
+            if !state.with(|db| plan::own_place(db, &sync_root, photo)).unwrap_or(false) {
+                continue;
+            }
             let Some(path) = plan::ready_to_read(&sync_root, photo) else {
                 continue;
             };

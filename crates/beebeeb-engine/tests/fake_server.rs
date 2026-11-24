@@ -90,8 +90,14 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
         .expect("the fixture's phrase is the account's");
     assert_eq!(engine.gate(), GateState::Ready);
 
+    // The plan check runs in the background: let it be served before the lines are read.
+    let waited = std::time::Instant::now();
+    while served.load(Ordering::SeqCst) < 7 && waited.elapsed().as_secs() < 10 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let written = lines.lock().unwrap().clone();
-    assert_eq!(served.load(Ordering::SeqCst), 6);
+    // Six sign-in requests and the one plan check at the unlock (the No plan gate).
+    assert_eq!(served.load(Ordering::SeqCst), 7);
     assert_eq!(fake.requests().len(), 0, "the server keeps no request");
     // The secrets check runs before the exact-match assertion so it guards against a future change to the access-line
     // format that leaks a secret (P2-4 of the PR #338 review).
@@ -110,6 +116,7 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
             "POST /api/v1/opaque/login-finish -> 200",
             "GET /api/v1/auth/me -> 200",
             "POST /api/v1/auth/verify-recovery-check -> 200",
+            "GET /api/v1/billing/subscription -> 200",
         ]
     );
 }
@@ -236,7 +243,19 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
         })
         .collect();
     // Case-insensitive: NSIS directives are case-insensitive (File, file, FILE all work).
-    if file_commands.len() != 1 || !file_commands[0].eq_ignore_ascii_case(r#"File "${MAINBINARYSRCPATH}""#) {
+    let packed_files = [
+        r#"File "${MAINBINARYSRCPATH}""#,
+        r#"File "${OFFICERENDERSRCPATH}""#,
+        r#"File "${MEDIAHELPERSRCPATH}""#,
+        // The third-party licence text (a text file, w17-licence-notice).
+        r#"File "${LICENSESRCPATH}""#,
+    ];
+    if file_commands.len() != packed_files.len()
+        || !file_commands
+            .iter()
+            .zip(packed_files)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    {
         wrong.push(format!("the NSIS scripts pack {file_commands:?}"));
     }
     let packager = read("../../packaging/windows/build-installer.ps1");
@@ -246,7 +265,14 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
         .filter(|line| !line.starts_with('#'))
         .collect();
     let copies: Vec<&str> = code.iter().copied().filter(|line| line.contains("Copy-Item")).collect();
-    if copies != ["Copy-Item -LiteralPath $Exe -Destination $staged"] {
+    if copies
+        != [
+            "Copy-Item -LiteralPath $Exe -Destination $staged",
+            "Copy-Item -LiteralPath $OfficeRenderExe -Destination $stagedOffice",
+            "Copy-Item -LiteralPath $MediaHelperExe -Destination $stagedMedia",
+            "Copy-Item -LiteralPath $licenceSrc -Destination $stagedLicence",
+        ]
+    {
         wrong.push(format!("build-installer.ps1 copies {copies:?}"));
     }
     let packed: Vec<&str> = code

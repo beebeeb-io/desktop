@@ -285,7 +285,7 @@ async fn a_landing_whose_only_later_write_parked_leaves_the_parked_status() {
 
 // ── Rule 6: the upgrade path (spec §10.2–§10.3, m-4c) ──
 
-/// T34, spec §10.3 (ruling 2): an upload an earlier build queued on a wall-clock second is
+/// T34, spec §10.3 : an upload an earlier build queued on a wall-clock second is
 /// marked at engine start and keeps that base. It is sent once, the server refuses it as a
 /// stale base, and it parks at its first attempt with its bytes. It never holds a token.
 #[tokio::test]
@@ -358,7 +358,7 @@ async fn an_old_timestamp_base_parks_at_its_first_attempt() {
 async fn an_earlier_builds_copy_in_the_old_cache_root_is_never_handed_over_and_never_lost() {
     let master_key = [102u8; 32];
     let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-    let bases = FinderStagingBases::current(&crate::identity::REAL);
+    let bases = FinderStagingBases::current(&crate::identity::TEST);
     let old_root = bases.cache_root();
     std::fs::create_dir_all(&old_root).unwrap();
     let mut queued = Vec::new();

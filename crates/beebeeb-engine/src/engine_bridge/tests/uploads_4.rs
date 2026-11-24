@@ -297,3 +297,325 @@ fn flow7_snapshot_skips_new_is_uploading_rows() {
         "an in-progress upload has no content yet and must not become a placeholder"
     );
 }
+
+// ── #59 (flow 7): a remote rename/move on a row this device holds (`Local`) ──
+// Ported from desktop #59: a rename/move is metadata-only, so on a Local row it
+// always applies the new path and parent, never re-anchors `remote_updated_at`,
+// never raises a content conflict and never blanks the path.
+
+fn flow7_seed_local_with_hash(bridge: &EngineBridge, file_id: &str, path: &str) {
+    seed_bridge_entry(bridge, file_id, path, None, FileStatus::Local, false, 10);
+    let mut row = bridge.db().get_file(file_id).unwrap().unwrap();
+    row.content_hash = Some("local-hash-abc".into());
+    bridge.db().upsert_file(&row).unwrap();
+}
+
+fn flow7_apply_batch(
+    bridge: &EngineBridge,
+    root: &Path,
+    ops: &[(i64, &str, serde_json::Value)],
+) -> Vec<ConflictDetected> {
+    let mut conflicts = Vec::new();
+    for (seq_id, op_type, payload) in ops {
+        let op = crate::api_client::SyncOp {
+            seq_id: *seq_id,
+            op_type: (*op_type).into(),
+            payload: payload.clone(),
+        };
+        apply_sync_op(bridge, root, &op, 200, &mut conflicts).unwrap();
+    }
+    conflicts
+}
+
+#[test]
+fn flow7_two_renames_in_one_batch_land_final_name_on_local_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let mk = [9u8; 32];
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+    let file = "dbl00000-0000-4000-8000-000000000001";
+    flow7_seed_local_with_hash(&bridge, file, "draft.txt");
+
+    let conflicts = flow7_apply_batch(
+        &bridge,
+        dir.path(),
+        &[
+            (
+                21,
+                "file_rename",
+                serde_json::json!({ "id": file, "new_name_encrypted": enc_name(&mk, file, "draft-v2.txt") }),
+            ),
+            (
+                22,
+                "file_rename",
+                serde_json::json!({ "id": file, "new_name_encrypted": enc_name(&mk, file, "final.txt") }),
+            ),
+        ],
+    );
+
+    let row = bridge.db().get_file(file).unwrap().unwrap();
+    assert_eq!(row.path, "final.txt", "second rename in the same batch must not be dropped");
+    assert_eq!(row.status, FileStatus::Local, "a rename is metadata-only");
+    assert_eq!(row.content_hash.as_deref(), Some("local-hash-abc"));
+    assert!(conflicts.is_empty(), "a metadata-only op never raises a content conflict");
+}
+
+#[test]
+fn flow7_move_then_rename_in_one_batch_lands_under_dest_on_local_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let mk = [9u8; 32];
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+    let dest = "dst00000-0000-4000-8000-000000000001";
+    let file = "mvr00000-0000-4000-8000-000000000002";
+    seed_bridge_entry(&bridge, dest, "Dest", None, FileStatus::CloudOnly, true, 10);
+    flow7_seed_local_with_hash(&bridge, file, "draft.txt");
+
+    let conflicts = flow7_apply_batch(
+        &bridge,
+        dir.path(),
+        &[
+            (31, "file_move", serde_json::json!({ "id": file, "new_parent_id": dest })),
+            (
+                32,
+                "file_rename",
+                serde_json::json!({ "id": file, "new_name_encrypted": enc_name(&mk, file, "n2.txt") }),
+            ),
+        ],
+    );
+
+    let row = bridge.db().get_file(file).unwrap().unwrap();
+    assert_eq!(row.path, "Dest/n2.txt", "move then rename in one batch must both apply");
+    assert_eq!(row.status, FileStatus::Local);
+    assert_eq!(row.content_hash.as_deref(), Some("local-hash-abc"));
+    let contract = bridge.db().get_file_contract_state(file).unwrap().unwrap();
+    assert_eq!(contract.parent_id.as_deref(), Some(dest));
+    assert!(conflicts.is_empty());
+}
+
+#[test]
+fn flow7_rename_on_locally_edited_local_row_moves_path_without_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let mk = [9u8; 32];
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+    let file = "edt00000-0000-4000-8000-000000000003";
+    flow7_seed_local_with_hash(&bridge, file, "notes.txt");
+
+    let conflicts = flow7_apply_batch(
+        &bridge,
+        dir.path(),
+        &[(
+            41,
+            "file_rename",
+            serde_json::json!({ "id": file, "new_name_encrypted": enc_name(&mk, file, "notes-renamed.txt") }),
+        )],
+    );
+
+    let row = bridge.db().get_file(file).unwrap().unwrap();
+    assert_eq!(row.path, "notes-renamed.txt");
+    assert_eq!(row.status, FileStatus::Local);
+    assert_eq!(
+        row.remote_updated_at, 10,
+        "a rename must not re-anchor the content freshness clock"
+    );
+    assert!(conflicts.is_empty());
+}
+
+/// Read-and-clear the re-snapshot request, as the tick does on each OS (macOS clears it only after the snapshot).
+fn resnapshot_taken(db: &crate::state_db::StateDb) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        match db.peek_resnapshot_request().unwrap() {
+            Some(seen) => db.clear_resnapshot_request(seen).unwrap(),
+            None => false,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        db.take_needs_resnapshot().unwrap()
+    }
+}
+
+#[test]
+fn flow7_rename_with_undecryptable_name_keeps_path_and_schedules_resnapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mk = [9u8; 32];
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://placeholder".into(), mk);
+    let file = "bad00000-0000-4000-8000-000000000004";
+    flow7_seed_local_with_hash(&bridge, file, "notes.txt");
+    // Drain any flag left by seeding so the assertion below is caused by this op.
+    resnapshot_taken(bridge.db());
+
+    let conflicts = flow7_apply_batch(
+        &bridge,
+        dir.path(),
+        &[(
+            51,
+            "file_rename",
+            serde_json::json!({ "id": file, "new_name_encrypted": "not-a-valid-encrypted-blob" }),
+        )],
+    );
+
+    let row = bridge.db().get_file(file).unwrap().unwrap();
+    assert_eq!(row.path, "notes.txt", "an undecryptable name must never blank the path");
+    assert_eq!(row.status, FileStatus::Local);
+    assert_eq!(row.content_hash.as_deref(), Some("local-hash-abc"));
+    assert_eq!(row.remote_updated_at, 10);
+    assert!(
+        resnapshot_taken(bridge.db()),
+        "an unresolvable name schedules a re-snapshot so the real name is recovered"
+    );
+    assert!(conflicts.is_empty());
+    // dc-136b: the row says its name could not be read, and the window shows it with the kept name.
+    assert!(bridge.db().name_unreadable(file).unwrap());
+    let item = crate::drive_v2::model::item_for_entry(bridge.db(), &row).unwrap();
+    assert_eq!(item.name, "notes.txt");
+    assert_eq!(item.name_unreadable, Some(true));
+
+    // The same unreadable name again (a re-snapshot still lists it) asks for no further re-snapshot.
+    flow7_apply_batch(
+        &bridge,
+        dir.path(),
+        &[(
+            52,
+            "file_rename",
+            serde_json::json!({ "id": file, "new_name_encrypted": "not-a-valid-encrypted-blob" }),
+        )],
+    );
+    assert!(!resnapshot_taken(bridge.db()), "a name that stays unreadable is no loop");
+
+    // A name that decrypts (the keys changed, another client fixed it) is applied and clears the mark.
+    flow7_apply_batch(
+        &bridge,
+        dir.path(),
+        &[(
+            53,
+            "file_rename",
+            serde_json::json!({ "id": file, "new_name_encrypted": enc_name(&mk, file, "notes-fixed.txt") }),
+        )],
+    );
+    let row = bridge.db().get_file(file).unwrap().unwrap();
+    assert_eq!(row.path, "notes-fixed.txt");
+    assert!(!bridge.db().name_unreadable(file).unwrap());
+}
+
+// ── Backlog 2351: no uploaded chunk is larger than 32 MiB ──
+
+/// Mock whose `init` announces `chunk_size` and a chunk count for `total` bytes; every chunk PUT is
+/// recorded and acknowledged. Serves `complete` the way the resumable mock does.
+struct CapMock {
+    base_url: String,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl CapMock {
+    fn start(chunk_size: u64, total: u64) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (server_requests, server_stop) = (Arc::clone(&requests), Arc::clone(&stop));
+        let handle = thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while !server_stop.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(90) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let request = read_http_request(&mut stream);
+                        let response = Self::answer(&request, chunk_size, total);
+                        server_requests.lock().unwrap().push(request);
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("cap mock accept failed: {e}"),
+                }
+            }
+        });
+        Self {
+            base_url,
+            requests,
+            stop,
+            handle,
+        }
+    }
+
+    fn answer(request: &RecordedRequest, chunk_size: u64, total: u64) -> String {
+        let path = request.path.as_str();
+        if request.method == "POST" && path == "/api/v1/uploads/init" {
+            let file_id = serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["file_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            return http_json(
+                "201 Created",
+                serde_json::json!({
+                    "file_id": file_id, "tenant_id": "tenant-1", "object_version_id": "object-init-1",
+                    "upload_session_id": "session-1", "chunk_size_bytes": chunk_size as i64,
+                    "chunk_count": total.div_ceil(chunk_size) as i64, "storage_format_version": 2,
+                    "storage_pool_id": "pool-1", "region": "local"
+                }),
+            );
+        }
+        if request.method == "PUT" && path.starts_with("/api/v1/uploads/session-1/chunks/") {
+            let index: u32 = path.rsplit('/').next().unwrap().parse().unwrap();
+            return http_json(
+                "200 OK",
+                serde_json::json!({ "index": index, "size": request.body.len() as i64, "skipped": false }),
+            );
+        }
+        if request.method == "POST" && path == "/api/v1/uploads/session-1/complete" {
+            let mut answer = serde_json::json!({
+                "file_id": "server-file-1", "version_number": 1,
+                "current_object_version_id": "object-complete-1",
+                "size_bytes": total as i64, "mime_type": "application/octet-stream"
+            });
+            if let Some(name) = completion_name(request) {
+                answer["name_encrypted"] = serde_json::json!(name);
+            }
+            return http_json("200 OK", answer);
+        }
+        http_json("200 OK", serde_json::json!({ "ok": true }))
+    }
+
+    fn finish(self) -> Vec<RecordedRequest> {
+        self.stop.store(true, Ordering::SeqCst);
+        self.handle.join().unwrap();
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+/// A 70 MiB file whose server plan is 32 MiB chunks (32 + 32 + 6): every PUT body carries at most
+/// 32 MiB of plaintext (plus the frame overhead), and the frames open back to the exact bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seeded_upload_writes_chunks_of_at_most_32_mib() {
+    const MIB: u64 = 1024 * 1024;
+    let total = 70 * MIB;
+    let dir = tempfile::tempdir().unwrap();
+    let payload = dir.path().join("resume.bin");
+    let bytes: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&payload, &bytes).unwrap();
+    let server = CapMock::start(32 * MIB, total);
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [25u8; 32]);
+    bridge.db.enqueue_operation(&resumable_create_op(&payload)).unwrap();
+
+    let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+    assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
+
+    let requests = server.finish();
+    let sizes: Vec<u64> = requests
+        .iter()
+        .filter(|r| r.method == "PUT" && r.path.contains("/chunks/"))
+        .map(|r| r.body.len() as u64)
+        .collect();
+    assert!(sizes.len() >= 3, "70 MiB cannot fit in fewer than three 32 MiB chunks: {sizes:?}");
+    let overhead = beebeeb_core::chunk_stream::CHUNK_OVERHEAD;
+    for size in &sizes {
+        assert!(
+            *size <= 32 * MIB + overhead,
+            "a chunk of {size} bytes exceeds 32 MiB of plaintext plus its {overhead}-byte frame"
+        );
+    }
+}

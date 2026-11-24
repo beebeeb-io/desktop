@@ -6,7 +6,7 @@
 //! `GetComputerNameW`, which answers the upper-case NetBIOS name. The old mirror named `Backups/<device>` from this
 //! source through `known_folder::sanitize_device_segment`, and core adopts a manifest-less folder only under the
 //! exact name (`DeviceFolderChoice::AdoptLegacy`): a name from another source would start a second device folder
-//! next to `Backups/GLegion` (lead finding, 2026-11-06).
+//! next to `Backups/TestPC` (lead finding, 2026-11-06).
 
 use beebeeb_core::backup::DeviceSelf;
 use beebeeb_types::backup::Platform;
@@ -41,7 +41,7 @@ pub fn machine_id() -> Option<String> {
 }
 
 /// A machine-id file's id: its first line, trimmed; `None` when it is missing, unreadable or empty.
-#[cfg_attr(not(any(any(test, feature = "test-support"), target_os = "linux")), allow(dead_code))]
+#[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
 fn machine_id_from_file(path: &std::path::Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let id = text.lines().next()?.trim();
@@ -85,7 +85,7 @@ fn backup_device_name() -> Option<String> {
 /// folder is chosen and no pass runs, as the old mirror made nothing for a lossy name).
 ///
 /// The test build is another device on the same machine: its id comes from the machine id under the identity's
-/// salt and its name carries the identity's suffix (`GLegion (test)`), so it never finds the real app's device
+/// salt and its name carries the identity's suffix (`TestPC (test)`), so it never finds the real app's device
 /// folder by id and never adopts a folder the old mirror wrote under the bare name ([`may_adopt_legacy_folder`]).
 pub fn device_self(identity: &crate::identity::EngineIdentity) -> Option<DeviceSelf> {
     device_self_from(identity, backup_device_name()?, &machine_id()?)
@@ -97,7 +97,7 @@ pub fn device_name_for(identity: &crate::identity::EngineIdentity) -> Option<Str
     Some(named(identity, backup_device_name()?))
 }
 
-/// `name` with the identity's suffix (`GLegion (test)`).
+/// `name` with the identity's suffix (`TestPC (test)`).
 fn named(identity: &crate::identity::EngineIdentity, name: String) -> String {
     format!("{name}{}", identity.backup_device_name_suffix())
 }
@@ -154,23 +154,23 @@ mod tests {
         }
     }
 
-    /// The old mirror's `Backups/GLegion` is adopted, never doubled, when the device's name comes from today's
-    /// source. The upper-case NetBIOS name (`GetComputerNameW`) would start `GLEGION (…)` next to it: the reason the
+    /// The old mirror's `Backups/TestPC` is adopted, never doubled, when the device's name comes from today's
+    /// source. The upper-case NetBIOS name (`GetComputerNameW`) would start `TESTPC (…)` next to it: the reason the
     /// source is fixed here.
     #[test]
     fn legacy_mirror_folder_is_adopted_with_todays_name_source() {
-        let folder = legacy_folder("GLegion");
+        let folder = legacy_folder("TestPC");
         let windows = |name: &str| DeviceSelf {
             device_id: beebeeb_core::backup::device_id_from_machine_id("4c4c4544-0042-3510-8052-b4c04f4e3732"),
             name: name.to_string(),
             platform: Platform::Windows,
         };
         assert_eq!(
-            find_device_folder(&windows("GLegion"), std::slice::from_ref(&folder)),
+            find_device_folder(&windows("TestPC"), std::slice::from_ref(&folder)),
             DeviceFolderChoice::AdoptLegacy(folder.folder_id)
         );
-        match find_device_folder(&windows("GLEGION"), std::slice::from_ref(&folder)) {
-            DeviceFolderChoice::Create { name } => assert!(name.starts_with("GLEGION ("), "{name}"),
+        match find_device_folder(&windows("TESTPC"), std::slice::from_ref(&folder)) {
+            DeviceFolderChoice::Create { name } => assert!(name.starts_with("TESTPC ("), "{name}"),
             other => panic!("the NetBIOS name is expected to double the folder, got {other:?}"),
         }
 
@@ -193,12 +193,12 @@ mod tests {
     /// name is the computer's.
     #[test]
     fn the_real_apps_device_is_unchanged() {
-        let me = device_self_from(&crate::identity::REAL, "GLegion".to_string(), "4c4c4544-0042-3510").unwrap();
+        let me = device_self_from(&crate::identity::REAL, "TestPC".to_string(), "4c4c4544-0042-3510").unwrap();
         assert_eq!(
             me.device_id,
             beebeeb_core::backup::device_id_from_machine_id("4c4c4544-0042-3510")
         );
-        assert_eq!(me.name, "GLegion");
+        assert_eq!(me.name, "TestPC");
         assert!(may_adopt_legacy_folder(&crate::identity::REAL));
     }
 
@@ -206,7 +206,7 @@ mod tests {
     /// real device's folder (found by its manifest) nor the old mirror's (found by its bare name) is its own.
     #[test]
     fn the_test_build_is_another_device_and_takes_no_folder_of_the_real_one() {
-        let (machine, name) = ("4c4c4544-0042-3510", "GLegion");
+        let (machine, name) = ("4c4c4544-0042-3510", "TestPC");
         let real = device_self_from(&crate::identity::REAL, name.to_string(), machine).unwrap();
         let test = device_self_from(&crate::identity::TEST, name.to_string(), machine).unwrap();
         assert_ne!(test.device_id, real.device_id);
@@ -214,7 +214,7 @@ mod tests {
             test.device_id,
             beebeeb_core::backup::device_id_from_machine_id("io.beebeeb.app.test:4c4c4544-0042-3510")
         );
-        assert_eq!(test.name, "GLegion (test)");
+        assert_eq!(test.name, "TestPC (test)");
         assert!(!may_adopt_legacy_folder(&crate::identity::TEST));
 
         // The old mirror's folder under the bare name: the real app adopts it, the test build makes its own.
@@ -228,7 +228,7 @@ mod tests {
             DeviceFolderChoice::AdoptLegacy(mirror.folder_id)
         );
         match find_device_folder(&on_windows(&test), std::slice::from_ref(&mirror)) {
-            DeviceFolderChoice::Create { name } => assert!(name.starts_with("GLegion (test)"), "{name}"),
+            DeviceFolderChoice::Create { name } => assert!(name.starts_with("TestPC (test)"), "{name}"),
             other => panic!("the test build must make its own folder, got {other:?}"),
         }
     }
@@ -250,8 +250,8 @@ mod tests {
             assert_eq!(permitted_choice(identity, create()), Ok(create()));
         }
         // And core does answer "adopt" for such a folder, so the rule above is what stops it.
-        let test = device_self_from(&crate::identity::TEST, "GLegion".to_string(), "m").unwrap();
-        let named_like_the_test_build = legacy_folder("GLegion (test)");
+        let test = device_self_from(&crate::identity::TEST, "TestPC".to_string(), "m").unwrap();
+        let named_like_the_test_build = legacy_folder("TestPC (test)");
         let on_windows = DeviceSelf {
             platform: Platform::Windows,
             ..test
@@ -274,7 +274,7 @@ mod tests {
             platform: Platform::Windows,
         };
         for name in [
-            "GLegion",
+            "TestPC",
             "DESKTOP-4F2K9QZ",
             "laptop-of-alex",
             "PC1",

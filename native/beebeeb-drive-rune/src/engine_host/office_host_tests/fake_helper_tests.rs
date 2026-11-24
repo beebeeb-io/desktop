@@ -20,17 +20,17 @@ use crate::engine_host::office_host::{
     DocKind, Event, HELPER_EXE, Helper, Link, OfficeHost, OfficeState, Registry, Starter, Timeouts, Wake, open_with,
 };
 
-/// The tests' timers: 300 ms each. The budgets are longer than [`WITHIN`], so that only the tests that shorten them
+/// The tests' timers: 1 s each. The budgets are longer than [`WITHIN`], so that only the tests that shorten them
 /// see one.
 pub(super) const TEST_TIMEOUTS: Timeouts = Timeouts {
-    open: Duration::from_millis(300),
-    request: Duration::from_millis(300),
-    split: Duration::from_secs(5),
-    outline: Duration::from_secs(5),
+    open: Duration::from_secs(1),
+    request: Duration::from_secs(1),
+    split: Duration::from_secs(60),
+    outline: Duration::from_secs(60),
 };
 
 /// How long a test waits for what must happen (generous, so a loaded machine does not flake).
-pub(super) const WITHIN: Duration = Duration::from_secs(2);
+pub(super) const WITHIN: Duration = Duration::from_secs(20);
 
 /// US Letter in points.
 pub(super) const LETTER: PageSize = PageSize {
@@ -288,6 +288,7 @@ pub(super) struct Fake {
     start_delay: Duration,
     name: String,
     leaking: bool,
+    burst: u32,
     lingering: bool,
     /// The n-th section made (1 = the document's) waits for this gate before it is handed out.
     section_gate: Option<(usize, Gate)>,
@@ -307,6 +308,7 @@ impl Fake {
             start_delay: Duration::ZERO,
             name: HELPER_EXE.to_owned(),
             leaking: false,
+            burst: 0,
             lingering: false,
             section_gate: None,
             section_panic: None,
@@ -337,6 +339,13 @@ impl Fake {
     /// Each helper holds one more handle after every answer it writes (it keeps what it was handed).
     pub(super) fn leaking_handles(mut self) -> Fake {
         self.leaking = true;
+        self
+    }
+
+    /// The helper takes `n` handles in one go with its first answer (so a count read only at that answer already holds
+    /// them), then keeps none more.
+    pub(super) fn bursting_handles(mut self, n: u32) -> Fake {
+        self.burst = n;
         self
     }
 
@@ -428,7 +437,7 @@ impl Starter for Fake {
     }
 
     fn start(&mut self) -> Result<Link<FakeHelper>, SandboxError> {
-        if let Some(error) = self.start_error.clone() {
+        if let Some(error) = self.start_error {
             return Err(error);
         }
         if !self.start_delay.is_zero() {
@@ -448,6 +457,7 @@ impl Starter for Fake {
             log: self.log.clone(),
             handles: handles.clone(),
             leaking: self.leaking,
+            burst: self.burst,
         };
         let script = self.script.clone();
         thread::spawn(move || {
@@ -543,6 +553,7 @@ pub(super) struct FakeLink {
     log: Arc<Log>,
     handles: Arc<AtomicU32>,
     leaking: bool,
+    burst: u32,
 }
 
 impl FakeLink {
@@ -561,6 +572,9 @@ impl FakeLink {
     pub(super) fn answer(&mut self, id: u32, message: Message) {
         if self.leaking {
             self.handles.fetch_add(1, SeqCst);
+        }
+        if self.burst > 0 {
+            self.handles.fetch_add(std::mem::take(&mut self.burst), SeqCst);
         }
         if let Ok(payload) = message.encode() {
             let _ = frame::write_frame(&mut self.output, message.kind(), id, &payload);
@@ -597,7 +611,7 @@ struct PipeState {
 pub(super) struct Pipe {
     state: Arc<(Mutex<PipeState>, Condvar)>,
     /// When set, each write is recorded as (kind, id): `write_frame` writes one whole frame at once.
-    frames: Option<Arc<Mutex<Vec<(u16, u32)>>>>,
+    frames: Option<Frames>,
 }
 
 impl Pipe {
@@ -672,3 +686,6 @@ impl Write for Pipe {
         Ok(())
     }
 }
+
+/// The frames a fake helper was sent.
+type Frames = Arc<Mutex<Vec<(u16, u32)>>>;

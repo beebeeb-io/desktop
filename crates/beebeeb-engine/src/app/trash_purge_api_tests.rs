@@ -5,6 +5,9 @@ use super::*;
 use crate::test_api::{ConfirmTokens, FakeApi, OpaqueAccount, Reply, Request};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// The fake, the calls it saw, and a counter.
+type ServerRig = (FakeApi, Arc<Mutex<Vec<String>>>, Arc<Mutex<usize>>);
+
 const PASSWORD: &str = "correct horse battery staple";
 const SESSION: &str = "session-of-the-test-account";
 const ONE: &str = "00000000-0000-4000-8000-000000000011";
@@ -19,7 +22,7 @@ fn account() -> Arc<OpaqueAccount> {
 
 /// The fake server: the two step-up legs and the permanent delete, which it refuses without a token it minted.
 /// `purged` is what it deleted for good, `minted` how many tokens it handed out.
-fn server() -> (FakeApi, Arc<Mutex<Vec<String>>>, Arc<Mutex<usize>>) {
+fn server() -> ServerRig {
     let account = account();
     let tokens = Arc::new(ConfirmTokens::default());
     let purged = Arc::new(Mutex::new(Vec::new()));
@@ -109,7 +112,7 @@ fn an_id_that_is_not_a_file_id_never_reaches_the_network() {
     assert!(api.requests().is_empty());
 }
 
-/// Review of desktop#424: the DELETE is sent only after the password proof, so a connection that drops AFTER it left
+/// The DELETE is sent only after the password proof, so a connection that drops AFTER it left
 /// says nothing about whether the item is gone. It is "not confirmed", never "offline" (which promises that nothing
 /// was sent) and never "refused".
 #[test]
@@ -139,7 +142,7 @@ fn a_connection_that_drops_after_the_delete_left_is_not_confirmed() {
     );
 }
 
-/// Review of desktop#424, delta: a gateway error (502, 503, 504) after the DELETE left is as unknown as a dropped
+/// A gateway error (502, 503, 504) after the DELETE left is as unknown as a dropped
 /// connection: the proxy may have passed the delete on.
 #[test]
 fn a_gateway_error_after_the_delete_left_is_not_confirmed() {
@@ -185,7 +188,7 @@ fn screen_locked_engine(
         api_base: api.base.clone(),
     };
     let engine = crate::app::Engine::open(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         config,
         host,
         crate::signin::memory_store::MemoryCredentials::default(),
@@ -203,7 +206,7 @@ fn screen_locked_engine(
     (engine, api, session)
 }
 
-/// Review of desktop#424 (engine P2-1, crypto P2-2): a locked screen refuses a permanent delete before anything is
+/// A locked screen refuses a permanent delete before anything is
 /// sent, also for a turn read while it was locked.
 #[test]
 fn a_locked_screen_deletes_nothing_and_sends_nothing() {

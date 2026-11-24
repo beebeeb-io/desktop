@@ -178,7 +178,7 @@ Paths are relative to the desktop repo root.
 
 ```bash
 WT=~/code/bb-worktrees/desktop-1887
-LOCK=~/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh
+LOCK=~/Development/Beebeeb/beebeeb.io/scripts/coord/the lock script
 EVID=~/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/1887
 mkdir -p $EVID
 ```
@@ -8388,7 +8388,7 @@ git diff --numstat 184ac962 -- src-tauri/Cargo.toml   # 4, 0: Task 11's tokio te
 
   Every number goes into the task file's Notes.
 
-- [ ] **Step 4: The other platforms (U32's other half).** The lead pushes the branch and opens the pull request. The public CI's `rust-linux` job and the Windows leg of `rust-check` run `cargo test --locked` there. Evidence: each job's log with `sign_out_unchanged_elsewhere_tests::the_unsent_gate_is_macos_only` and its binary's `test result:` line, as checked by `scripts/assert-cargo-test-counts.py`. If CI cannot run, the Linux half runs on the Linux build host (workspace memory: the Legion host) and the Windows half stays open, named.
+- [ ] **Step 4: The other platforms (U32's other half).** The lead pushes the branch and opens the pull request. The public CI's `rust-linux` job and the Windows leg of `rust-check` run `cargo test --locked` there. Evidence: each job's log with `sign_out_unchanged_elsewhere_tests::the_unsent_gate_is_macos_only` and its binary's `test result:` line, as checked by `scripts/assert-cargo-test-counts.py`. If CI cannot run, the Linux half runs on the Linux build host (workspace memory: the Windows test machine host) and the Windows half stays open, named.
 
 - [ ] **Step 5: Commit the docs.**
 

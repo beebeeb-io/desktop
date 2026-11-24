@@ -21,7 +21,7 @@ fn hydrate_file_fails_closed_on_symlink_destination_toctou() {
 
     let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
     let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
-    let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
+    let bridge = Arc::new(EngineBridge::new(&crate::identity::TEST, db.clone(), api));
     seed_bridge_row(
         &bridge,
         TEST_FILE_ID,
@@ -65,7 +65,7 @@ fn hydrate_file_fails_closed_on_symlink_destination_toctou() {
     server.stop_and_count();
 }
 
-// ── Task 1698 part 2: trash semantics (ruling: full sync) ────────────────
+// ── trash semantics (full sync) ────────────────
 
 #[test]
 fn test_1698_hydrate_final_status_keeps_the_trashing_marker() {
@@ -88,7 +88,7 @@ fn test_1698_hydrate_final_status_keeps_the_trashing_marker() {
 fn test_1698_queue_finder_delete_parks_trashing_immediately() {
     // The Finder-side trash: `queue_finder_delete` parks the row
     // `Trashing` AFTER enqueueing the op, so the change feed immediately
-    // presents the item under the trash container (ruling step 2), while
+    // presents the item under the trash container (trash step 2), while
     // a failed enqueue leaves the row untouched.
     let dir = tempfile::tempdir().unwrap();
     let bridge = test_bridge(&dir.path().join("state.db"));
@@ -116,7 +116,7 @@ fn test_1698_queue_finder_delete_parks_trashing_immediately() {
 
 #[test]
 fn test_1698_queue_finder_delete_unknown_item_is_an_idempotent_success() {
-    // Ruling: "unknown items report success" — the item may have been
+    // "unknown items report success" — the item may have been
     // deleted remotely already. No op is queued, no row is touched.
     let dir = tempfile::tempdir().unwrap();
     let bridge = test_bridge(&dir.path().join("state.db"));
@@ -135,7 +135,7 @@ fn test_1698_queue_finder_delete_unknown_item_is_an_idempotent_success() {
 
 #[test]
 fn test_1698_remote_file_trash_echo_marks_subtree_trashing_not_deleted() {
-    // Ruling step 3: a REMOTE trash (another device trashed the file) is
+    // Trash step 3: a REMOTE trash (another device trashed the file) is
     // the server trash — the mirror must flip the subtree to `Trashing`
     // (trash view), NOT delete the rows.
     let dir = tempfile::tempdir().unwrap();
@@ -210,7 +210,7 @@ fn test_1698_file_delete_echo_removes_trashing_rows_permanently() {
 
 #[test]
 fn test_1698_file_restore_echo_un_trashes_the_row() {
-    // Un-trashing (ruling: reparent back out of the trash container → the
+    // Un-trashing (reparent back out of the trash container → the
     // server's existing restore path). A Trashing row flips back to
     // CloudOnly (placeholder re-mints; content re-downloads on open).
     let dir = tempfile::tempdir().unwrap();
@@ -239,7 +239,7 @@ fn test_1698_file_restore_echo_un_trashes_the_row() {
 
 #[test]
 fn test_1698_review_hydrate_keeps_a_trashed_row_trashed_after_a_successful_open() {
-    // PR #100 review (Codex P1, engine_bridge.rs ~2500): the pre-hydrate
+    // the pre-hydrate
     // status must be the row's status BEFORE the flip to `Downloading`.
     // The trash-view scenario — the user opens a file from the macOS
     // Trash — re-read the DB AFTER `hydrate_file_with_progress` had

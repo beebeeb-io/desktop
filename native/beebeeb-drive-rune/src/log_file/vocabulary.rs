@@ -214,7 +214,7 @@ fn is_number(word: &str) -> bool {
         && (unit.is_empty() || UNITS.contains(&unit))
 }
 
-/// `0.9.0`: exactly three parts of 1 to 3 digits. Four parts (`10.0.5.161`) are an address, which says where a person
+/// `0.9.0`: exactly three parts of 1 to 3 digits. Four parts (`192.0.2.161`) are an address, which says where a person
 /// is, and longer parts can carry a long digit run: both masked.
 fn is_version(word: &str) -> bool {
     let parts: Vec<&str> = word.split('.').collect();
@@ -328,10 +328,11 @@ pub(crate) fn allow_listed(text: &str) -> String {
         .collect();
     for (pass, i) in order.into_iter().enumerate() {
         let next_to = if pass < pieces.len() - 1 { i - 1 } else { i + 1 };
-        if unmasked_number(&pieces[i].1) && masked_word(&pieces[next_to].1) {
-            if let Piece::Word { known, .. } = &mut pieces[i].1 {
-                *known = false;
-            }
+        if unmasked_number(&pieces[i].1)
+            && masked_word(&pieces[next_to].1)
+            && let Piece::Word { known, .. } = &mut pieces[i].1
+        {
+            *known = false;
         }
     }
 

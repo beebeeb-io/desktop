@@ -22,7 +22,8 @@ pub enum ConfigError {
     },
     ParseFile {
         path: PathBuf,
-        source: toml::de::Error,
+        /// Boxed: the parse error is large, and every config call returns this type.
+        source: Box<toml::de::Error>,
     },
     Serialize(toml::ser::Error),
     WriteFile {
@@ -91,7 +92,7 @@ impl std::error::Error for ConfigError {
             | Self::Rename { source, .. }
             | Self::Flush { source, .. }
             | Self::CreateDirectory { source, .. } => Some(source),
-            Self::ParseFile { source, .. } => Some(source),
+            Self::ParseFile { source, .. } => Some(source.as_ref()),
             Self::Serialize(source) => Some(source),
             Self::ConfigDirectoryUnknown
             | Self::MissingParentDirectory

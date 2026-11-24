@@ -44,17 +44,9 @@ pub static FIND: Icon = icon24!(
     r#"<path d="M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.35-4.35"></path>"#
 );
 pub static CHEV_DOWN: Icon = icon24!("chev-down", r#"<path d="M7 10l5 5 5-5"></path>"#);
-pub static FOLDER: Icon = icon24!(
-    "folder",
-    r#"<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>"#
-);
 pub static FILE_TEXT: Icon = icon24!(
     "file-text",
     r#"<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M16 13H8M16 17H8M10 9H8"></path>"#
-);
-pub static FILE_SHEET: Icon = icon24!(
-    "file-sheet",
-    r#"<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M8 13h2v2H8zM14 13h2v2h-2zM8 17h2v2H8zM14 17h2v2h-2z"></path>"#
 );
 pub static FILE_ARCHIVE: Icon = icon24!(
     "file-archive",

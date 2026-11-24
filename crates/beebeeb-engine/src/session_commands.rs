@@ -13,13 +13,22 @@ pub struct SessionCommands {
     gate: CallbackGate<()>,
     next: AtomicU64,
     pending: AtomicBool,
+    /// Woken by [`Self::close`]: a command in flight learns of the lock from this, not from a timer.
+    locked: Arc<tokio::sync::Notify>,
 }
+impl Default for SessionCommands {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionCommands {
     pub fn new() -> Self {
         Self {
             gate: CallbackGate::new(),
             next: AtomicU64::new(1),
             pending: AtomicBool::new(false),
+            locked: Arc::new(tokio::sync::Notify::new()),
         }
     }
     // Call only under SESSION_TRANSITION, after installing the session.
@@ -57,7 +66,9 @@ impl SessionCommands {
     pub fn close(&self) -> Option<crate::callback_gate::Revoked<()>> {
         self.pending.store(true, Ordering::SeqCst);
         self.next.fetch_add(1, Ordering::SeqCst);
-        self.gate.revoke()
+        let revoked = self.gate.revoke();
+        self.locked.notify_waiters();
+        revoked
     }
     pub fn drain(&self, revoked: Option<crate::callback_gate::Revoked<()>>, timeout: Duration) -> Result<(), String> {
         if let Some(revoked) = revoked {
@@ -71,7 +82,7 @@ impl SessionCommands {
     }
     pub async fn run<T>(&self, work: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
         let lease = self.lease()?;
-        Self::within(lease, work).await
+        Self::within(lease, self.locked.clone(), work).await
     }
     /// Work that outlives the command that started it (a task of its own) is bound to the session here, when it is
     /// created: the lease is taken before the work is first polled, so a lock cancels it and waits for it to drop.
@@ -85,7 +96,7 @@ impl SessionCommands {
         W: std::future::Future<Output = Result<T, String>>,
     {
         let lease = self.lease()?;
-        Ok(Self::within(lease, work))
+        Ok(Self::within(lease, self.locked.clone(), work))
     }
     fn lease(&self) -> Result<CallbackLease<()>, String> {
         self.gate
@@ -94,6 +105,7 @@ impl SessionCommands {
     }
     async fn within<T>(
         lease: CallbackLease<()>,
+        locked: Arc<tokio::sync::Notify>,
         work: impl std::future::Future<Output = Result<T, String>>,
     ) -> Result<T, String> {
         let result = {
@@ -101,7 +113,12 @@ impl SessionCommands {
             tokio::select! {
                 biased;
                 _ = async {
-                    while !lease.is_revoked() { tokio::time::sleep(Duration::from_millis(5)).await; }
+                    // Registered before the check: a lock between the two still wakes this (`notify_waiters`).
+                    loop {
+                        let woken = locked.notified();
+                        if lease.is_revoked() { break; }
+                        woken.await;
+                    }
                 } => Err("Vault locked while the command was running".into()),
                 result = &mut work => result,
             }
@@ -116,6 +133,22 @@ impl SessionCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// GL-0006: the lease learns of a lock from a notification, not from a 5 ms poll. On a paused clock a poll would
+    /// let virtual time run on while it waits; a notification leaves the clock where it was.
+    #[tokio::test(start_paused = true)]
+    async fn a_lock_wakes_a_waiting_command_without_a_poll() {
+        let commands = Arc::new(SessionCommands::new());
+        commands.open().unwrap();
+        let started = tokio::time::Instant::now();
+        let waiting = {
+            let commands = commands.clone();
+            tokio::spawn(async move { commands.run(std::future::pending::<Result<(), String>>()).await })
+        };
+        tokio::task::yield_now().await;
+        let _revoked = commands.close();
+        assert!(waiting.await.unwrap().is_err());
+        assert_eq!(started.elapsed(), Duration::ZERO, "the wait polled on a timer");
+    }
     #[tokio::test]
     async fn held_ipc_response_cancelled_and_credentials_dropped_before_lock_success() {
         let commands = Arc::new(SessionCommands::new());

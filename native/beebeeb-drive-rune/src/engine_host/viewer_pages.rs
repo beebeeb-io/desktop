@@ -1,13 +1,14 @@
 //! The window's side of an open PDF, and the worker's ends of its channels (moved out of `viewer.rs`, which has no
 //! lines to spare). Child of `viewer.rs`.
 //!
-//! Pages are asked of the worker that holds the document and the last few that came back are kept. A find is asked
+//! Pages are asked of the worker that holds the document (it asks the confined helper: `viewer_pdf.rs`) and the last few that came back are kept. A find is asked
 //! down the same channel and answered on its own, under a serial: an answer for any other serial than the one the
 //! window waits for (an earlier search, or one asked of a document that has since closed) is dropped here.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use super::PAGES_KEPT;
@@ -36,6 +37,8 @@ pub(super) struct Pages {
     found: mpsc::Receiver<FoundAnswer>,
     /// The serial of the last find asked.
     serial: Cell<u64>,
+    /// The helper that draws the pages stopped (the worker said so, once): no page comes any more.
+    stopped: Arc<AtomicBool>,
 }
 
 impl Pages {
@@ -51,14 +54,21 @@ impl Pages {
             doc: RefCell::new(None),
             found,
             serial: Cell::new(0),
+            stopped: Arc::default(),
         };
         let ends = PdfEnds {
             asks,
             answers: page_answers,
             found: found_answers,
+            stopped: pages.stopped.clone(),
             size,
         };
         (pages, ends)
+    }
+
+    /// The helper stopped since the last call (said once): the view shows Failed, with Try again.
+    pub(super) fn take_stopped(&self) -> bool {
+        self.stopped.swap(false, Ordering::SeqCst)
     }
 
     /// Take what the worker rendered since the last call. `true`: something came.
@@ -134,5 +144,6 @@ pub(super) struct PdfEnds {
     pub(super) asks: mpsc::Receiver<Ask>,
     pub(super) answers: mpsc::Sender<PageAnswer>,
     pub(super) found: mpsc::Sender<FoundAnswer>,
+    pub(super) stopped: Arc<AtomicBool>,
     pub(super) size: String,
 }

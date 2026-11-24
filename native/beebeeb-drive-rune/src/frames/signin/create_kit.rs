@@ -14,7 +14,8 @@ use rune::{
 
 use super::Ui;
 use crate::State;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::scale::{self, space};
+use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::au::{self, Keys, Tone, type_au};
 use crate::ui::au_entry::{self, mono_width};
 use crate::ui::kit;
@@ -37,7 +38,6 @@ pub static DOWNLOAD: Icon = Icon {
 };
 
 /// `.kit-btn-sm`'s label: 12px/500 on its own line.
-const BUTTON_SM: TextStyle = TextStyle::new(12.0, 500.0).lh(17.1429).tracking(-0.06);
 /// A checkbox's sentence: 12px on a relaxed line.
 const CHECK_LABEL: TextStyle = TextStyle::new(12.0, 400.0).lh(19.5);
 /// `.kit-chip`: 12px/600.
@@ -64,7 +64,7 @@ pub fn changed(f: fn(&mut Ui)) -> impl Fn(&mut State, &mut Tx) + 'static {
 
 /// The progress line: six bars, `step` of them dark, "2 of 6" and the step's name.
 pub fn steps_line(step: usize, name: &str, t: &Theme) -> El {
-    let mut bars = row().grow(1.0).gap(4.0).center_y();
+    let mut bars = row().grow(1.0).gap(space::S4).center_y();
     for i in 0..6 {
         bars = bars.child(
             el().key(format!("step-{i}"))
@@ -80,7 +80,7 @@ pub fn steps_line(step: usize, name: &str, t: &Theme) -> El {
         .label(format!("Step {step} of 6: {name}"))
         .w_full()
         .h(14.0)
-        .gap(10.0)
+        .gap(space::S10)
         .center_y()
         .child(bars)
         .child(kit::label("steps-count", format!("{step} of 6"), CAPTION_MONO, t.text_tertiary).a11y_hidden())
@@ -95,7 +95,7 @@ pub fn checkbox(k: &mut Keys, on: bool, sentence: &str, wraps: bool, t: &Theme) 
         .key(key.clone())
         .size(16.0, 16.0)
         .mt(2.0)
-        .radius(4.0)
+        .radius(tokens::radius::SM)
         .center()
         .border(1.0, if on { t.accent_deep } else { t.card_border })
         .fill(if on { t.accent } else { t.card });
@@ -109,11 +109,11 @@ pub fn checkbox(k: &mut Keys, on: bool, sentence: &str, wraps: bool, t: &Theme) 
         .label(sentence)
         .checked(on)
         .w_full()
-        .gap(8.0)
+        .gap(space::S8)
         .items_start()
         .focusable(true)
         .focus_ring(2.0, 2.0, t.accent_deep)
-        .radius(4.0)
+        .radius(tokens::radius::SM)
         .cursor(rune::Cursor::Pointer)
         .child(tick)
         .child(if wraps {
@@ -131,8 +131,8 @@ pub fn page_item(k: &mut Keys, icon: &'static Icon, title: &str, sub: &str, chev
         .key(key.clone())
         .w_full()
         .h(40.0)
-        .px(10.0)
-        .gap(8.0)
+        .px(space::S10)
+        .gap(space::S8)
         .center_y()
         .child(
             el().w(30.0)
@@ -163,13 +163,13 @@ pub fn page_item(k: &mut Keys, icon: &'static Icon, title: &str, sub: &str, chev
 /// A suggestion (`.kit-chip`): the word as a secure text node, because which words are
 /// offered follows what was typed. Its name says its place, not the word.
 pub fn chip(i: usize, word: &str, t: &Theme) -> El {
-    let (_, _, wash) = au::tone(Tone::Neutral, t);
+    let (wash, _) = crate::ui::pill::colors(crate::ui::pill::Tone::Neutral, t);
     row()
         .key(format!("chip-{i}"))
         .role("button")
         .label(format!("Use suggestion {}", i + 1))
         .h(26.0)
-        .px(10.0)
+        .px(space::S10)
         .center()
         .radius(13.0)
         .fill(wash)
@@ -194,7 +194,7 @@ pub fn meter(key: &str, lit: u8, words: &str, t: &Theme) -> El {
         2 => t.text_tertiary,
         _ => t.green,
     };
-    let mut bars = row().grow(1.0).gap(4.0).center_y();
+    let mut bars = row().grow(1.0).gap(space::S4).center_y();
     for i in 0..4 {
         bars = bars.child(
             el().key(format!("{key}-strength-{i}"))
@@ -210,7 +210,7 @@ pub fn meter(key: &str, lit: u8, words: &str, t: &Theme) -> El {
         .label(format!("Password strength: {words}"))
         .h(17.0)
         .mx(2.0)
-        .gap(10.0)
+        .gap(space::S10)
         .center_y()
         .child(bars)
         .child(kit::label(format!("{key}-strength"), words, type_::STATUS, t.text_tertiary).a11y_hidden())
@@ -218,26 +218,16 @@ pub fn meter(key: &str, lit: u8, words: &str, t: &Theme) -> El {
 
 /// A small outline button that is as wide as its words (`.kit-btn-sm`): Copy, Save as file, Print.
 pub fn small_button(k: &mut Keys, label: &str, icon: &'static Icon, t: &Theme) -> El {
-    let key = k.next("btn");
-    row()
-        .key(key.clone())
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(6.0)
-        .fill(t.paper)
-        .border(1.0, t.card_border)
-        .border_layout()
-        .hover(t.paper2)
-        .press(t.paper3)
-        .focusable(true)
-        .focus_ring(2.0, 2.0, t.accent_deep)
-        .cursor(rune::Cursor::Pointer)
-        .child(kit::glyph(format!("{key}-icon"), icon, 14.0, t.text))
-        .child(kit::label(format!("{key}-label"), label, BUTTON_SM, t.text))
+    use crate::ui::button::{ButtonState, Size, Variant, button, keys};
+    button(
+        keys(&k.next("btn")),
+        label,
+        Some(icon),
+        Variant::Secondary,
+        Size::Sm,
+        ButtonState::Enabled,
+        t,
+    )
 }
 
 /// The "Next" card of DW-A44: the product's own step, named. Keys `next-0`, `-tile`, `-icon`,
@@ -247,10 +237,10 @@ pub fn next_card(icon: &'static Icon, step: &str, t: &Theme) -> El {
         .key("next-0")
         .w_full()
         .h(66.0)
-        .px(16.0)
-        .gap(10.0)
+        .px(space::S16)
+        .gap(space::S10)
         .center_y()
-        .radius(10.0)
+        .radius(scale::radius::PANEL)
         .fill(t.card)
         .box_shadow(kit::ring(kit::HAIR, t.separator))
         .child(
@@ -371,10 +361,10 @@ pub fn field(
         .key(key.clone())
         .w_full()
         .h(28.0)
-        .px(8.0)
-        .gap(6.0)
+        .px(space::S8)
+        .gap(space::S6)
         .center_y()
-        .radius(6.0)
+        .radius(tokens::radius::MD)
         .border_layout();
     well = if spec.pictured {
         well.fill(t.card)
@@ -420,11 +410,11 @@ pub fn field(
         well
     } else {
         el().w_full()
-            .radius(6.0)
+            .radius(tokens::radius::MD)
             .focus_within_ring(3.0, 0.0, t.accent.alpha(0.30))
             .child(well)
     };
-    let mut wrap = col().key(format!("{key}-wrap")).w_full().gap(6.0).child(
+    let mut wrap = col().key(format!("{key}-wrap")).w_full().gap(space::S6).child(
         kit::label(
             format!("{key}-label"),
             spec.label,

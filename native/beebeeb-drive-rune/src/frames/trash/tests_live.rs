@@ -25,6 +25,11 @@ struct Held {
     forgot: usize,
     /// How often the window told the source the section opened.
     opened: usize,
+    /// How often a finished check asked the source to read again, and what that read brings: these rows go in at the
+    /// top, and these ids leave.
+    refreshed: usize,
+    arrives: Vec<Row>,
+    leaves: Vec<String>,
 }
 
 struct Stub(Rc<RefCell<Held>>);
@@ -72,6 +77,14 @@ impl TrashSource for Stub {
     fn opened(&mut self) {
         self.0.borrow_mut().opened += 1;
     }
+    fn refresh(&mut self) {
+        let mut held = self.0.borrow_mut();
+        held.refreshed += 1;
+        let arrived = std::mem::take(&mut held.arrives);
+        held.rows.splice(0..0, arrived);
+        let gone = std::mem::take(&mut held.leaves);
+        held.rows.retain(|row| !gone.contains(&row.id));
+    }
     fn actions_available(&self) -> bool {
         false
     }
@@ -86,6 +99,8 @@ fn row(id: &str, name: &str) -> Row {
         size: "1 KB".into(),
         extra: Extra::Words(String::new()),
         pc: None,
+        bytes: None,
+        at: None,
     }
 }
 
@@ -121,27 +136,56 @@ fn three() -> Vec<Row> {
 
 #[test]
 fn every_state_of_a_list_that_is_not_here_is_drawn_and_none_says_trash_is_empty() {
-    for (loaded, title) in [
-        (Loaded::Loading, "Loading Trash\u{2026}"),
-        (Loaded::Offline, "Can\u{2019}t reach Beebeeb"),
-        (Loaded::Failed, "Couldn\u{2019}t load Trash"),
-        (Loaded::SessionEnded, "Your session ended"),
-        (Loaded::SignedOut, "Signed out"),
+    for (loaded, key, title) in [
+        (Loaded::Loading, "loading-words", "Loading Trash\u{2026} Getting the list from Beebeeb."),
+        (Loaded::Offline, "trash-failed-title", "Can\u{2019}t reach Beebeeb"),
+        (Loaded::Failed, "trash-failed-title", "Couldn\u{2019}t load Trash"),
+        (Loaded::SessionEnded, "trash-failed-title", "Your session ended"),
+        (Loaded::SignedOut, "trash-failed-title", "Signed out"),
     ] {
         let (rt, _) = window(Held {
             loaded,
             ..Held::default()
         });
-        assert_eq!(info(&rt, "empty-title").text.as_deref(), Some(title), "{loaded:?}");
+        assert_eq!(info(&rt, key).text.as_deref(), Some(title), "{loaded:?}");
+        // Only a failure that trying again can mend offers the button.
+        let retry = matches!(loaded, Loaded::Offline | Loaded::Failed);
+        assert_eq!(rt.find("trash-failed-retry").is_some(), retry, "{loaded:?}");
         assert!(rt.find("btn-empty-trash").is_none(), "{loaded:?}: nothing to empty");
         assert!(rt.find("Trash-badge").is_none(), "{loaded:?}: no count");
     }
     let (rt, _) = window(Held::default());
     assert_eq!(
-        info(&rt, "empty-title").text.as_deref(),
+        info(&rt, "trash-empty-title").text.as_deref(),
         Some("Trash is empty"),
         "a list read as empty"
     );
+}
+
+#[test]
+fn try_again_on_a_failed_trash_reads_again_and_a_failed_refresh_offers_it_too() {
+    let (mut rt, held) = window(Held {
+        loaded: Loaded::Failed,
+        ..Held::default()
+    });
+    let before = held.borrow().opened;
+    click(&mut rt, "trash-failed-retry");
+    assert_eq!(held.borrow().opened, before + 1, "Try again asks the source to read");
+
+    let (mut rt, held) = window(Held {
+        rows: three(),
+        notice: Some(Notice::RefreshFailed),
+        ..Held::default()
+    });
+    assert_eq!(
+        info(&rt, "trash-failed-title").text.as_deref(),
+        Some("Couldn\u{2019}t refresh Trash")
+    );
+    assert!(rt.find("row-0").is_some(), "the list stays under it");
+    let before = held.borrow().opened;
+    click(&mut rt, "trash-failed-retry");
+    assert_eq!(held.borrow().opened, before + 1);
+    assert!(rt.find("trash-failed-retry").is_none(), "the failure goes once it is tried again");
 }
 
 #[test]
@@ -334,4 +378,67 @@ fn a_gate_or_account_change_makes_the_window_drop_every_name() {
         held.borrow().opened > opened_before,
         "the section re-opens after an account change while the gate stays Ready"
     );
+}
+
+/// A finished check reads Trash again: what was deleted on another device shows, what left is gone, with no click; the
+/// selection stays with its item.
+#[test]
+fn a_finished_check_shows_arrivals_and_removals_and_the_selection_stays_with_its_item() {
+    let (mut rt, held) = window(Held {
+        rows: three(),
+        ..Held::default()
+    });
+    click(&mut rt, "row-1");
+    assert_eq!(rt.state.frames.trash.selected_item.as_deref(), Some("b"));
+    {
+        let mut held = held.borrow_mut();
+        held.arrives = vec![row("n1", "New one.pdf"), row("n2", "New two.pdf")];
+        held.leaves = vec!["a".into()];
+    }
+    super::after_a_check(&mut rt.state);
+    poll(&mut rt);
+    let ids: Vec<String> = rt.state.frames.trash.source.items().into_iter().map(|r| r.id).collect();
+    assert_eq!(ids, ["n1", "n2", "b", "c"], "arrivals show, the removed one is gone");
+    assert_eq!(rt.state.frames.trash.selected_item.as_deref(), Some("b"));
+    assert_eq!(
+        rt.state.frames.trash.selected,
+        Some(2),
+        "Bravo's row moved, the selection with it"
+    );
+    assert_eq!(held.borrow().refreshed, 1);
+
+    // The selected item itself leaves on a later check: the selection ends, no other item is chosen.
+    held.borrow_mut().leaves = vec!["b".into()];
+    super::after_a_check(&mut rt.state);
+    poll(&mut rt);
+    assert_eq!(
+        (
+            rt.state.frames.trash.selected,
+            rt.state.frames.trash.selected_item.clone()
+        ),
+        (None, None)
+    );
+}
+
+/// While an item's menu is open the read waits; it runs on the first poll after the menu closed.
+#[test]
+fn a_finished_check_waits_while_the_row_menu_is_open_and_reads_once_it_closed() {
+    use crate::frames::shared::parts::menu::Open;
+    let (mut rt, held) = window(Held {
+        rows: three(),
+        ..Held::default()
+    });
+    click(&mut rt, "row-1");
+    rt.update(|s, _| s.frames.trash.menu = Some(Open::at(10.0, 10.0)));
+    held.borrow_mut().arrives = vec![row("n1", "New one.pdf")];
+    super::after_a_check(&mut rt.state);
+    poll(&mut rt);
+    assert_eq!(held.borrow().refreshed, 0, "nothing is read under an open menu");
+    assert_eq!(rt.state.frames.trash.source.items().len(), 3);
+
+    rt.update(|s, _| s.frames.trash.menu = None);
+    poll(&mut rt);
+    assert_eq!(held.borrow().refreshed, 1, "read once the menu closed");
+    assert_eq!(rt.state.frames.trash.source.items().len(), 4);
+    assert_eq!(rt.state.frames.trash.selected_item.as_deref(), Some("b"));
 }

@@ -5,22 +5,23 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use beebeeb_engine::identity::EngineIdentity;
 use beebeeb_media_protocol::{
-    Codec, ErrorCode, FromHelper, KindHint, MAX_ART, MAX_AUDIO_FRAMES, MAX_CHANNELS, MAX_FRAME_H, MAX_FRAME_W,
+    ErrorCode, FromHelper, KindHint, MAX_ART, MAX_AUDIO_FRAMES, MAX_CHANNELS, MAX_FRAME_H, MAX_FRAME_W,
     MAX_IN_FLIGHT_READS, MAX_RATE, MAX_READ, MAX_SOURCE_SIDE, Opened, Tags, ToHelper, cut_text,
 };
 use beebeeb_office_sandbox::Profile;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    ANSWER_WAIT_MS, AUDIO_PARTS_PER_SECOND, AudioFactory, BATCH_MAX, Clock, Cmd, DEFAULT_FRAME_MS, HELD_FRAMES,
-    LinkFactory, MAX_DURATION_MS, MediaBytes, MediaItem, MediaOpener, NOW_PLAYING_EVERY_MS, NoSound, OPEN_WAIT_MS,
-    PLAYED_AFTER_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK, lock,
+    ANSWER_WAIT_MS, AUDIO_PARTS_PER_SECOND, AudioFactory, BATCH_MAX, Clock, Cmd, DEFAULT_FRAME_MS,
+    FIRST_ANSWER_WAIT_MS, HELD_FRAMES, LinkFactory, MAX_DURATION_MS, MediaBytes, MediaItem, MediaOpener,
+    NOW_PLAYING_EVERY_MS, NoSound, OPEN_WAIT_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK,
+    Waker, lock,
 };
 use crate::media::os_controls::{NowPlaying, OsButton};
+use crate::media::refusal_log::{self, Broke};
 use crate::media::transport::{LinkError, profile_for_file_with, wipe, wipe_answer};
 
 /// Why a worker stopped.
@@ -38,7 +39,15 @@ impl From<Refusal> for Exit {
 }
 
 /// The helper broke a rule (or a read failed): it is killed, and "This file could not be played." is shown.
+#[track_caller]
 fn broke() -> Exit {
+    broke_as(Broke::Check)
+}
+
+/// [`broke`], saying which kind of rule in the log: `gone`, `protocol`, `timeout`, `read` or a `check` of an answer.
+#[track_caller]
+fn broke_as(what: Broke) -> Exit {
+    refusal_log::broke(what, std::panic::Location::caller().line());
     Exit::Refused(Refusal::CouldNotPlay)
 }
 
@@ -76,54 +85,18 @@ struct Held {
     rgba: Zeroizing<Vec<u8>>,
 }
 
-/// What the test build's `media.played` line counts in the first second of playback.
-#[derive(Default)]
-struct Played {
-    /// The time playback started at (the first frame shown or sample played).
-    start: Option<u64>,
-    frames: u32,
-    sum_sq: f64,
-    samples: u64,
-    written: bool,
-}
-
-impl Played {
-    fn begin(&mut self, at: u64) {
-        self.start.get_or_insert(at);
-    }
-
-    fn in_first_second(&self, pts: u64) -> bool {
-        self.start
-            .is_some_and(|start| pts >= start && pts < start.saturating_add(PLAYED_AFTER_MS))
-    }
-
-    fn frame(&mut self, pts: u64) {
-        if self.in_first_second(pts) {
-            self.frames += 1;
-        }
-    }
-
-    fn sound(&mut self, samples: &[f32], pts: u64, rate: u32, channels: u16) {
-        if !self.in_first_second(pts) {
-            return;
-        }
-        let second = u64::from(rate) * u64::from(channels);
-        for sample in samples {
-            if self.samples >= second {
-                break;
-            }
-            self.sum_sq += f64::from(*sample) * f64::from(*sample);
-            self.samples += 1;
-        }
-    }
-
-    fn rms(&self) -> f64 {
-        if self.samples == 0 {
-            return 0.0;
-        }
-        let rms = (self.sum_sq / self.samples as f64).sqrt();
-        (rms * 10_000.0).round() / 10_000.0
-    }
+/// What a view draws of a run: when it changes, the window is woken. The place counts in quarter seconds (the
+/// scrubber moves; the text says seconds).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Drawn {
+    phase: Phase,
+    playing: bool,
+    buffering: bool,
+    quarter: u64,
+    length_ms: u64,
+    no_sound: Option<NoSound>,
+    framed: bool,
+    tagged: bool,
 }
 
 /// What a worker is started with.
@@ -135,6 +108,7 @@ pub(super) struct Start {
     pub(super) links: Arc<dyn LinkFactory>,
     pub(super) audio: Arc<dyn AudioFactory>,
     pub(super) clock: Arc<dyn Clock>,
+    pub(super) waker: Option<Waker>,
     /// Decision 2541's switch, as the player holds it.
     pub(super) system_on: bool,
     pub(super) slots: Arc<Slots>,
@@ -151,6 +125,11 @@ pub(super) struct Worker {
     links: Arc<dyn LinkFactory>,
     audio: Arc<dyn AudioFactory>,
     clock: Arc<dyn Clock>,
+    waker: Option<Waker>,
+    /// What the window was last woken for.
+    drawn: Option<Drawn>,
+    /// A frame was shown since the open.
+    framed: bool,
     system_on: bool,
     /// The profile the current helper was started in: the default one, or (after a restart) the system decoder's.
     profile: Profile,
@@ -165,6 +144,9 @@ pub(super) struct Worker {
     opened: Option<Opened>,
     /// `Opened` is due by this wall-clock time.
     opened_by: Option<u64>,
+    /// The helper sent a frame or PCM: until then its first answer gets [`FIRST_ANSWER_WAIT_MS`], a decoder that
+    /// starts cold (Windows' system decoder on a slow PC) may take longer than the steady [`ANSWER_WAIT_MS`].
+    answered: bool,
     frame_ms: u64,
     /// The sound device's rate and channels; `None`: no sound (no audio track, no device for a video, a track that
     /// does not play here, or a device that went away).
@@ -199,6 +181,7 @@ pub(super) struct Worker {
     now_dirty: bool,
     now_shown_at: Option<u64>,
     played: Played,
+    trace: Trace,
 }
 
 impl Worker {
@@ -213,6 +196,9 @@ impl Worker {
             links: start.links,
             audio: start.audio,
             clock: start.clock,
+            waker: start.waker,
+            drawn: None,
+            framed: false,
             system_on: start.system_on,
             profile: Profile::default(),
             starts: 0,
@@ -223,6 +209,7 @@ impl Worker {
             len: 0,
             opened: None,
             opened_by: None,
+            answered: false,
             frame_ms: DEFAULT_FRAME_MS,
             out: None,
             device_lost: false,
@@ -254,6 +241,7 @@ impl Worker {
             now_dirty: false,
             now_shown_at: None,
             played: Played::default(),
+            trace: Trace::new(),
         }
     }
 
@@ -262,15 +250,29 @@ impl Worker {
             // The helper of the run before is gone before this one starts its own.
             let _ = previous.join();
         }
+        self.trace.mark("joined");
         let exit = match self.play() {
             Ok(()) => Exit::Done,
             Err(exit) => exit,
         };
+        self.write_start();
         self.slots.end();
         self.bytes = None;
         self.release();
-        if let Exit::Refused(refusal) = exit {
-            self.publish(|player| player.failed(refusal));
+        if let Exit::Refused(refusal) = &exit {
+            refusal_log::refused(refusal);
+        }
+        if let Exit::Refused(refusal) = exit
+            && self.publish(|player| player.failed(refusal)).is_some()
+        {
+            self.wake();
+        }
+    }
+
+    /// Wakes the window's loop. Never called with the player held.
+    fn wake(&self) {
+        if let Some(waker) = self.waker.as_ref() {
+            waker();
         }
     }
 
@@ -303,6 +305,7 @@ impl Worker {
         let bytes = self.opener.open(&self.item.file_id)?;
         self.len = bytes.len();
         self.bytes = Some(bytes);
+        self.trace.mark("bytes");
         if self.slots.cancelled() {
             return Err(Exit::Done);
         }
@@ -316,8 +319,14 @@ impl Worker {
     fn start_helper(&mut self) -> Result<(), Exit> {
         let link = self.links.start_in(self.profile)?;
         self.starts += 1;
+        self.trace.mark("helper");
         if !self.slots.put_link(link) {
             return Err(Exit::Done);
+        }
+        // The helper in the system decoder's profile is the item's last one: where Windows' decoders do not start
+        // in it either, it plays the video without that sound instead of asking again (ux-57).
+        if self.profile != Profile::NoCapabilities {
+            self.send(&ToHelper::LastHelper)?;
         }
         self.send(&ToHelper::Open {
             len: self.len,
@@ -336,8 +345,11 @@ impl Worker {
             && self.profile == Profile::NoCapabilities
             && let Some(profile) = profile_for_file_with(self.system_on, Some(codec))
         {
+            refusal_log::started_again(matches!(profile, Profile::SystemDecoder { hevc: true }));
             return self.restart_in(profile);
         }
+        refusal_log::helper_error(code);
+        refusal_log::helper_error_at(self.profile != Profile::NoCapabilities, self.opened.is_some());
         Err(Exit::Refused(refusal_of(code)))
     }
 
@@ -356,6 +368,7 @@ impl Worker {
         self.want_video = None;
         self.want_audio = None;
         self.opened_by = None;
+        self.answered = false;
         self.profile = profile;
         self.start_helper()
     }
@@ -365,6 +378,7 @@ impl Worker {
             return Err(Exit::Done);
         }
         self.take_commands()?;
+        self.trace.ticks += 1;
         let mut batch = self.receive()?.into_iter();
         let handled = self.handle_batch(&mut batch);
         // What was not handled (the rule broken before it, a restart) is zeroed before it is let go.
@@ -416,9 +430,9 @@ impl Worker {
             match got {
                 Ok(msg) => batch.push(msg),
                 Err(LinkError::Timeout) => break,
-                Err(LinkError::Gone | LinkError::Protocol(_)) => {
+                Err(gone @ (LinkError::Gone | LinkError::Protocol(_))) => {
                     batch.iter_mut().for_each(wipe_answer);
-                    return Err(broke());
+                    return Err(broke_as(if gone == LinkError::Gone { Broke::Gone } else { Broke::Protocol }));
                 }
             }
             wait = Duration::ZERO;
@@ -443,12 +457,18 @@ impl Worker {
                 Ok(())
             }
             FromHelper::Opened(opened) => self.on_opened(opened),
-            FromHelper::Frame { pts_ms, w, h, rgba } => self.on_frame(pts_ms, w, h, rgba),
+            FromHelper::Frame { pts_ms, w, h, rgba } => {
+                self.answered = true;
+                self.on_frame(pts_ms, w, h, rgba)
+            }
             FromHelper::Audio {
                 pts_ms,
                 channels,
                 samples,
-            } => self.on_audio(pts_ms, channels, samples),
+            } => {
+                self.answered = true;
+                self.on_audio(pts_ms, channels, samples)
+            }
             FromHelper::Tags(tags) => self.on_tags(tags),
             FromHelper::Ended => {
                 if self.opened.is_none() {
@@ -483,9 +503,12 @@ impl Worker {
         self.frame_ms = opened.video.map_or(DEFAULT_FRAME_MS, |video| frame_ms(video.fps_milli));
         self.opened = Some(opened);
         self.opened_by = None;
+        self.trace.mark("opened");
         // Without a device a video plays its picture on the wall clock (and says so); a recording cannot play.
         if let Some(audio) = opened.audio {
             let sound = self.open_sound(audio.rate)?;
+            self.trace.sound = sound;
+            self.trace.mark("sound");
             if !sound && opened.video.is_none() {
                 return Err(broke());
             }
@@ -612,6 +635,11 @@ impl Worker {
         }
         #[cfg(test)]
         let _ = self.publish(|player| player.record.received.push(pts));
+        self.trace.mark("frame");
+        self.trace.received += 1;
+        if let Some(asked) = self.trace.want_at.take() {
+            self.trace.answer_us += Trace::us(asked);
+        }
         self.held.push_back(Held { pts, w, h, rgba });
         Ok(())
     }
@@ -624,7 +652,7 @@ impl Worker {
         let per_frame = usize::from(channels);
         if channels != want.channels
             || per_frame == 0
-            || samples.len() % per_frame != 0
+            || !samples.len().is_multiple_of(per_frame)
             || samples.len() / per_frame > want.frames as usize
         {
             return Err(broke());
@@ -689,17 +717,19 @@ impl Worker {
     fn answer_reads(&mut self) -> Result<(), Exit> {
         while let Some(read) = self.reads.pop_front() {
             let started = self.clock.now_ms();
+            let reading = Instant::now();
             let got = match self.bytes.as_mut() {
                 Some(bytes) => bytes.read_at(read.offset, read.len, &self.slots.cancel),
                 None => return Err(Exit::Done),
             };
+            self.trace.read_us += Trace::us(reading);
             self.not_counted(self.clock.now_ms().saturating_sub(started));
             if self.slots.cancelled() {
                 return Err(Exit::Done);
             }
             let mut buf = match got {
                 Ok(buf) if buf.len() == read.len as usize => buf,
-                _ => return Err(broke()),
+                _ => return Err(broke_as(Broke::Read)),
             };
             let mut msg = ToHelper::Data {
                 id: read.id,
@@ -731,9 +761,18 @@ impl Worker {
         let video_late = self.want_video.as_ref().is_some_and(|want| now > want.by);
         let audio_late = self.want_audio.as_ref().is_some_and(|want| now > want.by);
         if opened_late || video_late || audio_late {
-            return Err(broke());
+            return Err(broke_as(Broke::Timeout));
         }
         Ok(())
+    }
+
+    /// How long the helper has for the answer asked now: longer for its first one.
+    fn answer_wait(&self) -> u64 {
+        if self.answered {
+            ANSWER_WAIT_MS
+        } else {
+            FIRST_ANSWER_WAIT_MS
+        }
     }
 
     /// Asks for the next frame and the next PCM, one of each at a time.
@@ -747,11 +786,13 @@ impl Worker {
         if opened.video.is_some() && self.want_video.is_none() && self.held.len() < HELD_FRAMES {
             let view = self.publish(|player| player.view).ok_or(Exit::Done)?;
             if let Some((w, h)) = asked_size(view) {
+                self.trace.mark("asked");
+                self.trace.want_at = Some(Instant::now());
                 self.send(&ToHelper::WantVideo { w, h })?;
                 self.want_video = Some(VideoWant {
                     w,
                     h,
-                    by: self.clock.now_ms().saturating_add(ANSWER_WAIT_MS),
+                    by: self.clock.now_ms().saturating_add(self.answer_wait()),
                     stale: false,
                 });
             }
@@ -765,7 +806,7 @@ impl Worker {
             self.want_audio = Some(AudioWant {
                 channels,
                 frames,
-                by: self.clock.now_ms().saturating_add(ANSWER_WAIT_MS),
+                by: self.clock.now_ms().saturating_add(self.answer_wait()),
                 stale: false,
             });
         }
@@ -789,7 +830,7 @@ impl Worker {
     /// Hands PCM to the device and shows the frames whose time came.
     fn present(&mut self) -> Result<(), Exit> {
         self.push_sound()?;
-        let clock = self.clock_ms();
+        let mut clock = self.clock_ms();
         let now = self.clock.now_ms();
         while self.held.front().is_some_and(|frame| frame.pts <= clock) {
             let Some(frame) = self.held.pop_front() else {
@@ -800,8 +841,17 @@ impl Worker {
             let starving = self
                 .last_shown_at
                 .is_none_or(|at| now.saturating_sub(at) >= SHOW_LATE_AFTER_MS);
-            if superseded || (late && !starving) {
+            // Sound keeps its own time, so a late frame is dropped to stay in step with it. Without sound the
+            // picture is all there is: a late frame is shown, and the wall clock goes on from its time.
+            let follows_sound = self.out.is_some();
+            if superseded || (late && follows_sound && !starving) {
+                self.trace.dropped += 1;
                 continue;
+            }
+            if late && !follows_sound {
+                self.base_ms = frame.pts;
+                self.mono_from = self.playing.then_some(now);
+                clock = frame.pts;
             }
             self.show(frame, now)?;
         }
@@ -812,6 +862,7 @@ impl Worker {
         let Held { pts, w, h, mut rgba } = frame;
         // The surface takes the pixels themselves (the view's frame); nothing is left behind here.
         let rgba = std::mem::take(&mut *rgba);
+        let handing = Instant::now();
         self.publish(|player| {
             player.surface.show(w, h, rgba);
             player.has_frame = true;
@@ -819,8 +870,14 @@ impl Worker {
             player.record.shown.push(pts);
         })
         .ok_or(Exit::Done)?;
+        self.trace.show_us += Trace::us(handing);
         self.last_shown_at = Some(now);
         self.presented = true;
+        self.framed = true;
+        self.trace.mark("shown");
+        self.trace.shown += 1;
+        self.trace.shown_pts = pts;
+        self.write_start();
         self.played.begin(pts);
         self.played.frame(pts);
         Ok(())
@@ -998,6 +1055,7 @@ impl Worker {
         };
         let length = self.opened.map(|opened| opened.duration_ms);
         let at_ms = length.map_or(0, |length| clock.min(length));
+        self.write_pace(clock, at_ms);
         let playing = self.playing && !self.ended_shown;
         let buffering = !self.presented && !self.ended_shown;
         let feed = length.is_some()
@@ -1027,49 +1085,27 @@ impl Worker {
             self.now_dirty = false;
             self.now_shown_at = Some(now);
         }
+        let drawn = Drawn {
+            phase,
+            playing,
+            buffering,
+            quarter: at_ms / 250,
+            length_ms: length.unwrap_or(0),
+            no_sound: self
+                .publish(|player| player.shown.as_ref().and_then(|state| state.no_sound))
+                .flatten(),
+            framed: self.framed,
+            tagged: self.tags_taken,
+        };
+        if self.drawn != Some(drawn) {
+            self.drawn = Some(drawn);
+            self.wake();
+        }
         for button in buttons.unwrap_or_default() {
             self.press(button)?;
         }
         Ok(())
     }
-
-    /// The test build's one line per item, after the first second of playback.
-    fn write_played(&mut self, clock: u64) {
-        let due = self
-            .played
-            .start
-            .is_some_and(|start| clock >= start.saturating_add(PLAYED_AFTER_MS));
-        if self.played.written || !due {
-            return;
-        }
-        self.played.written = true;
-        let codec = self
-            .opened
-            .and_then(|opened| {
-                opened
-                    .video
-                    .map(|video| video.codec)
-                    .or_else(|| opened.audio.map(|audio| audio.codec))
-            })
-            .unwrap_or(Codec::Other);
-        let confined = lock(&self.slots.link).as_ref().is_some_and(|link| link.confined());
-        log_played(codec, self.played.frames, self.played.rms(), confined);
-    }
-}
-
-/// Whether this build writes the `media.played` line: the TEST build only (the VM 401 rung reads it), never the
-/// real app, in any profile. Asked of the identity fixed when the binary was built.
-pub(super) fn writes_played_line(identity: &EngineIdentity) -> bool {
-    !identity.is_real()
-}
-
-/// The `media.played` line: the codec as its protocol number (`Codec::ALL`'s order), the frames shown and the RMS of
-/// the samples played in the first second, and whether the helper ran confined. Nothing else.
-fn log_played(codec: Codec, frames_1s: u32, rms_1s: f64, confined: bool) {
-    if !writes_played_line(crate::shell::identity::engine_identity()) {
-        return;
-    }
-    tracing::info!(codec = codec as u8, frames_1s, rms_1s, confined, "media.played");
 }
 
 /// The words the view shows for a helper's error code.
@@ -1079,6 +1115,8 @@ pub(super) fn refusal_of(code: ErrorCode) -> Refusal {
         ErrorCode::NoSystemMedia(codec) => Refusal::NoSystemMedia(codec),
         ErrorCode::Unsupported(codec) => Refusal::NoDecoder(codec.name().unwrap_or_default().to_string()),
         ErrorCode::NoDecoder => Refusal::NoDecoder(String::new()),
+        ErrorCode::TenBit => Refusal::TenBit,
+        ErrorCode::UnknownCodec => Refusal::UnknownCodec,
         ErrorCode::Corrupt | ErrorCode::TooLarge | ErrorCode::ReadFailed | ErrorCode::Timeout | ErrorCode::Internal => {
             Refusal::CouldNotPlay
         }
@@ -1126,6 +1164,13 @@ fn clean_text(text: &str) -> String {
 fn turns_text_around(c: char) -> bool {
     matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
+
+mod lines;
+
+pub(super) use lines::log_seen;
+#[cfg(test)]
+pub(super) use lines::writes_played_line;
+use lines::{Played, Trace};
 
 #[cfg(test)]
 #[path = "worker_tests.rs"]

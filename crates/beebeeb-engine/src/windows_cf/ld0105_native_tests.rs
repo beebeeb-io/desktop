@@ -21,7 +21,7 @@ type Callback = unsafe extern "system" fn(*const CF_CALLBACK_INFO, *const CF_CAL
 
 /// A registered (and optionally connected) QA root; unregistered on drop, whatever the test did.
 struct QaRoot {
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
     root: PathBuf,
     key: Option<CF_CONNECTION_KEY>,
 }
@@ -33,7 +33,7 @@ impl QaRoot {
         std::fs::create_dir(&root).unwrap();
         crate::windows_cf::register_sync_root_with(&root, &crate::windows_cf::QA_PROVIDER, hydration).unwrap();
         QaRoot {
-            _dir: dir,
+            _dir: Some(dir),
             root,
             key: None,
         }
@@ -96,6 +96,28 @@ impl Drop for QaRoot {
             let _ = unsafe { CfDisconnectSyncRoot(key) };
         }
         let _ = crate::windows_cf::unregister_any_sync_root(&self.root);
+        // The driver can hold the root for a moment after the disconnect: retry the removal
+        // instead of letting the TempDir drop race it.
+        if let Some(dir) = self._dir.take() {
+            for _ in 0..50 {
+                if std::fs::remove_dir_all(dir.path()).is_ok() || !dir.path().exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+/// Polls `census_of` until it reads `want` (the platform settles a moment after a read returns).
+fn wait_census(path: &Path, want: OnDisk) -> (OnDisk, bool, bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let c = census_of(path);
+        if c.0 == want || std::time::Instant::now() > deadline {
+            return c;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
@@ -326,6 +348,10 @@ fn ld0105_w1_native_the_upgrade_from_partial_to_progressive_keeps_every_placehol
     let after = census(&qa, &names);
     println!("ld0105-w1-native: after  {after:?}");
     assert_eq!(after, before, "0 placeholders lost or changed");
+    // Measured 2026-11-16 (the Windows test machine, Windows 11): after an UPDATE registration Windows still reports the old
+    // policy, (0, 0), until the root is next CONNECTED; the app connects right after registering, and reads
+    // the policy back only then (`connect_root`). So connect, then read.
+    qa.connect(serve_first_64k);
     let policy = crate::windows_cf::hydration_policy_of(&qa.root).unwrap();
     println!("ld0105-w1-native: policy read back {policy:?}");
     assert!(
@@ -557,8 +583,8 @@ unsafe extern "system" fn refuse_every_fetch(info: *const CF_CALLBACK_INFO, para
 fn poisoned_whole_pinned(qa: &QaRoot, name: &str) -> Option<(i64, i64)> {
     let path = qa.path(name);
     std::fs::write(&path, content(1 << 20)).unwrap();
-    // Its FileIdentity is its row's file id, `qa-<stem>`, as a real placeholder's is (delta review P2-1:
-    // the discard checks it).
+    // Its FileIdentity is its row's file id, `qa-<stem>`, as a real placeholder's is (the discard
+    // checks it).
     let stem = name.split('.').next().unwrap_or(name);
     placeholders::convert_to_in_sync_placeholder(&path, &format!("qa-{stem}")).unwrap();
     placeholders::set_pin_state(&path, true, false).unwrap();
@@ -884,7 +910,7 @@ fn ld0105_s6_native_a_keyless_poison_needs_attention_and_missing_clears_only_at_
     );
 }
 
-/// Self-review (desktop PR 224): a database error while the sweep reads a poisoned file's row is not
+/// A database error while the sweep reads a poisoned file's row is not
 /// "the row is gone". The poison stays (I5), as the fetch check fails closed on the same error.
 #[test]
 fn ld0105_s6_native_an_unreadable_row_keeps_its_poison() {
@@ -933,7 +959,7 @@ fn ld0105_p2_native_a_pin_lost_both_ways_outlives_the_empty_and_the_next_sweep_r
     assert_eq!(lost.0, (OnDisk::Nothing, true, false), "emptied, the pin not back yet");
     assert_eq!(lost.1, None, "the poison is cleared");
     assert_eq!(lost.2, Some(CF_PIN_STATE_PINNED.0), "but the pin is kept to restore");
-    assert_eq!(restored.2, true, "the next sweep pinned it again");
+    assert!(restored.2, "the next sweep pinned it again");
     assert_eq!(db.pin_to_restore("qa-lost-pin").unwrap(), None, "and the record ends");
 }
 
@@ -1025,7 +1051,7 @@ unsafe extern "system" fn t10_fetch(info: *const CF_CALLBACK_INFO, params: *cons
     }
 }
 
-/// P1 #1 from the native QA rung (desktop #225, lead ruling 2026-11-06), the data-loss repro: a
+/// The data-loss repro from the native QA rung: a
 /// partly downloaded file; another process writes 21 B at offset 0 (a FileStream, share ReadWrite);
 /// Windows fetches the missing range first, the provider serves it, the write lands and moves
 /// LastWriteTime; then that session fails after a write. Its poison keeps the key the session read
@@ -1040,7 +1066,7 @@ fn ld0105_p1_native_a_write_into_a_partly_downloaded_file_is_kept() {
     let path = qa.path("t10.bin");
     let mut one = [0u8; 1];
     let _ = std::fs::File::open(&path).and_then(|mut f| std::io::Read::read(&mut f, &mut one));
-    let partial = census_of(&path);
+    let partial = wait_census(&path, OnDisk::Partly);
     assert_eq!(partial.0, OnDisk::Partly, "a partly downloaded file: {partial:?}");
     // The session that later poisons: its key before its first transfer.
     let key_before = content_key(&path);
@@ -1081,7 +1107,7 @@ fn ld0105_p1_native_a_write_into_a_partly_downloaded_file_is_kept() {
     );
 }
 
-/// Desktop #225 into #226's UI, end to end (lead 2026-11-06): a poisoned file the person changed is a
+/// Desktop #225 into #226's UI, end to end: a poisoned file the person changed is a
 /// needs-attention row of `get_active_transfers` (the board plus state.db); "Discard and download again"
 /// (the command's `discard_now`) empties and refetches it, and the row is gone. Red on the mutant
 /// "the board alone" (`snapshot_with_attention` returning `snapshot_dtos`): no row to act on.
@@ -1124,7 +1150,7 @@ fn ld0105_u1_native_a_changed_file_is_a_board_row_until_discard_and_download_aga
     assert!(after.is_empty(), "the discard ends the row: {after:?}");
 }
 
-/// Delta review P2-1 (lead 2026-11-06: blocks the merge): "Discard and download again" empties only the
+/// "Discard and download again" empties only the
 /// poisoned file. The row's path holds ANOTHER placeholder (a stale path after a folder rename): refused
 /// `identity_mismatch` under the exclusive handle, that file kept as it is, the poison kept, nothing
 /// fetched. A plain file at the path carries no identity: refused the same way, the poison kept (never

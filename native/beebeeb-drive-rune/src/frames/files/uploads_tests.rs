@@ -256,8 +256,8 @@ fn try_again_pause_all_and_cancel_upload_each_ask_once() {
     assert_eq!(asked(&calls).last(), Some(&Call::PauseUploads(false)));
     // Right-click a row: Cancel upload.
     right_click(&mut rt, "upload-3-name");
-    assert_eq!(info(&rt, "menu-9-item-0").label.as_deref(), Some("Cancel upload"));
-    click(&mut rt, "menu-9-item-0");
+    assert_eq!(info(&rt, "upload-menu-item-0").label.as_deref(), Some("Cancel upload"));
+    click(&mut rt, "upload-menu-item-0");
     assert_eq!(asked(&calls).last(), Some(&Call::CancelUpload("up-ponte".into())));
     assert_eq!(asked(&calls).len(), 4, "one call per press");
     let left = rt.state.actions.source.uploads().unwrap();

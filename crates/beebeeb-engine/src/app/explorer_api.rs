@@ -192,6 +192,13 @@ impl<C: CredentialStores> Engine<C> {
         self.seat().sync_root_for_test = Some(root);
     }
 
+    /// Test builds only: `root` is the folder an engine runs in (as a start notes it), so a host's test whose engine
+    /// is held running reaches a folder of its own through [`Engine::sync_root`], never the person's home.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn use_running_root_for_test(&self, root: PathBuf) {
+        self.note_explorer_root(&root);
+    }
+
     /// Settings > Sync > "Repair" (T2-E1): sync is stopped and started again into the configured folder, which is the
     /// registration path Setup's "Try again" asks too (only a start asks Windows). Nothing is changed unless the
     /// session in memory is still `session`, the one of the press.

@@ -85,9 +85,6 @@ pub enum MediaError {
     Io(std::io::Error),
     DecodeImage(image::ImageError),
     NoVideoFrame,
-    SpawnFfmpeg(std::io::Error),
-    FfmpegFailed(String),
-    DecodeFrame(image::ImageError),
     ZeroDimensions,
     ResizeBlurhash(String),
     Base64 {
@@ -105,9 +102,6 @@ impl std::fmt::Display for MediaError {
             MediaError::Io(error) => error.fmt(f),
             MediaError::DecodeImage(error) => write!(f, "decode image for thumbnail: {error}"),
             MediaError::NoVideoFrame => f.write_str("video thumbnail extraction failed"),
-            MediaError::SpawnFfmpeg(error) => write!(f, "spawn ffmpeg for video thumbnail: {error}"),
-            MediaError::FfmpegFailed(snippet) => write!(f, "ffmpeg video thumbnail failed: {snippet}"),
-            MediaError::DecodeFrame(error) => write!(f, "decode ffmpeg thumbnail frame: {error}"),
             MediaError::ZeroDimensions => f.write_str("thumbnail source has zero dimensions"),
             MediaError::ResizeBlurhash(detail) => write!(f, "resize blurhash source: {detail}"),
             MediaError::Base64 { label, detail } => {
@@ -120,8 +114,8 @@ impl std::fmt::Display for MediaError {
 impl std::error::Error for MediaError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            MediaError::Io(error) | MediaError::SpawnFfmpeg(error) => Some(error),
-            MediaError::DecodeImage(error) | MediaError::DecodeFrame(error) => Some(error),
+            MediaError::Io(error) => Some(error),
+            MediaError::DecodeImage(error) => Some(error),
             _ => None,
         }
     }
@@ -187,6 +181,8 @@ pub(super) fn prepare_thumbnail_uploads_with_pin(
                 }
             };
         let plaintext = Zeroizing::new(output.data);
+        // The legacy sealer is the format this path still writes; the new-item sealers are a later migration.
+        #[allow(deprecated)]
         let encrypted = Zeroizing::new(
             beebeeb_core::encrypt::encrypt_thumbnail_for(file_key, &plaintext, pin).map_err(|e| {
                 MediaError::EncryptThumbnail {
@@ -236,47 +232,22 @@ pub(super) fn decode_image_thumbnail_source(payload_path: &Path) -> Result<Thumb
     dynamic_image_to_thumbnail_source(image, MediaKind::Image)
 }
 
+/// A video's thumbnail source: the first frame from the app's confined media helper (`video_frame_source`). No
+/// helper, or one that refuses, is [`MediaError::NoVideoFrame`]: the file keeps its type icon. No program is started.
 pub(super) fn decode_video_thumbnail_source(payload_path: &Path) -> Result<ThumbnailSource, MediaError> {
-    let mut last_error: Option<MediaError> = None;
-    for seek in ["1", "0"] {
-        match decode_video_frame_with_ffmpeg(payload_path, seek) {
-            Ok(source) => return Ok(source),
-            Err(e) => last_error = Some(e),
-        }
-    }
-    Err(last_error.unwrap_or(MediaError::NoVideoFrame))
+    video_source_from(crate::video_frame_source::first_frame(payload_path))
 }
 
-pub(super) fn decode_video_frame_with_ffmpeg(payload_path: &Path, seek: &str) -> Result<ThumbnailSource, MediaError> {
-    let ffmpeg = std::env::var_os("BEEBEEB_FFMPEG_PATH").unwrap_or_else(|| "ffmpeg".into());
-    let output = Command::new(ffmpeg)
-        .arg("-nostdin")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-ss")
-        .arg(seek)
-        .arg("-i")
-        .arg(payload_path)
-        .arg("-frames:v")
-        .arg("1")
-        .arg("-f")
-        .arg("image2pipe")
-        .arg("-vcodec")
-        .arg("png")
-        .arg("-")
-        .output()
-        .map_err(MediaError::SpawnFfmpeg)?;
-
-    if !output.status.success() || output.stdout.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let snippet: String = stderr.chars().take(240).collect();
-        return Err(MediaError::FfmpegFailed(snippet));
-    }
-
-    let frame_png = Zeroizing::new(output.stdout);
-    let image = image::load_from_memory(&frame_png).map_err(MediaError::DecodeFrame)?;
-    dynamic_image_to_thumbnail_source(image, MediaKind::Video)
+pub(super) fn video_source_from(
+    frame: Result<crate::video_frame_source::Frame, crate::video_frame_source::Refused>,
+) -> Result<ThumbnailSource, MediaError> {
+    let frame = frame.map_err(|_| MediaError::NoVideoFrame)?;
+    Ok(ThumbnailSource {
+        rgba: frame.rgba,
+        width: frame.width,
+        height: frame.height,
+        kind: MediaKind::Video,
+    })
 }
 
 pub(super) fn dynamic_image_to_thumbnail_source(

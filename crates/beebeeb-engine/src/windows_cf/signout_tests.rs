@@ -3,7 +3,7 @@ use super::*;
 
 /// The suite signs out as the real app (today's names; every root here is a temp one).
 fn purge(db: &StateDb, root: Option<&Path>, unknown: &UnknownFiles) -> anyhow::Result<KeptAtSignOut> {
-    super::purge(&crate::identity::REAL, db, root, unknown)
+    super::purge(&crate::identity::TEST, db, root, unknown)
 }
 use crate::state_db::{FileContractState, FileEntry, FileStatus, ItemKind, Namespace, PinState};
 
@@ -15,7 +15,11 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        // Staged payloads must sit under the test identity's scratch folder: the purge gate accepts nothing
+        // else under the OS temp dir (identity::TEST scopes its disposable roots to a sub-folder).
+        let scratch = crate::identity::TEST.scratch_dir_in(&std::env::temp_dir());
+        std::fs::create_dir_all(&scratch).unwrap();
+        let temp = tempfile::tempdir_in(scratch).unwrap();
         let root = temp.path().join("root");
         std::fs::create_dir(&root).unwrap();
         let db = StateDb::open(temp.path().join("state.db")).unwrap();
@@ -28,7 +32,7 @@ impl Fixture {
         self.db.mark_no_fetched_content(path).unwrap();
     }
 
-    /// Task 2191: a row of unknown content (synced before task 1640).
+    /// A row of unknown content (synced before task 1640).
     fn track_unknown(&self, path: &str, kind: ItemKind, status: FileStatus) {
         self.db
             .upsert_file(&FileEntry {
@@ -348,7 +352,7 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
     use windows::Win32::System::Registry::*;
     use windows::core::HSTRING;
     let f = Fixture::new();
-    let id = crate::windows_cf::shell_sync_root_id(&crate::identity::REAL, &f.root);
+    let id = crate::windows_cf::shell_sync_root_id(&crate::identity::TEST, &f.root);
     let key = HSTRING::from(format!(
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"
     ));
@@ -369,7 +373,7 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
             ERROR_SUCCESS
         );
         assert_eq!(RegCloseKey(handle), ERROR_SUCCESS);
-        let result = crate::windows_cf::unregister_shell_sync_root(&crate::identity::REAL, &f.root);
+        let result = crate::windows_cf::unregister_shell_sync_root(&crate::identity::TEST, &f.root);
         let remaining = RegOpenKeyExW(HKEY_CURRENT_USER, &key, 0, KEY_READ, &mut handle);
         if remaining == ERROR_SUCCESS {
             assert_eq!(RegCloseKey(handle), ERROR_SUCCESS);
@@ -403,7 +407,7 @@ fn journal_finalization(
 }
 
 /// Tasks 2270 / 2280 changed this test's meaning (0.8.19 refused both cases with an error on every tick):
-/// another file's placeholder is held for review and never stamped (spec F4); bytes that are neither the payload
+/// another file's placeholder is held for review and never stamped; bytes that are neither the payload
 /// nor the agreed content get the server identity only, not in sync (F7c). Either way the bytes stay, and sign-out
 /// still refuses to delete them.
 #[test]
@@ -482,10 +486,10 @@ fn round6_verified_upload_finalization_updates_identity() {
     assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
 }
 
-/// Tasks 2270 / 2280 (spec X1, I5; review focus): a row held for review no longer blocks sign-out (the person cannot
+/// A row held for review no longer blocks sign-out (the person cannot
 /// act on it), and sign-out forgets it once it goes ahead. A row still pending (its file is open in another program)
 /// still blocks it, with today's message, until it finishes; a sign-out it refuses keeps the row in review too
-/// (self-review of #195: it was forgotten before the refusal, so the tray lost it and no start retried it).
+///.
 #[test]
 fn signout_purges_review_rows_and_still_refuses_a_pending_one() {
     let registered = RegisteredRoot::new();
@@ -571,7 +575,7 @@ fn task_2191_sign_out_deletes_an_unknown_file_when_asked() {
     assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
 }
 
-/// Task 2191: a file of KNOWN content that is not a clean placeholder still refuses sign-out.
+/// A file of KNOWN content that is not a clean placeholder still refuses sign-out.
 #[test]
 fn task_2191_a_known_file_that_is_not_clean_still_refuses_sign_out() {
     let f = Fixture::new();
@@ -581,7 +585,7 @@ fn task_2191_a_known_file_that_is_not_clean_still_refuses_sign_out() {
     assert!(f.root.join("a.txt").exists(), "nothing deleted");
 }
 
-/// Slice 11: a sign-out that meets work it cannot keep says so in plain words and offers one
+/// A sign-out that meets work it cannot keep says so in plain words and offers one
 /// plain way forward. It never tells the person to unlock, to sync, to resolve anything, or to
 /// deal with "failed changes": those are our internals, not their job.
 #[test]
@@ -605,7 +609,7 @@ fn sign_out_sentence_never_names_internals() {
     );
 }
 
-/// Slice 11: unsent work the person cannot settle is kept, named, and never deleted; the
+/// Unsent work the person cannot settle is kept, named, and never deleted; the
 /// sign-out itself goes ahead. No homework, no internals.
 #[test]
 fn sign_out_keeps_unsent_files_and_names_their_folder() {
@@ -630,7 +634,7 @@ fn sign_out_keeps_unsent_files_and_names_their_folder() {
     assert_eq!(f.db.list_files().unwrap().len(), 0);
 }
 
-/// Slice 11: when a pending file cannot be copied, the sign-out stops with a plain sentence
+/// When a pending file cannot be copied, the sign-out stops with a plain sentence
 /// about space, and every byte stays where it was.
 #[test]
 fn sign_out_stops_plainly_when_it_cannot_keep_a_pending_file() {
@@ -656,4 +660,151 @@ fn sign_out_stops_plainly_when_it_cannot_keep_a_pending_file() {
         b"an edit that has not left"
     );
     assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+// ---- w28: an account switch's purge never deletes a file the engine does not know is synced and unchanged ----
+
+/// The purge an account switch runs: the real port, as the engine calls it.
+fn switch_purge(f: &Fixture, unasked: &[&str]) -> Result<(), String> {
+    use crate::sync_root_port::SyncRootPort;
+    let unasked: Vec<String> = unasked.iter().map(|path| path.to_string()).collect();
+    crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST).remove_synced_items(&f.db, &f.root, &unasked)
+}
+
+/// w28 (the window w27 left): the engine was told nothing is at the path of a file of unknown content, then a person
+/// made a file there. The switch's purge refuses and deletes nothing; the file keeps every byte; no row is cleared.
+#[test]
+fn w28_switch_purge_keeps_a_file_made_at_a_path_that_was_empty_when_checked() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    f.track_unknown("Budget.docx", ItemKind::File, FileStatus::Local);
+    std::fs::write(f.root.join("Budget.docx"), b"typed while the account switched").unwrap();
+
+    assert!(switch_purge(&f, &["Budget.docx"]).is_err());
+
+    assert_eq!(
+        std::fs::read(f.root.join("Budget.docx")).unwrap(),
+        b"typed while the account switched"
+    );
+    assert!(f.root.join("Plans").is_dir(), "nothing else was removed either");
+    assert_eq!(f.db.list_files().unwrap().len(), 2, "no row was cleared");
+}
+
+/// The same, with the engine's list naming the path: an item the engine did not know (here a folder that is
+/// otherwise a synced plain one) at a path it was told was empty is never removed.
+#[test]
+fn w28_switch_purge_refuses_any_item_at_a_path_the_engine_was_told_was_empty() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    assert!(switch_purge(&f, &["Plans"]).is_err());
+    assert!(f.root.join("Plans").is_dir());
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+/// With nothing at those paths the purge still does its work: the synced items go, the rows are cleared.
+#[test]
+fn w28_switch_purge_still_removes_synced_items_when_nothing_unexpected_is_there() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    f.track_unknown("Budget.docx", ItemKind::File, FileStatus::Local);
+    switch_purge(&f, &["Budget.docx"]).unwrap();
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}
+
+/// A file made in a synced folder (a path no row has) after the check: refused too, nothing deleted.
+#[test]
+fn w28_switch_purge_keeps_a_file_made_in_a_synced_folder() {
+    let f = Fixture::new();
+    f.folder("Plans");
+    std::fs::write(f.root.join("Plans").join("late.txt"), b"made during the switch").unwrap();
+    assert!(switch_purge(&f, &[]).is_err());
+    assert_eq!(std::fs::read(f.root.join("Plans").join("late.txt")).unwrap(), b"made during the switch");
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+// ---- w29: a file of unknown content that is only a placeholder (nothing fetched) is a synced item, not unsent work ----
+
+/// the Windows test machine (a CLI-replaced file never opened here kept every switch out, "guarded file" 5/5): a REAL cloud placeholder
+/// with nothing on disk holds no bytes; the real port says so and the switch's purge removes it with its row.
+#[test]
+fn w29_an_unfetched_placeholder_of_unknown_content_holds_nothing_and_the_switch_removes_it() {
+    use crate::sync_root_port::SyncRootPort;
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    assert!(crate::windows_cf::placeholders::create_placeholder(&f.root, "Old.docx", "Old.docx", 4096, 1_700_000_000, false).unwrap());
+    f.track_unknown("Old.docx", ItemKind::File, FileStatus::CloudOnly);
+    let os = crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST);
+
+    assert!(!os.may_hold_bytes(&f.root, "/Old.docx"), "a placeholder with nothing on disk holds nothing");
+    switch_purge(f, &[]).unwrap();
+
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
+}
+
+/// The same row with bytes on disk may be a person's: the real port says it may hold bytes, and a purge that is asked
+/// anyway refuses, deleting nothing.
+#[test]
+fn w29_a_placeholder_of_unknown_content_with_bytes_on_disk_is_never_removed() {
+    use crate::sync_root_port::SyncRootPort;
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    let path = f.root.join("Budget.docx");
+    std::fs::write(&path, b"typed by A, not sent").unwrap();
+    crate::windows_cf::placeholders::convert_to_unsynced_placeholder(&path, "Budget.docx").unwrap();
+    crate::windows_cf::placeholders::convert_to_in_sync_placeholder(&path, "Budget.docx").unwrap();
+    f.track_unknown("Budget.docx", ItemKind::File, FileStatus::Local);
+    let os = crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST);
+
+    assert!(os.may_hold_bytes(&f.root, "/Budget.docx"));
+    assert!(switch_purge(f, &[]).is_err());
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"typed by A, not sent");
+    assert_eq!(f.db.list_files().unwrap().len(), 1);
+}
+
+/// A plain file (no placeholder at all) at the path may hold anything: it is never removed.
+#[test]
+fn w29_a_plain_file_at_a_path_of_unknown_content_is_never_removed() {
+    use crate::sync_root_port::SyncRootPort;
+    let f = Fixture::new();
+    f.track_unknown("Plain.docx", ItemKind::File, FileStatus::Local);
+    std::fs::write(f.root.join("Plain.docx"), b"").unwrap();
+    let os = crate::sync_root_port::OsSyncRoots::new(&crate::identity::TEST);
+
+    assert!(os.may_hold_bytes(&f.root, "/Plain.docx"));
+    assert!(switch_purge(&f, &[]).is_err());
+    assert!(f.root.join("Plain.docx").exists());
+}
+
+// ---- RC3-1 (the Windows test machine, rc3/f1): the switch's purge after a person's leftover file was taken out of a synced folder ----
+
+/// A synced folder placeholder with a synced file in it; a person made a new file in that folder (the engine made it
+/// a placeholder that is not in sync when it queued the upload), and "Keep them aside" took it out again. The folder
+/// holds exactly what the database lists, so the switch's purge removes it.
+#[test]
+fn rc3_switch_purge_removes_a_synced_folder_a_leftover_file_was_taken_out_of() {
+    let registered = RegisteredRoot::new();
+    let f = &registered.0;
+    use crate::windows_cf::placeholders::{convert_to_unsynced_placeholder, create_placeholder};
+    assert!(create_placeholder(&f.root, "Folder", "Folder", 0, 1_700_000_000, true).unwrap());
+    f.track("Folder", ItemKind::Folder, FileStatus::Local);
+    assert!(create_placeholder(&f.root.join("Folder"), "Folder/own.txt", "own.txt", 4096, 1_700_000_000, false).unwrap());
+    f.track("Folder/own.txt", ItemKind::File, FileStatus::CloudOnly);
+    let leftover = f.root.join("Folder").join("leftover.txt");
+    std::fs::write(&leftover, b"made while sync was paused").unwrap();
+    convert_to_unsynced_placeholder(&leftover, "local-leftover").unwrap();
+    std::fs::remove_file(&leftover).unwrap();
+
+    let removed = switch_purge(f, &["Folder/leftover.txt"]);
+
+    assert!(
+        removed.is_ok(),
+        "the folder in sync before the leftover: {:?}, after: {:?}",
+        Some(true),
+        crate::windows_cf::placeholders::placeholder_in_sync(&f.root.join("Folder"))
+    );
+    assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), 0);
+    assert_eq!(f.db.list_files().unwrap().len(), 0);
 }

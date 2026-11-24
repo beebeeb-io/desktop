@@ -26,7 +26,7 @@ fn tick1697_apply_sync_op_collects_the_applied_create_id() {
 
 #[test]
 fn tick1697_apply_sync_op_collects_remote_delete_subtree_ids() {
-    // FLIPPED BY TASK 1698 (trash ruling — full sync): a server-side trash
+    // FLIPPED (trash semantics: full sync): a server-side trash
     // of a folder no longer removes rows — it flips the folder AND its
     // descendants to `Trashing` (the macOS trash view mirrors the server
     // trash), reporting both ids so the replica moves the subtree into the
@@ -188,7 +188,7 @@ fn audit_1244_double_trash_restore_cycle_keeps_resnapshot_for_final_restore() {
         apply_sync_op(&bridge, dir.path(), &op, 200, &mut conflicts).unwrap();
     }
 
-    // Task 1698: the trash no longer removes the row — it flips it
+    // the trash no longer removes the row — it flips it
     // `Trashing` (trash view) and the restore flips it straight back
     // (`CloudOnly`). Two fast trash+restore cycles converge to
     // CloudOnly with the resnapshot still requested.
@@ -615,7 +615,7 @@ async fn test_sync_tick_snapshot_window_does_not_resurrect_trashing_row() {
 
 #[tokio::test]
 async fn test_sync_tick_snapshot_absent_keeps_trashing_row_trash_view() {
-    // task 0802 — FLIPPED BY TASK 1698 (trash ruling, full sync): once the
+    // FLIPPED (trash semantics: full sync): once the
     // trash propagates the file is ABSENT from the snapshot — and it STAYS
     // absent forever, because the snapshot never lists trashed files. The
     // op-less `Trashing` row is now the macOS TRASH VIEW: prune_absent
@@ -1068,7 +1068,7 @@ async fn test_sync_tick_trash_then_restore_keeps_row_via_resnapshot() {
 
     sync_tick(&bridge, dir.path()).await.unwrap(); // bootstrap
     sync_tick(&bridge, dir.path()).await.unwrap(); // ops: trash + restore
-    // Task 1698: the trash put the row in the TRASH VIEW (`Trashing`) and
+    // the trash put the row in the TRASH VIEW (`Trashing`) and
     // the restore flipped it straight back out (`CloudOnly`) — the row
     // never disappeared; a re-snapshot is still pending to refresh its
     // authoritative metadata.
@@ -1135,3 +1135,28 @@ async fn test_sync_tick_empty_snapshot_does_not_prune_existing_tree() {
 }
 
 // ── Task 1247: hydrate destination allow-list + real IPC entry point ──────
+
+/// DW-0802b: while a snapshot is ingested the board says how far the first listing is (so Search can say "Still
+/// getting your files ready" with a count), and says nothing once it is whole.
+#[test]
+fn applying_a_snapshot_reports_how_far_the_first_listing_is() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let mk = [9u8; 32];
+    let board = crate::transfer_progress::TransferBoard::new();
+    let bridge = test_bridge(&dir.path().join("state.db")).with_transfers(board.clone());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    {
+        let (seen, board) = (seen.clone(), board.clone());
+        board.clone().set_wake(move || seen.lock().unwrap().push(board.first_listing()));
+    }
+    let nodes = (0..3)
+        .map(|i| snap_node(&mk, &format!("lst0000{i}-0000-4000-8000-00000000000{i}"), &format!("f{i}.txt"), None, false, 50))
+        .collect();
+    let snapshot = crate::api_client::SyncSnapshot { seq_id: 9, nodes };
+    apply_snapshot(&bridge, dir.path(), &snapshot, 200, 200, &mut Vec::new()).unwrap();
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.first(), Some(&Some((0, 3))), "the total is known before the first row: {seen:?}");
+    assert_eq!(seen.last(), Some(&None), "and it is gone once the list is whole: {seen:?}");
+    assert_eq!(board.first_listing(), None);
+}

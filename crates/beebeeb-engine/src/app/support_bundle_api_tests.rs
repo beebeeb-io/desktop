@@ -4,14 +4,12 @@
 //! Every name is invented.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use super::super::{Engine, EngineConfig};
-use super::*;
 use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, PendingOperation, StateDb};
@@ -28,7 +26,7 @@ fn signed_in_engine(slot: &str) -> TestEngine {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens");
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens");
     {
         let _writes = engine.writes.write().unwrap();
         engine

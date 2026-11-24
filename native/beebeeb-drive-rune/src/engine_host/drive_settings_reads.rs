@@ -115,7 +115,7 @@ pub(super) fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, ac
     }
 }
 
-/// The contract rows `rows` has read on this thread (a test's seam: a page that needs none must read none).
+// The contract rows `rows` has read on this thread (a test's seam: a page that needs none must read none).
 #[cfg(test)]
 thread_local! {
     pub(crate) static CONTRACT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -258,6 +258,7 @@ pub(crate) fn insights_of(files: &[&FileEntry], (used, quota): (i64, i64)) -> In
             .map(|f| {
                 let path = f.path.trim_matches('/').to_string();
                 LargeFile {
+                    id: f.file_id.clone(),
                     shown: cut_middle(&path),
                     kind: kind_name(&path).to_string(),
                     size: size_words(f.size_bytes),
@@ -306,7 +307,7 @@ pub(crate) fn count_words(n: usize, one: &str, many: &str) -> String {
     let digits = n.to_string();
     let mut grouped = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(c);
@@ -373,3 +374,7 @@ pub(crate) fn keep_of(rows: &[(FileEntry, bool, DriveItem)]) -> Keep {
         total_mb: total as f32 / 1e6,
     }
 }
+
+#[cfg(test)]
+#[path = "drive_settings_reads_ids_tests.rs"]
+mod ids_tests;

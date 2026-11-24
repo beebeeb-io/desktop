@@ -74,14 +74,8 @@ fn click(rt: &mut Runtime<State>, key: &str) {
 
 /// Tab to the control keyed `target`, and press it with Enter.
 fn press(rt: &mut Runtime<State>, target: &str) {
-    for _ in 0..80 {
-        if find(rt, target).is_some_and(|e| e.focused) {
-            key(rt, Key::Enter);
-            return;
-        }
-        key(rt, Key::Tab);
-    }
-    panic!("Tab never reaches {target}");
+    super::tests_keys::tab_to(rt, target);
+    key(rt, Key::Enter);
 }
 
 /// Let `seconds` pass on the window's clock (the shell's poll runs at the start of each frame).
@@ -617,16 +611,8 @@ fn every_control_of_the_pane_takes_the_keyboard_once() {
         .collect();
     assert_eq!(
         pane,
-        [
-            "device-0",
-            "device-1",
-            "device-2",
-            "item-1-0",
-            "item-1-1",
-            "item-1-2-switch",
-            "btn-0"
-        ],
-        "the Tab order of Bandwidth: top to bottom, nothing twice"
+        ["device-0", "item-1-0", "item-1-1", "item-1-2-switch", "btn-0"],
+        "the Tab order of Bandwidth: top to bottom, the devices one stop, nothing twice"
     );
 }
 
@@ -759,4 +745,21 @@ fn the_fixtures_test_stands_still_in_a_scene_and_reports_reset_its_clock() {
     );
     assert_eq!(drive.pump(9.0), (false, false));
     assert_eq!(drive.bandwidth().test, BoardBandwidth::test_done());
+}
+
+/// DW-0785's figure tile is the board's geometry: 3pt between its name, figure and line (not the 4pt
+/// step), and the tile is the three of them, 3pt twice, plus 12pt above and below.
+#[test]
+fn bandwidth_figure_tile_keeps_the_boards_three_point_gaps() {
+    let rt = runtime("DW-0785");
+    let (tile, name, says) = (
+        info(&rt, "fig-0-tile").rect,
+        info(&rt, "fig-0-name-row").rect,
+        info(&rt, "fig-0-says").rect,
+    );
+    assert_eq!(name[1] - tile[1], 12.0, "12pt above the name");
+    let value_h = says[1] - (name[1] + name[3]) - 6.0;
+    assert!(value_h > 20.0, "the figure sits between two 3pt gaps, got {value_h}");
+    assert_eq!(tile[1] + tile[3] - (says[1] + says[3]), 12.0, "12pt below the line");
+    assert_eq!(tile[3], 24.0 + name[3] + value_h + says[3] + 6.0);
 }

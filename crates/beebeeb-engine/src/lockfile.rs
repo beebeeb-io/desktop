@@ -70,14 +70,23 @@ impl LockFile {
     pub fn acquire(identity: &'static crate::identity::EngineIdentity, agent: &str) -> Result<Self, String> {
         let state_dir = crate::state_paths::beebeeb_state_dir_for(identity)?;
         fs::create_dir_all(&state_dir).map_err(|e| format!("create lock dir {}: {e}", state_dir.display()))?;
-        let path = state_dir.join(crate::state_paths::LOCK_FILENAME);
+        Self::acquire_at(state_dir.join(crate::state_paths::LOCK_FILENAME), agent)
+    }
 
+    /// [`LockFile::acquire`] on an explicit lock path.
+    fn acquire_at(path: PathBuf, agent: &str) -> Result<Self, String> {
         // If a prior lock exists, decide whether to break it.
         if path.exists() {
             let raw = fs::read_to_string(&path).map_err(|e| format!("read existing lock {}: {e}", path.display()))?;
             match serde_json::from_str::<LockContents>(&raw) {
+                // An empty or all-NUL lock is a write cut short by a crash or power loss: nobody holds it.
+                Err(_) if is_blank(&raw) => {
+                    tracing::warn!("empty .beebeeb-sync.lock found (interrupted write); overwriting");
+                }
                 Ok(prior) => {
-                    if pid_alive(prior.pid) {
+                    // A lock naming THIS process is the app's own, left by a forced stop (the engine task was
+                    // aborted before its guard dropped): reclaim it. Another live pid still holds it.
+                    if prior.pid != process::id() && pid_alive(prior.pid) {
                         return Err(format!(
                             "another Beebeeb agent is already syncing this folder: \
                              {agent_name} (pid {pid} on {host}, since {since})",
@@ -95,14 +104,12 @@ impl LockFile {
                     );
                 }
                 Err(e) => {
-                    // Corrupt JSON — we can't reason about who holds
-                    // it, but a corrupt file probably came from a
-                    // crash too. Log and overwrite rather than refuse.
-                    tracing::warn!(
-                        error = %e,
-                        path = %path.display(),
-                        "lock file is corrupt; overwriting"
-                    );
+                    // We cannot tell who holds an unreadable lock, so it is held, not free: refuse and say so.
+                    return Err(format!(
+                        "the sync lock file {} exists but cannot be read ({e}); treating it as held. \
+                         If no other Beebeeb agent is running, delete it and start again",
+                        path.display()
+                    ));
                 }
             }
         }
@@ -114,7 +121,10 @@ impl LockFile {
             started_at: Utc::now(),
         };
         let json = serde_json::to_string_pretty(&contents).map_err(|e| format!("serialize lock: {e}"))?;
-        fs::write(&path, json).map_err(|e| format!("write lock {}: {e}", path.display()))?;
+        // Write a temp file and rename it over, so a crash never leaves a truncated lock.
+        let tmp = path.with_extension("lock.tmp");
+        fs::write(&tmp, json).map_err(|e| format!("write lock {}: {e}", tmp.display()))?;
+        fs::rename(&tmp, &path).map_err(|e| format!("write lock {}: {e}", path.display()))?;
 
         Ok(Self { path })
     }
@@ -124,9 +134,17 @@ impl LockFile {
 /// cannot be read. Reads only: it never writes and never breaks a stale lock (`sync_root_port`, step 4 of a start).
 pub fn held_by_a_live_process(state_dir: &std::path::Path) -> bool {
     match fs::read_to_string(state_dir.join(crate::state_paths::LOCK_FILENAME)) {
-        Ok(raw) => serde_json::from_str::<LockContents>(&raw).is_ok_and(|prior| pid_alive(prior.pid)),
+        // An unparseable lock is held (as `acquire` refuses it); a lock naming this process is our own, not held.
+        Ok(raw) => serde_json::from_str::<LockContents>(&raw).map_or(!is_blank(&raw), |prior| {
+            prior.pid != process::id() && pid_alive(prior.pid)
+        }),
         Err(error) => error.kind() != std::io::ErrorKind::NotFound,
     }
+}
+
+/// Empty or all-NUL content: what a lock write cut short by a crash leaves behind.
+fn is_blank(raw: &str) -> bool {
+    raw.chars().all(|c| c.is_whitespace() || c == '\0')
 }
 
 impl Drop for LockFile {
@@ -203,4 +221,71 @@ fn hostname_or_unknown() -> String {
         .ok()
         .and_then(|s| s.into_string().ok())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+    fn lock_path(d: &tempfile::TempDir) -> PathBuf {
+        d.path().join(crate::state_paths::LOCK_FILENAME)
+    }
+    fn write_lock(path: &std::path::Path, pid: u32) {
+        let c = LockContents {
+            pid,
+            agent: "x".into(),
+            hostname: "h".into(),
+            started_at: Utc::now(),
+        };
+        fs::write(path, serde_json::to_string(&c).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn empty_or_nul_lock_is_stale_and_replaced_atomically() {
+        for junk in ["", "\0\0\0"] {
+            let d = dir();
+            fs::write(lock_path(&d), junk).unwrap();
+            assert!(!held_by_a_live_process(d.path()));
+            let lock = LockFile::acquire_at(lock_path(&d), "desktop").expect("blank lock is stale");
+            assert!(serde_json::from_str::<LockContents>(&fs::read_to_string(lock_path(&d)).unwrap()).is_ok());
+            assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1, "no temp file left");
+            drop(lock);
+        }
+    }
+
+    #[test]
+    fn unparseable_lock_is_held_and_acquire_says_so() {
+        let d = dir();
+        fs::write(lock_path(&d), "{ not json").unwrap();
+        assert!(held_by_a_live_process(d.path()));
+        let err = LockFile::acquire_at(lock_path(&d), "desktop")
+            .err()
+            .expect("must refuse");
+        assert!(err.contains("cannot be read") && err.contains("held"), "{err}");
+        assert_eq!(
+            fs::read_to_string(lock_path(&d)).unwrap(),
+            "{ not json",
+            "left untouched"
+        );
+    }
+
+    #[test]
+    fn own_lock_left_by_a_forced_stop_is_reclaimed() {
+        let d = dir();
+        write_lock(&lock_path(&d), process::id());
+        assert!(!held_by_a_live_process(d.path()));
+        let g = LockFile::acquire_at(lock_path(&d), "desktop").expect("own stale lock reclaimed");
+        drop(g);
+        assert!(!lock_path(&d).exists());
+    }
+
+    #[test]
+    fn missing_lock_is_free() {
+        let d = dir();
+        assert!(!held_by_a_live_process(d.path()));
+        assert!(LockFile::acquire_at(lock_path(&d), "desktop").is_ok());
+    }
 }

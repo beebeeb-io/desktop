@@ -35,14 +35,27 @@ struct Fake {
     /// The engine's session: a test moves it on as a sign-in, a lock or a sign-out does.
     session: AtomicU64,
     /// Runs inside the next read of the local state, on the worker (a test changes the session under it).
-    during_read: Mutex<Option<Box<dyn FnOnce(&Fake) + Send>>>,
+    during_read: Hook,
     /// Runs after the next `set_kept`, on the worker.
-    after_kept: Mutex<Option<Box<dyn FnOnce(&Fake) + Send>>>,
+    after_kept: Hook,
     /// Task 2530: the ways out the engine applied, in order: `(op, pick, version)`.
     settled: Mutex<Vec<(String, ParkedPick, Option<i64>)>>,
 }
 
 impl Fake {
+    fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String> {
+        self.kept_calls.lock().unwrap().push((file_id.to_string(), kept));
+        let done = self
+            .db()
+            .set_recursive_pin(file_id, kept, now())
+            .map(|_| ())
+            .map_err(|_| "refused".to_string());
+        let hook = self.after_kept.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook(self);
+        }
+        done
+    }
     fn new() -> Arc<Fake> {
         Self::with_account("invented@beebeeb.io")
     }
@@ -157,19 +170,6 @@ impl ThisPcEngine for Fake {
             Ok(None) => Ok(Settled::Moved),
             Err(_) => Err(SettleRefused::Failed),
         }
-    }
-    fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String> {
-        self.kept_calls.lock().unwrap().push((file_id.to_string(), kept));
-        let done = self
-            .db()
-            .set_recursive_pin(file_id, kept, now())
-            .map(|_| ())
-            .map_err(|_| "refused".to_string());
-        let hook = self.after_kept.lock().unwrap().take();
-        if let Some(hook) = hook {
-            hook(self);
-        }
-        done
     }
 }
 
@@ -997,7 +997,9 @@ fn the_switch_decides_the_source() {
         std::thread::sleep(Duration::from_millis(5));
     }
 
-    assert!(TURNED_ON, "This PC answers in the running app");
+    const {
+        assert!(TURNED_ON, "This PC answers in the running app");
+    }
     assert!(source_for(busy_pc()).wired());
 }
 
@@ -1044,3 +1046,6 @@ fn remove_is_refused_by_the_engine_when_the_session_moves_after_the_check() {
 // Task 2530: a way out of a parked change, through this adapter.
 #[path = "this_pc_settle_tests.rs"]
 mod settle_tests;
+
+/// A one-shot hook run on the fake.
+type Hook = Mutex<Option<Box<dyn FnOnce(&Fake) + Send>>>;

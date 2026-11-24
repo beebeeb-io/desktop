@@ -59,7 +59,8 @@ fn plain(key: Key) -> KeyEvent {
 
 #[test]
 fn each_dialog_and_its_controls_are_named_as_the_board_names_them() {
-    let frames: [(fn(&mut State), &str, &str, &str); 9] = [
+    type Frame = (fn(&mut State), &'static str, &'static str, &'static str);
+    let frames: [Frame; 9] = [
         (scenes::dw_0504, "dlg", "dialog", "New request"),
         (scenes::dw_0511, "dlg", "dialog", "People"),
         (scenes::dw_0512, "dlg", "dialog", "Jonas Meier"),
@@ -81,11 +82,11 @@ fn each_dialog_and_its_controls_are_named_as_the_board_names_them() {
     assert_eq!(info(&rt, super::NOTE_INPUT).label.as_deref(), Some("Note (optional)"));
     assert_eq!(
         role_and_name(&rt, "item-1-0"),
-        named("listitem", "Files go to, Documents")
+        named("combobox", "Files go to, All files")
     );
     assert_eq!(
         role_and_name(&rt, "item-1-3"),
-        named("listitem", "Total size, No limit")
+        named("combobox", "Total size, No limit")
     );
     assert_eq!(role_and_name(&rt, "btn-create-link"), named("button", "Create link"));
     assert_eq!(focused(&rt).as_deref(), Some(super::TITLE_INPUT));
@@ -715,4 +716,363 @@ fn share_invite_for_an_item_shared_with_no_one_yet_is_titled_by_its_name() {
     settle(&mut rt);
     assert_eq!(rt.state.frames.shared.fields.unlisted, None);
     assert!(any_text(&rt, "Lisbon trip") && !any_text(&rt, "another name"));
+}
+
+#[test]
+fn the_new_dialogs_open_draw_and_close_on_escape() {
+    let new = [
+        (Dialog::LinkExpiry { share_id: "s".into() }, "dialog-link-change"),
+        (Dialog::LinkPassword { share_id: "s".into(), has_password: false }, "dialog-link-change"),
+        (Dialog::ConfirmLeave { id: "i".into() }, "alert-confirm-leave"),
+        (Dialog::ConfirmStop { id: "i".into() }, "alert-confirm-stop"),
+        (Dialog::ConfirmClose { id: "i".into() }, "alert-confirm-close"),
+    ];
+    for (d, key) in new {
+        let mut rt = runtime(scenes::dw_0511);
+        rt.state.frames.shared.open_dialog(d.clone());
+        settle(&mut rt);
+        assert_eq!(d.section(), Section::Shared);
+        assert!(rt.state.frames.shared.fields.link_password.text.is_empty());
+        let _ = info(&rt, key);
+        press(&mut rt, Key::Escape);
+        settle(&mut rt);
+        assert_eq!(dialog(&rt), None, "{d:?}");
+    }
+}
+
+// ---- New request: the four menus and Create link (DW-0504) ----
+
+mod new_request {
+    use super::*;
+    use crate::frames::shared::source::{
+        BoardShared, Invitation, LinkShare, PeopleShare, Request, RequestForm, SharedSource,
+    };
+    use crate::frames::shared::parts::table::Row;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// The board's source, recording every create it is asked for.
+    struct Recording(BoardShared, Rc<RefCell<Vec<RequestForm>>>);
+
+    impl SharedSource for Recording {
+        fn invitations(&self) -> Vec<Invitation> {
+            self.0.invitations()
+        }
+        fn with_me(&self) -> Vec<Row> {
+            self.0.with_me()
+        }
+        fn people_shares(&self) -> Vec<PeopleShare> {
+            self.0.people_shares()
+        }
+        fn links(&self) -> Vec<LinkShare> {
+            self.0.links()
+        }
+        fn requests(&self) -> Vec<Request> {
+            self.0.requests()
+        }
+        fn accept(&mut self, id: &str) -> bool {
+            self.0.accept(id)
+        }
+        fn decline(&mut self, id: &str) -> bool {
+            self.0.decline(id)
+        }
+        fn keep_offline(&mut self, id: &str) -> bool {
+            self.0.keep_offline(id)
+        }
+        fn stop_sharing(&mut self, id: &str) -> bool {
+            self.0.stop_sharing(id)
+        }
+        fn close_request(&mut self, id: &str) -> bool {
+            self.0.close_request(id)
+        }
+        fn remove_request(&mut self, id: &str) -> bool {
+            self.0.remove_request(id)
+        }
+        fn members(&self, share: &str) -> Vec<crate::frames::shared::source::Member> {
+            self.0.members(share)
+        }
+        fn set_access(&mut self, share: &str, person: &str, access: Access) -> bool {
+            self.0.set_access(share, person, access)
+        }
+        fn remove_access(&mut self, share: &str, person: &str) -> bool {
+            self.0.remove_access(share, person)
+        }
+        fn create_request(&mut self, form: RequestForm) -> bool {
+            self.1.borrow_mut().push(form);
+            true
+        }
+        fn folders(&self) -> Vec<(String, String)> {
+            vec![("folder-taxes".into(), "Taxes".into())]
+        }
+    }
+
+    #[test]
+    fn create_link_sends_one_create_with_the_chosen_options() {
+        let mut rt = runtime(scenes::dw_0504);
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        rt.state.frames.shared.source = Box::new(Recording(BoardShared::new(), sent.clone()));
+        // Opening the dialog asks the source for the account's folders.
+        let mut open_tx = rune::Tx::default();
+        assert!(crate::frames::shared::actions_new::take(
+            &mut rt.state,
+            &mut open_tx,
+            &Intent::Frame("DW-0504")
+        ));
+        let n = rt.state.frames.shared.lists_behind();
+        click(&mut rt, &format!("item-{n}-0"));
+        click(&mut rt, "menu-0-item-1");
+        // The Expires menu opens under its row and its choice is taken; Most files too.
+        click(&mut rt, &format!("item-{n}-1"));
+        assert!(rt.find("menu-0").is_some());
+        click(&mut rt, "menu-0-item-1");
+        assert!(rt.find("menu-0").is_none());
+        click(&mut rt, &format!("item-{n}-2"));
+        click(&mut rt, "menu-0-item-3");
+        click(&mut rt, &format!("item-{n}-3"));
+        click(&mut rt, "menu-0-item-2");
+        rt.state.frames.shared.fields.title.text = "Tax forms".into();
+        click(&mut rt, "btn-create-link");
+        assert_eq!(
+            rt.state.frames.intents,
+            vec![Intent::Do("create-request", "Tax forms".into())]
+        );
+        let mut tx = rune::Tx::default();
+        let intents = std::mem::take(&mut rt.state.frames.intents);
+        for intent in &intents {
+            assert!(crate::frames::shared::actions_new::take(&mut rt.state, &mut tx, intent));
+        }
+        let sent = sent.borrow();
+        assert_eq!(sent.len(), 1, "one create per press");
+        assert_eq!(sent[0].title, "Tax forms");
+        assert_eq!(sent[0].target_folder.as_deref(), Some("folder-taxes"));
+        assert_eq!(sent[0].expires_in_hours, Some(24 * 7));
+        assert_eq!(sent[0].max_files, Some(10));
+        assert_eq!(sent[0].max_total_bytes, Some(1 << 30));
+        assert_eq!(dialog(&rt), None, "the dialog closes once the source took it");
+    }
+
+    #[test]
+    fn the_folder_menu_offers_the_accounts_folders_and_the_choice_is_the_target() {
+        use super::super::request_menus::{Pick, Setting};
+        let mut pick = Pick::default();
+        assert_eq!(pick.words(Setting::Folder), vec!["All files".to_string()]);
+        assert_eq!(pick.form("t", "").target_folder, None);
+        pick.set_folders(vec![("f-1".into(), "Taxes".into()), ("f-2".into(), "Trips".into())]);
+        assert_eq!(
+            pick.words(Setting::Folder),
+            vec!["All files".to_string(), "Taxes".to_string(), "Trips".to_string()]
+        );
+        // The default is still All files, with no target.
+        assert_eq!(pick.chosen(Setting::Folder), 0);
+        assert_eq!(pick.form("t", "").target_folder, None);
+        pick.choose(Setting::Folder, 2);
+        assert_eq!(pick.chosen(Setting::Folder), 2);
+        assert_eq!(pick.form("t", "").target_folder.as_deref(), Some("f-2"));
+        // A choice that is not in the menu changes nothing.
+        pick.choose(Setting::Folder, 9);
+        assert_eq!(pick.chosen(Setting::Folder), 2);
+        pick.choose(Setting::Folder, 0);
+        assert_eq!(pick.form("t", "").target_folder, None);
+        // Folder names are file names: a debug print holds none.
+        assert!(!format!("{pick:?}").contains("Taxes"));
+    }
+
+    #[test]
+    fn a_new_request_starts_at_thirty_days_with_no_limits() {
+        let form = super::super::request_menus::Pick::default().form(" A title ", "");
+        assert_eq!(form.title, "A title");
+        assert_eq!(form.expires_in_hours, Some(720));
+        assert_eq!((form.max_files, form.max_total_bytes), (None, None));
+    }
+}
+
+// ---- The link cards: Change expiry and Password (DW-0511) ----
+//
+// Shared has no "Copy link" card of its own: Copy link on a row is a press that asks the source (`actions_links`).
+// The two cards a link row opens are Change expiry and Password; both are covered here.
+
+mod link_cards {
+    use super::*;
+    use crate::frames::shared::parts::table::Row;
+    use crate::frames::shared::source::{
+        BoardShared, Invitation, LinkEdit, LinkShare, Member, PeopleShare, Request, SharedSource,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// What the cards sent: a password edit as `Some(Some(typed))` / `Some(None)` (remove), an expiry as `None`.
+    type Sent = Rc<RefCell<Vec<(String, Option<Option<String>>)>>>;
+
+    /// The board's source, recording every change of a link.
+    struct Links(BoardShared, Sent);
+
+    impl SharedSource for Links {
+        fn invitations(&self) -> Vec<Invitation> {
+            self.0.invitations()
+        }
+        fn with_me(&self) -> Vec<Row> {
+            self.0.with_me()
+        }
+        fn people_shares(&self) -> Vec<PeopleShare> {
+            self.0.people_shares()
+        }
+        fn links(&self) -> Vec<LinkShare> {
+            self.0.links()
+        }
+        fn requests(&self) -> Vec<Request> {
+            self.0.requests()
+        }
+        fn accept(&mut self, id: &str) -> bool {
+            self.0.accept(id)
+        }
+        fn decline(&mut self, id: &str) -> bool {
+            self.0.decline(id)
+        }
+        fn keep_offline(&mut self, id: &str) -> bool {
+            self.0.keep_offline(id)
+        }
+        fn stop_sharing(&mut self, id: &str) -> bool {
+            self.0.stop_sharing(id)
+        }
+        fn close_request(&mut self, id: &str) -> bool {
+            self.0.close_request(id)
+        }
+        fn remove_request(&mut self, id: &str) -> bool {
+            self.0.remove_request(id)
+        }
+        fn members(&self, share: &str) -> Vec<Member> {
+            self.0.members(share)
+        }
+        fn set_access(&mut self, share: &str, person: &str, access: Access) -> bool {
+            self.0.set_access(share, person, access)
+        }
+        fn remove_access(&mut self, share: &str, person: &str) -> bool {
+            self.0.remove_access(share, person)
+        }
+        fn change_link(&mut self, share_id: &str, change: LinkEdit) -> bool {
+            let seen = match change {
+                LinkEdit::Password(typed) => Some(typed.map(|t| t.to_string())),
+                LinkEdit::Expiry(_) => None,
+            };
+            self.1.borrow_mut().push((share_id.to_string(), seen));
+            true
+        }
+    }
+
+    fn open(dialog: Dialog) -> (Runtime<State>, Sent) {
+        let mut rt = runtime(scenes::dw_0511);
+        let sent = Sent::default();
+        rt.state.frames.shared.source = Box::new(Links(BoardShared::new(), sent.clone()));
+        rt.state.frames.shared.open_dialog(dialog);
+        settle(&mut rt);
+        (rt, sent)
+    }
+
+    fn password() -> Dialog {
+        Dialog::LinkPassword {
+            share_id: "link-1".into(),
+            has_password: false,
+        }
+    }
+
+    fn type_password(rt: &mut Runtime<State>, typed: &str) {
+        let edit = &mut rt.state.frames.shared.fields.link_password;
+        edit.text.clear();
+        edit.text.push_str(typed);
+        edit.anchor = edit.text.len();
+        edit.focus = edit.text.len();
+        settle(rt);
+    }
+
+    fn typed(rt: &Runtime<State>) -> String {
+        rt.state.frames.shared.fields.link_password.text.clone()
+    }
+
+    #[test]
+    fn the_password_card_opens_on_its_field_and_says_what_it_is() {
+        let (rt, sent) = open(password());
+        assert_eq!(dialog(&rt), Some(password()));
+        assert_eq!(focused(&rt).as_deref(), Some(super::super::link_change::LINK_PASSWORD_INPUT));
+        assert!(typed(&rt).is_empty());
+        assert!(super::super::link_change::shows_secret(&rt.state));
+        assert!(sent.borrow().is_empty(), "opening sends nothing");
+    }
+
+    #[test]
+    fn enter_in_the_password_field_sends_what_was_typed_closes_the_card_and_wipes_the_field() {
+        let (mut rt, sent) = open(password());
+        type_password(&mut rt, "an invented password");
+        press(&mut rt, Key::Enter);
+        assert_eq!(
+            *sent.borrow(),
+            [("link-1".to_string(), Some(Some("an invented password".to_string())))]
+        );
+        assert_eq!(dialog(&rt), None);
+        assert!(typed(&rt).is_empty(), "the field is wiped once it is sent");
+        assert!(!super::super::link_change::shows_secret(&rt.state));
+    }
+
+    #[test]
+    fn enter_with_nothing_typed_sends_nothing_and_keeps_the_card() {
+        let (mut rt, sent) = open(password());
+        type_password(&mut rt, "   ");
+        press(&mut rt, Key::Enter);
+        assert!(sent.borrow().is_empty());
+        assert_eq!(dialog(&rt), Some(password()));
+    }
+
+    #[test]
+    fn escape_closes_the_password_card_sends_nothing_and_wipes_what_was_typed() {
+        let (mut rt, sent) = open(password());
+        type_password(&mut rt, "never sent");
+        press(&mut rt, Key::Escape);
+        assert_eq!(dialog(&rt), None);
+        assert!(sent.borrow().is_empty());
+        assert!(typed(&rt).is_empty(), "typed words do not stay after Esc");
+    }
+
+    #[test]
+    fn cancel_and_remove_password_close_the_card_and_wipe_it() {
+        let (mut rt, sent) = open(password());
+        type_password(&mut rt, "typed then cancelled");
+        click(&mut rt, "btn-cancel");
+        assert_eq!(dialog(&rt), None);
+        assert!(typed(&rt).is_empty() && sent.borrow().is_empty());
+
+        rt.state.frames.shared.open_dialog(Dialog::LinkPassword {
+            share_id: "link-1".into(),
+            has_password: true,
+        });
+        settle(&mut rt);
+        type_password(&mut rt, "typed then removed");
+        click(&mut rt, "btn-remove-password");
+        assert_eq!(*sent.borrow(), [("link-1".to_string(), Some(None))]);
+        assert_eq!(dialog(&rt), None);
+        assert!(typed(&rt).is_empty(), "the password is gone with the card");
+    }
+
+    #[test]
+    fn a_dialog_opened_over_a_typed_password_starts_with_an_empty_field() {
+        let (mut rt, _) = open(password());
+        type_password(&mut rt, "left behind");
+        rt.state.frames.shared.open_dialog(Dialog::LinkExpiry { share_id: "link-1".into() });
+        settle(&mut rt);
+        assert!(typed(&rt).is_empty());
+    }
+
+    #[test]
+    fn the_expiry_card_sends_the_choice_and_closes_and_escape_sends_nothing() {
+        let link = BoardShared::new().links()[0].id.clone();
+        let (mut rt, sent) = open(Dialog::LinkExpiry { share_id: link.clone() });
+        let _ = info(&rt, "dialog-link-change");
+        press(&mut rt, Key::Escape);
+        assert_eq!(dialog(&rt), None);
+        assert!(sent.borrow().is_empty());
+
+        rt.state.frames.shared.open_dialog(Dialog::LinkExpiry { share_id: link.clone() });
+        settle(&mut rt);
+        click(&mut rt, "expiry-7-days");
+        assert_eq!(dialog(&rt), None);
+        assert_eq!(*sent.borrow(), [(link, None)]);
+    }
 }

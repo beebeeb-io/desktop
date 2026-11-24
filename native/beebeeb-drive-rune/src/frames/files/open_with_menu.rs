@@ -14,7 +14,7 @@ use std::sync::{Mutex, PoisonError};
 use rune::{El, Key, KeyEvent, Tx};
 
 use super::source::Action;
-use super::{MenuKind, Toast};
+use super::MenuKind;
 use crate::State;
 use crate::frames::viewers::kinds::{self, OfficeShips};
 use crate::source::DriveItem;
@@ -316,11 +316,9 @@ impl State {
         if self.needs_session(tx) {
             return;
         }
-        // Only the copy kept on this PC goes to another app: nothing is fetched or decrypted for it.
-        if !self.selection_is_kept() {
-            self.show_toast(Toast::KeepFirst, tx);
-            return;
-        }
+        // Any file goes to another app; one not here (asked of the source at the press, never the row's mark) is
+        // fetched by Windows first, and the window says how much (`open_file::fetch_toast`).
+        let fetch = crate::frames::open_file::fetch_toast(self, &item);
         let answer = if id == OTHER_ID {
             self.actions.source.open_with(&item)
         } else {
@@ -333,8 +331,13 @@ impl State {
             };
             self.actions.source.open_in_app(&item, &app)
         };
-        if let Err(why) = answer {
-            self.failed(Action::OpenWith, why, tx);
+        match answer {
+            Err(why) => self.failed(Action::OpenWith, why, tx),
+            Ok(()) => {
+                if let Some(toast) = fetch {
+                    self.show_toast(toast, tx);
+                }
+            }
         }
     }
 }

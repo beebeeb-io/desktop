@@ -1,4 +1,4 @@
-//! Task 2267 in the engine (plan wave 3, slice S2a; census S2: "Unowned local data on a Windows PC" and "Found while
+//! Task 2267 in the engine ("Unowned local data on a Windows PC" and "Found while
 //! paused"). A Windows start refused with `OtherAccountsData` over local data that has no owner record, or one recorded
 //! only by an old email, proves in the background that the data is the signed-in account's own (`own_data_proof`: ONE
 //! listing of this account's tree, every server-named My Files row opening under this session's key) and then starts
@@ -9,13 +9,15 @@
 //! - One proof per account runtime and session turn. A refusal while one runs, or after one settled the turn, asks
 //!   nothing new; a proof that got no answer frees the turn, so a later start asks again (`Outcome::Unavailable`).
 //! - The proof is a task of the engine's runtime that a Lock and a sign-out stop first ([`Engine::stop_proofs`]), so
-//!   its client (the session's token and key) never outlives them.
+//!   its client (the session's token and key) never outlives them. A stopped proof that does not let go in time (it is
+//!   in a write that does not yield) is kept: the Lock or the sign-out goes on, and no start runs until its client is
+//!   gone (`StopFinishing`, [`Engine::local_data_for_start`]).
 //! - Sync starts after an adoption only while the session is still the one proven. That start binds again under the
 //!   step lock and now keeps everything.
 //! - No answer at all (offline, a time-out) turns the refusal into `IdentityUnknown` ("connect and open Beebeeb
 //!   again"). A token the server refused is not "offline", so that sentence is not shown for it.
 //!
-//! The upgrade from a release before the binding (R10 ruling 8; lead rulings 2026-11-15 17:35), on every OS: the first
+//! The upgrade from a release before the binding (The binding rule), on every OS: the first
 //! startup of this build ([`Engine::fix_upgrade_candidate_at_startup`], from `restore`) fixes the adoption candidate,
 //! the account whose vault key the credential store holds then, and shuts the adoption window on disk, even with no
 //! key. That startup writes nothing but the window's one `user_version` mark into a `state.db` that exists, and never
@@ -26,8 +28,8 @@
 //!
 //! A "Keep on this PC only" that a crash interrupted is finished or undone before an engine exists
 //! ([`Engine::settle_an_interrupted_keep`], step 7 of the start, after the binding). The decisions the card needs
-//! (review, upload, keep, show the kept folder) are the `found_while_paused_*_for` calls, stamped with the session turn
-//! ([`Engine::session_turn`]); the window binds them (slice S2b).
+//!  are the `found_while_paused_*_for` calls, stamped with the session turn
+//! ([`Engine::session_turn`]); the window binds them.
 //!
 //! The proof's hooks the start, the Lock and the sign-out call exist on every OS and do nothing where no start is
 //! refused over local data a proof could settle (the same gate as `own_data_proof` in `lib.rs`).
@@ -69,6 +71,10 @@ use crate::signin::start;
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 use crate::sync_view::Start;
 
+/// dc-144b: what the window says once after a corrupt `state.db` was moved aside and the files listed again.
+pub const LOCAL_LIST_REBUILT_NOTICE: &str =
+    "Beebeeb rebuilt its local file list. Your files are listed again from your account; nothing in your account changed.";
+
 #[cfg(test)]
 #[path = "own_data_start_tests.rs"]
 mod tests;
@@ -83,10 +89,25 @@ pub const LIST_TIMEOUT: Duration = Duration::from_secs(600);
 #[cfg(target_os = "windows")]
 pub const PROOF_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// How long a Lock or a sign-out waits for a stopped proof to let go of its client. A stopped task is dropped at its
-/// next await; a database write it is in finishes first.
+/// How long a Lock or a sign-out waits for its stopped proofs to let go of their client (one wait for them all). A
+/// stopped task is dropped at its next await; a database write it is in finishes first. One still alive after it is
+/// kept ([`ProofStop::Unconfirmed`]).
 #[cfg(any(target_os = "windows", test, feature = "test-support"))]
 const STOP_WAIT: Duration = Duration::from_secs(5);
+
+/// What [`Engine::stop_proofs`] came to. The step that stopped them (a Lock, a sign-out, the close of a session the
+/// server ended, the strong unlock's replacement) goes on either way and tells the person nothing new: the seat itself
+/// refuses every start while a proof that did not end is alive.
+#[must_use = "a stopped proof that did not end still holds the session's token and key"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "windows", test, feature = "test-support")), allow(dead_code))]
+pub(in crate::app) enum ProofStop {
+    /// Every stopped proof let go of its client, or none ran.
+    Ended,
+    /// A stopped proof did not let go of its client within [`STOP_WAIT`]. Its seat keeps it: every start is refused
+    /// ([`SyncStartRefused::StopFinishing`]) until its client is gone, and the next stop waits for it again.
+    Unconfirmed,
+}
 
 /// What Upload, Keep, the review and "Show in Explorer" say when this PC's local data is not the signed-in account's
 /// own, the session moved since the card was read, or nobody is signed in.
@@ -134,6 +155,8 @@ struct Seat {
 struct SeatState {
     /// The upgrade's adoption, as this handle's first startup fixed it.
     startup: Startup,
+    /// dc-144b: a corrupt `state.db` was moved aside and a fresh one is made; the window has not said so yet.
+    rebuilt: bool,
     /// The proof the last refused start owes; `ready` once that refusal is in the view.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     owed: Option<Owed>,
@@ -145,6 +168,10 @@ struct SeatState {
     /// The proofs on the runtime, for a Lock or a sign-out to stop.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
     running: Vec<Running>,
+    /// Stopped proofs that did not let go of their client within [`STOP_WAIT`]: no start while one is alive
+    /// ([`Engine::local_data_for_start`]), and the next stop aborts and waits for them again.
+    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    unconfirmed: Vec<Running>,
     /// How many stops ([`Engine::stop_proofs`]) this handle has had. A proof owed before the last one never reads a
     /// key: it is compared under this lock, in the same hold that reads the keys and registers the proof's task.
     #[cfg(any(target_os = "windows", test, feature = "test-support"))]
@@ -153,7 +180,7 @@ struct SeatState {
     test: TestSeams,
 }
 
-/// R10 ruling 8: the adoption window as the first startup found it. `candidate` is set only when that startup found
+/// The binding rule: the adoption window as the first startup found it. `candidate` is set only when that startup found
 /// the window open (or no `state.db` yet), and holds the account whose vault key the credential store held then.
 #[derive(Default)]
 struct Startup {
@@ -204,6 +231,8 @@ struct TestSeams {
     listing: Option<TestListing>,
     /// The listing's time-out, in place of [`LIST_TIMEOUT`].
     list_timeout: Option<Duration>,
+    /// How long a stop waits for a stopped proof, in place of [`STOP_WAIT`].
+    stop_wait: Option<Duration>,
     /// The OS's answers for the start after an adoption, in place of the real ones.
     restart_port: Option<Arc<dyn crate::sync_root_port::SyncRootPort>>,
     /// Owed proofs the service took up (before the one-per-turn rule), and proofs it started.
@@ -328,34 +357,72 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// The Lock, the sign-out, the close of a session the server ended and the strong unlock's replacement of a session
-    /// in memory, first: every proof of this handle stops, and each is waited for (at most [`STOP_WAIT`]) until it let
-    /// go of its client, so the session's token and key are gone before the next engine waits for every credential to
-    /// be released (`runner.rs`). Every caller holds the step lock, which a proof never
+    /// in memory, first: every proof of this handle stops, and they are waited for (at most [`STOP_WAIT`] in all) until
+    /// each let go of its client, so the session's token and key are gone before the next engine waits for every
+    /// credential to be released (`runner.rs`). Every caller holds the step lock, which a proof never
     /// takes (the start after an adoption takes it as any start does, so it is never cut half way). A proof stopped
     /// after it recorded the owner has recorded this same account's data; one stopped before it recorded nothing.
+    ///
+    /// A proof still alive when the wait ran out (in a write that does not yield) is kept in the seat before this
+    /// returns, and the stop says so ([`ProofStop::Unconfirmed`]): every start is refused until its client is gone
+    /// ([`Self::local_data_for_start`]), and the next stop aborts it and waits for it again. Never waits longer: the
+    /// caller goes on and tells the person nothing new. No start sees the seat while a proof is out of it here, since
+    /// every start takes the step lock the caller holds.
     ///
     /// No proof slips past: a proof reads the session's keys, makes its client and registers its task in one hold of
     /// the seat lock, after it compared the stop count this bumps in its own hold ([`Engine::run_proof`]). So a proof
     /// is either registered here (stopped and waited for) or reads no key at all. Never waits for the service thread
     /// itself, whose start after an adoption takes the step lock the caller holds.
-    pub(in crate::app) async fn stop_proofs(&self) {
+    pub(in crate::app) async fn stop_proofs(&self) -> ProofStop {
         #[cfg(any(target_os = "windows", test, feature = "test-support"))]
         {
-            let running = {
-                let seat = self.own_data_seat();
+            let seat = self.own_data_seat();
+            let (proofs, wait) = {
                 let mut state = lock(&seat.state);
                 state.owed = None;
                 state.ready = false;
                 state.stops = state.stops.wrapping_add(1);
-                std::mem::take(&mut state.running)
+                #[cfg(test)]
+                let wait = state.test.stop_wait.unwrap_or(STOP_WAIT);
+                #[cfg(not(test))]
+                let wait = STOP_WAIT;
+                let mut proofs = std::mem::take(&mut state.running);
+                proofs.append(&mut state.unconfirmed);
+                (proofs, wait)
             };
-            for proof in running {
+            let until = tokio::time::Instant::now() + wait;
+            let mut alive = Vec::new();
+            for mut proof in proofs {
                 proof.abort.abort();
-                if tokio::time::timeout(STOP_WAIT, proof.ended).await.is_err() {
-                    tracing::warn!("ownership proof: a stopped proof did not end in time");
+                // By reference: a proof still alive at the deadline keeps the receiver that says when it let go.
+                if tokio::time::timeout_at(until, &mut proof.ended).await.is_err() {
+                    alive.push(proof);
                 }
             }
+            if alive.is_empty() {
+                return ProofStop::Ended;
+            }
+            tracing::warn!("ownership proof: a stopped proof did not end in time");
+            lock(&seat.state).unconfirmed.append(&mut alive);
+            ProofStop::Unconfirmed
         }
+        #[cfg(not(any(target_os = "windows", test, feature = "test-support")))]
+        ProofStop::Ended
+    }
+
+    /// A stopped proof that did not let go of its client in time ([`ProofStop::Unconfirmed`]) is still alive. Forgets
+    /// each one that let go since. Polls only, never waits.
+    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    fn a_stopped_proof_is_alive(&self) -> bool {
+        let seat = self.own_data_seat();
+        let mut state = lock(&seat.state);
+        state.unconfirmed.retain_mut(|proof| {
+            matches!(
+                proof.ended.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            )
+        });
+        !state.unconfirmed.is_empty()
     }
 
     /// Step 7 of the start, right after the binding and before an engine exists: a "Keep on this PC only" that a crash
@@ -389,7 +456,29 @@ impl<C: CredentialStores> Engine<C> {
         drop(data);
     }
 
-    /// R10 ruling 8, from `restore` (under the step lock, after the stored key was or was not loaded): the first
+    /// dc-144b: a corrupt `state.db` is moved aside (`local_state::move_corrupt_state_db_aside`, never deleted), so
+    /// the next open makes a fresh one and the files are listed again from the server. Called at the startup
+    /// ([`Self::fix_upgrade_candidate_at_startup`]) and at every engine start, once no other live process holds this
+    /// state. A move is remembered until the window says so once ([`Engine::take_local_list_rebuilt_notice`]). Any
+    /// other failure to open is an `Err` and nothing is moved: it fails closed.
+    pub(in crate::app) fn move_aside_a_corrupt_state_db(&self) -> Result<(), String> {
+        match crate::local_state::move_corrupt_state_db_aside(&self.config.state_dir)? {
+            crate::local_state::StateDbCheck::Sound => {}
+            crate::local_state::StateDbCheck::MovedAside(_) => {
+                lock(&self.own_data_seat().state).rebuilt = true;
+                self.host.wake();
+            }
+        }
+        Ok(())
+    }
+
+    /// The words the window shows once after a corrupt `state.db` was moved aside, or `None`. Taking them clears
+    /// them: a second ask answers `None` until the next move.
+    pub fn take_local_list_rebuilt_notice(&self) -> Option<&'static str> {
+        std::mem::take(&mut lock(&self.own_data_seat().state).rebuilt).then_some(LOCAL_LIST_REBUILT_NOTICE)
+    }
+
+    /// The binding rule, from `restore` (under the step lock, after the stored key was or was not loaded): the first
     /// startup of this handle fixes the upgrade's adoption candidate and shuts the adoption window on disk. The window
     /// is open on a `state.db` that a release before the binding wrote, and nothing else: whatever this startup finds,
     /// it shuts it, even with no key, so a later startup (whatever key it finds) never adopts by this route. The
@@ -405,6 +494,9 @@ impl<C: CredentialStores> Engine<C> {
                 return;
             }
             state.startup.fixed = true;
+        }
+        if self.move_aside_a_corrupt_state_db().is_err() {
+            tracing::warn!("state.db could not be checked at startup; the next start checks again");
         }
         let path = state_paths::state_db_path_from_state_dir(&self.config.state_dir);
         let open = match StateDb::shut_adoption_window_at_startup(&path) {
@@ -436,11 +528,19 @@ impl<C: CredentialStores> Engine<C> {
     /// (`account_binding::is_the_upgrade_candidate`), unowned local data is recorded as its own (one transaction, never
     /// over a recorded owner), so this first start keeps everything. Then the window is shut, as at every start.
     /// Any error refuses the start as `Other` (nothing was started; the window is shut at the next start that reads).
+    ///
+    /// First, before anything is opened: while a stopped ownership proof that did not let go of its client in time is
+    /// alive ([`ProofStop::Unconfirmed`]), the start is refused as `StopFinishing` (unlike an engine whose stop was
+    /// never confirmed, `StopUnconfirmed`, which only a restart ends). The refusal ends by itself once that client is gone.
     pub(in crate::app) fn local_data_for_start(
         &self,
         sync_root: &Path,
         session: &Identity,
     ) -> Result<LocalState, SyncStartRefused> {
+        #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+        if self.a_stopped_proof_is_alive() {
+            return Err(SyncStartRefused::StopFinishing);
+        }
         let data =
             LocalState::for_engine_start(&self.config.state_dir, sync_root).map_err(|_| SyncStartRefused::Other)?;
         let seat = self.own_data_seat();

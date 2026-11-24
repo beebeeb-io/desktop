@@ -373,10 +373,10 @@ impl Fixture {
     }
 }
 
-fn glegion() -> DeviceSelf {
+fn testpc() -> DeviceSelf {
     DeviceSelf {
         device_id: beebeeb_core::backup::device_id_from_machine_id("4c4c4544-0042-3510-8052-b4c04f4e3732"),
-        name: "GLegion".into(),
+        name: "TestPC".into(),
         platform: Platform::Windows,
     }
 }
@@ -459,10 +459,10 @@ async fn legacy_duplicate_roots_merged_then_claimed() {
     let fx = Fixture::new();
     let old = fx.add(None, "Backups", true, 0, "2026-01-01T10:00:00Z");
     let new = fx.add(None, "Backups", true, 0, "2026-06-01T10:00:00Z");
-    let old_device = fx.add(Some(&old), "GLegion", true, 0, "2026-01-01T10:00:00Z");
+    let old_device = fx.add(Some(&old), "Alpha-PC", true, 0, "2026-01-01T10:00:00Z");
     let old_pictures = fx.add(Some(&old_device), "Pictures", true, 0, "2026-01-01T10:00:00Z");
     fx.add(Some(&old_pictures), "a.jpg", false, 5, "2026-01-01T10:00:00Z");
-    let new_device = fx.add(Some(&new), "GLegion", true, 0, "2026-06-01T10:00:00Z");
+    let new_device = fx.add(Some(&new), "Alpha-PC", true, 0, "2026-06-01T10:00:00Z");
     let new_pictures = fx.add(Some(&new_device), "Pictures", true, 0, "2026-06-01T10:00:00Z");
     let clash = fx.add(Some(&new_pictures), "a.jpg", false, 6, "2026-06-01T10:00:00Z");
     let new_documents = fx.add(Some(&new_device), "Documents", true, 0, "2026-06-01T10:00:00Z");
@@ -490,7 +490,7 @@ async fn legacy_duplicate_roots_merged_then_claimed() {
         Some(old.as_str()),
         "another device's folder moved into the survivor"
     );
-    assert_eq!(fx.names(&old), ["GLegion", "Sam's iPhone"]);
+    assert_eq!(fx.names(&old), ["Alpha-PC", "Sam's iPhone"]);
     assert_eq!(fx.names(&old_device), ["Documents", "Pictures"]);
     let pictures = fx.names(&old_pictures);
     assert_eq!(pictures.len(), 2, "both files kept: {pictures:?}");
@@ -528,13 +528,13 @@ async fn legacy_duplicate_roots_merged_then_claimed() {
     );
 }
 
-/// Spec §4.2 rule 3 (b), §6.1 point 6, rule 10: the first pass adopts the old mirror's `Backups/GLegion` (my
+/// Spec §4.2 rule 3 (b), §6.1 point 6, rule 10: the first pass adopts the old mirror's `Backups/TestPC` (my
 /// exact name, no manifest), writes this device's `.device.json` into it at once, and rebuilds the records from
 /// what the mirror already uploaded, so an unchanged file is not uploaded again and a new one is. Another
 /// device's folder (its own manifest) is left alone. With the layout forgotten, the manifest finds the folder
 /// again (rule 3 (a)) and no second manifest is written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn first_pass_writes_manifest_and_adopts_legacy_glegion_folder() {
+async fn first_pass_writes_manifest_and_adopts_legacy_testpc_folder() {
     let fx = Fixture::new();
     let root = fx.add(None, "Backups", true, 0, "2026-01-01T10:00:00Z");
     fx.flag(&root);
@@ -551,7 +551,7 @@ async fn first_pass_writes_manifest_and_adopts_legacy_glegion_folder() {
         )
         .await
         .unwrap();
-    let legacy = fx.add(Some(&root), "GLegion", true, 0, "2026-03-01T10:00:00Z");
+    let legacy = fx.add(Some(&root), "TestPC", true, 0, "2026-03-01T10:00:00Z");
     let pictures = fx.add(Some(&legacy), "Pictures", true, 0, "2026-03-01T10:00:00Z");
     let source = fx.dir.path().join("Pictures");
     std::fs::create_dir_all(&source).unwrap();
@@ -568,14 +568,14 @@ async fn first_pass_writes_manifest_and_adopts_legacy_glegion_folder() {
     std::fs::write(source.join("new.jpg"), b"taken today").unwrap();
     let writes_before = fx.server.count("POST", "/api/v1/uploads/init");
 
-    let me = glegion();
+    let me = testpc();
     let layout = ensure_layout(&fx.bridge, &me, &[Category::Pictures]).await.unwrap();
     assert_eq!(layout.root_id, root);
     assert_eq!(
         layout.device_folder_id, legacy,
         "the old mirror's folder is adopted, not doubled"
     );
-    assert_eq!(layout.device_folder_name, "GLegion");
+    assert_eq!(layout.device_folder_name, "TestPC");
     assert_eq!(
         fx.server.count("POST", "/api/v1/uploads/init") - writes_before,
         1,
@@ -583,7 +583,7 @@ async fn first_pass_writes_manifest_and_adopts_legacy_glegion_folder() {
     );
     let (manifest_id, manifest) = fx
         .child(Some(&legacy), MANIFEST_NAME)
-        .expect("the manifest is in GLegion");
+        .expect("the manifest is in TestPC");
     // The record the read is checked against is the listed row's own (its name carries the upload's commitment).
     let (listed, _) = fx.bridge.backup_list_children(&legacy).await.unwrap();
     let record = listed
@@ -684,10 +684,10 @@ async fn other_devices_are_read_through_their_sealed_manifests() {
         "version": 1, "device_id": "ios-invented-02", "device_name": "Invented phone", "device_model": "iPhone 17",
     });
     write(phone.clone(), phone_manifest.to_string()).await;
-    let mine = fx.add(Some(&root), "GLegion", true, 0, "2026-04-01T10:00:00Z");
+    let mine = fx.add(Some(&root), "TestPC", true, 0, "2026-04-01T10:00:00Z");
     write(
         mine.clone(),
-        beebeeb_core::backup::serialize_manifest(&device_manifest(&glegion(), &[Category::Documents])),
+        beebeeb_core::backup::serialize_manifest(&device_manifest(&testpc(), &[Category::Documents])),
     )
     .await;
     let broken = fx.add(Some(&root), "Invented tablet", true, 0, "2026-05-01T10:00:00Z");
@@ -700,7 +700,7 @@ async fn other_devices_are_read_through_their_sealed_manifests() {
         chunk[last] ^= 0x01;
     }
 
-    let (devices, complete) = read_devices(&*fx.bridge, &root, None, Some(&glegion()), None)
+    let (devices, complete) = read_devices(&*fx.bridge, &root, None, Some(&testpc()), None)
         .await
         .unwrap();
     assert!(complete);

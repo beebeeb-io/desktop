@@ -8,13 +8,21 @@
 pub mod fake_account;
 pub mod fake_device_signin;
 pub mod fake_previews;
+pub mod fake_purge;
+pub mod fake_rest;
+pub mod fake_search_shards;
+pub mod fake_sessions;
+pub mod fake_sharing;
 pub mod fake_signup;
 pub mod fake_uploads;
+pub mod large_account;
 pub mod password_change;
 pub mod server;
 
 #[cfg(test)]
 mod gap_tests;
+#[cfg(test)]
+mod patch_tests;
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};

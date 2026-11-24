@@ -25,25 +25,26 @@ use crate::shell::app::{Event, GateState, Screen};
 use crate::shell::host;
 use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
 use crate::theme::icons_settings as ic;
-use crate::theme::tokens::{self, Theme, radius, type_};
+use crate::theme::scale::{self, space};
+use crate::theme::tokens::{self, Theme};
+use crate::ui::button::{ButtonState, Size, Variant, button as ui_button, keys};
 use crate::ui::settings_dialog::DIALOG_TITLE;
 use crate::ui::sidebar::{self, Standing};
+use crate::ui::status_bar::{self, Dot};
 use crate::ui::toolbar::{self, Closed};
 use crate::ui::{caption, kit};
-use rune::{Align, Color, Cx, El, Icon, TextStyle, col, el, row};
+use rune::{Align, Cx, El, Icon, TextStyle, col, el, row};
 
-/// The action each button names, for tests and the log. None of these is wired to an engine
-/// action yet: each button shows [`NOT_AVAILABLE`].
-pub const OPEN_PLANS: &str = "open-plans";
 pub const CHECK_PLAN: &str = "check-plan";
 pub const SIGN_OUT: &str = "sign-out";
 /// The lock screen's second button, shown once Windows Hello could not answer.
 pub const USE_PASSWORD_KEY: &str = "gate-btn-1";
 
-/// `.kit-btn-lg`'s words: 13px/500 on 19.5px.
-const BUTTON_LG: TextStyle = TextStyle::new(13.0, 500.0).lh(19.5).tracking(-0.065);
+/// The cover's sign-in button, shown while the engine's look failed and nothing passed (`shell::away`).
+pub const COVER_SIGN_IN_KEY: &str = "cover-sign-in";
+
 /// `.t-sub`: 12px on 15px.
-const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+const SUB: TextStyle = scale::text::SUB;
 /// The no-plan column is 380 wide (`max-width: 380px`).
 const NO_PLAN_W: f32 = 380.0;
 
@@ -61,8 +62,16 @@ pub const NO_PLAN: Frame = Frame {
     feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
 };
 
+/// The credential store did not answer (no board frame): `keystore.rs`.
+pub const KEYSTORE: Frame = Frame {
+    group: FrameGroup::KeyStoreUnavailable,
+    view,
+    on_key: None,
+    feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
+};
+
 /// The board's frames of this file: the id, and what shows it on a fresh `State`.
-pub const FRAMES: &[(&str, fn(&mut State))] = &[
+pub const FRAMES: &[crate::frames::signin::Scene<State>] = &[
     ("DW-0009", |s| {
         host::dispatch(s, Event::Gate(GateState::Locked));
     }),
@@ -71,62 +80,74 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     }),
 ];
 
-/// The message every gate button shows today: none of the four engine actions exists yet.
+/// What a gate button says when the engine cannot be asked (no sign-in source in this window).
 const NOT_AVAILABLE: &str = "Not available yet";
 
-/// Set the gate notice and log the attempt. The engine actions these buttons need (unlock via
-/// Windows Hello, opening the plans page in the browser, re-checking the plan with the server,
-/// and sign-out while the gate is closed) are phase 2: this file does not edit `engine_host.rs`.
-fn not_built(what: &'static str) -> impl Fn(&mut State) + 'static {
-    move |s: &mut State| {
+#[cfg(test)]
+#[path = "gates_tests.rs"]
+mod gates_tests;
+#[path = "keystore.rs"]
+pub mod keystore;
+
+/// Asks the window's sign-in source (the engine's) for one of the gate buttons; says [`NOT_AVAILABLE`] under the
+/// buttons when this window has none. The engine's gate then changes by itself and the window follows it.
+fn ask_source(s: &mut State, what: &'static str, ask: impl FnOnce(&mut dyn super::source::SignInSource)) {
+    match s.signin.as_mut() {
+        Some(ui) => ask(ui.source.as_mut()),
+        None => {
+            let gate = s.shell.app.gate();
+            s.frames.gate_notice = Some(GateNotice {
+                message: NOT_AVAILABLE,
+                gate,
+            });
+            eprintln!("beebeeb gate: NotAvailable({what})");
+        }
+    }
+}
+
+/// "Check again" / "Try again": the engine reads its gate once more.
+fn recheck(s: &mut State) {
+    s.frames.gate_notice = None;
+    ask_source(s, CHECK_PLAN, |source| source.recheck_gate());
+}
+
+/// "Sign out" on the no-plan screen: the existing sign-out of this app.
+fn sign_out(s: &mut State) {
+    s.frames.gate_notice = None;
+    // An open editor with unsaved changes asks first (Save, Discard and sign out, Cancel).
+    if crate::frames::viewers::unsaved_guard::ask(s, crate::frames::viewers::unsaved_guard::Then::GateSignOut) {
+        return;
+    }
+    sign_out_now(s, false);
+}
+
+/// The gate's sign-out itself, once nothing unsaved is in the way (or the person chose to discard it).
+pub(crate) fn sign_out_now(s: &mut State, discard: bool) {
+    if discard {
+        ask_source(s, SIGN_OUT, |source| source.sign_out_from_gate_discarding_unsaved());
+    } else {
+        ask_source(s, SIGN_OUT, |source| source.sign_out_from_gate());
+    }
+}
+
+/// Opens one of the website's pages by its name in `shell::web_pages`; says so when it did not open.
+fn open_page(s: &mut State, name: &'static str) {
+    s.frames.gate_notice = None;
+    let opened = crate::shell::web_pages::url(name)
+        .is_some_and(|address| crate::engine_host::signin::open_web_page(address).is_ok());
+    if !opened {
         let gate = s.shell.app.gate();
         s.frames.gate_notice = Some(GateNotice {
-            message: NOT_AVAILABLE,
+            message: "Could not open that page",
             gate,
         });
-        eprintln!("beebeeb gate: NotBuilt({what})");
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Look {
-    Primary,
-    Plain,
-    Quiet,
-}
-
-/// A button of the block: `h` tall, as wide as its words unless the caller sets a width.
+/// A button of the block (`ui::button::button`), as wide as its words unless the caller sets a width.
 /// Keys: `<key>`, `<key>-icon`, `<key>-label`.
-fn button(key: &str, label: &str, icon: Option<&'static Icon>, look: Look, h: f32, style: TextStyle, t: &Theme) -> El {
-    let (fill, ink) = match look {
-        Look::Primary => (t.accent, t.accent_text_on),
-        Look::Plain => (t.paper, t.text),
-        Look::Quiet => (Color::TRANSPARENT, t.text_secondary),
-    };
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(h)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(radius::MD)
-        .fill(fill)
-        .focusable(true);
-    b = match look {
-        Look::Primary => b
-            .hover(fill.mix(Color::BLACK, 0.05))
-            .press(fill.mix(Color::BLACK, 0.10)),
-        _ => b.hover(t.paper2).press(t.paper3),
-    };
-    if look == Look::Plain {
-        b = b.border(1.0, t.card_border).border_layout();
-    }
-    if let Some(icon) = icon {
-        b = b.child(kit::glyph(format!("{key}-icon"), icon, 16.0, ink));
-    }
-    b.child(kit::label(format!("{key}-label"), label, style, ink))
+fn button(key: &str, label: &str, icon: Option<&'static Icon>, variant: Variant, size: Size, t: &Theme) -> El {
+    ui_button(keys(key), label, icon, variant, size, ButtonState::Enabled, t)
 }
 
 /// The head of the block: a neutral tile, the heading, one sentence, centred.
@@ -169,18 +190,17 @@ fn on_key(s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
 /// answer, when it was not a yes; "Use your password" shows with it, never before (the board's frame has one
 /// button).
 fn locked(said: Option<super::lock::Said>, t: &Theme) -> El {
-    let mut block = col().key("gate").items_center().gap(8.0);
+    let mut block = col().key("gate").items_center().gap(space::S8);
     for child in head(&ic::PADLOCK, "Beebeeb is locked", "Unlock to see your files.", false, t) {
         block = block.child(child);
     }
-    let mut actions = row().key("gate-actions").mt(8.0).gap(8.0).child(
+    let mut actions = row().key("gate-actions").mt(8.0).gap(space::S8).child(
         button(
             super::lock::UNLOCK_KEY,
             "Unlock",
             Some(&ic::APP_LOCK),
-            Look::Primary,
-            28.0,
-            crate::ui::settings_dialog::BUTTON_MD,
+            Variant::Primary,
+            Size::Md,
             t,
         )
         .default_button()
@@ -193,9 +213,8 @@ fn locked(said: Option<super::lock::Said>, t: &Theme) -> El {
                 USE_PASSWORD_KEY,
                 "Use your password",
                 None,
-                Look::Plain,
-                28.0,
-                crate::ui::settings_dialog::BUTTON_MD,
+                Variant::Secondary,
+                Size::Md,
                 t,
             )
             .on_press_tx(super::act(super::Ui::lock_use_password)),
@@ -204,9 +223,39 @@ fn locked(said: Option<super::lock::Said>, t: &Theme) -> El {
     block.child(actions)
 }
 
+/// The cover whose look failed: the lock screen's look with the sign-in path in place of an Unlock that would ask
+/// nothing (the engine's lock is open). The press closes the engine's lock; its own password screen takes the window.
+fn cover_sign_in(t: &Theme) -> El {
+    let mut block = col().key("gate").items_center().gap(space::S8);
+    for child in head(
+        &ic::PADLOCK,
+        "Beebeeb is locked",
+        "Sign in to see your files.",
+        false,
+        t,
+    ) {
+        block = block.child(child);
+    }
+    block.child(
+        row().key("gate-actions").mt(8.0).gap(space::S8).child(
+            button(
+                COVER_SIGN_IN_KEY,
+                "Sign in",
+                Some(&ic::APP_LOCK),
+                Variant::Primary,
+                Size::Md,
+                t,
+            )
+            .default_button()
+            .autofocus()
+            .on_press_tx(|s: &mut State, _: &mut rune::Tx| s.shell.actions.lock_vault_now()),
+        ),
+    )
+}
+
 /// DW-0014: where to get a plan (only on the website), Check again, Sign out.
 fn no_plan(t: &Theme) -> El {
-    let mut block = col().key("gate").w(NO_PLAN_W).items_center().gap(8.0);
+    let mut block = col().key("gate").w(NO_PLAN_W).items_center().gap(space::S8);
     for child in head(
         &ic::DATABASE,
         "Choose a plan",
@@ -216,55 +265,29 @@ fn no_plan(t: &Theme) -> El {
     ) {
         block = block.child(child);
     }
-    let wide = |key: &str, label: &str, icon, look| button(key, label, icon, look, 32.0, BUTTON_LG, t).w_full();
+    let wide = |key: &str, label: &str, icon, look| button(key, label, icon, look, Size::Lg, t).w_full();
     block.child(
         col()
             .key("gate-actions")
             .w_full()
-            .gap(8.0)
+            .gap(space::S8)
             .mt(12.0)
             .child(
                 wide(
                     "gate-btn-0",
                     "Choose a plan on beebeeb.io",
                     Some(&ic::EXTERNAL),
-                    Look::Primary,
+                    Variant::Primary,
                 )
                 // It opens the browser: said to assistive technology, as the glyph says it to the eye.
                 .label("Choose a plan on beebeeb.io, opens in your browser")
                 .default_button()
                 .autofocus()
-                .on_press(not_built(OPEN_PLANS)),
+                .on_press(|s: &mut State| open_page(s, "plan")),
             )
-            .child(wide("gate-btn-1", "Check again", None, Look::Plain).on_press(not_built(CHECK_PLAN)))
-            .child(wide("gate-btn-2", "Sign out", None, Look::Quiet).on_press(not_built(SIGN_OUT))),
+            .child(wide("gate-btn-1", "Check again", None, Variant::Secondary).on_press(recheck))
+            .child(wide("gate-btn-2", "Sign out", None, Variant::Ghost).on_press(sign_out)),
     )
-}
-
-/// The status line (`.mk-foot`): a dot and what sync is doing. The dot is never green here.
-fn status(words: &str, dot: Color, t: &Theme) -> El {
-    row()
-        .key("status-bar")
-        .role("status")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(
-            row()
-                .key("status-left")
-                .center_y()
-                .gap(7.0)
-                .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(dot))
-                .child(kit::label("status-text", words, type_::STATUS_STRONG, t.text_secondary)),
-        )
-        .child(el().key("status-spacer").grow(1.0))
-        // Nothing to count: the board keeps the place, empty.
-        .child(kit::label("status-details", "", type_::STATUS, t.text_tertiary).w(0.0))
 }
 
 /// The lock screen's sync line: the tray's words (`frames/tray/source.rs`), true to what the engine does.
@@ -304,16 +327,31 @@ fn drawn(s: &State, cx: &mut Cx<State>, is_locked: bool) -> El {
         .as_ref()
         .and_then(super::Ui::lock_said)
         .filter(|_| current_gate == GateState::Locked);
-    let (standing, closed, block, words, dot) = if is_locked {
+    let (standing, closed, block, words, dot) = if current_gate == GateState::KeyStoreUnavailable {
+        (
+            Standing::Locked,
+            Closed {
+                title: "Files",
+                sub: Some("Can't read your keys"),
+            },
+            keystore::block(&t),
+            "Not syncing \u{00B7} can't read your keys",
+            Dot::Idle,
+        )
+    } else if is_locked {
         (
             Standing::Locked,
             Closed {
                 title: "Beebeeb is locked",
                 sub: None,
             },
-            locked(lock_said, &t),
+            if s.shell.away.sign_in_offered() && current_gate != GateState::Locked {
+                cover_sign_in(&t)
+            } else {
+                locked(lock_said, &t)
+            },
             locked_line(s.shell.sync_runs()),
-            t.text_tertiary,
+            Dot::Busy,
         )
     } else {
         (
@@ -324,7 +362,7 @@ fn drawn(s: &State, cx: &mut Cx<State>, is_locked: bool) -> El {
             },
             no_plan(&t),
             "Not syncing \u{00B7} no plan",
-            t.text_quaternary,
+            Dot::Idle,
         )
     };
     // The notice a button raised: drawn under the buttons, shown only while the gate that
@@ -359,7 +397,7 @@ fn drawn(s: &State, cx: &mut Cx<State>, is_locked: bool) -> El {
         .fill(t.bg)
         .child(toolbar::toolbar_in(s, &t, 0.0, Some(&closed)))
         .child(gate_block)
-        .child(status(words, dot, &t));
+        .child(status_bar::bar(Some(dot), Some(words), "", &t));
     col()
         .key("window")
         .role("window")

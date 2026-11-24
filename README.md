@@ -126,7 +126,7 @@ To update by hand (any version): download the newest installer from the [latest 
 ## Features
 
 - **Automatic sync** — files in your beebeeb folder are encrypted and synced in the background
-- **Selective sync** — choose which folders sync locally; the rest stay as online-only placeholders until you open them
+- **Selective sync** — not available on any platform in the native app yet: no screen sets it (backlog GL-0002). On macOS (File Provider) and Windows (Cloud Files) the vault is already online-only placeholders until you open a file; Linux has no placeholders
 - **Conflict resolution** — never silently drops a version: a conflict window lets you choose Keep Mine, Keep Theirs or Keep Both (see [Sync engine behavior](#sync-engine-behavior))
 - **Online-only files** — native placeholders on macOS (File Provider) and Windows (Cloud Files); not on Linux yet (the FUSE prototype is not mounted)
 - **Zero-knowledge encryption** — per-file keys derived via HKDF; the server stores only ciphertext
@@ -183,7 +183,7 @@ The sync engine (`beebeeb-sync`, from the [core](https://github.com/beebeeb-io/c
   - **Keep Both** renames *your local copy* to `name (conflict - <device name> - <YYYY-MM-DD>).ext` (date in UTC) and downloads the server's version under the original name.
   - **After 24 hours with no choice**, every sync tick checks for conflicts older than that and applies Keep Both automatically (`sweep_auto_resolutions`, called from `crates/beebeeb-engine/src/runner.rs`). If the download of the server's version fails, your renamed copy stays on disk and the next tick retries.
   - **On macOS, a save from Finder** that meets a newer version on the server is held instead of sent. The conflict window offers the same three choices; Keep Both adds your version beside the original as `name (<device name>, HH.MM).ext`.
-- **Selective sync** — the vault stays remote by default. Folders marked locally available are hydrated and kept in sync; other items remain online-only placeholders until opened
+- **Selective sync** — not offered in the native app on any platform (0.9.0). The engine keeps an `excluded_folder_ids` list in `desktop.toml` (reset on account switch), but no screen edits it. Items stay online-only placeholders until opened on macOS and Windows; Linux has no placeholders
 
 ## Contributing
 

@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Re-encrypts a queued op's metadata for the server id.
+type RekeyFn<'a, E> = dyn Fn(&PendingOperation, &str) -> std::result::Result<Option<String>, E> + 'a;
+
 impl StateDb {
     /// The held write of `file_id` (`files.held_*`): its write and base, and, once its upload landed, the version it
     /// became (§8.6.2: written only for that write). `None`: the row holds no write, or there is no row.
@@ -45,6 +48,21 @@ impl StateDb {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         match version {
             Some(version) => {
+                // Task 2199 N7 (dc-103b): the restore moves the base to a version whose bytes are not on disk.
+                // The agreed content joins the candidate at its own version first (T6's fold), so the old hash
+                // is never paired with the new base: an edit of those bytes is sent on the old version (and
+                // parks), never on the restored one.
+                let base_moves: bool = tx
+                    .query_row(
+                        "SELECT local_base_version != ?2 FROM files WHERE file_id = ?1",
+                        params![file_id, version],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+                if base_moves {
+                    super::sql::fold_agreed_into_candidate_conn(&tx, file_id)?;
+                }
                 tx.execute(
                     "UPDATE files SET current_version = ?2, local_base_version = ?2,
                                       current_object_version_id = COALESCE(?3, current_object_version_id),
@@ -241,6 +259,21 @@ impl StateDb {
                     )?;
                     record_file_change_conn(&tx, accept.file_id, FpChangeKind::Reparented, None)?;
                 }
+                // The row's contract starts with no permission at all (the column's default), so a file made here
+                // read as one the account may not change until the next metadata pass wrote the right bits: the
+                // viewer opened a New document read-only and Ctrl+S saved nothing (w24, the Windows test machine). It takes its
+                // parent's permission; at the vault root it is ours (the bits the metadata pass gives our own files).
+                let parent_bits = match accept.parent_id {
+                    Some(parent) => get_file_contract_state_conn(&tx, parent)?.map(|parent| parent.permission_bits),
+                    None => None,
+                };
+                let bits = parent_bits
+                    .filter(|bits| *bits != 0)
+                    .unwrap_or(PERMISSION_READ | PERMISSION_WRITE | PERMISSION_OWNER);
+                if let Some(mut contract) = get_file_contract_state_conn(&tx, accept.file_id)? {
+                    contract.permission_bits = bits;
+                    set_file_contract_state_conn(&tx, &contract)?;
+                }
                 (None, None)
             }
             FinderAcceptKind::Modify { incoming_base } => {
@@ -401,7 +434,7 @@ impl StateDb {
     pub fn apply_landing<E: RekeyFailure>(
         &self,
         input: &LandingInput<'_>,
-        rekey: &dyn Fn(&PendingOperation, &str) -> std::result::Result<Option<String>, E>,
+        rekey: &RekeyFn<'_, E>,
     ) -> Result<Option<LandingOutcome>> {
         // The landing's ids come from outside (the server's completion, the queue's claim,
         // the runner's op): a blank one is refused before it reaches SQL.

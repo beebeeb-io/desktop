@@ -41,11 +41,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
+use beebeeb_engine::app::office_scratch::ScratchStore;
 use beebeeb_office_protocol::check;
 use beebeeb_office_protocol::frame::FrameError;
 use beebeeb_office_protocol::office::{self, Message};
@@ -53,8 +54,17 @@ use beebeeb_office_sandbox as sandbox;
 use zeroize::{Zeroize, Zeroizing};
 
 pub use beebeeb_office_protocol::office::{
-    Anchor, CellData, CellRange, DocKind, OutlineEntry, PageSize, Rect, SheetInfo,
+    Anchor, CellData, CellRange, DocKind, DroppedPart, EditKind, EditOp, Edited, HitMode, OutlineEntry, PageSize,
+    Purpose, Rect, SheetInfo, Template,
 };
+pub use worker::edit::EditEvent;
+// Re-exported for the window; the window proof (`beebeeb-office-page`) compiles this file alone and names neither.
+#[allow(unused_imports)]
+pub use worker::edit::{EditFailure, EditRefused};
+#[allow(unused_imports)]
+pub use worker::restart::{READ_ONLY_WORDS, RESTORED_WORDS};
+pub(crate) use worker::edit::Mode;
+pub(crate) use worker::restart::Cadence;
 
 // Windows Error Reporting keeps no copy of the helper's memory (the lead's answer 4, 2026-11-15 19:03).
 #[path = "office_host/crash_reports.rs"]
@@ -104,7 +114,7 @@ pub const OUTLINE_BUDGET: Duration = Duration::from_secs(60);
 /// without end by naming new ones in every answer.
 pub const MAX_KNOWN_ANCHORS: usize = 4_096;
 
-/// Open handles a helper may hold beyond its count at its first page and one per request out
+/// Open handles a helper may hold beyond its count right after its start and one per request out
 /// ([`MAX_IN_FLIGHT`]). A helper that keeps the sections it was handed is over it soon, and is stopped.
 pub const HANDLE_SLACK: u32 = 16;
 
@@ -125,10 +135,122 @@ pub fn kill_all(why: CloseWhy) {
     kill_all_in(&PROCESS, why);
 }
 
+/// How long a lock waits, in all, for the open editors' unsaved work to be sealed. One bound for every document: the
+/// lock itself is never held longer, and what is not sealed by then is not kept.
+pub const LOCK_FLUSH_BUDGET: Duration = Duration::from_millis(1_500);
+
+/// What the engine's session end calls (`office_session_end`): a lock seals every open editor's unsaved work within
+/// [`LOCK_FLUSH_BUDGET`]; a sign-out ends every helper first (no snapshot lands after the wipe that follows).
+pub fn on_session_end(ending: beebeeb_engine::app::office_session_end::SessionEnding) {
+    use beebeeb_engine::app::office_session_end::SessionEnding;
+    match ending {
+        SessionEnding::Lock => flush_all_in(&PROCESS, LOCK_FLUSH_BUDGET),
+        // The lock already shows: ask now (never waits), wait and close in the background.
+        SessionEnding::ScreenLock => {
+            let run = screen_lock_begin_in(&PROCESS, LOCK_FLUSH_BUDGET);
+            // A thread that cannot start drops `run`: the helpers close at once, nothing is waited for.
+            let _ = std::thread::Builder::new()
+                .name("office-screen-lock-flush".into())
+                .spawn(move || run.finish());
+        }
+        SessionEnding::SignOut => kill_all(CloseWhy::SignedOut),
+    }
+}
+
+/// How many live editors of the process hold edits that no save has landed: what a sign-out asks about.
+pub fn unsaved_count() -> usize {
+    unsaved_count_in(&PROCESS)
+}
+
+pub(crate) fn unsaved_count_in(registry: &Registry) -> usize {
+    lock(&registry.hosts)
+        .iter()
+        .filter_map(Weak::upgrade)
+        .filter(|shared| lock(&shared.inner).closed.is_none() && shared.unsaved.load(Ordering::SeqCst))
+        .count()
+}
+
+/// Every live editing host of `registry` seals its unsaved work (all asked at once, one deadline for all).
+pub(crate) fn flush_all_in(registry: &Registry, budget: Duration) {
+    let deadline = Instant::now() + budget;
+    let live: Vec<Arc<Shared>> = lock(&registry.hosts).iter().filter_map(Weak::upgrade).collect();
+    let asked: Vec<&Arc<Shared>> = live.iter().filter(|shared| shared.flush_begin()).collect();
+    for shared in asked {
+        shared.flush_wait(deadline);
+    }
+}
+
+/// A screen lock's flush: every live editing host was asked to seal its unsaved work ([`screen_lock_begin_in`]); the
+/// wait, and then the close of every helper that was open at the lock, is [`ScreenLockFlush::finish`] (or its drop).
+pub(crate) struct ScreenLockFlush {
+    registry: &'static Registry,
+    open_at_lock: Vec<Arc<Shared>>,
+    asked: Vec<Arc<Shared>>,
+    deadline: Instant,
+}
+
+/// Ask every live editing host of `registry` to seal now, and return at once. Hosts opened after this call are not
+/// this lock's: they are neither waited for nor closed by it.
+pub(crate) fn screen_lock_begin_in(registry: &'static Registry, budget: Duration) -> ScreenLockFlush {
+    let deadline = Instant::now() + budget;
+    // Counted before the first ask, so a close the shell asks for from now on waits.
+    lock(&registry.screen).running += 1;
+    let open_at_lock: Vec<Arc<Shared>> = lock(&registry.hosts).iter().filter_map(Weak::upgrade).collect();
+    let asked = open_at_lock.iter().filter(|shared| shared.flush_begin()).cloned().collect();
+    ScreenLockFlush {
+        registry,
+        open_at_lock,
+        asked,
+        deadline,
+    }
+}
+
+impl ScreenLockFlush {
+    /// Wait (one deadline for all) for the answers, then close the helpers.
+    pub(crate) fn finish(self) {
+        for shared in &self.asked {
+            shared.flush_wait(self.deadline);
+        }
+    }
+}
+
+impl Drop for ScreenLockFlush {
+    /// Whatever the way out: the helpers that were open at the lock close, with the shell's reason when it asked.
+    fn drop(&mut self) {
+        let why = {
+            let mut state = lock(&self.registry.screen);
+            state.running = state.running.saturating_sub(1);
+            if state.running > 0 {
+                None
+            } else {
+                Some(state.deferred.take().unwrap_or(CloseWhy::Locked))
+            }
+        };
+        for shared in &self.asked {
+            shared.flush_end();
+        }
+        // While another flush is still running it closes its own (a later lock's) hosts; these close now.
+        for shared in &self.open_at_lock {
+            shared.close(why.unwrap_or(CloseWhy::Locked));
+        }
+    }
+}
+
 /// The shell's session end (a lock, a sign-out, another account): every helper of the process is killed and what
-/// it rendered is wiped.
+/// it rendered is wiped. While a screen lock's flush is under way the close waits for it (it is the flush's last step).
 pub fn end_session(locked: bool) {
-    kill_all(if locked { CloseWhy::Locked } else { CloseWhy::SignedOut });
+    end_session_in(&PROCESS, if locked { CloseWhy::Locked } else { CloseWhy::SignedOut });
+}
+
+pub(crate) fn end_session_in(registry: &Registry, why: CloseWhy) {
+    {
+        let mut state = lock(&registry.screen);
+        if state.running > 0 {
+            state.deferred.get_or_insert(why);
+            return;
+        }
+    }
+    kill_all_in(registry, why);
 }
 
 /// A render request, as [`OfficeHost::request_page`] handed it out.
@@ -488,12 +610,23 @@ impl Timeouts {
 /// `kill_all_in` never reaches another test's hosts.
 pub(crate) struct Registry {
     hosts: Mutex<Vec<Weak<Shared>>>,
+    /// The screen-lock flushes under way, and the close the shell asked for meanwhile.
+    screen: Mutex<ScreenFlushState>,
+}
+
+/// What a screen lock's background flush and the shell's close of the helpers agree on: the shell's `end_session`
+/// (the gate left Ready) must not kill a helper whose snapshot is still being asked for.
+#[derive(Default)]
+struct ScreenFlushState {
+    running: usize,
+    deferred: Option<CloseWhy>,
 }
 
 impl Registry {
     pub(crate) const fn new() -> Registry {
         Registry {
             hosts: Mutex::new(Vec::new()),
+            screen: Mutex::new(ScreenFlushState { running: 0, deferred: None }),
         }
     }
 
@@ -528,6 +661,21 @@ struct Shared {
     wiped: AtomicUsize,
     /// Payload bytes of helper frames wiped because nobody handled them (a test hook).
     frames_wiped: AtomicUsize,
+    /// The snapshot flush a lock asks for ([`flush_all_in`]): where the worker seals, and when it is done.
+    flush: (Mutex<Flush>, Condvar),
+    /// Edits are held that no save has landed (the worker's `unsaved`, read by [`unsaved_count`] for a sign-out).
+    unsaved: AtomicBool,
+}
+
+/// Where a snapshot the worker takes for a lock is sealed: the file's recovery blob (called on the worker's thread).
+pub type FlushSink = Arc<dyn Fn(&Zeroizing<Vec<u8>>) + Send + Sync>;
+
+#[derive(Default)]
+struct Flush {
+    sink: Option<FlushSink>,
+    /// A waiter is waiting: the worker may seal. Cleared when the waiter leaves, so a late answer seals nothing.
+    armed: bool,
+    done: bool,
 }
 
 struct Inner {
@@ -537,23 +685,85 @@ struct Inner {
     /// wipes it at once instead of at the window's next poll.
     state: OfficeState,
     outs: VecDeque<Out>,
+    /// The editor's answers, moved here by [`OfficeHost::poll`] and taken by [`OfficeHost::poll_edit`].
+    edit_events: VecDeque<EditEvent>,
     worker_ended: bool,
+    /// A second crash within a minute opened the document read-only: `edit` calls are refused.
+    read_only: bool,
+    /// The editor's guard refused this file (`EditGuarded`): what an edit here would drop. The document opens in the
+    /// viewer instead and `edit` calls are refused. Empty: not guarded.
+    guarded: Vec<DroppedPart>,
     /// The charts and pictures of checked cells from the running helper, by (sheet, id): what
     /// [`OfficeHost::request_anchor`] may ask. Emptied when that helper goes, and at a close.
     anchors: HashMap<(u32, u32), Anchor>,
+    /// The document's section while the worker waits for a helper's start (the launch lock: Windows' app chooser may
+    /// hold it as long as it is open). Here, so that a close drops it at once, not when the start returns.
+    parked: Option<Box<dyn std::any::Any + Send>>,
 }
 
 /// What the worker queues for the window.
 enum Out {
     State(OfficeState),
     Event(Event),
+    /// An answer of an editing session (see [`EditEvent`]).
+    Edit(EditEvent),
 }
 
 impl Shared {
+    /// The worker is done with the flush that was asked (sealed, nothing to seal, or it cannot): wakes the waiter.
+    fn flush_complete(&self) {
+        let (state, wake) = &self.flush;
+        lock(state).done = true;
+        wake.notify_all();
+    }
+
+    /// The sink, while a waiter waits.
+    fn flush_sink(&self) -> Option<FlushSink> {
+        let state = lock(&self.flush.0);
+        state.armed.then(|| state.sink.clone()).flatten()
+    }
+
+    /// Ask the worker to seal this document's unsaved work. `false`: nothing to wait for (no sink, closed, no worker).
+    fn flush_begin(&self) -> bool {
+        if lock(&self.inner).closed.is_some() {
+            return false;
+        }
+        {
+            let mut state = lock(&self.flush.0);
+            if state.sink.is_none() {
+                return false;
+            }
+            state.armed = true;
+            state.done = false;
+        }
+        if self.commands.send(Input::Flush).is_err() {
+            self.flush_end();
+            return false;
+        }
+        true
+    }
+
+    /// Wait for the worker's answer until `deadline`; whatever it did not do by then is left undone for good.
+    fn flush_wait(&self, deadline: Instant) {
+        let (state, wake) = &self.flush;
+        let mut guard = lock(state);
+        while !guard.done {
+            let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else {
+                break;
+            };
+            guard = wake.wait_timeout(guard, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+        guard.armed = false;
+    }
+
+    fn flush_end(&self) {
+        lock(&self.flush.0).armed = false;
+    }
+
     /// Kills the helper through the shared handle, wipes the state and every answer not taken, tells the worker,
     /// wakes the window. Never waits for the worker. The first close's reason stays.
     fn close(&self, why: CloseWhy) {
-        let (helper, outs, mut state) = {
+        let (helper, outs, mut state, parked, edits) = {
             let mut inner = lock(&self.inner);
             if inner.closed.is_some() {
                 return;
@@ -561,14 +771,26 @@ impl Shared {
             inner.closed = Some(why);
             let state = std::mem::replace(&mut inner.state, OfficeState::Closed(why));
             inner.anchors = HashMap::new();
-            (inner.helper.take(), std::mem::take(&mut inner.outs), state)
+            (
+                inner.helper.take(),
+                std::mem::take(&mut inner.outs),
+                state,
+                inner.parked.take(),
+                std::mem::take(&mut inner.edit_events),
+            )
         };
         if let Some(helper) = helper {
             helper.end();
         }
+        self.flush_complete();
+        // The document's section, while its worker waits for a start: dropped (and wiped) now.
+        drop(parked);
         let mut wiped = wipe_state(&mut state);
         for mut out in outs {
             wiped += wipe_out(&mut out);
+        }
+        for mut event in edits {
+            wiped += worker::edit::wipe_edit_event(&mut event);
         }
         self.wiped.fetch_add(wiped, Ordering::SeqCst);
         // The worker may be waiting with no deadline: this wakes it so that it drops every section and ends.
@@ -595,6 +817,24 @@ impl Shared {
         lock(&self.inner).helper = None;
     }
 
+    /// Holds the document while the worker waits for a start; a close drops it. `false`: the host is closed, and
+    /// `doc` is dropped now.
+    fn park(&self, doc: Box<dyn std::any::Any + Send>) -> bool {
+        let mut inner = lock(&self.inner);
+        if inner.closed.is_some() {
+            drop(inner);
+            drop(doc);
+            return false;
+        }
+        inner.parked = Some(doc);
+        true
+    }
+
+    /// The parked document back. `None`: a close dropped it.
+    fn unpark(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        lock(&self.inner).parked.take()
+    }
+
     /// Queues `out` for the window and wakes it; after a close it is wiped instead.
     fn push(&self, mut out: Out) {
         {
@@ -614,6 +854,8 @@ impl Shared {
         let mut inner = lock(&self.inner);
         inner.helper = None;
         inner.worker_ended = true;
+        drop(inner);
+        self.flush_complete();
     }
 
     /// Wipes a helper frame nobody handles, and counts its payload.
@@ -641,6 +883,8 @@ enum Input {
         frame: Result<Received, FrameError>,
     },
     Command(Command),
+    /// A lock is coming: seal the unsaved work now ([`Shared::flush_begin`]).
+    Flush,
     Close,
 }
 
@@ -661,6 +905,8 @@ enum Command {
     Stats,
     Cells { sheet: u32, range: CellRange },
     Retry,
+    /// A request of an editing session.
+    Edit(worker::edit::EditCommand),
 }
 
 /// A page asked by the window; `w` x `h` from `check::asked_size`.
@@ -695,15 +941,34 @@ pub struct OfficeHost {
     next_request: u32,
     /// The window knows the host is closed: it closed it itself, or a poll told it with an `Event::State`.
     told_closed: bool,
+    /// An editing session (`open_edit`, `new_doc`): the `edit` calls are for it only.
+    editing: bool,
 }
 
 impl OfficeHost {
     /// Opens `bytes` (a document of `kind`) with the helper at `helper`. Never blocks: the helper starts on a worker.
     pub fn open(helper: &Path, kind: DocKind, bytes: Zeroizing<Vec<u8>>, wake: Wake) -> OfficeHost {
+        Self::open_in(&PROCESS, helper, kind, bytes, wake)
+    }
+
+    /// [`OfficeHost::open`] joining `registry`, not the process's: a test's own, which no other test's session end
+    /// (`end_session` on [`PROCESS`]) reaches.
+    pub(crate) fn open_in(
+        registry: &Registry,
+        helper: &Path,
+        kind: DocKind,
+        bytes: Zeroizing<Vec<u8>>,
+        wake: Wake,
+    ) -> OfficeHost {
         let starter = Confined {
             helper: helper.to_path_buf(),
         };
-        open_with(starter, &PROCESS, Timeouts::PRODUCTION, kind, bytes, wake)
+        open_with(starter, registry, Timeouts::PRODUCTION, kind, bytes, wake)
+    }
+
+    /// Where this editing session's unsaved work is sealed when a lock comes ([`on_session_end`]).
+    pub fn set_flush_sink(&mut self, sink: FlushSink) {
+        lock(&self.shared.flush.0).sink = Some(sink);
     }
 
     /// What the window shows, as a copy. A close from another thread (a lock, a sign-out) makes it `Closed` at once;
@@ -727,6 +992,7 @@ impl OfficeHost {
                         events.push(Event::State);
                     }
                     Out::Event(event) => events.push(event),
+                    Out::Edit(event) => inner.edit_events.push_back(event),
                 }
             }
             (events, inner.closed.is_some())
@@ -959,14 +1225,58 @@ pub(crate) fn open_with<S: Starter>(
     bytes: Zeroizing<Vec<u8>>,
     wake: Wake,
 ) -> OfficeHost {
+    open_mode(starter, registry, timeouts, Mode::View, kind, Some(bytes), wake)
+}
+
+/// The one way a host starts: a viewer (`Mode::View`), an editor of `bytes` (`Mode::Edit`) or a new document
+/// (`Mode::New`, no bytes). Never blocks.
+pub(crate) fn open_mode<S: Starter>(
+    starter: S,
+    registry: &Registry,
+    timeouts: Timeouts,
+    mode: Mode,
+    kind: DocKind,
+    bytes: Option<Zeroizing<Vec<u8>>>,
+    wake: Wake,
+) -> OfficeHost {
+    open_mode_cadence(starter, registry, timeouts, Cadence::PRODUCTION, mode, kind, bytes, wake)
+}
+
+/// [`open_mode`] with the snapshot and crash timing named (the tests shorten it).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_mode_cadence<S: Starter>(
+    starter: S,
+    registry: &Registry,
+    timeouts: Timeouts,
+    cadence: Cadence,
+    mode: Mode,
+    kind: DocKind,
+    bytes: Option<Zeroizing<Vec<u8>>>,
+    wake: Wake,
+) -> OfficeHost {
+    open_mode_held(starter, registry, timeouts, cadence, mode, kind, bytes, wake, None)
+}
+
+/// [`open_mode_cadence`] with the session's scratch store: what the host keeps for a restart goes sealed to scratch
+/// above `SPILL_ABOVE_BYTES` (`None`: always in memory).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_mode_held<S: Starter>(
+    starter: S,
+    registry: &Registry,
+    timeouts: Timeouts,
+    cadence: Cadence,
+    mode: Mode,
+    kind: DocKind,
+    bytes: Option<Zeroizing<Vec<u8>>>,
+    wake: Wake,
+    scratch: Option<ScratchStore>,
+) -> OfficeHost {
     let (commands, inputs) = mpsc::channel();
     // Refused before anything starts: `bytes` is wiped when this returns.
-    let refused = if bytes.len() as u64 > check::MAX_INPUT_BYTES {
-        Some(CannotOpen::TooLarge)
-    } else if bytes.is_empty() {
-        Some(CannotOpen::Damaged)
-    } else {
-        None
+    let refused = match &bytes {
+        Some(bytes) if bytes.len() as u64 > check::MAX_INPUT_BYTES => Some(CannotOpen::TooLarge),
+        Some(bytes) if bytes.is_empty() => Some(CannotOpen::Damaged),
+        _ => None,
     };
     let shared = Arc::new(Shared {
         inner: Mutex::new(Inner {
@@ -974,25 +1284,32 @@ pub(crate) fn open_with<S: Starter>(
             helper: None,
             state: refused.map_or(OfficeState::Opening, OfficeState::CannotOpen),
             outs: VecDeque::new(),
+            edit_events: VecDeque::new(),
             worker_ended: false,
+            read_only: false,
+            guarded: Vec::new(),
             anchors: HashMap::new(),
+            parked: None,
         }),
         commands,
         wake,
         wiped: AtomicUsize::new(0),
         frames_wiped: AtomicUsize::new(0),
+        flush: (Mutex::new(Flush::default()), Condvar::new()),
+        unsaved: AtomicBool::new(false),
     });
     let host = OfficeHost {
         shared: shared.clone(),
         next_request: 0,
         told_closed: false,
+        editing: !matches!(mode, Mode::View),
     };
     if refused.is_some() {
         shared.mark_worker_ended();
         return host;
     }
     registry.add(&shared);
-    if !worker::spawn(starter, kind, shared.clone(), inputs, timeouts, bytes) {
+    if !worker::spawn(starter, mode, kind, shared.clone(), inputs, timeouts, cadence, bytes, scratch) {
         // The worker (and the bytes in it) was dropped: wiped.
         lock(&shared.inner).state = OfficeState::Stopped {
             why: Stop::Failed,
@@ -1009,6 +1326,7 @@ fn wipe_out(out: &mut Out) -> usize {
     match out {
         Out::State(state) => wipe_state(state),
         Out::Event(event) => wipe_event(event),
+        Out::Edit(event) => worker::edit::wipe_edit_event(event),
     }
 }
 
@@ -1081,6 +1399,17 @@ fn wipe_message(message: &mut Message) {
         Message::OpenedSheets(opened) => {
             for sheet in &mut opened.sheets {
                 sheet.name.zeroize();
+            }
+        }
+        Message::Clip(clip) => {
+            clip.text.zeroize();
+            if let Some(html) = clip.html.as_mut() {
+                html.zeroize();
+            }
+        }
+        Message::LayoutList(list) => {
+            for name in &mut list.names {
+                name.zeroize();
             }
         }
         _ => {}

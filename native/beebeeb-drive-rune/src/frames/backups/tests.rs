@@ -72,7 +72,7 @@ fn press(rt: &mut Runtime<State>, key: Key) {
 
 fn type_text(rt: &mut Runtime<State>, typed: &str) {
     for c in typed.chars() {
-        press(rt, Key::Text(c.to_string().into()));
+        press(rt, Key::Text(c.to_string()));
     }
 }
 
@@ -691,4 +691,94 @@ fn a_delete_answer_never_lands_in_another_devices_dialog() {
     // An answer with nothing sent closes nothing.
     ui.delete_answered(Ok(()));
     assert_eq!(ui.dialog, Some(Dialog::DeleteDevice("b".into())));
+}
+
+/// A source with nothing to show: still reading, refused, or an empty PC.
+struct Quiet {
+    loading: bool,
+    refusal: Option<&'static str>,
+    read_again: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl BackupsSource for Quiet {
+    fn loading(&self) -> bool {
+        self.loading
+    }
+    fn refusal(&self) -> Option<&'static str> {
+        self.refusal
+    }
+    fn read_again(&mut self) {
+        self.read_again.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn root(&self) -> super::source::BackupsRoot {
+        super::source::BackupsRoot {
+            id: String::new(),
+            is_protected: true,
+            device_folder: String::new(),
+        }
+    }
+    fn status(&self) -> Status {
+        Status::Plain {
+            title: String::new(),
+            sub: String::new(),
+            can_run: false,
+        }
+    }
+    fn folders(&self) -> Vec<super::source::Folder> {
+        Vec::new()
+    }
+    fn devices(&self) -> Vec<super::source::Device> {
+        Vec::new()
+    }
+    fn not_backed_up(&self) -> Vec<super::source::NotBackedUp> {
+        Vec::new()
+    }
+    fn mail_backup_on(&self) -> bool {
+        false
+    }
+    fn back_up_now(&mut self) {}
+    fn set_folder(&mut self, _id: &str, _on: bool) {}
+    fn add_folder(&mut self, _path: &str) -> bool {
+        false
+    }
+    fn remove_folder(&mut self, _id: &str, _move_copy_to_trash: bool) {}
+    fn retry(&mut self, _id: &str) {}
+    fn retry_all(&mut self) {}
+    fn delete_device_backup(&mut self, _id: &str, _code: &str) -> bool {
+        false
+    }
+}
+
+fn quiet_runtime(loading: bool, refusal: Option<&'static str>) -> (Runtime<State>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut state = init();
+    crate::frames::settings::go(&mut state, "DW-0737");
+    state.backups = BackupsUi::new(Some(Box::new(Quiet {
+        loading,
+        refusal,
+        read_again: flag.clone(),
+    })));
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (958.0, 958.0), env);
+    rt.frame(0.0);
+    (rt, flag)
+}
+
+#[test]
+fn the_section_says_loading_empty_and_failed_and_try_again_reads_again() {
+    let (rt, _) = quiet_runtime(true, None);
+    assert!(has(&rt, "loading"), "loading while the first answer is out");
+    assert!(!has(&rt, "backups-empty"));
+
+    let (rt, _) = quiet_runtime(false, None);
+    assert!(has(&rt, "backups-empty"), "no folders: an empty state, not a blank list");
+
+    let (mut rt, flag) = quiet_runtime(false, Some("Could not read."));
+    assert!(has(&rt, "backups-failed"));
+    assert!(!has(&rt, "backups-empty"));
+    click(&mut rt, "backups-failed-retry");
+    assert!(flag.load(std::sync::atomic::Ordering::SeqCst), "Try again reads again");
 }

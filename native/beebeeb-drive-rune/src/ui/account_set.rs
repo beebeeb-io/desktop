@@ -2,15 +2,12 @@
 //! sessions panes (DW-A51 to DW-A84a).
 //!
 //! The board draws these panes with the shared account kit, not with Drive's own settings
-//! classes: the same sidebar entries, in `.kit-side` (30 pt items, 14 pt between groups), and a
-//! 520 pt column. The lists are the kit's lists, so [`settings_list::list`] holds the rows; the
+//! classes: the sidebar is the shared one (`settings_shell::app_sidebar`), and the column is 520 pt. The lists are the kit's lists, so [`settings_list::list`] holds the rows; the
 //! rows here add what an account row has and a settings row does not (an avatar or a toned tile
 //! in front, a pill at the end, a destructive title).
 //!
 //! | Piece | Function | Keys it gives |
 //! | --- | --- | --- |
-//! | Sidebar item, the way back | `nav_item(label, icon, on, t)`, `nav_back(label, icon, t)` | `<label>-row`, `<label>-icon`, `<label>` |
-//! | Sidebar | `sidebar(back, sections, foot, t)` | `sidebar`, `side-title-<slug>`, `side-foot-box`, `side-foot` |
 //! | Pane | `pane(children, t)` | `set-main`, `set-col` |
 //! | Heading | `heading(title, sub, trailing, t)` | `set-title`, `set-sub` |
 //! | Row | `item(list, index, &Row, extra, t)` | `item-<L>-<I>` + `-icon`, `-avatar`, `-initials`, `-tile`, `-tile-icon`, `-title`, `-sub`, `-value`, `-pill`, `-pill-dot`, `-pill-label`, `-check`, `-chev` |
@@ -24,31 +21,27 @@
 //! Nothing here knows which panes exist or what a press does: a frame attaches `.on_press`.
 
 use crate::theme::icons_settings as ic;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{Theme, type_};
 use rune::tok::Family;
 use rune::{Color, El, Icon, LineCap, Shape, TextStyle, canvas, col, el, row};
 
 use super::au::{self, Tone};
+use super::button;
+use super::dialog::{self, Dialog, Foot, Head, scrim};
 use super::kit;
-use super::settings_dialog::{BUTTON_MD, DIALOG_TITLE, scrim_color};
+use super::settings_dialog::{DIALOG_TITLE};
 use super::settings_list::{VALUE, VALUE_MONO};
-use super::settings_shell::{PANE_TITLE, slug};
+use super::settings_shell::{PANE_TITLE};
 
-/// The settings sidebar is 224 pt wide.
-pub const SIDEBAR_W: f32 = 224.0;
 /// A pane's column (`.au-set-col`).
 pub const COLUMN_W: f32 = 520.0;
 
-/// 10.5px/600 on a 17px line, tracked .07em: a sidebar group's heading (`.kit-side-title`).
-pub const SIDE_TITLE: TextStyle = TextStyle::new(10.5, 600.0).lh(17.0).tracking(0.735);
 /// 12px/400 on a 15px line: a second line (`.t-sub`).
 pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 /// 12px/400 mono on a 15px line: a machine's value inside a second line.
 pub const SUB_MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
 /// 11.5px/400 mono on a 15px line: a row's second line when it is a machine's (`.kit-item-sub.font-mono`).
 pub const SUB_MONO_ROW: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
-/// 11px/600 on a 13px line, tracked .01em: a pill's word (`.kit-pill`).
-pub const PILL: TextStyle = TextStyle::new(11.0, 600.0).lh(13.0).tracking(0.11);
 /// 12px/650: the initials on a 32 pt avatar.
 pub const INITIALS_32: TextStyle = TextStyle::new(12.0, 650.0);
 /// 13px/600 mono on a 17px line, tracked -0.006em: the count inside the score ring.
@@ -60,114 +53,6 @@ pub const RING_COUNT: TextStyle = TextStyle::new(13.0, 600.0)
 /// `--kit-sel`: the neutral selection of the account kit's sidebar (ink at 6 %, 9 % in dark).
 pub fn selection(t: &Theme) -> Color {
     t.text.alpha(if t.dark { 0.09 } else { 0.06 })
-}
-
-/// One item of the sidebar (`.kit-side-item`): a 30 pt row, selected in the neutral tint.
-/// A link: it shows another pane. Keys: `<label>-row`, `<label>-icon`, `<label>`.
-pub fn nav_item(label: &str, ic: &'static Icon, on: bool, t: &Theme) -> El {
-    row()
-        .key(format!("{label}-row"))
-        .role("link")
-        .label(label)
-        .h(30.0)
-        .px(10.0)
-        .gap(10.0)
-        .center_y()
-        .radius(8.0)
-        .fill(if on { selection(t) } else { Color::TRANSPARENT })
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::glyph(
-            format!("{label}-icon"),
-            ic,
-            16.0,
-            if on { t.text } else { t.text_tertiary },
-        ))
-        .child(
-            kit::label(
-                label,
-                label,
-                type_::LIST_ITEM,
-                if on { t.text } else { t.text_secondary },
-            )
-            .grow(1.0)
-            .truncate(),
-        )
-}
-
-/// The way back at the top of the sidebar: the same row, its chevron 6 pt from words that are
-/// as wide as they are (the board's `.au-row` inside the item).
-pub fn nav_back(label: &str, ic: &'static Icon, t: &Theme) -> El {
-    row()
-        .key(format!("{label}-row"))
-        .role("link")
-        .label(label)
-        .h(30.0)
-        .px(10.0)
-        .gap(6.0)
-        .center_y()
-        .radius(8.0)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::glyph(format!("{label}-icon"), ic, 15.0, t.text_tertiary))
-        .child(kit::label(label, label, type_::LIST_ITEM, t.text_secondary))
-}
-
-/// The sidebar (`.kit-side`): the way back on top, the titled groups, a foot note under a hairline.
-pub fn sidebar(back: El, sections: Vec<(&str, Vec<El>)>, foot: &str, t: &Theme) -> El {
-    let mut nav = col()
-        .key("settings-nav")
-        .role("navigation")
-        .label("Settings sections")
-        .gap(14.0)
-        .grow(1.0)
-        .min_h(0.0);
-    for (title, items) in sections {
-        let mut group = col()
-            .key(format!("side-sec-{}", slug(title)))
-            .role("group")
-            .label(title)
-            .gap(1.0)
-            .child(
-                el().key(format!("side-title-box-{}", slug(title)))
-                    .px(10.0)
-                    .pb(4.0)
-                    .child(kit::label(
-                        format!("side-title-{}", slug(title)),
-                        title.to_uppercase(),
-                        SIDE_TITLE,
-                        t.text_tertiary,
-                    )),
-            );
-        for item in items {
-            group = group.child(item);
-        }
-        nav = nav.child(group);
-    }
-    col()
-        .key("sidebar")
-        .w(SIDEBAR_W)
-        .h_full()
-        .fill(t.sidebar_bg)
-        .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
-        .border_layout()
-        .gap(14.0)
-        .py(14.0)
-        .px(10.0)
-        .child(back)
-        .child(nav)
-        .child(
-            col()
-                .key("side-foot-box")
-                .items_start()
-                .pt(10.0)
-                .px(6.0)
-                .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-                .border_layout()
-                .child(kit::label("side-foot", foot, type_::CAPTION, t.text_tertiary).wrap()),
-        )
 }
 
 /// A pane (`.au-set-main` > `.au-set-col`): 22 pt above and 30 pt beside a 520 pt column whose
@@ -218,19 +103,7 @@ pub fn heading(title: &str, sub: Option<&str>, trailing: Option<El>, t: &Theme) 
 /// A pill (`.kit-pill`): a short state, with a dot before it when `dot`. The state is in the
 /// words, never only in the colour. Keys: `<key>`, `<key>-dot`, `<key>-label`.
 pub fn pill(key: &str, label: &str, tone: Tone, dot: bool, t: &Theme) -> El {
-    let (mark, ink, wash) = au::tone(tone, t);
-    let mut p = row()
-        .key(key.to_string())
-        .h(20.0)
-        .px(8.0)
-        .gap(5.0)
-        .center_y()
-        .radius(10.0)
-        .fill(wash);
-    if dot {
-        p = p.child(el().key(format!("{key}-dot")).size(6.0, 6.0).radius(3.0).fill(mark));
-    }
-    p.child(kit::label(format!("{key}-label"), label, PILL, ink))
+    super::pill::pill(key, label, au::pill_tone(tone), dot, t)
 }
 
 /// A toned tile (`.kit-tile`): a glyph half the tile's size on the tone's wash.
@@ -440,8 +313,12 @@ pub fn item(list: usize, index: usize, it: &Row, extra: Vec<El>, t: &Theme) -> E
         .gap(8.0)
         .center_y()
         .label(it.says());
+    // A link or selectable row is itself the focusable item, so a `roving_list` can hold it;
+    // a row with buttons of its own stays text around them.
     r = if it.link {
-        r.role("link").hover(t.hover).press(t.press).focusable(true)
+        r.role("link").hover(t.hover).press(t.press).focusable(true).focus_selected(it.selected)
+    } else if it.selected && extra.is_empty() {
+        r.role("listitem").focusable(true).focus_selected(true)
     } else {
         r.role("listitem")
     };
@@ -546,46 +423,18 @@ pub fn button(
     dimmed: bool,
     t: &Theme,
 ) -> El {
-    let (fill, ink) = match look {
-        Look::Primary => (t.accent, t.accent_text_on),
-        Look::Plain => (t.paper, t.text),
-        Look::Quiet => (Color::TRANSPARENT, t.text_secondary),
-        // `--color-red-fill`, the same in both themes.
-        Look::Danger => (rune::oklch(0.55, 0.2, 25.0), t.white),
+    let variant = match look {
+        Look::Primary => button::Variant::Primary,
+        Look::Plain => button::Variant::Secondary,
+        Look::Quiet => button::Variant::Ghost,
+        Look::Danger => button::Variant::Danger,
     };
-    let (h, style) = match size {
-        Size::Small => (22.0, type_::BUTTON_SM.lh(17.1429)),
-        Size::Medium => (28.0, BUTTON_MD),
+    let size = match size {
+        Size::Small => button::Size::Sm,
+        Size::Medium => button::Size::Md,
     };
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(h)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(radius::MD)
-        .fill(fill);
-    if dimmed {
-        b = b.opacity(0.5).disabled(true);
-    } else {
-        b = b.focusable(true);
-        b = match look {
-            Look::Plain | Look::Quiet => b.hover(t.paper2).press(t.paper3),
-            _ => b
-                .hover(fill.mix(Color::BLACK, 0.05))
-                .press(fill.mix(Color::BLACK, 0.10)),
-        };
-    }
-    if look == Look::Plain {
-        b = b.border(1.0, t.card_border).border_layout();
-    }
-    if let Some(icon) = icon {
-        let glyph = if size == Size::Medium { 16.0 } else { 14.0 };
-        b = b.child(kit::glyph(format!("{key}-icon"), icon, glyph, ink));
-    }
-    b.child(kit::label(format!("{key}-label"), label, style, ink))
+    let state = if dimmed { button::ButtonState::Disabled } else { button::ButtonState::Enabled };
+    button::button(button::keys(key), label, icon, variant, size, state, t)
 }
 
 /// A confirm over a pane (`.au-scrim` + `.wn-dlg`): a title, what happens in one paragraph,
@@ -604,8 +453,23 @@ pub fn dialog(
     foot: Vec<(El, bool)>,
     t: &Theme,
 ) -> El {
+    dialog_enter(name, width, title, words, extra, foot, None, t)
+}
+
+/// [`dialog`] where Enter presses foot button `enter` (never a destructive one).
+#[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
+pub fn dialog_enter(
+    name: &str,
+    width: f32,
+    title: &str,
+    words: &str,
+    extra: Vec<El>,
+    foot: Vec<(El, bool)>,
+    enter: Option<usize>,
+    t: &Theme,
+) -> El {
     let paragraph = kit::label("dlg-text-0", words, SUB, t.text_secondary).wrap().w_full();
-    dialog_with(name, width, title, paragraph, extra, foot, t)
+    dialog_with_enter(name, width, title, paragraph, extra, foot, enter, t)
 }
 
 /// [`dialog`] with the caller's own paragraph under the title (one whose lead is bold:
@@ -619,61 +483,56 @@ pub fn dialog_with(
     foot: Vec<(El, bool)>,
     t: &Theme,
 ) -> El {
-    let mut body = col()
-        .key("dlg-body")
-        .w_full()
-        .pt(22.0)
-        .px(24.0)
-        .pb(18.0)
-        .gap(12.0)
-        .child(
-            col()
-                .key("dlg-h")
-                .w_full()
-                .gap(6.0)
-                .child(
-                    kit::label("dlg-title", title, DIALOG_TITLE, t.text)
-                        .role("heading")
-                        .level(2)
-                        .wrap()
-                        .w_full(),
-                )
-                .child(paragraph),
-        );
-    for child in extra {
-        body = body.child(child);
-    }
-    let mut f = row()
-        .key("dlg-foot")
-        .w_full()
-        .center_y()
-        .gap(8.0)
-        .py(16.0)
-        .px(24.0)
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
+    dialog_with_enter(name, width, title, paragraph, extra, foot, None, t)
+}
+
+/// [`dialog_with`] where Enter presses foot button `enter` (never a destructive one).
+#[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
+pub fn dialog_with_enter(
+    name: &str,
+    width: f32,
+    title: &str,
+    paragraph: El,
+    extra: Vec<El>,
+    foot: Vec<(El, bool)>,
+    enter: Option<usize>,
+    t: &Theme,
+) -> El {
+    let mut body = vec![
+        col()
+            .key("dlg-h")
+            .w_full()
+            .gap(6.0)
+            .child(
+                kit::label("dlg-title", title, DIALOG_TITLE, t.text)
+                    .role("heading")
+                    .level(2)
+                    .wrap()
+                    .w_full(),
+            )
+            .child(paragraph),
+    ];
+    body.extend(extra);
     let count = foot.len().max(1) as f32;
     let fixed = |bordered: bool| 24.0 + if bordered { 2.0 } else { 0.0 };
     let free = width - 48.0 - 8.0 * (count - 1.0) - foot.iter().map(|(_, bordered)| fixed(*bordered)).sum::<f32>();
-    for (child, bordered) in foot {
-        f = f.child(child.w(free / count + fixed(bordered)));
-    }
-    let dlg = col()
-        .key("dlg")
-        .role("dialog")
-        .label(name)
-        .pixel_snap(false)
-        .w(width)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(col().key("dlg-clip").w_full().clip_rounded(8.0).child(body).child(f));
-    col()
-        .key("scrim")
-        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .center()
-        .fill(scrim_color(t))
-        .child(dlg)
+    let buttons = foot
+        .into_iter()
+        .map(|(child, bordered)| child.w(free / count + fixed(bordered)))
+        .collect();
+    scrim(
+        0.0,
+        dialog::dialog(
+            Dialog {
+                head: Head::None,
+                body,
+                body_top: Some(22.0),
+                foot: Foot::Row(buttons),
+                enter,
+                ..Dialog::new("dlg", name, width)
+            },
+            t,
+        ),
+        t,
+    )
 }

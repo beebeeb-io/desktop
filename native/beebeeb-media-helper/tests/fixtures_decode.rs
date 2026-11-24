@@ -4,8 +4,10 @@
 //! `manifest.tsv`: `file kind codec expect sha256 ref`. A fixtures dir with fewer than 26 rows, a row without its file,
 //! or a file whose hash is not the manifest's is a failure, never a skip.
 //!
-//! The session entry point used here is `beebeeb_media_helper::session::run_with(input, output, table)`: the shipped
-//! switch (OFF) on every OS, with the shipped route table (features: `h264` only).
+//! The session entry point used here is `beebeeb_media_helper::session::run_with_system(input, output, table, false)`:
+//! the switch HELD OFF on every OS (what this helper's own decoders do alone, the same on Linux and on Windows), with
+//! the shipped route table (features: `h264` only). The shipped switch is on (ux-02, 2026-11-20): what Windows'
+//! decoders then do with the `system` and `silent` rows is `tests/system_decoder.rs` and the VM rung.
 //!
 //! The `expect` column is exact, by the shipped routes: `play`, `silent` (the video plays, `no_sound` names the audio
 //! codec), `system` (`NoSystemDecoder`), `unsupported` (`Unsupported`), `refuse` (the code `refused_with` pins per file).
@@ -212,7 +214,7 @@ impl App {
             };
             let output = ChanWriter(helper_tx);
             // The result is the session's own end (Close, EOF or a refused message); the test reads the pipe.
-            let _ = beebeeb_media_helper::session::run_with(input, output, table);
+            let _ = beebeeb_media_helper::session::run_with_system(input, output, table, false);
         });
         App {
             to_helper: ChanWriter(app_tx),
@@ -462,11 +464,13 @@ fn run_row(file: &str) {
         }
         "system" => {
             let code = refusal(&mut app, file, &r.kind, hint);
-            assert_eq!(
-                code,
-                ErrorCode::NoSystemDecoder(codec_of(&r.codec)),
-                "{file}: this codec's route is the system's decoder"
-            );
+            // A 10-bit H.264 stream with no system decoder is its own refusal (ux-24).
+            let expected = if file == "h264-10bit.mp4" && code == ErrorCode::TenBit {
+                ErrorCode::TenBit
+            } else {
+                ErrorCode::NoSystemDecoder(codec_of(&r.codec))
+            };
+            assert_eq!(code, expected, "{file}: this codec's route is the system's decoder");
         }
         "unsupported" => {
             let code = refusal(&mut app, file, &r.kind, hint);

@@ -379,7 +379,12 @@ impl UpdatesPart {
             // Keeps the build's mark in the binary: the release workflow reads it there (as `windows_release_trust`
             // does).
             std::hint::black_box(BUILD_MARK);
-            let (channel, from) = channels(config);
+            if let Ok(path) = DesktopConfig::path_for(identity)
+                && !seed_first_run(&path, built_channel())
+            {
+                log("settings: the release channel of a fresh install was not written down");
+            }
+            let (channel, from) = channels(config, built_channel());
             let folder = rune::dirs::AppDirs::new(crate::shell::identity::AppIdentity::CURRENT.state_dir_id())
                 .map(|dirs| crate::shell::local_data_of(&dirs, "windows"));
             match release_setup(BUILD_NOT_BEFORE, option_env!("BEEBEEB_RELEASE_VERSION"), folder) {
@@ -947,13 +952,53 @@ pub(crate) fn refused(refusal: Refusal) -> &'static str {
     }
 }
 
-/// The channel the settings file holds, and the one the running build came from.
-fn channels(config: Option<&DesktopConfig>) -> (Channel, Channel) {
+/// The channel this build was cut on (`BEEBEEB_RELEASE_CHANNEL`, set by the release workflow from its channel
+/// input), when it names one. A fresh install of an alpha build starts on alpha, a beta one on beta.
+#[cfg(all(windows, not(test)))]
+fn built_channel() -> Option<ReleaseChannel> {
+    parse_built(option_env!("BEEBEEB_RELEASE_CHANNEL"))
+}
+
+fn parse_built(word: Option<&str>) -> Option<ReleaseChannel> {
+    match word?.trim() {
+        "stable" => Some(ReleaseChannel::Stable),
+        "beta" => Some(ReleaseChannel::Beta),
+        "alpha" => Some(ReleaseChannel::Alpha),
+        _ => None,
+    }
+}
+
+/// The channel the settings file holds, and the one the running build came from. A file that records no installed
+/// channel is a fresh install (no update has ever been handed off): it follows the channel the build was cut on
+/// (`built`), as [`seed_first_run`] writes it down.
+fn channels(config: Option<&DesktopConfig>, built: Option<ReleaseChannel>) -> (Channel, Channel) {
+    if let (Some(built), Some(config)) = (built, config)
+        && config.installed_release_channel.is_none()
+    {
+        return (channel_of(built), channel_of(built));
+    }
     let chosen = config.map_or(ReleaseChannel::Stable, |config| config.release_channel);
     let from = config
         .and_then(|config| config.installed_release_channel)
         .unwrap_or(chosen);
     (channel_of(chosen), channel_of(from))
+}
+
+/// First start of a fresh install: writes the build's channel as both the chosen and the installed channel, once
+/// (only while no installed channel is recorded), so the person's later choice in About is never overwritten.
+/// `true` when the file now holds it.
+#[cfg(any(windows, test))]
+pub(crate) fn seed_first_run(path: &std::path::Path, built: Option<ReleaseChannel>) -> bool {
+    let Some(built) = built else { return false };
+    DesktopConfig::update_at(path, |config| {
+        if config.installed_release_channel.is_some() {
+            return (false, ());
+        }
+        config.release_channel = built;
+        config.installed_release_channel = Some(built);
+        (true, ())
+    })
+    .is_ok()
 }
 
 #[cfg(any(windows, test))]
@@ -986,6 +1031,7 @@ pub(crate) fn release_config(
 
 /// What a build sets its updater up with, or why it has none.
 #[cfg(any(windows, test))]
+#[allow(clippy::large_enum_variant)] // one value per answer, moved once through a channel: boxing would only add a hop
 pub(crate) enum ReleaseSetup {
     /// Not a release build (no build time, or no release version): no updater, and not one request.
     NotARelease,

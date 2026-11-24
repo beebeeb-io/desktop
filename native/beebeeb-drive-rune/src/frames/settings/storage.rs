@@ -4,6 +4,7 @@
 
 use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::space as sp;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::settings_controls::{self as controls, Emphasis};
@@ -12,10 +13,11 @@ use crate::ui::settings_list::{self as lists, Item, Trailing};
 use crate::ui::settings_meter as meters;
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell::{self as shell, PANE_TITLE, SUB};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use rune::tok::Family;
 use rune::{El, col, el, row};
 
-use super::drive::{Kept, UseKind};
+use super::drive::{Control, Insights, Kept, KeptOnPc, UseKind};
 use super::{Dialog, SettingsUi};
 
 fn icon_of(kind: UseKind) -> &'static rune::Icon {
@@ -27,8 +29,44 @@ fn icon_of(kind: UseKind) -> &'static rune::Icon {
     }
 }
 
+/// The "Thumbnails and previews" row has a true figure only when previews report a size and a limit: otherwise it
+/// would read " of 0 GB", so it stays out.
+fn previews_row_shown(shows: bool, previews: &KeptOnPc) -> bool {
+    shows && !previews.used.is_empty() && previews.limit.max_gb > 0
+}
+
+/// Storage has no answer of its own: its usage arrives with the insights. Loading while that is out, Failed
+/// (with a retry that really asks again) when it did not come, never a blank " used of ".
+fn unanswered(ui: &SettingsUi, st: &super::drive::Storage, t: &Theme) -> Option<El> {
+    let why = match ui.drive.insights() {
+        Insights::Loading => {
+            return Some(view_state(
+                ViewState::Loading {
+                    words: "Loading your storage…",
+                },
+                t,
+            ));
+        }
+        Insights::Failed(why) => why.as_str(),
+        _ if st.used.is_empty() || st.total.is_empty() => "Beebeeb could not read how much space you use.",
+        _ => return None,
+    };
+    Some(view_state(
+        ViewState::Failed {
+            key: "storage-failed",
+            title: "Couldn't load your storage",
+            why,
+            retry: Some(try_again("storage-failed", t).on_press(|s: &mut State| s.settings.drive.reload_insights())),
+        },
+        t,
+    ))
+}
+
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let st = ui.drive.storage();
+    if let Some(state) = unanswered(ui, &st, t) {
+        return (shell::pane(vec![shell::heading("Storage", None, t), state], t), None);
+    }
 
     // In your Beebeeb account: the figure and its meter, then what it is made of.
     let head = col()
@@ -36,8 +74,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         .role("status")
         .label(format!("{} used of {}", st.used, st.total))
         .w_full()
-        .padding(12.0)
-        .gap(8.0)
+        .padding(sp::S12)
+        .gap(sp::S8)
         .child(
             row()
                 .key("usage-line")
@@ -126,16 +164,18 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             vec![
                 row()
                     .key(format!("item-1-{index}-actions"))
-                    .gap(6.0)
+                    .gap(sp::S6)
                     .child(clear)
                     .child(change),
             ],
             t,
         )
     };
-    let pc = vec![
-        kept(0, 0, Kept::Downloaded, &ic::DOWNLOAD_TRAY, "Clear…"),
-        kept(1, 2, Kept::Previews, &ic::GRID, "Clear"),
+    let mut pc = vec![kept(0, 0, Kept::Downloaded, &ic::DOWNLOAD_TRAY, "Clear…")];
+    if previews_row_shown(ui.drive.shows(Control::PreviewsRow), &st.previews) {
+        pc.push(kept(1, 2, Kept::Previews, &ic::GRID, "Clear"));
+    }
+    pc.push(
         lists::item(
             1,
             2,
@@ -145,17 +185,17 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             t,
         )
         .on_press(|s: &mut State| super::go(s, "DW-0715")),
-    ];
+    );
 
     let children = vec![
         shell::heading("Storage", None, t),
         col()
             .key("account-use")
             .w_full()
-            .gap(8.0)
+            .gap(sp::S8)
             .child(lists::list(0, Some("In your Beebeeb account"), account, None, t))
             .child(
-                el().key("cap-0-box").w_full().px(4.0).child(
+                el().key("cap-0-box").w_full().px(sp::S4).child(
                     kit::label(
                         "cap-0",
                         "Need more space? Plans are on beebeeb.io.",
@@ -216,7 +256,7 @@ pub fn limit(ui: &SettingsUi, which: Kept, first: usize, t: &Theme) -> El {
             PANE_TITLE.family(Family::Mono),
             t.text,
         ),
-        col().key("slider-box").w_full().gap(4.0).child(slider).child(
+        col().key("slider-box").w_full().gap(sp::S4).child(slider).child(
             row()
                 .key("slider-ends")
                 .w_full()
@@ -263,4 +303,48 @@ pub fn free_up(ui: &SettingsUi, first: usize, t: &Theme) -> El {
         t,
     )
     .modal(false, |s: &mut State| s.settings.dialog = None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frames::settings::drive::{BoardDrive, DriveSettings};
+
+    #[test]
+    fn previews_row_stays_out_without_a_true_figure() {
+        let board = BoardDrive::new().storage().previews;
+        assert!(previews_row_shown(true, &board));
+        assert!(!previews_row_shown(false, &board));
+        let mut none = board.clone();
+        none.used = String::new();
+        assert!(!previews_row_shown(true, &none));
+        let mut no_limit = board;
+        no_limit.limit.max_gb = 0;
+        assert!(!previews_row_shown(true, &no_limit));
+    }
+
+    fn keys_with(insights: crate::frames::settings::drive::Insights) -> Vec<String> {
+        let mut state = crate::init();
+        assert!(crate::frames::settings::scene("DW-0712", &mut state));
+        state.settings.drive = Box::new(BoardDrive::new().with_insights(insights));
+        let env = rune::Env {
+            system_dark: false,
+            scale: 2.0,
+        };
+        let mut rt = rune::Runtime::new(state, crate::view, (958.0, 718.0), env);
+        rt.frame(0.0);
+        rt.frame(0.016);
+        rt.elements().into_iter().filter_map(|e| e.key).collect()
+    }
+
+    #[test]
+    fn storage_says_loading_and_failed_never_a_blank_figure() {
+        use crate::frames::settings::drive::Insights;
+        let loading = keys_with(Insights::Loading);
+        assert!(loading.iter().any(|k| k == "loading") && !loading.iter().any(|k| k == "usage"));
+        let failed = keys_with(Insights::Failed("offline".into()));
+        assert!(failed.iter().any(|k| k == "storage-failed-retry") && !failed.iter().any(|k| k == "usage"));
+        let ready = keys_with(Insights::Empty);
+        assert!(ready.iter().any(|k| k == "usage"));
+    }
 }

@@ -10,6 +10,8 @@ pub struct SendPhaseLink {
     pub wake: tokio::sync::Notify,
     /// Task 2409: Try again on a change that failed asks for a queue step now, not at the next tick (`Wake::Nudge`).
     pub nudge: tokio::sync::Notify,
+    /// w36: the same ask, for the sender that serves it while the loop is inside a tick ([`send_nudges_mid_tick`]).
+    pub(super) mid_tick: tokio::sync::Notify,
     pub(super) link: std::sync::OnceLock<Arc<crate::link_health::LinkMonitor>>,
     pub(super) signals: Mutex<AttemptSignals>,
 }
@@ -44,14 +46,20 @@ impl SendPhaseLink {
         self.wake.notify_one();
     }
     /// Task 2409: one queue step as soon as the runner is free (`Wake::Nudge`). A nudge sent while a tick runs is kept
-    /// (`notify_one` stores a permit), so the step follows that tick.
+    /// (`notify_one` stores a permit), so a whole step follows that tick. w36: it is also served while that tick runs
+    /// ([`send_nudges_mid_tick`]): a save is sent now, not after a tick that can take minutes.
     pub fn nudge(&self) {
         self.nudge.notify_one();
+        self.mid_tick.notify_one();
     }
     /// §6.1 condition 3: the link monitor has a failure since its last good answer.
     #[cfg_attr(not(any(target_os = "macos", any(test, feature = "test-support"))), allow(dead_code))]
     pub fn link_failed(&self) -> bool {
         self.link.get().is_some_and(|link| link.snapshot().failure.is_some())
+    }
+    /// w29: the link monitor's latest failure since its last good answer, and when (unix seconds).
+    pub fn link_failure(&self) -> Option<(crate::link_health::LinkFailure, i64)> {
+        self.link.get().and_then(|link| link.snapshot().failure)
     }
     #[cfg_attr(not(any(target_os = "macos", any(test, feature = "test-support"))), allow(dead_code))]
     pub fn signals(&self) -> AttemptSignals {
@@ -85,6 +93,82 @@ pub fn phase_step_due(
 pub fn nudge_wait(last_run: Option<std::time::Instant>, now: std::time::Instant) -> Option<Duration> {
     let wait = Duration::from_secs(1).saturating_sub(now.duration_since(last_run?));
     (!wait.is_zero()).then_some(wait)
+}
+
+/// w36: what the mid-tick sender ([`send_nudges_mid_tick`]) reads of the runner's loop.
+#[derive(Default)]
+pub struct LoopState {
+    /// The loop is inside a wake (a tick, or a phase or nudge step): a nudge sent now waits in `next_wake`.
+    busy: AtomicBool,
+    /// Spec D11b: this engine run's first reconcile pass has committed (always, on a Mac: its start runs it).
+    reconciled: AtomicBool,
+    /// Held by a tick from its pull to the end of its passes, and by a mid-tick step for its whole run: a change is
+    /// never sent while the pull or a reconcile pass reads the rows, and neither starts while one is being sent.
+    pub(super) pull: tokio::sync::Mutex<()>,
+}
+
+impl LoopState {
+    pub(super) fn set_busy(&self, busy: bool) {
+        self.busy.store(busy, Ordering::SeqCst);
+    }
+    pub(super) fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+    pub(super) fn set_reconciled(&self, reconciled: bool) {
+        self.reconciled.store(reconciled, Ordering::SeqCst);
+    }
+    pub(super) fn is_reconciled(&self) -> bool {
+        self.reconciled.load(Ordering::SeqCst)
+    }
+}
+
+/// w36: how long the sender gives the loop to take a nudge itself before it reads whether the loop is busy (a nudge
+/// and a tick that start together).
+pub(super) const MID_TICK_SETTLE: Duration = Duration::from_millis(200);
+/// w36: how often the sender looks again while the loop's first tick has not reconciled yet.
+pub(super) const MID_TICK_POLL: Duration = Duration::from_millis(250);
+
+/// w36: serves a nudge (a save, a New file, Try again) while the loop is inside a tick. The loop takes a nudge only
+/// between ticks, and a tick with a backup pass or a long queue takes minutes: the save was stored and not sent, and
+/// the viewer's wait ran out. `step` sends the due changes; it runs beside the tick, at most once a second, never
+/// while paused, never before this run's first reconcile pass (D11b: it waits for that pass, then sends), and never
+/// inside the tick's pull or reconcile pass ([`LoopState::pull`]). A nudge that finds the loop idle is the loop's own
+/// (`Wake::Nudge`): nothing is sent here. Never returns; the runner aborts it when it ends.
+pub(super) async fn send_nudges_mid_tick<F, Fut>(
+    link: Arc<SendPhaseLink>,
+    state: Arc<LoopState>,
+    paused: Arc<AtomicBool>,
+    step: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut step = step;
+    let is_paused = || paused.load(Ordering::Relaxed);
+    let mut last_run: Option<std::time::Instant> = None;
+    loop {
+        link.mid_tick.notified().await;
+        if !state.is_busy() {
+            tokio::time::sleep(MID_TICK_SETTLE).await;
+        }
+        // D11b: the tick this nudge met runs the first pass; the nudge is sent once that pass committed.
+        while state.is_busy() && !state.is_reconciled() {
+            tokio::time::sleep(MID_TICK_POLL).await;
+        }
+        if !state.is_busy() || is_paused() {
+            continue;
+        }
+        if let Some(wait) = nudge_wait(last_run, tokio::time::Instant::now().into_std()) {
+            tokio::time::sleep(wait).await;
+        }
+        let _not_in_the_pull = state.pull.lock().await;
+        // The tick ended while this waited: the loop's own nudge step runs now.
+        if !state.is_busy() || is_paused() {
+            continue;
+        }
+        last_run = Some(tokio::time::Instant::now().into_std());
+        step().await;
+    }
 }
 
 /// What woke the runner's loop (spec 2026-10-10 §6.2).
@@ -150,6 +234,7 @@ impl EngineRunner {
     ///
     /// `api_base` is the one server this engine talks to, named by the host (the engine handle passes its
     /// `EngineConfig::api_base`; the Tauri shell passes `runner::api_base_url()`). The run reads no environment.
+    #[allow(clippy::too_many_arguments)] // one call site; a params struct would only move the list
     pub fn spawn(
         identity: &'static crate::identity::EngineIdentity,
         app: Host,
@@ -281,6 +366,7 @@ impl EngineRunner {
                 crate::windows_cf::refuse_unconfirmed_stop();
             }
             let revoke_after = crate::windows_cf::revoke_callbacks().await;
+            #[allow(clippy::needless_return)] // the other platforms' tail follows under its own cfg
             return classify_abort_result(
                 stopped,
                 revoke_before.as_ref().err().map(|e| e.to_string()),
@@ -340,6 +426,8 @@ impl AbortOutcome {
 /// must treat the engine as alive); otherwise the FIRST failing revocation
 /// stage is reported, matching the old all-must-succeed conjunction.
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
+// Only the Windows build calls this outside tests; other targets build it for the tests.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub(super) fn classify_abort_result(
     task_stopped: bool,
     revoke_before_error: Option<String>,

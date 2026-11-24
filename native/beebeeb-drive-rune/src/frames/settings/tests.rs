@@ -116,13 +116,7 @@ fn click(rt: &mut Runtime<State>, key: &str) {
 
 /// Tab until the element keyed `target` has focus; panics when focus never gets there.
 fn tab_to(rt: &mut Runtime<State>, target: &str) {
-    for _ in 0..80 {
-        if find(rt, target).is_some_and(|e| e.focused) {
-            return;
-        }
-        key(rt, Key::Tab);
-    }
-    panic!("Tab never reaches {target}");
+    super::tests_keys::tab_to(rt, target);
 }
 
 /// Is the window on settings (the shell's route), and on which of the shell's sections?
@@ -460,6 +454,18 @@ fn about_goes_back_copies_checks_and_shows_the_notes() {
 }
 
 #[test]
+fn about_links_to_this_versions_desktop_source() {
+    let mut rt = runtime("DW-0751");
+    assert_eq!(info(&rt, "item-2-2").role, "link");
+    click(&mut rt, "item-2-2");
+    assert_eq!(rt.state.settings.intents, vec![Intent::Web("desktop-source")]);
+    assert_eq!(
+        crate::shell::web_pages::url("desktop-source"),
+        Some(crate::frames::office::dialogs::DESKTOP_SOURCE_URL)
+    );
+}
+
+#[test]
 fn the_release_channel_is_chosen_from_its_menu_by_keyboard() {
     let mut rt = runtime("DW-0751");
     tab_to(&mut rt, "item-1-1");
@@ -520,12 +526,12 @@ fn a_storage_location_is_a_country_chosen_by_keyboard_and_said_in_a_toast() {
 #[test]
 fn locations_that_could_not_load_say_so_and_try_again_loads_them() {
     let mut rt = runtime("DW-0788d");
-    assert_eq!(info(&rt, "card-0").role, "alert");
+    assert!(find(&rt, "locations-failed").is_some());
     assert!(find(&rt, "list-0-body").is_none());
-    tab_to(&mut rt, "btn-0");
+    tab_to(&mut rt, "locations-failed-retry");
     key(&mut rt, Key::Enter);
     assert!(find(&rt, "list-0-body").is_some(), "the list is back");
-    assert!(find(&rt, "card-0").is_none());
+    assert!(find(&rt, "locations-failed").is_none());
 }
 
 #[test]
@@ -628,13 +634,20 @@ fn notifications_off_in_windows_keep_the_choices_out_of_reach_and_open_windows_s
 
 #[test]
 fn recent_alerts_lead_where_they_point_and_an_empty_list_says_so() {
-    let leads = [("item-0-1", "DW-0501"), ("item-1-0", "DW-0503"), ("item-2-0", "DW-A77")];
-    for (row, frame) in leads {
+    // Shared holds the shares and the requests: the window leaves settings for it. The sign-in activity is a
+    // page of Security. Nothing is left over as a request nobody takes.
+    let leads = [
+        ("item-0-1", None),
+        ("item-1-0", None),
+        ("item-2-0", Some(SettingsPane::Security)),
+    ];
+    for (row, pane) in leads {
         let mut rt = runtime("DW-0791");
         assert_eq!(info(&rt, row).role, "link");
         tab_to(&mut rt, row);
         key(&mut rt, Key::Enter);
-        assert_eq!(rt.state.settings.intents, vec![Intent::Show(frame)], "{row}");
+        assert_eq!(on_settings(&rt), pane, "{row}");
+        assert!(rt.state.settings.intents.is_empty(), "{row}");
     }
     // A place the shell routes itself (Settings › Devices and sessions): no request needed.
     let mut rt = runtime("DW-0791");
@@ -648,7 +661,10 @@ fn recent_alerts_lead_where_they_point_and_an_empty_list_says_so() {
         "a new alert says so in words, not only with a pill"
     );
     let mut rt = runtime("DW-0791b");
-    assert_eq!(info(&rt, "card-0-head").text.as_deref(), Some("No notifications"));
+    assert_eq!(
+        info(&rt, "recent-empty-title").text.as_deref(),
+        Some("No notifications")
+    );
     click(&mut rt, "crumb-row");
     assert_eq!(rt.state.settings.pane, Pane::Notifications);
 }
@@ -796,29 +812,8 @@ fn a_pop_up_row_is_one_tab_stop_and_every_tab_stop_acts() {
     assert_eq!(stops[..3], ["cap-min", "cap-max", "cap-close"]);
     assert_eq!(
         stops[3..],
-        [
-            "Back to Drive-row",
-            "General-row",
-            "Account-row",
-            "Security-row",
-            "Devices and sessions-row",
-            "Notifications-row",
-            "Storage-row",
-            "Backups-row",
-            "Sync and File Explorer-row",
-            "Thumbnails and previews-row",
-            "Bandwidth-row",
-            "item-0-0",
-            "item-1-0",
-            "item-1-1",
-            "item-1-2",
-            "item-2-0",
-            "item-2-1",
-            "item-2-2",
-            "item-3-0",
-            "item-3-1",
-        ],
-        "the Tab order of General: the sidebar, then the rows, top to bottom; nothing twice"
+        ["General-row", "item-0-0", "item-1-0", "item-2-0", "item-3-0",],
+        "the Tab order of General: the sidebar (one stop, its selected item), then each list of links one stop, top to bottom; nothing twice"
     );
     // About has the other pop-up row.
     click(&mut rt, "item-3-1");
@@ -880,7 +875,7 @@ fn a_list_of_locations_without_choices_never_panics_and_says_it_could_not_load()
     state.settings.source = Box::new(Empty(BoardSettings::new()));
     super::open_on(&mut state, "DW-0788");
     let mut rt = window(state, (958.0, 638.0));
-    assert_eq!(info(&rt, "card-0").role, "alert");
+    assert!(find(&rt, "locations-failed").is_some());
     assert!(find(&rt, "list-0-body").is_none(), "no empty list");
     click(&mut rt, "crumb-row");
     assert_eq!(
@@ -1031,6 +1026,20 @@ fn a_build_that_ships_never_shows_the_sample_content() {
     }
     key(&mut rt, Key::Escape);
     assert_eq!(on_settings(&rt), None, "Esc still leaves");
+}
+
+/// w14 bug 2: a not-wired pane keeps the settings sidebar and its Back to Drive, so only Esc is not the way out.
+#[test]
+fn a_not_built_pane_keeps_the_settings_sidebar_and_back() {
+    let mut state = init();
+    state.settings.source = Box::new(Unwired);
+    let mut rt = window(state, (958.0, 638.0));
+    ctrl_comma(&mut rt);
+    assert!(find(&rt, "not-built").is_some(), "the not-built frame");
+    assert_eq!(info(&rt, "settings-nav").role, "navigation");
+    assert!(info(&rt, "General-row").fill.a > 0.0, "General is selected");
+    click(&mut rt, "Back to Drive-row");
+    assert_eq!(on_settings(&rt), None, "Back leaves");
 }
 
 /// P2.8: what was open when the window left settings is not there on the next visit,

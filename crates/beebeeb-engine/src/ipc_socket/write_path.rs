@@ -127,15 +127,12 @@ pub(super) fn refresh_cached_write(
     let (entry, presented) = match db.get_file(&item.identifier) {
         Ok(Some(entry)) => (entry, false),
         Ok(None) if through_alias.resolves_alias() => {
-            match db
+            let entry = db
                 .resolve_alias(&item.identifier)
                 .ok()
                 .flatten()
-                .and_then(|server_id| db.get_file(&server_id).ok().flatten())
-            {
-                Some(entry) => (entry, true),
-                None => return None,
-            }
+                .and_then(|server_id| db.get_file(&server_id).ok().flatten())?;
+            (entry, true)
         }
         Ok(None) => return None,
         // Cannot tell: prefer returning the stored result over queueing twice.

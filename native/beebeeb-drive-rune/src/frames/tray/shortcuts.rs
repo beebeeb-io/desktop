@@ -10,14 +10,16 @@
 //!
 //! Every measurement is the board's computed CSS (`.wn-dlg`, `.wn-cmds`, `.wn-cmd`).
 
-use rune::{Align, Color, Cx, El, Key, KeyEvent, ScrollSpec, TextStyle, Tx, col, el, row};
+use rune::{Align, Cx, El, Key, KeyEvent, ScrollSpec, TextStyle, Tx, col, el, row};
 
 use super::commands::{APP, EDITOR, WINDOW};
 use crate::State;
 use crate::frames::shared::parts::controls::{ButtonKind, ButtonSize, button_keyed};
-use crate::shell::app::{Dialog, Event};
+use crate::shell::app::{Dialog as AppDialog, Event};
 use crate::shell::registry::{self, DialogFrame, FeedbackPolicy, FrameGroup};
+use crate::theme::scale::space;
 use crate::theme::tokens::{self, Theme};
+use crate::ui::dialog::{Dialog, Foot, Head, dialog};
 use crate::ui::kit;
 
 /// One of the other desktop's menus: its name and its commands, each with its key or its home.
@@ -53,9 +55,9 @@ pub const BODY_KEY: &str = "sc-body";
 mod type_sc {
     use super::TextStyle;
     /// `.t-title` in a dialog's head.
-    pub const TITLE: TextStyle = TextStyle::new(17.0, 600.0).lh(22.0).tracking(-0.204);
+    pub const TITLE: TextStyle = crate::theme::scale::text::HEADING;
     /// `.t-sub` in a dialog's head.
-    pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+    pub const SUB: TextStyle = crate::theme::scale::text::SUB;
     /// `.wn-cmdhead`: a menu's name, in capitals.
     pub const HEAD: TextStyle = TextStyle::new(11.0, 600.0).lh(17.0).tracking(0.66);
     /// `.wn-cmd`: a command.
@@ -87,12 +89,12 @@ pub fn lists(s: &State) -> &'static [List] {
 /// Opens the dialog on its first page, as Ctrl+/ does.
 pub fn open(s: &mut State) {
     s.shortcuts.page = Page::App;
-    crate::shell::host::dispatch(s, Event::OpenDialog(Dialog::Shortcuts));
+    crate::shell::host::dispatch(s, Event::OpenDialog(AppDialog::Shortcuts));
 }
 
 /// Closes it (Close; Esc is the shell's).
 pub fn close(s: &mut State) {
-    if s.shell.app.dialog() == Some(&Dialog::Shortcuts) {
+    if s.shell.app.dialog() == Some(&AppDialog::Shortcuts) {
         crate::shell::host::dispatch(s, Event::Escape);
     }
 }
@@ -100,7 +102,7 @@ pub fn close(s: &mut State) {
 /// A closed dialog forgets its page: the next opening starts on the first (`host::dispatch`
 /// calls this after every event, as it does for settings).
 pub fn sync(s: &mut State) {
-    if s.shell.app.dialog() != Some(&Dialog::Shortcuts) {
+    if s.shell.app.dialog() != Some(&AppDialog::Shortcuts) {
         s.shortcuts.page = Page::App;
     }
 }
@@ -126,36 +128,30 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
 /// The card, in the place the board gives it: centred in the window under the caption, 24 px
 /// clear of every edge; in a window too low for it the lists scroll and the card never grows
 /// past the window (`max-height: calc(100% - 48px)`).
-pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
+pub fn card(_dialog: &AppDialog, s: &State, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
     let lists = lists(s);
     let names: Vec<&str> = lists.iter().map(|list| list.name).collect();
-    let card = col()
-        .key("sc-dlg")
-        .role("dialog")
-        .label(format!("{TITLE}: {}", names.join(", ")))
-        // The foot's hairline makes the height end in a half point, so centring puts the top
-        // on a quarter point, where the board draws it.
-        .pixel_snap(false)
+    let label = format!("{TITLE}: {}", names.join(", "));
+    let head_body = col()
         .w_full()
-        .max_w(WIDTH)
         .shrink()
         .min_h(0.0)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(
-            col()
-                .key("sc-clip")
-                .w_full()
-                .shrink()
-                .min_h(0.0)
-                .clip_rounded(8.0)
-                .child(head(&t))
-                .child(body(lists, &t))
-                .child(foot(&t)),
-        );
+        .child(head(&t))
+        .child(body(lists, &t));
+    let card = dialog(
+        Dialog {
+            prefix: "sc",
+            head: Head::Raw(head_body),
+            foot: Foot::Custom(row().w_full().justify_end().child(close_button(&t))),
+            ..Dialog::new("sc-dlg", &label, WIDTH)
+        },
+        &t,
+    )
+    .w_full()
+    .max_w(WIDTH)
+    .shrink()
+    .min_h(0.0);
     // A column, so the card gives up height (its main axis) in a window too low for it.
     col()
         .key("sc-place")
@@ -174,7 +170,7 @@ fn head(t: &Theme) -> El {
         .key("sc-head")
         .w_full()
         .pt(20.0)
-        .px(24.0)
+        .px(space::S24)
         .pb(4.0)
         .gap(3.0)
         .child(kit::label("sc-title", TITLE, type_sc::TITLE, t.text).role("heading"))
@@ -193,7 +189,7 @@ fn body(lists: &'static [List], t: &Theme) -> El {
         .shrink()
         .min_h(0.0)
         .pt(10.0)
-        .px(24.0)
+        .px(space::S24)
         .pb(18.0)
         .scroll(ScrollSpec { stick_bottom: false })
         .child(grid)
@@ -245,7 +241,7 @@ fn command(c: usize, r: usize, name: &str, home: &str, t: &Theme) -> El {
                 .key(format!("{key}-words"))
                 .w_full()
                 .py(3.0)
-                .gap(12.0)
+                .gap(space::S12)
                 .justify_between()
                 .items_start()
                 .child(
@@ -271,27 +267,16 @@ fn command(c: usize, r: usize, name: &str, home: &str, t: &Theme) -> El {
         .child(el().key(format!("{key}-line")).w_full().h(kit::HAIR).fill(t.separator))
 }
 
-/// `.wn-dlg-foot`: the ground, a hairline over it, "padding: 16px 24px", Close at the end.
-fn foot(t: &Theme) -> El {
-    row()
-        .key("sc-foot")
-        .w_full()
-        .px(24.0)
-        .py(16.0)
-        .justify_end()
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .child(
-            button_keyed(
-                CLOSE_KEY.into(),
-                "Close",
-                ButtonKind::Outline,
-                ButtonSize::Medium,
-                None,
-                t,
-            )
-            .focus_ring(2.0, 2.0, t.accent_deep)
-            .on_press(close),
-        )
+/// Close, at the end of the card's foot.
+fn close_button(t: &Theme) -> El {
+    button_keyed(
+        CLOSE_KEY.into(),
+        "Close",
+        ButtonKind::Outline,
+        ButtonSize::Medium,
+        None,
+        t,
+    )
+    .focus_ring(2.0, 2.0, t.accent_deep)
+    .on_press(close)
 }

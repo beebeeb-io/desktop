@@ -2,7 +2,7 @@
 //! kit (`ui::au`). Every string is the board's; every measurement is its computed CSS.
 
 use rune::tok::Family;
-use rune::{Color, Cx, El, Span, TextStyle, col, el, row};
+use rune::{Color, Cx, El, TextStyle, col, el, row};
 
 use super::source::{Explorer, LockAfter, PreviewFormat, PreviewSize, Switch};
 use super::{
@@ -10,19 +10,22 @@ use super::{
 };
 use crate::State;
 use crate::frames::signin::icons as signin_icons;
+use crate::theme::scale::{self, space};
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone, type_au};
 use crate::ui::setup::{self, SegInk, SegSize, Status, StepState};
+use crate::ui::switch as ui_switch;
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::{kit, settings_list};
 
 const PRODUCT: &str = "Drive";
 
 /// `.t-sub` at 500 and its mono twin: the sample's size in the preview card.
-const SUB_MEDIUM: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
-const SUB_MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
+const SUB_MEDIUM: TextStyle = scale::text::SUB_STRONG;
+const SUB_MONO: TextStyle = scale::text::MONO;
 const SUB_MONO_MEDIUM: TextStyle = TextStyle::new(12.0, 500.0).family(Family::Mono).lh(15.0);
 /// `.wn-fdlg-ni`: File Explorer's own 13px.
-const NAV: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+const NAV: TextStyle = scale::text::READ;
 /// `.t-cap.font-mono`: a weight under a size in the compare view.
 const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
 
@@ -134,7 +137,7 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
 
 /// `.au-actions`: the buttons at the foot of a column, 6 apart, 6 below the column's gap.
 pub(super) fn actions() -> El {
-    col().key("au-actions").w_full().gap(6.0).mt(6.0)
+    col().key("au-actions").w_full().gap(space::S6).mt(6.0)
 }
 
 pub(super) fn primary(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to: fn(&mut Ui)) -> El {
@@ -156,9 +159,8 @@ pub(super) fn ghost(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to
 }
 
 fn switch(row_key: &str, name: &str, on: bool, t: &Theme, to: impl Fn(&mut Ui) + 'static) -> El {
-    settings_list::switch(row_key, name, on, t)
-        .focus_ring(2.0, 2.0, t.accent_deep)
-        .cursor(rune::Cursor::Pointer)
+    ui_switch::switch(&format!("{row_key}-switch"), "", on, true, t)
+        .label(name)
         .on_press_tx(act(to))
 }
 
@@ -312,10 +314,10 @@ fn preview_card(ui: &Ui, t: &Theme) -> El {
             ui.original_weight()
         ))
         .w_full()
-        .padding(12.0)
-        .gap(12.0)
+        .padding(space::S12)
+        .gap(space::S12)
         .center_y()
-        .radius(10.0)
+        .radius(scale::radius::PANEL)
         .fill(t.card)
         .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -328,7 +330,7 @@ fn preview_card(ui: &Ui, t: &Theme) -> El {
                     "Your photo"
                 })
                 .size(70.0, 52.0)
-                .radius(6.0)
+                .radius(tokens::radius::MD)
                 .pixels(original),
         )
         .child(words)
@@ -404,16 +406,12 @@ fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         )
 }
 
-/// Step 4 while the account's preview setting is being read: its heading, a line that says so, nothing chosen and
+/// Step 4 while the account's preview setting is being read: its heading, a loading state, nothing chosen and
 /// nothing stored until the read answered. "Not now" stays.
 fn previews_loading(k: &mut Keys, t: &Theme) -> El {
     setup::column()
-        .child(au::heading(
-            "Thumbnails and previews",
-            Some("Reading your preview settings\u{2026}"),
-            false,
-            t,
-        ))
+        .child(au::heading("Thumbnails and previews", None, false, t))
+        .child(view_state(ViewState::Loading { words: "Reading your preview settings\u{2026}" }, t))
         .child(
             actions()
                 .child(primary(k, "Continue", ButtonState::Disabled, t, Ui::go_on))
@@ -424,18 +422,19 @@ fn previews_loading(k: &mut Keys, t: &Theme) -> El {
 /// Step 4 when reading the preview setting failed: said as a failure, never as "off" or "not in this version". Try
 /// again reads it again; Not now goes on with nothing changed.
 fn previews_failed(k: &mut Keys, t: &Theme) -> El {
+    let retry = try_again("previews-failed", t).on_press_tx(act(Ui::retry_previews));
     setup::column()
-        .child(au::heading(
-            "Thumbnails and previews",
-            Some("Beebeeb couldn\u{2019}t read your preview settings. Nothing is changed."),
-            false,
+        .child(au::heading("Thumbnails and previews", None, false, t))
+        .child(view_state(
+            ViewState::Failed {
+                key: "previews-failed",
+                title: "Couldn\u{2019}t read your preview settings",
+                why: "Beebeeb couldn\u{2019}t read your preview settings. Nothing is changed.",
+                retry: Some(retry),
+            },
             t,
         ))
-        .child(
-            actions()
-                .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::retry_previews))
-                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
-        )
+        .child(actions().child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)))
 }
 
 /// Step 4 as the board draws it behind the compare view: nothing in it takes a press.
@@ -511,14 +510,14 @@ fn explorer_added(k: &mut Keys, t: &Theme) -> El {
         .role("image")
         .label("File Explorer's navigation pane: Home, Gallery, Beebeeb (selected), Desktop, Documents")
         .w(220.0)
-        .padding(8.0)
-        .gap(2.0)
-        .radius(10.0)
+        .padding(space::S8)
+        .gap(space::S2)
+        .radius(scale::radius::PANEL)
         .fill(os.card)
         .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
         .box_shadow(kit::ring(kit::HAIR, t.separator));
     for (i, (name, icon)) in places.iter().enumerate() {
-        let mut ni = row().h(28.0).px(10.0).gap(9.0).center_y().radius(4.0);
+        let mut ni = row().h(28.0).px(space::S10).gap(space::S9).center_y().radius(tokens::radius::SM);
         ni = match icon {
             Some(icon) => ni.child(kit::glyph(format!("nav-{i}-icon"), icon, 15.0, os.icon)),
             // The b as Windows shows it in the pane: one colour, the letter cut out of its plate.
@@ -609,75 +608,9 @@ const NOTHING_SYNCS: &str = "Your files are safe in Beebeeb. Nothing syncs with 
 /// `code`: Windows' code for support; empty when there is none (the sentence then stands alone). `another`: no
 /// folder was kept yet, so another one can be chosen (the folder may be what was refused).
 fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Keys, t: &Theme) -> El {
-    let (mark, _, wash) = au::tone(Tone::Red, t);
-    let key = k.next("banner");
     let lead = "Try again in a moment.";
-    let words = if code.is_empty() {
-        lead.to_string()
-    } else {
-        format!("{lead} {code}")
-    };
-    let spans = if code.is_empty() {
-        Vec::new()
-    } else {
-        vec![Span {
-            mono: true,
-            size: Some(11.0),
-            ..Span::new(lead.len() + 1, words.len())
-        }]
-    };
-    let code_style = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(17.0);
-    kit::note_text(
-        &format!("{key}-code"),
-        &format!("{key}-code-box"),
-        code,
-        code_style,
-        t.text_secondary,
-    );
-    let banner = row()
-        .key(key.clone())
-        .role("alert")
-        .live_region(rune::LiveRegion::Assertive)
-        .w_full()
-        .px(13.0)
-        .py(11.0)
-        .gap(10.0)
-        .items_start()
-        .radius(13.0)
-        .fill(wash)
-        .child(kit::glyph(format!("{key}-icon"), &icons::EXPLORER, 16.0, mark).mt(1.0))
-        .child(
-            col()
-                .gap(2.0)
-                .grow(1.0)
-                .min_w(0.0)
-                .child(
-                    kit::label(format!("{key}-title"), title, type_au::BANNER_TITLE, t.text)
-                        .wrap()
-                        .w_full(),
-                )
-                .child(
-                    el().w_full()
-                        .child(
-                            kit::label(
-                                format!("{key}-text"),
-                                words.clone(),
-                                type_au::BANNER_TEXT,
-                                t.text_secondary,
-                            )
-                            .spans(spans)
-                            .w_full(),
-                        )
-                        // The error's own box, for the gate: where the mono run stands in the line.
-                        .children((!code.is_empty()).then(|| {
-                            el().key(format!("{key}-code-box"))
-                                .a11y_hidden()
-                                .absolute(rune::text::advance(&format!("{lead} "), type_au::BANNER_TEXT), 1.25)
-                                .w(rune::text::advance(code, code_style))
-                                .h(14.5)
-                        })),
-                ),
-        );
+    let why = if code.is_empty() { lead.to_string() } else { format!("{lead} {code}") };
+    let retry = try_again("explorer-failed", t).on_press_tx(act(Ui::go_on));
     setup::column()
         .child(au::heading(
             "Couldn't add Beebeeb to File Explorer",
@@ -685,10 +618,12 @@ fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Ke
             false,
             t,
         ))
-        .child(banner)
+        .child(view_state(
+            ViewState::Failed { key: "explorer-failed", title, why: &why, retry: Some(retry) },
+            t,
+        ))
         .child(
             actions()
-                .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::go_on))
                 .children(another.then(|| {
                     ghost(
                         k,
@@ -722,7 +657,7 @@ fn notifications(k: &mut Keys, t: &Theme) -> El {
             t,
         ))
         .child(
-            el().key("tile-at").a11y_hidden().w_full().py(16.0).center().child(
+            el().key("tile-at").a11y_hidden().w_full().py(space::S16).center().child(
                 el().key("tile")
                     .size(64.0, 64.0)
                     .radius(18.0)
@@ -775,7 +710,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     };
     let backup = match ui.answered(Switch::Backup) {
         Some(Answered::Waiting) => "Saving\u{2026}".to_string(),
-        Some(Answered::NotKnown | Answered::NotChanged) => "Not changed".to_string(),
+        Some(Answered::Unknown | Answered::NotChanged) => "Not changed".to_string(),
         _ if r.backup.is_empty() => "Off".to_string(),
         _ => r.backup.join(", "),
     };
@@ -784,7 +719,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let switch = |switch: Switch, on: bool| match ui.answered(switch) {
         Some(Answered::NotAsked) => "Not set here",
         Some(Answered::Waiting) => "Saving\u{2026}",
-        Some(Answered::NotKnown) => "Not changed",
+        Some(Answered::Unknown) => "Not changed",
         Some(Answered::NotChanged) | None => on_off(on),
     };
     // The passkey's answer may still be out (step 1 was left while Windows' dialog or Beebeeb was answering): no value
@@ -803,7 +738,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             match ui.answered(Switch::Previews) {
                 Some(Answered::NotAsked) => "Not set here".into(),
                 Some(Answered::Waiting) => "Saving\u{2026}".into(),
-                Some(Answered::NotKnown | Answered::NotChanged) => "Not changed".into(),
+                Some(Answered::Unknown | Answered::NotChanged) => "Not changed".into(),
                 None => ui.preview_name(),
             },
             Setting::Previews,
@@ -853,18 +788,31 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                 .on_press_tx(act(move |ui: &mut Ui| ui.open_setting(setting)))
         })
         .collect();
-    // What was asked and did not happen, said in words (the rows show what is set).
-    let not_changed: Vec<&str> = [
+    // What was asked and did not happen, said in words (the rows show what is set). App lock is apart: a Windows
+    // Hello that was cancelled leaves it as it was, and that is not an error.
+    let unchanged = |names: [(Switch, &'static str); 3]| -> Vec<&'static str> {
+        names
+            .into_iter()
+            .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::Unknown)))
+            .map(|(_, name)| name)
+            .collect()
+    };
+    let not_changed = unchanged([
         (Switch::Notifications, "notifications"),
         (Switch::OpenAtLogin, "open at login"),
         (Switch::Backup, "backup"),
-        (Switch::AppLock, "app lock"),
-        (Switch::LockAfter, "lock delay"),
-    ]
-    .into_iter()
-    .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))
-    .map(|(_, name)| name)
-    .collect();
+    ]);
+    let lock_kept: Vec<&str> = [(Switch::AppLock, "app lock"), (Switch::LockAfter, "lock delay")]
+        .into_iter()
+        .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::Unknown)))
+        .map(|(_, name)| name)
+        .collect();
+    let note = |key: &'static str, k: &mut Keys, words: String| {
+        el().key(key)
+            .role("alert")
+            .w_full()
+            .child(setup::note(k, &words, type_::CAPTION, 0.0, t))
+    };
     setup::column()
         .child(au::heading(
             "You're set up",
@@ -874,16 +822,22 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         ))
         .child(setup::list(k, rows, None, t))
         .children((!not_changed.is_empty()).then(|| {
-            el().key("not-changed").role("alert").w_full().child(setup::note(
+            note(
+                "not-changed",
                 k,
-                &format!(
-                    "Couldn't change {}. You can set it in Settings.",
-                    not_changed.join(" and ")
+                format!("Couldn't change {}. You can set it in Settings.", not_changed.join(" and ")),
+            )
+        }))
+        .children((!lock_kept.is_empty()).then(|| {
+            let verb = if lock_kept.len() == 1 { "wasn't" } else { "weren't" };
+            note(
+                "lock-not-changed",
+                k,
+                format!(
+                    "{} {verb} changed. You can set it in Settings.",
+                    capitalised(&lock_kept.join(" and "))
                 ),
-                type_::CAPTION,
-                0.0,
-                t,
-            ))
+            )
         }))
         .child(setup::note(
             k,
@@ -911,9 +865,9 @@ fn stage(t: &Theme) -> Color {
 fn tag(key: &str, words: &str) -> El {
     el().key(format!("{key}-box"))
         .h(18.0)
-        .px(8.0)
+        .px(space::S8)
         .center()
-        .radius(4.0)
+        .radius(tokens::radius::SM)
         .fill(Color::BLACK.alpha(0.5))
         .child(kit::label(key.to_string(), words, type_::CAPTION, Color::WHITE))
 }
@@ -926,7 +880,7 @@ fn photo(ui: &Ui, compare: Compare, t: &Theme) -> El {
         Some(weight) => format!("{} \u{b7} {weight}", ui.preview_name()),
         None => ui.preview_name(),
     };
-    let frame = |key: &str| el().key(key.to_string()).size(w, h).radius(4.0);
+    let frame = |key: &str| el().key(key.to_string()).size(w, h).radius(tokens::radius::SM);
     match compare.mode {
         CompareMode::Wipe => {
             let x = (compare.wipe * w).round();
@@ -970,14 +924,14 @@ fn photo(ui: &Ui, compare: Compare, t: &Theme) -> El {
                     .role("image")
                     .label(name.to_string())
                     .size(half * w / h, half)
-                    .radius(4.0)
+                    .radius(tokens::radius::SM)
                     .pixels(pixels)
                     .child(el().absolute(12.0, 12.0).child(tag(key, words)))
             };
             col()
                 .key("cmp-photo")
                 .size(w, h)
-                .gap(10.0)
+                .gap(space::S10)
                 .items_center()
                 .child(one("cmp-tag-0", original, &original_tag, "The original"))
                 .child(one("cmp-tag-1", preview, &preview_tag, "The preview"))
@@ -1025,7 +979,7 @@ fn option(j: usize, label: &str, weight: Option<String>, on: bool, t: &Theme) ->
             + rune::text::advance(label, type_::HEAD)
                 .max(weight.as_deref().map_or(0.0, |w| rune::text::advance(w, CAP_MONO))))
         .h(43.0)
-        .py(6.0)
+        .py(space::S6)
         .items_center()
         .radius(8.0)
         .focusable(true)
@@ -1049,8 +1003,8 @@ fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
         .key("cmp-head")
         .w_full()
         .h(48.0)
-        .px(16.0)
-        .gap(12.0)
+        .px(space::S16)
+        .gap(space::S12)
         .center_y()
         .child(
             setup::small_button("cmp-done", "Done", t)
@@ -1085,7 +1039,7 @@ fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
         .key("cmp-foot")
         .w_full()
         .pb(16.0)
-        .gap(24.0)
+        .gap(space::S24)
         .center()
         .role("group")
         .label("Preview size and format");
@@ -1139,4 +1093,13 @@ fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
             .child(foot),
         t,
     )
+    // Modal: Tab stays inside, what is behind is inert, Esc closes it, focus goes back to
+    // Compare. `setup::page` draws the scrim, so `dialog::modal` (a second scrim) is not used.
+    .modal_tx(false, act(Ui::close_compare))
+}
+
+/// First letter up, for a name that starts a sentence.
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }

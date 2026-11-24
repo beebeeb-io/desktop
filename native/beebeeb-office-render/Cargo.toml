@@ -27,10 +27,31 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
-beebeeb-office = { git = "https://github.com/beebeeb-io/desktop-office", rev = "0b4c199b56f6ab0d88e9cb4fcc13ce7cbd49bc9a" }
+beebeeb-office = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f", features = ["edit-slides"] }
 beebeeb-office-protocol = { path = "../../crates/beebeeb-office-protocol" }
 beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
-log = "0.4"   # only for the no-logger check (`log::max_level()`); already in the Office engine's closure
+# The edit-open guard reads the package's entries and content types (same zip as the engines, already in the lock).
+zip = { version = "3.0.0", default-features = false, features = ["deflate"] }
+# PDFs (2501): the renderer the app used in-process, same pinned version, now inside the sandbox.
+hayro = "=0.9.0"
+log = "0.4"  # only for the no-logger check (`log::max_level()`); already in the Office engine's closure
+
+# The PDF renderer and its rasterizer: a page at opt-level 0 takes seconds, and the PDF tests render pages.
+[profile.dev.package.hayro]
+opt-level = 3
+[profile.dev.package.hayro-interpret]
+opt-level = 3
+[profile.dev.package.hayro-syntax]
+opt-level = 3
+[profile.dev.package.hayro-font]
+opt-level = 3
+[profile.dev.package.vello_cpu]
+opt-level = 3
 
 [profile.release]
 panic = "abort"
+
+# The engines' upstream workspaces patch krilla (PDF export) to the craft-libs fork; a [patch] in a dependency
+# is not read here, so it is repeated. Same rev as in desktop-office's wordcraft/Cargo.toml.
+[patch.crates-io]
+krilla = { git = "https://github.com/storytold/craft-libs", rev = "6e03f65bf45181db77ba6229716e6624db9eb25b" }

@@ -28,7 +28,6 @@ const TWO: &str = "d0000000-0000-4000-8000-000000000002";
 
 struct Server {
     fake: FakeApi,
-    account: Arc<FakeAccount>,
     phrase: String,
     /// The status the list answers with (200: the rows).
     list_status: Arc<AtomicU16>,
@@ -103,7 +102,6 @@ fn server() -> Server {
     }));
     Server {
         fake,
-        account,
         phrase,
         list_status,
         list_delay_ms,

@@ -14,7 +14,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::config::{CONFIG_DIR_OVERRIDE, DesktopConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::photo_previews::runner::Stopped;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
@@ -54,7 +54,7 @@ fn engine_at(base: &str) -> Arc<TestEngine> {
         state_dir,
         api_base: base.to_string(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 fn signed_in(engine: &TestEngine, account: &FakeAccount) {
@@ -93,13 +93,17 @@ fn world(tag: &str, photos: &[(&str, &str, FileStatus, Vec<u8>)]) -> World {
     }
     let (routes, own) = (previews.clone(), account_handler(account.clone()));
     let api = FakeApi::start(Arc::new(move |req: &Request| {
+        // The thumbnail upload (not the preview's): stored, answered.
+        if req.method == "PUT" && req.path.ends_with("/thumbnail") {
+            return crate::test_api::Reply::ok(serde_json::json!({}));
+        }
         routes.answer(req).unwrap_or_else(|| own(req))
     }));
     let engine = engine_at(&api.base);
     signed_in(&engine, &account);
     let root = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&db_dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(db_dir.path().join("state.db")).unwrap();
     std::fs::create_dir_all(root.path().join("Photos")).unwrap();
     for (at, (id, name, status, picture)) in photos.iter().enumerate() {
         let rel = format!("Photos/{name}");
@@ -137,7 +141,7 @@ impl World {
     fn run<T>(&self, body: impl FnOnce() -> T) -> T {
         let root = self.root.path().to_path_buf();
         CONFIG_DIR_OVERRIDE.sync_scope(self.config_dir.path().to_path_buf(), || {
-            DesktopConfig::update_for(&REAL, |config| {
+            DesktopConfig::update_for(&TEST, |config| {
                 config.sync_root = Some(root);
                 (true, ())
             })
@@ -843,17 +847,19 @@ fn a_lock_during_a_wait_ends_the_run_at_once() {
     let session = world.engine.session_turn();
     let (engine, previews) = (world.engine.clone(), world.previews.clone());
     // Once the first preview is sent (the wait of about 5 s at 1 KiB/s has begun), the screen locks.
+    let locked_at = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+    let locked_at_writer = std::sync::Arc::clone(&locked_at);
     let locker = std::thread::spawn(move || {
         let began = std::time::Instant::now();
         while previews.puts() == 0 && began.elapsed() < std::time::Duration::from_secs(10) {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
+        *locked_at_writer.lock().unwrap() = Some(std::time::Instant::now());
         lock_and_unlock(&engine);
     });
-    let began = std::time::Instant::now();
     let end = world.run(|| {
-        DesktopConfig::update_for(&REAL, |config| {
+        DesktopConfig::update_for(&TEST, |config| {
             config.upload_kbps_limit = 1;
             (true, ())
         })
@@ -864,9 +870,9 @@ fn a_lock_during_a_wait_ends_the_run_at_once() {
     assert!(end.session_moved);
     assert_eq!(world.previews.puts(), 1);
     assert!(
-        began.elapsed() < std::time::Duration::from_secs(3),
+        locked_at.lock().unwrap().expect("the lock happened").elapsed() < std::time::Duration::from_secs(3),
         "the wait ended with the session: {:?}",
-        began.elapsed()
+        locked_at.lock().unwrap().map(|t| t.elapsed())
     );
 }
 
@@ -997,7 +1003,7 @@ fn the_upload_speed_limit_paces_the_previews() {
     let session = world.engine.session_turn();
     let began = std::time::Instant::now();
     let end = world.run(|| {
-        DesktopConfig::update_for(&REAL, |config| {
+        DesktopConfig::update_for(&TEST, |config| {
             config.upload_kbps_limit = 1;
             (true, ())
         })
@@ -1012,4 +1018,103 @@ fn the_upload_speed_limit_paces_the_previews() {
         sent,
         began.elapsed()
     );
+}
+
+// ---- 115: a thumbnail made on this PC is sent once --------------------------------------------------------------
+
+use crate::app::photos_api::ThumbPixels;
+use crate::photo_previews::thumbs_upload::NotNow;
+
+impl World {
+    fn thumb_puts(&self) -> Vec<Request> {
+        self.api
+            .requests()
+            .into_iter()
+            .filter(|req| req.method == "PUT" && req.path.split('?').next().is_some_and(|p| p.ends_with("/thumbnail")))
+            .collect()
+    }
+
+    fn keep_made(&self, id: &str, version: i64) {
+        let session = self.engine.session_turn();
+        let pixels = ThumbPixels {
+            session,
+            width: 32,
+            height: 24,
+            rgba: zeroize::Zeroizing::new(vec![120u8; 32 * 24 * 4]),
+        };
+        self.engine.keep_local_thumbnail(session, id, version, &pixels).unwrap();
+    }
+
+    fn upload_made(&self, id: &str, version: i64, server_404: bool) -> MadeUpload {
+        let session = self.engine.session_turn();
+        self.run(|| self.engine.upload_made_thumbnail_for(session, id, version, server_404))
+    }
+}
+
+#[test]
+fn made_thumbnail_is_sent_once_sealed_with_the_thumbnail_recipe() {
+    let world = world("thumb1", &[(ONE, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    world.previews.set_setting(JPEG_1920);
+    world.keep_made(ONE, 0);
+    assert_eq!(world.upload_made(ONE, 0, true), MadeUpload::Sent);
+    let puts = world.thumb_puts();
+    assert_eq!(puts.len(), 1);
+    let key = beebeeb_core::kdf::derive_file_key(
+        &beebeeb_core::kdf::MasterKey::from_bytes(world.account.master_key),
+        ONE.as_bytes(),
+    );
+    let webp = beebeeb_core::encrypt::decrypt_thumbnail(&key, &puts[0].body).expect("opens as a thumbnail");
+    assert_eq!(&webp[..4], b"RIFF");
+    // Once: a later look sends nothing more.
+    assert_eq!(world.upload_made(ONE, 0, true), MadeUpload::NothingToSend);
+    assert_eq!(world.thumb_puts().len(), 1);
+}
+
+const M1: &str = "d0000000-0000-4000-8000-000000000101";
+#[test]
+fn made_thumbnail_is_not_sent_unless_the_server_had_none() {
+    let world = world("thumb2", &[(M1, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    world.previews.set_setting(JPEG_1920);
+    world.keep_made(M1, 0);
+    assert_eq!(world.upload_made(M1, 0, false), MadeUpload::NothingToSend);
+    assert!(world.thumb_puts().is_empty());
+}
+
+const M2: &str = "d0000000-0000-4000-8000-000000000102";
+#[test]
+fn made_thumbnail_waits_while_the_setting_is_off_and_goes_when_it_is_on() {
+    let world = world("thumb3", &[(M2, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    world.keep_made(M2, 0);
+    assert_eq!(world.upload_made(M2, 0, true), MadeUpload::NotNow(NotNow::SettingOff));
+    assert!(world.thumb_puts().is_empty());
+    let session = world.engine.session_turn();
+    world.engine.set_photo_previews_for(session, JPEG_1920).unwrap();
+    // The 404 was remembered: a later look without it still sends.
+    assert_eq!(world.upload_made(M2, 0, false), MadeUpload::Sent);
+    assert_eq!(world.thumb_puts().len(), 1);
+}
+
+const M9: &str = "d0000000-0000-4000-8000-000000000199";
+
+#[test]
+fn a_hundred_looks_read_the_setting_once_and_a_local_change_reads_it_again() {
+    let world = world("thumb9", &[(M9, "Invented harbour.jpg", FileStatus::Local, jpeg(800, 600))]);
+    world.keep_made(M9, 0);
+    let gets = |world: &World| {
+        world
+            .api
+            .requests()
+            .iter()
+            .filter(|req| req.method == "GET" && req.path.starts_with("/api/v1/preferences/photo_previews"))
+            .count()
+    };
+    for _ in 0..100 {
+        assert_eq!(world.upload_made(M9, 0, true), MadeUpload::NotNow(NotNow::SettingOff));
+    }
+    assert_eq!(gets(&world), 1);
+    // The settings pane changes it here: the next look reads it again, and sends.
+    let session = world.engine.session_turn();
+    world.engine.set_photo_previews_for(session, JPEG_1920).unwrap();
+    assert_eq!(world.upload_made(M9, 0, true), MadeUpload::Sent);
+    assert_eq!(gets(&world), 2);
 }

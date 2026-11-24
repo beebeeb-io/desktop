@@ -41,6 +41,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
@@ -51,13 +52,15 @@ use rune::Pixels;
 
 use super::files_trash::TrashCalls;
 use super::log;
+use super::media::HelperPicture;
 use super::stamp::{Stamp, stamp};
 use super::thumbs::EngineThumbStore;
 use crate::frames::files::source::{Action, ActionError, Change};
 use crate::frames::photos::source::{
     Answered, BackupStatus, Day, Detail, Device, DeviceKind, Folder, Kind, Left, Loaded, Photo, PhotoId, PhotosSource,
-    Pumped, Shape, SourceRef, StripItem, Totals, Viewing,
+    OriginalAnswer, Pumped, Shape, SourceRef, StripItem, Totals, Viewing,
 };
+use crate::engine_host::viewer::viewer_picture;
 use crate::media::StopReason;
 use crate::media::player::{MediaItem, PlayerHandle, Press, Refusal};
 use crate::source::DriveItem;
@@ -66,7 +69,7 @@ use beebeeb_media_protocol::KindHint;
 #[cfg(test)]
 #[path = "photos_tests.rs"]
 mod tests;
-// plan40 batch 1: Photo sources' folders and the devices' backup line (slice B1).
+// Photo sources' folders and the devices' backup line.
 #[path = "photos_folders.rs"]
 mod photos_folders;
 
@@ -123,6 +126,86 @@ enum Answer {
     ),
     /// Keep on this PC, or stop: the file, what was asked, the stamp of the press, and whether it was done.
     Kept(String, bool, Stamp, Result<(), ()>),
+    /// The original with this job number has this many bytes of this many.
+    OriginalProgress(u64, u64, u64),
+    /// The original with this job number: decoded, or not.
+    OriginalDone(u64, Result<Pixels, ()>),
+}
+
+/// The original that is downloading for the open photo (one at a time), or is held decoded: memory only.
+struct OriginalJob {
+    number: u64,
+    file_id: String,
+    pressed: Stamp,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// `Some` once it is decoded.
+    pixels: Option<Pixels>,
+}
+
+/// w31: why the original of the photo `name` is never downloaded for the Original tab: the decoder in this process
+/// opens PNG, JPEG, GIF and WebP only (`viewer_picture::check`), so a HEIC or a RAW came down whole (2 MB to 80 MB
+/// each on the owner's account) and was then refused. `None`: a format that opens here, which a HEIC or a RAW is
+/// (095, through the confined helper) until this PC answered that it has no decoder for it.
+pub(crate) fn original_refused_for(name: &str) -> Option<&'static str> {
+    use super::viewer::{Shows, shows};
+    if shows(name) == Shows::Picture {
+        return None;
+    }
+    // 095: a HEIC or a RAW opens through the confined helper unless this PC is known to have no decoder for it.
+    if HelperPicture::of_name(name).is_some_and(|kind| !kind.decoder_missing()) {
+        return None;
+    }
+    let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()).unwrap_or_default();
+    Some(match ext.as_str() {
+        "heic" | "heif" => crate::frames::viewers::refusal_text::HEIC_WORDS,
+        "dng" | "cr2" | "cr3" | "arw" | "nef" | "raf" | "orf" | "rw2" => crate::frames::viewers::refusal_text::RAW_WORDS,
+        _ => "This format can\u{2019}t be shown at full size on this PC yet. This is the preview.",
+    })
+}
+
+/// An original over this is not downloaded into memory.
+const ORIGINAL_MAX: u64 = 256 * 1024 * 1024;
+
+/// What a test's download answers in the engine's place: calls `progress` as it goes, then hands back the bytes.
+#[cfg(test)]
+type FakeFetch = Box<dyn FnOnce(&(dyn Fn(u64, u64) + Send + Sync), &std::sync::atomic::AtomicBool) -> Result<Vec<u8>, ()> + Send>;
+
+/// The picture decoders of this source, started with the first original.
+fn decoders() -> &'static rune::ImageCache {
+    static DECODERS: std::sync::OnceLock<rune::ImageCache> = std::sync::OnceLock::new();
+    DECODERS.get_or_init(|| rune::ImageCache::new(Arc::new(|| {})))
+}
+
+/// The bytes as pixels, on this (a worker's) thread. What the file declares is held to the viewer's limits first.
+/// The decoder reads a copy of the bytes; it is overwritten once the decoder let go of it.
+fn decode(bytes: &[u8]) -> Option<Pixels> {
+    use zeroize::Zeroize;
+    // A HEIC or a RAW is decoded by the confined helper, never in this process.
+    if HelperPicture::of_bytes(bytes).is_some() {
+        return super::media::helper_pixels(bytes).ok();
+    }
+    viewer_picture::check(bytes).ok()?;
+    let mut encoded: Arc<[u8]> = Arc::from(bytes);
+    let image = decoders().load(encoded.clone());
+    let decoded = image.wait().ok().map(|[width, height]| {
+        let pixels = image.pixels().clone();
+        for _ in 0..2_000 {
+            if pixels.size() == (width, height) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        pixels
+    });
+    for _ in 0..2_000 {
+        if let Some(copy) = Arc::get_mut(&mut encoded) {
+            copy.zeroize();
+            return decoded;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    log("photos: a decoder kept the original's bytes");
+    decoded
 }
 
 /// One Keep for the worker: the file, what was asked and the stamp of the press.
@@ -180,6 +263,13 @@ pub struct EnginePhotos<C: CredentialStores> {
     /// The photos a move to Trash was pressed for, as they were at the press: what Undo names even when a library
     /// read in between no longer lists one. Dropped as the answer comes.
     offered: HashMap<String, LibraryPhoto>,
+    /// The original of the open photo: downloading or held (`download_original`).
+    original: Option<OriginalJob>,
+    original_answers: Vec<OriginalAnswer>,
+    originals: u64,
+    /// Tests only: what the next original's download answers.
+    #[cfg(test)]
+    fetch_says: Option<FakeFetch>,
     /// What the changes did and the window has not taken yet.
     answered: Vec<Answered>,
     /// Something changed outside an answer: the next pump says so.
@@ -187,7 +277,7 @@ pub struct EnginePhotos<C: CredentialStores> {
     /// Tests only: what the next Keep answers in the engine's place (this PC's sync folder is not a test's to set).
     #[cfg(test)]
     keep_says: Option<Result<(), ()>>,
-    /// Slice B1 (`photos_folders.rs`): what it keeps between a press and its answer: the held folder list and the calls on their way.
+    /// `photos_folders.rs`: what it keeps between a press and its answer: the held folder list and the calls on their way.
     photos_folders: photos_folders::PhotoFolderCalls,
 }
 
@@ -220,6 +310,11 @@ impl<C: CredentialStores> EnginePhotos<C> {
             keep_jobs: None,
             #[cfg(test)]
             keep_workers: 0,
+            original: None,
+            original_answers: Vec::new(),
+            originals: 0,
+            #[cfg(test)]
+            fetch_says: None,
             offered: HashMap::new(),
             answered: Vec::new(),
             dirty: false,
@@ -257,6 +352,8 @@ impl<C: CredentialStores> EnginePhotos<C> {
         self.hidden.clear();
         self.back.clear();
         self.keeping.clear();
+        self.end_original();
+        self.original_answers.clear();
         self.offered.clear();
         self.answered.clear();
         self.thumbs.forget();
@@ -499,6 +596,13 @@ impl<C: CredentialStores> EnginePhotos<C> {
 
     /// The worker of the Keeps: it takes the jobs in order, asks the engine for each under the session of its press
     /// (the engine decides whether that is still the session) and answers each; a panic answers as failed.
+    /// Stops the original's download and wipes what is held of it.
+    fn end_original(&mut self) {
+        if let Some(job) = self.original.take() {
+            job.cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn start_keep_worker(&mut self) -> Result<mpsc::Sender<KeepJob>, ()> {
         let (jobs, queue) = mpsc::channel::<KeepJob>();
         let (engine, answers) = (self.engine.clone(), self.answers.clone());
@@ -749,8 +853,33 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         let now = stamp(&self.engine);
         self.look(&now);
         let here = self.engine.has_session();
+        let mut progress: Option<(u64, u64, u64)> = None;
         while let Ok(answer) = self.inbox.try_recv() {
             match answer {
+                Answer::OriginalProgress(number, done, total) => {
+                    if self.original.as_ref().is_some_and(|job| job.number == number && job.pixels.is_none()) {
+                        progress = Some((number, done, total));
+                    }
+                }
+                Answer::OriginalDone(number, decoded) => {
+                    let Some(job) = self.original.as_mut().filter(|job| job.number == number) else {
+                        continue;
+                    };
+                    let id = self.numbers.get(&job.file_id).copied();
+                    match (decoded, id) {
+                        (Ok(pixels), Some(id)) => {
+                            job.pixels = Some(pixels);
+                            progress = None;
+                            self.original_answers.push(OriginalAnswer::Done(id));
+                        }
+                        (_, id) => {
+                            self.original = None;
+                            if let Some(id) = id {
+                                self.original_answers.push(OriginalAnswer::Failed(id));
+                            }
+                        }
+                    }
+                }
                 Answer::Read(number, pressed, read) => {
                     if self.reading == Some(number) {
                         self.reading = None;
@@ -805,6 +934,15 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
                 }
             }
         }
+        if let Some((number, done, total)) = progress
+            && let Some(id) = self
+                .original
+                .as_ref()
+                .filter(|job| job.number == number)
+                .and_then(|job| self.numbers.get(&job.file_id).copied())
+        {
+            self.original_answers.push(OriginalAnswer::Progress { id, done, total });
+        }
         self.take_trash_answers();
         if self.again && self.reading.is_none() {
             self.again = false;
@@ -813,8 +951,12 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         let arrived = self.thumbs.take_arrived();
         Pumped {
             changed: std::mem::take(&mut self.dirty) || arrived,
-            busy: self.reading.is_some() || !self.keeping.is_empty() || self.thumbs.busy(),
+            busy: self.reading.is_some()
+                || !self.keeping.is_empty()
+                || self.thumbs.busy()
+                || self.original.as_ref().is_some_and(|job| job.pixels.is_none()),
             answered: std::mem::take(&mut self.answered),
+            originals: std::mem::take(&mut self.original_answers),
         }
     }
 
@@ -844,7 +986,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
             .collect()
     }
 
-    /// The folders from Files the account added, as the engine last answered (slice K4, `photos_folders.rs`).
+    /// The folders from Files the account added, as the engine last answered (`photos_folders.rs`).
     fn folders(&self) -> Vec<Folder> {
         self.photos_folders_folders()
     }
@@ -866,6 +1008,22 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
             .collect()
     }
 
+    /// The photo's file in the Beebeeb folder, while sync is on and the engine has a path for it (a device backup
+    /// has none). The same check as every hand-over of a file to another app.
+    fn kept_path(&self, id: PhotoId) -> Option<std::path::PathBuf> {
+        let file_id = self.file_of(id)?.id.clone();
+        if !self.engine.is_syncing() {
+            return None;
+        }
+        let root = self.engine.sync_root().ok()?;
+        self.engine
+            .local_state_for_changes()
+            .ok()?
+            .with(|db| super::path_the_system_opens(db, &root, &file_id).ok())
+            .ok()
+            .flatten()
+    }
+
     fn add_folder(&mut self, folder_id: &str) -> bool {
         self.photos_folders_add(folder_id)
     }
@@ -877,7 +1035,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
     fn set_shown(&mut self, source: SourceRef, shown: bool) {
         let place = match source {
             SourceRef::Device(place) => place,
-            // A folder from Files: asked of the engine (slice K4, `photos_folders.rs`).
+            // A folder from Files: asked of the engine (`photos_folders.rs`).
             SourceRef::Folder(index) => return self.photos_folders_set_shown(index, shown),
         };
         if self.current().is_none() {
@@ -906,7 +1064,7 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         totals
     }
 
-    /// The newest backup pass of the other devices (slice B1, `photos_folders.rs`).
+    /// The newest backup pass of the other devices (`photos_folders.rs`).
     fn backup_status(&self) -> Option<BackupStatus> {
         self.photos_folders_backup_status()
     }
@@ -1119,6 +1277,86 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         }
         self.keeping.insert(file_id, pressed.0);
         Ok(())
+    }
+
+    fn download_original(&mut self, id: PhotoId) -> bool {
+        let pressed = stamp(&self.engine);
+        self.look(&pressed);
+        if !self.engine.has_session() {
+            return false;
+        }
+        let Some(photo) = self.file_of(id) else { return false };
+        if photo.video || photo.bytes > ORIGINAL_MAX || original_refused_for(&photo.name).is_some() {
+            return false;
+        }
+        let file_id = photo.id.clone();
+        let (name, session) = (photo.name.clone(), pressed.0);
+        // One original at a time: the earlier one is stopped and wiped.
+        self.end_original();
+        self.originals += 1;
+        let number = self.originals;
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        #[cfg(test)]
+        let fake = self.fetch_says.take();
+        let (engine, answers, flag, wanted) = (self.engine.clone(), self.answers.clone(), cancel.clone(), file_id.clone());
+        let started = std::thread::Builder::new().name("photos-original".into()).spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let reply = answers.clone();
+                let progress = move |done: u64, total: u64| {
+                    let _ = reply.send(Answer::OriginalProgress(number, done, total));
+                    // Not the window's wake on every chunk: the poll takes the latest.
+                };
+                #[cfg(test)]
+                if let Some(fake) = fake {
+                    return fake(&progress, &flag).ok().and_then(|bytes| decode(&bytes)).ok_or(());
+                }
+                // A HEIC or a RAW whose copy is on this PC is read from there: nothing is downloaded for it.
+                if HelperPicture::of_name(&name).is_some()
+                    && let Ok(Some(copy)) = engine.local_picture_copy_for(session, &wanted, ORIGINAL_MAX)
+                    && let Some(bytes) = copy.read()
+                {
+                    return decode(&bytes).ok_or(());
+                }
+                let opened = engine
+                    .open_file_in_memory(&wanted, ORIGINAL_MAX, &progress, &flag)
+                    .map_err(|_| ())?;
+                if flag.load(Ordering::SeqCst) {
+                    return Err(());
+                }
+                decode(&opened.bytes).ok_or(())
+            }))
+            .unwrap_or(Err(()));
+            let _ = answers.send(Answer::OriginalDone(number, outcome));
+            engine.wake_host();
+        });
+        if started.is_err() {
+            log("photos: could not start the worker");
+            return false;
+        }
+        self.original = Some(OriginalJob { number, file_id, pressed, cancel, pixels: None });
+        true
+    }
+
+    fn original_refused(&self, id: PhotoId) -> Option<&'static str> {
+        let photo = self.file_of(id)?;
+        (!photo.video).then(|| original_refused_for(&photo.name)).flatten()
+    }
+
+    fn holds_unshowable(&self) -> bool {
+        self.current().is_some_and(|library| {
+            library.photos.iter().any(|photo| !photo.video && original_refused_for(&photo.name).is_some())
+        })
+    }
+
+    fn stop_original(&mut self, _id: PhotoId) {
+        self.end_original();
+    }
+
+    fn original(&self, id: PhotoId) -> Option<Pixels> {
+        let job = self.original.as_ref()?;
+        let held = job.pixels.as_ref()?;
+        (self.numbers.get(&job.file_id) == Some(&id) && self.engine.has_session() && job.pressed == stamp(&self.engine))
+            .then(|| held.clone())
     }
 
     fn play_video(&mut self, id: PhotoId) -> Option<crate::media::player::PlayerHandle> {

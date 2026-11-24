@@ -9,7 +9,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind};
@@ -27,7 +27,7 @@ fn engine() -> Arc<TestEngine> {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 /// A session in memory, as a sign-in and an unlock leave it. Its number.
@@ -198,8 +198,11 @@ fn a_sign_out_that_clears_the_accounts_rows_keeps_the_mark_and_no_other_account_
     assert_eq!(guide_rows(&path), ["guide_done:user-a", "guide_done:user-b"]);
     signed_out(&engine);
 
-    // A reset of local data removes every account's mark.
-    StateDb::open(&path).unwrap().forget_share_trust_rows().unwrap();
+    // An account switch removes the leaving account's mark only (dc-014).
+    let db = StateDb::open(&path).unwrap();
+    db.forget_share_trust_rows(A.0.unwrap()).unwrap();
+    assert_eq!(guide_rows(&path), ["guide_done:user-b"], "only that account's mark goes");
+    db.forget_share_trust_rows(B.0.unwrap()).unwrap();
     assert!(guide_rows(&path).is_empty());
     let other = signed_in(&engine, B);
     assert_eq!(engine.guide_mark_for(other), GuideMark::NotDone);

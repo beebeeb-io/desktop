@@ -11,15 +11,13 @@ pub const CRUMB: TextStyle = TextStyle::new(11.0, 500.0).lh(13.0).tracking(-0.11
 /// `.mk-crumbs > span`: the open file's name, 11px/650.
 pub const CRUMB_NAME: TextStyle = TextStyle::new(11.0, 650.0).lh(13.0).tracking(-0.11);
 /// `.t-title`: 17px/600 on 22px, tracked -0.012em.
-pub const TITLE: TextStyle = TextStyle::new(17.0, 600.0).lh(22.0).tracking(-0.204);
+pub const TITLE: TextStyle = crate::theme::scale::text::HEADING;
 /// `.t-sub`: 12px/400 on 15px.
-pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+pub const SUB: TextStyle = crate::theme::scale::text::SUB;
 /// `.t-sub .font-mono`.
-pub const SUB_MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
+pub const SUB_MONO: TextStyle = crate::theme::scale::text::MONO;
 /// `.kit-btn-sm` label: 12px/500.
 pub const BUTTON_SM: TextStyle = TextStyle::new(12.0, 500.0).lh(17.1429).tracking(-0.06);
-/// `.kit-btn-md` label: 13px/500.
-pub const BUTTON_MD: TextStyle = TextStyle::new(13.0, 500.0).lh(18.5714).tracking(-0.065);
 
 /// The text of a file: JetBrains Mono 12.5px on 21px.
 pub const CODE: TextStyle = TextStyle::new(12.5, 400.0).family(Family::Mono).lh(21.0);
@@ -98,23 +96,13 @@ pub fn fitted(key: impl Into<String>, words: &str, text_style: TextStyle, color:
 }
 
 /// `.t-large`: a note's first heading, 22px/650 on 28px, tracked -0.022em.
-pub const MD_H1: TextStyle = TextStyle::new(22.0, 650.0).lh(28.0).tracking(-0.484);
+pub const MD_H1: TextStyle = crate::theme::scale::text::DISPLAY;
 /// `.t-body`: a note's words, 13px/400 on 17px.
-pub const MD_BODY: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+pub const MD_BODY: TextStyle = crate::theme::scale::text::READ;
 /// `<b>` in a note: 700.
 pub const MD_BOLD: TextStyle = TextStyle::new(13.0, 700.0).lh(17.0);
 /// Inline code in a note: mono 12px.
 pub const MD_CODE: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.5);
 
-/// `shadow-1`'s ink (`oklch(0.18 0.01 70)`) at `alpha`.
-pub fn knob_shadow(alpha: f32) -> Color {
-    Color {
-        a: alpha,
-        ..rune::color::hex("#14110D").unwrap_or(Color::BLACK)
-    }
-}
-
 /// `.t-cap.font-mono`: mono 11px/500 on 14px.
 pub const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
-/// `.kit-toast` words: 12.5px/550 on 17px.
-pub const TOAST: TextStyle = TextStyle::new(12.5, 550.0).lh(17.0);

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::frames::account::source::DeviceKind;
 use beebeeb_engine::account_dto::Subscription;
 use beebeeb_engine::app::EngineConfig;
 use beebeeb_engine::host::ChannelHost;
@@ -87,12 +88,14 @@ struct Server {
     deleted: Arc<Mutex<Vec<String>>>,
     revoked_all: Arc<AtomicU64>,
     /// Runs once, while the next sessions list is being answered (the call is under way).
-    during_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    during_read: Hook,
     /// Two-factor as each person's profile marks it. `None`: the profile does not say (the accounts' own
     /// handler answers, without the mark). A profile that says is as slow as `read_delay_ms`.
     two_factor: Arc<Mutex<[Option<bool>; 2]>>,
     /// Runs once, before the next sessions list that is asked to fail is answered.
-    during_failed_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    during_failed_read: Hook,
+    /// The PC is offline: every request is dropped unanswered (counted in `routes`, answered for nothing).
+    offline: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn sessions_of_the_first() -> Vec<Value> {
@@ -167,14 +170,19 @@ fn server() -> Server {
         deleted.clone(),
         revoked_all.clone(),
     );
-    let during_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::new(Mutex::new(None));
+    let during_read: Hook = Arc::new(Mutex::new(None));
     let during_read_in = during_read.clone();
-    let during_failed_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::new(Mutex::new(None));
+    let during_failed_read: Hook = Arc::new(Mutex::new(None));
     let during_failed_in = during_failed_read.clone();
     let signing_in_second = Mutex::new(false);
     let two_factor: Arc<Mutex<[Option<bool>; 2]>> = Arc::new(Mutex::new([None, None]));
     let two_factor_in = two_factor.clone();
+    let offline: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let offline_in = offline.clone();
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
+        if offline_in.load(Ordering::SeqCst) {
+            return failed(DROP_CONNECTION).expect("a dropped connection");
+        }
         let who = match req.bearer() {
             Some(token) => usize::from(token == people_in[1].account.session_token),
             None => {
@@ -310,6 +318,7 @@ fn server() -> Server {
         during_read,
         two_factor,
         during_failed_read,
+        offline,
     }
 }
 
@@ -579,18 +588,20 @@ fn a_read_that_fails_keeps_what_was_drawn_says_so_and_is_asked_again() {
         );
         assert!(source.plan().is_some(), "mode {mode}");
         assert_eq!(ids(&source).len(), 3, "mode {mode}");
-        // Try again reads the pane that shows, once.
+        // Try again reads the pane that shows, once. (A dropped connection is asked twice more by the engine's
+        // bounded transport retries: three asks make one read.)
+        let asks = if mode == DROP_CONNECTION { 3 } else { 1 };
         let before = server.asked("GET /api/v1/account/sessions");
         engine.note_call_for_test(false);
         source.run_notice_action();
         assert_eq!(source.notice(), None, "mode {mode}: nothing is said while it is read");
         settle(&mut source);
-        assert_eq!(server.asked("GET /api/v1/account/sessions"), before + 1, "mode {mode}");
+        assert_eq!(server.asked("GET /api/v1/account/sessions"), before + asks, "mode {mode}");
         assert_eq!(source.notice(), Some(NOT_REFRESHED), "mode {mode}: it failed again");
         // A failed read is not fresh: the next opening asks again.
         engine.note_call_for_test(false);
         opened(&mut source, Pane::Sessions);
-        assert_eq!(server.asked("GET /api/v1/account/sessions"), before + 2, "mode {mode}");
+        assert_eq!(server.asked("GET /api/v1/account/sessions"), before + 2 * asks, "mode {mode}");
     }
     source.engine.note_call_for_test(false);
     server.read_mode.store(ANSWER, Ordering::SeqCst);
@@ -1135,3 +1146,6 @@ fn initials_and_times_read_as_the_board_writes_them() {
     assert_eq!(ago(Some(now - 86_400), now), "1 day ago");
     assert_eq!(ago(Some(now - 3 * 86_400), now), "3 days ago");
 }
+
+/// A one-shot hook a test sets to run during a read.
+type Hook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;

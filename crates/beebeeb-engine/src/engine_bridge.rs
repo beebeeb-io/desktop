@@ -17,11 +17,14 @@
 //! normalization accepts the existing raw and JSON envelopes without decrypting them.
 //! ChunkDecryptor is the public facade over core StreamOpener; finish gates whole-file
 //! publication. Indexed range reads authenticate frame zero before calling open_chunk.
+// Platform-gated and integration-test helpers are not all reached by the test-support and unit-test builds.
+// Test fixtures seal with the old sealers on purpose: they pin the on-disk format those still write.
+#![cfg_attr(any(test, feature = "test-support"), allow(deprecated))]
+#![cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -57,8 +60,7 @@ pub struct EngineBridge {
     /// runner hands in the board the popover snapshot reads; a one-shot bridge
     /// keeps a private one nobody reads.
     transfers: Arc<crate::transfer_progress::TransferBoard>,
-    /// Cooperative stop signal (task 1538 Codex P1, PR #49 lib.rs:1087
-    /// thread). `false` for the lifetime of a normal bridge. Flipped `true`
+    /// Cooperative stop signal: `false` for the lifetime of a normal bridge. Flipped `true`
     /// by [`crate::runner::EngineRunner::abort`] BEFORE it even sends the
     /// tick-loop's cancel oneshot, so [`Self::process_due_operations`]
     /// (checked before every queued operation) and
@@ -73,6 +75,10 @@ pub struct EngineBridge {
     /// landing takes the op off the queue before they are uploaded, and until they are, the
     /// server holds the previous version's (one per file): [`Self::finder_thumbnail`] refuses.
     thumbnails_pending: std::sync::Mutex<HashSet<String>>,
+    /// w36: the ops a queue step is sending right now ([`Self::process_due_operations`], [`Self::process_due_changes`]).
+    /// Two steps can run at once (the tick's, and a nudge's beside it): an op in here is skipped by the other, so no
+    /// change is ever sent twice.
+    ops_in_flight: std::sync::Mutex<HashSet<String>>,
     /// Ids whose listing carries a 2236 request envelope (L12). A cache only:
     /// the authoritative fact is persisted on the record (P3-3).
     request_rows: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -277,6 +283,7 @@ mod tests {
     mod stale_2523;
     // S6: a hydrate's start look; a save made after it is never replaced (Linux).
     mod start_look_s6;
+    mod cursor_2272; // Task 2272: a failed op apply holds the cursor, retries, then parks.
     mod sync;
     mod sync_2;
     mod sync_3;
@@ -295,6 +302,7 @@ mod tests {
     mod versions;
     mod versions_2;
     mod versions_3;
+    mod video_frame;
     // Chunk format v2 (core 0.3.0): write then read, the completion name, resume, capabilities.
     mod format_v2;
     // rusqlite 0.41: a state database and a file of release 0.8.25, read by this build.
@@ -489,6 +497,8 @@ pub use types::{LocalEntry, NON_UUID, OpDone, PrunedEntry, RENAME_SETTLE_SECS, S
 pub use types::RemovedKind;
 #[cfg(all(any(test, feature = "test-support"), target_os = "windows"))]
 pub(crate) use types::engine_remove;
+#[cfg(windows)]
+pub(crate) use types::content_seq_for_wipe;
 
 // The native app's open file: the whole file in memory, nothing recorded (`app::viewer_api`).
 mod open_in_memory;
@@ -517,6 +527,7 @@ use fs::*;
 pub use fs::{LocalPathVerdict, move_no_replace, path_is_engine_internal, relative_db_path};
 
 mod meta;
+pub(crate) use meta::recorded_pin;
 #[cfg(windows)]
 pub use meta::promote_fetched_content;
 use meta::*;

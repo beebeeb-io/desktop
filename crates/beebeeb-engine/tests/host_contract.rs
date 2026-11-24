@@ -150,7 +150,7 @@ fn fake_api() -> &'static FakeApi {
         let world = Mutex::new(World::default());
         let snapshot = snapshot();
         let recovery_check = base64::engine::general_purpose::STANDARD
-            .encode(&*beebeeb_core::opaque::compute_recovery_check(&master_key()));
+            .encode(*beebeeb_core::opaque::compute_recovery_check(&master_key()));
         FakeApi::start(Arc::new(move |request: &Request| {
             let body = request.json();
             let mut world = world.lock().unwrap();
@@ -268,7 +268,7 @@ fn open(credentials: &MemoryCredentials) -> Host {
         "the handle talks to the fake API, never to production"
     );
     Host {
-        engine: Engine::open(&beebeeb_engine::identity::REAL, config, host, credentials.clone()).unwrap(),
+        engine: Engine::open(&beebeeb_engine::identity::TEST, config, host, credentials.clone()).unwrap(),
         messages,
         wakes,
     }
@@ -311,7 +311,7 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     let _serial = serial();
     let credentials = MemoryCredentials::default();
     let sync_root: PathBuf = tempfile::tempdir().unwrap().keep();
-    DesktopConfig::update_for(&beebeeb_engine::identity::REAL, |cfg| {
+    DesktopConfig::update_for(&beebeeb_engine::identity::TEST, |cfg| {
         cfg.sync_root = Some(sync_root.clone());
         (true, ())
     })
@@ -401,7 +401,7 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     host.engine.pause().unwrap();
     assert!(host.engine.is_paused() && host.engine.is_syncing());
     assert!(
-        DesktopConfig::load_for(&beebeeb_engine::identity::REAL)
+        DesktopConfig::load_for(&beebeeb_engine::identity::TEST)
             .unwrap()
             .pause_sync,
         "the pause is written, so a restart stays paused"
@@ -409,7 +409,7 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     host.engine.resume().unwrap();
     assert!(!host.engine.is_paused());
     assert!(
-        !DesktopConfig::load_for(&beebeeb_engine::identity::REAL)
+        !DesktopConfig::load_for(&beebeeb_engine::identity::TEST)
             .unwrap()
             .pause_sync
     );
@@ -430,8 +430,9 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
 
     // The process ends: nothing of the engine is left running.
     drop(host);
+    // A joined thread can show in /proc for a moment after the join returns; it must be gone soon, not stay.
     #[cfg(target_os = "linux")]
-    assert_eq!(engine_threads(), 0, "no engine thread outlives the handle");
+    wait_for("no engine thread outlives the handle", || engine_threads() == 0);
 
     // A restart, no password asked: the app starts SCREEN-LOCKED. The stored key (this account's) is in memory, so
     // sync starts and runs; the window is shown nothing of the account.
@@ -652,7 +653,7 @@ fn wrong_inputs_map_to_the_gates_words_and_change_nothing() {
 }
 
 /// Task 2447 through the handle's entry points: a vault key that is another account's is never loaded next to
-/// this account's session, and a sign-in removes it before it stores its token.
+/// this account's session; a sign-in leaves it, tagged with the other account's id, for the account switch (dc-014).
 #[test]
 fn another_accounts_stored_key_is_refused_and_removed() {
     let _serial = serial();
@@ -684,7 +685,10 @@ fn another_accounts_stored_key_is_refused_and_removed() {
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
     drop(host);
 
-    // Sign-in: a key left behind with another owner's tag (no token) goes before the token is stored.
+    // Sign-in: a key left behind with another owner's tag (no token) stays, and is never loaded. It is put there
+    // after the start: a start finishes such a leftover itself (`app::unfinished_sign_out`), and this pins the sign-in.
+    let host = open(&credentials);
+    assert_eq!(host.engine.restore(), GateState::SignedOut);
     {
         let vault = AuthVault::new(store.clone());
         vault
@@ -696,15 +700,20 @@ fn another_accounts_stored_key_is_refused_and_removed() {
         // And that account's app lock turned off: it never reaches this one.
         store.save_lock_flag(LockFlag::AppLock, b"0").unwrap();
     }
-    let host = open(&credentials);
-    assert_eq!(host.engine.restore(), GateState::SignedOut);
     assert_eq!(
         host.engine.sign_in_password(EMAIL, secret(PASSWORD)),
         Ok(NextAfterSignIn::RecoveryPhrase)
     );
+    // dc-014: a key tagged with another account's id stays until that account's local data is cleared (the account
+    // switch removes it then), and it is never this account's: nothing loads it.
     assert!(
-        store.load_wrapped_master_key().unwrap().is_none(),
-        "the foreign key is gone"
+        store.load_wrapped_master_key().unwrap().is_some(),
+        "the other account's key stays until its data is cleared"
+    );
+    assert_eq!(
+        AuthVault::new(store.clone()).vault_key_owner().unwrap().as_deref(),
+        Some("99999999-9999-4999-8999-999999999999"),
+        "with its own tag, never this account's"
     );
     assert_eq!(flag(&credentials, LockFlag::AppLock), None, "and its lock setting");
     assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
@@ -1152,7 +1161,7 @@ fn the_watcher_closes_an_ended_session_and_ends_with_its_handle() {
         state_dir: beebeeb_engine::state_paths::init_for_test(),
         api_base: beebeeb_engine::runner::api_base_url(),
     };
-    let engine = Arc::new(Engine::open(&beebeeb_engine::identity::REAL, config, host, credentials.clone()).unwrap());
+    let engine = Arc::new(Engine::open(&beebeeb_engine::identity::TEST, config, host, credentials.clone()).unwrap());
     assert_eq!(engine.restore(), GateState::SignedOut);
     assert!(matches!(
         engine.sign_in_password(EMAIL, secret(PASSWORD)),
@@ -1189,7 +1198,7 @@ fn a_locked_screen_refuses_the_guide_mark_read_and_write() {
     let _serial = serial();
     let credentials = MemoryCredentials::default();
     let sync_root: PathBuf = tempfile::tempdir().unwrap().keep();
-    DesktopConfig::update_for(&beebeeb_engine::identity::REAL, |cfg| {
+    DesktopConfig::update_for(&beebeeb_engine::identity::TEST, |cfg| {
         cfg.sync_root = Some(sync_root.clone());
         (true, ())
     })

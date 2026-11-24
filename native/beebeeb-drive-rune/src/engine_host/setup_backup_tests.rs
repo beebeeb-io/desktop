@@ -35,7 +35,7 @@ fn the_backup_step_is_not_called_unavailable_while_its_folders_are_still_being_r
     );
     assert!(!source.loading(Step::Notifications), "no other step is loading");
     drop(held);
-    let began = Instant::now();
+    let _began = Instant::now();
     // The answer: no folders were found. That is an answer, not an absence: the step stays (it is never "not in
     // this version" while Backups is on), is no longer loading, and did not fail.
     let began = Instant::now();

@@ -243,9 +243,10 @@ fn a_file_of_each_type_opens_its_viewer_through_the_router() {
         assert_eq!(viewer(&rt).file.name, name);
         assert!(has(&rt, key), "{name}: its viewer draws {key}");
     }
-    // A type with no viewer and a folder: not this group's.
+    // A type with no viewer opens the viewer's "No preview" frame (w29); a folder is not this group's.
     let mut state = init();
-    assert!(!open_item(&mut state, &item("q4plan", "Q4 plan.key")));
+    assert!(open_item(&mut state, &item("q4plan", "Q4 plan.key")));
+    state.viewer.ui = None;
     let folder = DriveItem {
         is_folder: true,
         ..item(board::PDF, "Studio plan.pdf")
@@ -628,31 +629,33 @@ fn an_archive_lists_steps_into_a_folder_and_out_again() {
 }
 
 #[test]
-fn share_says_not_built_yet_until_something_takes_it() {
+fn share_opens_files_dialog_over_the_viewer() {
+    crate::shell::intents::poll_drains_for_this_test();
     let (mut rt, _) = recording(board::AUDIO);
-    assert!(!has(&rt, "toast-text"));
     click(&mut rt, "tool-0");
-    assert_eq!(words(&rt, "toast-text"), "Not built yet: Share");
-    assert_eq!(
-        intents(&mut rt),
-        [Intent::Share],
-        "the intent is still recorded for the shell"
-    );
-    // The notice goes with the next key the window gets.
-    press(&mut rt, Key::Down);
-    assert_eq!(viewer(&rt).toast, None);
+    assert!(intents(&mut rt).is_empty(), "the shell's router took the intent");
+    let mut shared = false;
+    rt.update(|s, _| shared = matches!(s.actions.dialog, Some(crate::frames::files::dialogs::Dialog::Share(_))));
+    assert!(shared, "Files holds the share of the open file");
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert!(has(&rt, "viewer-root"), "the dialog layer is drawn over the viewer");
+    assert!(viewer(&rt).toast.is_none());
 }
 
 #[test]
-fn trash_says_not_built_yet_until_something_takes_it() {
+fn trash_moves_the_file_and_leaves_the_viewer() {
+    crate::shell::intents::poll_drains_for_this_test();
     let (mut rt, _) = recording(board::RAW);
     click(&mut rt, "action-3");
-    assert_eq!(words(&rt, "toast-text"), "Not built yet: Move to Trash");
-    assert_eq!(viewer(&rt).file.name, "DSC04182.ARW", "nothing was trashed");
+    let mut open = true;
+    rt.update(|s, _| open = super::ui(s).is_some());
+    assert!(!open, "the viewer closed back to Files");
 }
 
 #[test]
 fn open_in_another_app_says_not_built_yet_until_something_takes_it() {
+    crate::shell::intents::poll_drains_for_this_test();
     let (mut rt, _) = recording(board::ZIP);
     click(&mut rt, "tb-btn-0");
     assert_eq!(words(&rt, "toast-text"), "Not built yet: Open in another app");
@@ -660,6 +663,7 @@ fn open_in_another_app_says_not_built_yet_until_something_takes_it() {
 
 #[test]
 fn edit_in_sheets_says_not_built_yet_until_something_takes_it() {
+    crate::shell::intents::poll_drains_for_this_test();
     let (mut rt, _) = recording(board::CSV);
     ctrl(&mut rt, Key::Command('e'));
     assert_eq!(words(&rt, "toast-text"), "Not built yet: Edit in Sheets");
@@ -815,4 +819,108 @@ fn a_long_pdf_builds_only_the_thumbnails_near_the_window_and_its_column_and_its_
     press(&mut rt, Key::PageDown);
     assert_eq!(viewer(&rt).media.page, 901);
     assert_eq!(info(&rt, "page").rect[1], page[1], "a turned page starts at its top");
+}
+
+fn typed(rt: &mut Runtime<State>, text: &str) {
+    press(rt, Key::Text(text.into()));
+}
+
+/// The archive's list on the one list model (`ui::list_keys`, task 159): type-ahead on the entries' names, the ends,
+/// a page; a read-only single-select list, so Space, F2 and Delete are not its keys.
+#[test]
+fn an_archives_list_jumps_by_typed_names_and_keeps_its_keys() {
+    let (mut rt, _) = recording(board::ZIP);
+    // Names: "Shoot selects", "Day 1", "contact-sheet.pdf", "selects-list.csv", "README.txt".
+    typed(&mut rt, "r");
+    assert_eq!(viewer(&rt).media.entry, Some(4), "R: README.txt");
+    typed(&mut rt, "e");
+    assert_eq!(viewer(&rt).media.entry, Some(4), "\"re\": still README.txt");
+    let (mut rt, _) = recording(board::ZIP);
+    typed(&mut rt, "s");
+    typed(&mut rt, "e");
+    assert_eq!(viewer(&rt).media.entry, Some(3), "\"se\": selects-list.csv, by its name");
+    typed(&mut rt, "C");
+    assert_eq!(viewer(&rt).media.entry, Some(3), "\"sec\" matches none: focus stays");
+}
+
+#[test]
+fn an_archives_type_ahead_matches_a_prefix_and_cycles_one_letter() {
+    let (mut rt, _) = recording(board::ZIP);
+    typed(&mut rt, "s");
+    assert_eq!(viewer(&rt).media.entry, Some(0), "S: Shoot selects");
+    typed(&mut rt, "s");
+    assert_eq!(viewer(&rt).media.entry, Some(3), "S again: the next name with S");
+    typed(&mut rt, "s");
+    assert_eq!(viewer(&rt).media.entry, Some(0), "and around");
+    typed(&mut rt, "x");
+    assert_eq!(viewer(&rt).media.entry, Some(0), "no match: focus stays");
+}
+
+#[test]
+fn an_archives_list_moves_to_its_ends_and_by_a_page() {
+    let (mut rt, _) = recording(board::ZIP);
+    press(&mut rt, Key::End);
+    assert_eq!(viewer(&rt).media.entry, Some(4));
+    press(&mut rt, Key::Home);
+    assert_eq!(viewer(&rt).media.entry, Some(0));
+    press(&mut rt, Key::PageDown);
+    assert_eq!(viewer(&rt).media.entry, Some(4), "a page stops at the end");
+    press(&mut rt, Key::PageUp);
+    assert_eq!(viewer(&rt).media.entry, Some(0));
+    // Shift moves as a plain move: no multi-select here.
+    press_with(
+        &mut rt,
+        Key::Down,
+        Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    assert_eq!(viewer(&rt).media.entry, Some(1));
+    // F2 and Delete do nothing to a read-only list; the file stays open.
+    press(&mut rt, Key::Function(2));
+    press(&mut rt, Key::Delete);
+    assert_eq!(viewer(&rt).media.entry, Some(1));
+    assert!(on_a_file(&rt));
+    // Alt+Up: one folder up inside the archive.
+    press(&mut rt, Key::Up);
+    press(&mut rt, Key::Enter);
+    assert_eq!(viewer(&rt).media.dir, "Shoot selects/");
+    press_with(
+        &mut rt,
+        Key::Up,
+        Mods {
+            alt: true,
+            ..Mods::default()
+        },
+    );
+    assert_eq!(viewer(&rt).media.dir, "");
+}
+
+#[test]
+fn home_and_end_go_to_the_first_and_last_photo_of_the_strip() {
+    let (mut rt, _) = recording(board::RAW);
+    let names = |rt: &Runtime<State>| match &viewer(rt).file.body {
+        Body::Photo(doc) => (
+            doc.strip.first().map(|i| i.name.clone()),
+            doc.strip.last().map(|i| i.name.clone()),
+        ),
+        _ => panic!("a photo"),
+    };
+    let (first, last) = names(&rt);
+    press(&mut rt, Key::End);
+    assert_eq!(Some(viewer(&rt).file.name.clone()), last);
+    press(&mut rt, Key::End);
+    assert_eq!(Some(viewer(&rt).file.name.clone()), last, "already the last: it stays");
+    press(&mut rt, Key::Home);
+    assert_eq!(Some(viewer(&rt).file.name.clone()), first);
+}
+
+/// The zoom group keeps its 1px gap between the three tools (the board's `gap-px`), 2px padding.
+#[test]
+fn media_look_zoom_group_gap_is_one_pixel() {
+    let rt = scene("DW-1506");
+    let group = info(&rt, "zoom-group").rect;
+    let tools: f32 = ["tool-0", "tool-1", "tool-2"].iter().map(|k| info(&rt, k).rect[2]).sum();
+    assert_eq!(group[2], tools + 2.0 * 2.0 + 2.0 * 1.0, "padding 2 each side, gap 1 twice");
 }

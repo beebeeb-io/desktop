@@ -145,7 +145,7 @@ fn rule_5_numbers_and_units_pass() {
     assert_eq!(redact::scrub("uploaded 123456789 files"), "uploaded <…> files");
     // A version stays; an IPv4 address says where a person is and is masked.
     assert_eq!(
-        redact::scrub("version 0.9.0, connect 10.0.5.161 timed out"),
+        redact::scrub("version 0.9.0, connect 192.0.2.161 timed out"),
         "version 0.9.0, connect <…> timed out"
     );
     // A dot does not let a long digit run through: the part after it has at most 3 digits, a version part too.
@@ -224,7 +224,7 @@ fn vocabulary_os_is_pinned() {
     let file = include_str!("vocabulary_os.txt");
     assert_eq!(
         fnv1a(file.as_bytes()),
-        0xbf3e_9702_502b_712d,
+        0x9963_bb01_5124_9861,
         "vocabulary_os.txt changed: update the pin on purpose"
     );
     let phrases: Vec<&str> = file.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();

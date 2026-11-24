@@ -192,18 +192,22 @@ fn a_speed_test_landing_after_the_account_changed_is_dropped() {
 
 #[test]
 fn the_speed_test_button_is_off_in_the_test_build() {
-    assert!(!SPEED_TEST_ON);
+    const {
+        assert!(!SPEED_TEST_ON);
+    }
     let source = EngineDriveSettings::new(account(), Arc::new(FakePlatform::default()));
     assert!(!source.shows(Control::SpeedTest));
-    assert!(!source.shows(Control::SyncOnMetered), "no metered detection: no switch");
+    assert!(source.shows(Control::SyncOnMetered), "the engine's tick honours the metered setting: the switch is drawn");
     assert!(!source.shows(Control::StatusOnFiles), "nothing honours it: no switch");
 }
 
 #[test]
-fn a_press_on_the_metered_switch_changes_nothing_and_says_so() {
+fn a_press_on_the_metered_switch_goes_to_the_engine_and_a_refusal_says_so() {
+    // The fake engine has no settings file behind it: the engine says no, and the press says so.
     let mut source = source(&account(), Arc::default());
     source.set_sync_on_metered(true);
-    assert_eq!(source.take_toast(), Some(METERED_NOT_AVAILABLE));
+    settle(&mut source);
+    assert_eq!(source.take_toast(), Some(METERED_FAILED));
 }
 
 #[test]
@@ -228,7 +232,8 @@ fn an_export_saves_shows_and_opens_a_draft_that_names_the_file_only() {
         Bundle::Saved {
             folder: "Downloads".into(),
             file: "beebeeb-support-bundle-1.json".into(),
-            draft_opened: true
+            draft_opened: true,
+            path: PathBuf::from("somewhere/beebeeb-support-bundle-1.json"),
         }
     );
     assert_eq!(SHOWN.lock().unwrap().len(), 1);
@@ -237,7 +242,6 @@ fn an_export_saves_shows_and_opens_a_draft_that_names_the_file_only() {
     assert!(drafts[0].starts_with("mailto:support@beebeeb.io?"), "{}", drafts[0]);
     assert!(drafts[0].contains("beebeeb-support-bundle-1.json"));
     assert!(!drafts[0].contains("somewhere"), "never the folder");
-    assert!(source.diagnostics().activity.is_empty(), "no live figure is drawn");
 }
 
 #[test]

@@ -10,26 +10,30 @@
 //! `btn-version-history`): the same elements, so the panel names them twice as well (see
 //! [`details_pane`]).
 
-use rune::{Align, Color, Cx, El, Shadow, Span, Tx, col, el, row, text_input};
+use rune::{Align, Color, Cx, El, Span, Tx, col, el, row, text_input};
 
-use super::source::{Hit, Loading, Narrow, matched};
-use super::{Shows, close, open_result, run};
+use super::actions;
+use super::source::{Hit, Loading, Narrow};
+use super::{Shows, open_result, run};
 use crate::State;
 use crate::frames::Intent;
 use crate::frames::files::source::Details;
 use crate::frames::shared::parts::controls::segments;
-use crate::frames::shared::parts::empty::empty;
 use crate::frames::shared::parts::style;
-use crate::frames::shared::parts::table::tile;
+use crate::frames::shared::parts::table::{self, Kind};
+use crate::theme::file_icons::icon_for;
+use crate::ui::field::advance;
 use crate::theme::tokens::{self, Theme, radius, type_};
 use crate::theme::{icons, icons_settings};
-use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview, switch};
-use crate::ui::field::{advance, caret_mark, snap};
+use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview};
 use crate::ui::file_list::{self, pc_glyph};
 use crate::ui::keys::SEARCH_KEY;
-use crate::ui::settings_controls::BANNER_TEXT;
-use crate::ui::toolbar::{ToolState, kbd, segment, segmented, tool_button};
-use crate::ui::{caption, global_icons, kit, status_line};
+use crate::ui::file_row::{self, Column, RowLook, Width};
+use crate::ui::file_tile::{self, TilePicture, TileSize};
+use crate::ui::toolbar::{Bar, Details as PaneBtn, New, Sort, View, bar, press, search_box, title_block};
+use crate::theme::scale::space;
+use crate::ui::view_state::{ViewState, try_again, view_state};
+use crate::ui::{caption, kit, status_line};
 
 /// The field's placeholder: one string for the field and for the gate's note.
 const PLACEHOLDER: &str = "Search names";
@@ -52,18 +56,11 @@ pub fn recent_key(m: usize) -> String {
 }
 
 // Columns (`SEARCH_COLS`: "minmax(0,1fr) 132px 84px 170px 34px", 12 pt between).
-const GAP: f32 = 12.0;
 const DATE_W: f32 = 132.0;
 const SIZE_W: f32 = 84.0;
 const WHERE_W: f32 = 170.0;
 const PC_W: f32 = 34.0;
 
-/// What the field's box holds before the text (`.mk-search`: 9 pt, the 13 pt glyph, 6 pt).
-const FIELD_TEXT_X: f32 = 9.0 + 13.0 + 6.0;
-/// The board's caret (`.kit-caret`, 14 pt here) stands 7.25 pt under the field's top edge: on
-/// whole device pixels of a 200 % display, its foot 3 pt under the text's baseline.
-const CARET_TOP: f32 = 7.25;
-const CARET_H: f32 = 14.0;
 
 fn push(intent: Intent) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| s.frames.intents.push(intent.clone())
@@ -72,9 +69,7 @@ fn push(intent: Intent) -> impl Fn(&mut State) + 'static {
 pub fn window(s: &State, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
     let ui = &s.frames.find;
-    // Rune reports the caret of the field that has the keyboard.
-    let focused = cx.caret(SEARCH_KEY).is_some();
-    let shows = ui.shows(&s.search.text);
+    let shows = actions::shows(s);
     let content = match &shows {
         Shows::Unavailable => unavailable(ui.unavailable_reason(&s.search.text), &t),
         Shows::Searching => searching(&t),
@@ -89,21 +84,32 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar(s, &shows.count_words(), focused, &t))
+        .child(toolbar(s, &shows.count_words(), &t))
         // The one banner of the whole window (`frames::global`: "on every view of the window").
         .children(crate::frames::global::banner_under_toolbar(s, &t))
-        .child(content.grow(1.0).min_h(0.0).w_full())
+        .child(crate::ui::focus::pane(
+            col().w_full().grow(1.0).min_h(0.0).child(content.grow(1.0).min_h(0.0).w_full()),
+            "search-content",
+        ))
+        .child(
+            // The result count, spoken politely each time it changes; the search box keeps focus.
+            el().key("result-count")
+                .role("status")
+                .label(shows.count_words())
+                .live_region(rune::LiveRegion::Polite),
+        )
         .child(status(s, &t));
     let body = row()
         .key("body")
         .w_full()
-        .child(crate::frames::files::sidebar::sidebar(s, &t))
+        .child(crate::ui::sidebar::sidebar(s, &t))
         .child(main);
     col()
         .key("window")
         .role("window")
         .label(s.identity.main_window_title())
         .on_key(super::on_key)
+        .on_layout(|s: &mut State, [_, _, w, h]| s.actions.window = (w, h))
         .w_full()
         .h_full()
         .fill(t.bg)
@@ -114,7 +120,22 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
 
 /// An item's Details over the results (`frames::item`), drawn by the one dialog layer of Shared and Trash.
 fn dialogs(s: &State, t: &Theme, cx: &mut Cx<State>) -> Vec<El> {
-    let dialogs = crate::frames::shared::dialogs::layers(s, t);
+    let mut dialogs = crate::frames::shared::dialogs::layers(s, t);
+    // The menu of Sort or of a result, Files' Share and Version history dialogs standing over the results, and the
+    // line for what could not be done.
+    dialogs.extend(actions::menu_layer(s, t));
+    if s.frames.find.dialog_over {
+        dialogs.extend(crate::frames::files::dialogs::layer(s, t));
+    }
+    dialogs.extend(actions::notice(s).map(|words| {
+        crate::ui::toast::layer(crate::ui::toast::toast(
+            &crate::theme::icons_files::ALERT,
+            crate::ui::toast::Tone::Failed,
+            words,
+            None,
+            t,
+        ))
+    }));
     if !dialogs.is_empty() {
         // Keyboard as Windows has it in a dialog (`shared::parts::chrome`): Tab visits every control, Space and
         // Enter press the focused one.
@@ -147,206 +168,89 @@ fn status(s: &State, t: &Theme) -> El {
 pub const PLAIN_NOTE: &str = "Searches file and folder names on this PC, even offline. It doesn't look inside files.";
 
 fn plain_note_line(t: &Theme) -> El {
-    row()
-        .key("status-bar")
-        .role("status")
-        .label(PLAIN_NOTE)
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .center_y()
-        .child(kit::label("search-note", PLAIN_NOTE, type_::STATUS, t.text_tertiary))
+    crate::ui::status_bar::frame(
+        vec![kit::label("search-note", PLAIN_NOTE, type_::STATUS, t.text_tertiary)],
+        t,
+    )
+    .label(PLAIN_NOTE)
 }
 
-/// The toolbar (`.mk-tb`) while searching: "Search" and what was found, the Files window's
-/// controls as the board draws them here, and the field focused.
-fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
-    // The board draws Back and Forward off while searching: Esc is the way back.
-    let nav = row()
-        .key("nav")
-        .child(tool_button("back", "Back", &icons::CHEVRON_LEFT, 16.0, ToolState::Off, t).shortcut_hint("Alt+Left"))
-        .child(
-            tool_button("forward", "Forward", &icons::CHEVRON_RIGHT, 16.0, ToolState::Off, t)
-                .shortcut_hint("Alt+Right"),
-        );
-    let title = col()
-        .key("folder-info")
-        .px(4.0)
-        .min_w(0.0)
-        .child(kit::label("folder-title", "Search", type_::TITLE, t.text).truncate())
-        .child(kit::label("item-count", sub, type_::TITLE_SUB, t.text_tertiary));
-    let view_toggle = segmented(
-        "view-toggle",
-        "View",
-        vec![
-            segment("view-list", "as List", &icons::VIEW_LIST, true, t),
-            segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t).on_press(push(Intent::Frame("DW-1102"))),
-        ],
-        t,
+/// The toolbar (`.mk-tb`) while searching: the one window toolbar (`ui::toolbar::bar`) with "Search" and what was
+/// found for the title, and the search field.
+fn toolbar(s: &State, sub: &str, t: &Theme) -> El {
+    let sorting = matches!(
+        &s.frames.find.menu,
+        Some(actions::Menu {
+            of: actions::MenuOf::Sort,
+            ..
+        })
     );
-    let sort = tool_button("sort-btn", "Sort", &icons::SORT, 15.0, ToolState::Idle, t)
-        .child(kit::glyph("sort-caret", &icons::CHEVRON_DOWN, 11.0, t.text_secondary))
-        .on_press(push(Intent::Frame("DW-0406")));
-    let panel = tool_button(
-        "panel-toggle-btn",
-        "Details panel",
-        &icons::PANEL_TOGGLE,
-        16.0,
-        if s.show_detail_pane {
-            ToolState::On
-        } else {
-            ToolState::Idle
+    bar(
+        Bar {
+            name: "Search".into(),
+            // The board draws Back and Forward off while searching: Esc is the way back.
+            back: (false, None),
+            forward: (false, None),
+            title: title_block("Search", Some(sub), t),
+            slot: None,
+            slot_sep: false,
+            gate_closed: false,
+            view: if s.frames.find.grid { View::Grid } else { View::List },
+            on_view: Some(Box::new(|s: &mut State, _: &mut Tx, grid: bool| {
+                if grid {
+                    s.frames.intents.push(Intent::Frame("DW-1102"));
+                } else {
+                    s.frames.find.grid = false;
+                }
+            })),
+            sort: if sorting { Sort::Open } else { Sort::Idle },
+            on_sort: press(|s, _| s.frames.intents.push(Intent::Frame("DW-0404"))),
+            details: if s.show_detail_pane { PaneBtn::Open } else { PaneBtn::Closed },
+            on_details: press(|s, _| s.show_detail_pane = !s.show_detail_pane),
+            inert: false,
+            on_explorer: Box::new(|s, tx| {
+                crate::shell::host::on_menu(s, crate::shell::tray::MenuAction::OpenInFileExplorer, tx);
+            }),
+            new: New::Idle,
+            on_new: press(|s, _| s.frames.intents.push(Intent::Frame("DW-0414"))),
+            search: search_field(s, t),
+            trailing_inset: 0.0,
         },
         t,
     )
-    .shortcut_hint("Alt+Shift+P")
-    .checked(s.show_detail_pane)
-    .on_press(|s: &mut State| s.show_detail_pane = !s.show_detail_pane);
-    // "Open in File Explorer", between the panel toggle and the separator (the Files toolbar's,
-    // DW-0401): the b's menu item (`host::on_menu`).
-    let explorer = tool_button(
-        "open-explorer",
-        "Open in File Explorer",
-        &icons::FILES,
-        16.0,
-        ToolState::Idle,
+}
+
+/// The search field: the shared box (`ui::toolbar::search_box`) around the window's search input, the one the Files
+/// toolbar shows. Esc ends search.
+fn search_field(s: &State, t: &Theme) -> El {
+    search_box(
+        SEARCH_KEY,
+        PLACEHOLDER,
+        text_input(&s.search, type_::SEARCH)
+            .key(SEARCH_KEY)
+            .label(PLACEHOLDER)
+            .shortcut_hint("Ctrl+F")
+            .single_line()
+            .color(t.text)
+            .caret(t.accent_deep, t.text.alpha(0.15))
+            .placeholder(PLACEHOLDER, t.text_tertiary)
+            .on_edit(|s: &mut State| &mut s.search)
+            .on_input_key(super::field_key)
+            .grow(1.0),
         t,
     )
-    .on_press_tx(|s: &mut State, tx: &mut Tx| {
-        crate::shell::host::on_menu(s, crate::shell::tray::MenuAction::OpenInFileExplorer, tx);
-    });
-    let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
-    let new_btn = row()
-        .key("new-btn")
-        .role("button")
-        .label("New")
-        .h(28.0)
-        .pl(8.0)
-        .pr(9.0)
-        .gap(5.0)
-        .center_y()
-        .radius(radius::CONTROL)
-        .fill(t.accent)
-        .hover(t.press)
-        .press(t.press)
-        .focusable(true)
-        .on_press(push(Intent::Frame("DW-0415")))
-        .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
-        .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
-        .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));
-    row()
-        .key("toolbar")
-        .role("toolbar")
-        .label("Search")
-        .h(46.0)
-        .w_full()
-        .fill(t.toolbar_bg)
-        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-        .border_layout()
-        .pl(10.0)
-        .pr(12.0)
-        .center_y()
-        .gap(8.0)
-        .child(nav)
-        .child(title)
-        .child(el().key("toolbar-spacer").grow(1.0))
-        .child(view_toggle)
-        .child(sort)
-        .child(panel)
-        .child(explorer)
-        .child(sep)
-        .child(new_btn)
-        .child(search_field(s, focused, t))
 }
 
-/// The search field (`.mk-search.is-focus`): lit while it has the keyboard or holds words, the
-/// hint giving way to × (which ends search) once something is typed. It edits the window's
-/// search field (`State::search`), the one the Files toolbar shows.
-fn search_field(s: &State, focused: bool, t: &Theme) -> El {
-    let ui = &s.frames.find;
-    let words = s.search.text.as_str();
-    let has_words = !words.is_empty();
-    // A board frame's focused field: Rune draws its own caret only where a window has focus.
-    let pictured = ui.pictured && !focused;
-    let lit = focused || pictured || has_words;
-    // `.is-focus` sets the field's words in ink, the placeholder too.
-    let ink = if lit { t.text } else { t.text_tertiary };
-    let shown = if has_words { words } else { PLACEHOLDER };
-    kit::note_text("search-placeholder", SEARCH_KEY, shown, type_::SEARCH, ink);
-    let mut field = row()
-        .key("search-box")
-        .role("search")
-        .w(210.0)
-        .h(28.0)
-        .gap(6.0)
-        .pl(9.0)
-        .pr(6.0)
-        .radius(8.0)
-        .center_y()
-        .child(kit::glyph("search-icon", &icons::SEARCH, 13.0, ink))
-        .child(
-            text_input(&s.search, type_::SEARCH)
-                .key(SEARCH_KEY)
-                .label(PLACEHOLDER)
-                .shortcut_hint("Ctrl+F")
-                .single_line()
-                .color(t.text)
-                .caret(t.accent_deep, t.text.alpha(0.15))
-                .placeholder(PLACEHOLDER, ink)
-                .on_edit(|s: &mut State| &mut s.search)
-                .on_input_key(super::field_key)
-                .grow(1.0),
-        );
-    field = if lit {
-        field
-            .fill(t.card)
-            .box_shadow(kit::ring(3.0, t.accent.alpha(0.3)))
-            .box_shadow(Shadow {
-                spread: 1.0,
-                ..kit::ring_inset(t.accent_deep)
-            })
-    } else {
-        field.fill(t.field).box_shadow(kit::ring_inset(t.separator))
-    };
-    field = if has_words {
-        field.child(
-            el().key("search-clear-btn")
-                .role("button")
-                .label("Clear search")
-                .size(12.0, 12.0)
-                .focusable(true)
-                .tab_index(-1)
-                .on_press_tx(close)
-                .child(kit::glyph("search-clear", &global_icons::CLOSE, 12.0, t.text_tertiary)),
-        )
-    } else {
-        field.child(kbd("kbd-hint", "Ctrl+F", t))
-    };
-    if pictured {
-        // `.kit-caret` after the words: 1 pt of margin, on the device pixel the board puts it on.
-        let x = snap(FIELD_TEXT_X + advance(shown, type_::SEARCH) + 1.0);
-        field = field.child(
-            el().key("search-caret-at")
-                .a11y_hidden()
-                .absolute(x, CARET_TOP)
-                .child(caret_mark("search-caret".into(), CARET_H, t)),
-        );
-    }
-    field
-}
-
-/// A window whose search is not wired yet: it says so, and shows nothing of the board's sample. With a reason
-/// (`SearchUi::unavailable_reason`: this PC's local state is another account's) it says why under it, in Photos'
-/// words; never an account's name, email or count.
+/// A window whose search is not wired, or whose index could not be built: it says so and offers Try again, which
+/// builds the index again (`SearchSource::rebuild`). With a reason (`SearchUi::unavailable_reason`: this PC's local
+/// state is another account's) it says why, in Photos' words; never an account's name, email or count.
 fn unavailable(reason: Option<(&'static str, &'static str)>, t: &Theme) -> El {
+    let retry = try_again("search-unavailable", t).on_press(|s: &mut State| s.frames.find.source.rebuild());
     let why = reason.map(|(title, line)| {
         col()
             .key("search-why")
             .items_center()
-            .gap(4.0)
+            .gap(space::S4)
             .child(
                 kit::label("search-why-title", title, style::SUB, t.text_secondary)
                     .w(227.11)
@@ -360,26 +264,33 @@ fn unavailable(reason: Option<(&'static str, &'static str)>, t: &Theme) -> El {
                     .align(Align::Center),
             )
     });
-    col().key("search-unavailable").w_full().child(
-        empty(&icons::SEARCH, UNAVAILABLE_TITLE, UNAVAILABLE_TEXT, why, t)
+    col().key("search-body").w_full().child(
+        col()
+            .key("empty-area")
+            .center()
             .grow(1.0)
-            .w_full(),
+            .w_full()
+            .child(view_state(
+                ViewState::Failed {
+                    key: "search-unavailable",
+                    title: UNAVAILABLE_TITLE,
+                    why: UNAVAILABLE_TEXT,
+                    retry: Some(retry),
+                },
+                t,
+            ))
+            .children(why),
     )
 }
 
 /// A query on its way: it says so, never "no results" before the answer.
 fn searching(t: &Theme) -> El {
-    col().key("search-searching").w_full().child(
-        empty(
-            &icons::SEARCH,
-            "Searching\u{2026}",
-            "Looking through the names on this PC.",
-            None,
-            t,
-        )
-        .grow(1.0)
-        .w_full(),
-    )
+    col().key("search-searching").w_full().child(view_state(
+        ViewState::Loading {
+            words: "Searching\u{2026} Looking through the names on this PC.",
+        },
+        t,
+    ))
 }
 
 /// The recent searches (DW-0801): a label with Clear, the list, and what search covers.
@@ -389,8 +300,8 @@ fn recent_searches(recent: &[String], t: &Theme) -> El {
         .grow(1.0)
         .max_w(560.0)
         .h_full()
-        .padding(24.0)
-        .gap(12.0);
+        .padding(space::S24)
+        .gap(space::S12);
     if !recent.is_empty() {
         let head = row()
             .key("recent-head")
@@ -475,8 +386,8 @@ fn recent_item(m: usize, query: &str, t: &Theme) -> El {
         .description("Recent search")
         .h(28.0)
         .w_full()
-        .px(10.0)
-        .gap(8.0)
+        .px(space::S10)
+        .gap(space::S8)
         .center_y()
         .hover(t.hover)
         .press(t.press)
@@ -511,9 +422,9 @@ fn narrow_row(narrow: Narrow, scope: bool, t: &Theme) -> El {
     let mut r = row()
         .key("narrow-row")
         .w_full()
-        .px(20.0)
+        .px(space::S20)
         .pt(12.0)
-        .gap(12.0)
+        .gap(space::S12)
         .center_y()
         .child(pills);
     if scope {
@@ -532,7 +443,7 @@ fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -540,122 +451,76 @@ fn grouped(n: u64) -> String {
     out
 }
 
-/// The note of a first sign-in (`.kit-banner.tone-neutral`, DW-0802b): some results may be
-/// missing until the list has loaded, with the live count in figures.
+/// The note of a first sign-in (DW-0802b): some results may be missing until the list has loaded, with the live count
+/// in figures. The shared Loading state.
 fn loading_note(l: Loading, t: &Theme) -> El {
     let figure = format!("{} of {}", grouped(l.listed), grouped(l.total));
     let words =
         format!("Still getting your files ready. Results may be incomplete until the list has loaded: {figure}.");
-    let from = words.len() - figure.len() - 1;
-    el().key("loading-wrap").w_full().px(20.0).pt(8.0).child(
-        row()
-            .key("loading-note")
-            .role("status")
-            .label(words.clone())
-            .w_full()
-            .items_start()
-            .gap(10.0)
-            .py(11.0)
-            .px(13.0)
-            .radius(13.0)
-            .fill(t.tile)
-            .child(el().key("loading-icon-box").pt(1.0).child(kit::glyph(
-                "loading-icon",
-                &icons_settings::INFO,
-                16.0,
-                t.text_secondary,
-            )))
-            .child(
-                kit::label("loading-text", words, BANNER_TEXT, t.text_secondary)
-                    .spans(vec![Span::new(from, from + figure.len()).mono()])
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .wrap(),
-            ),
-    )
-}
-
-/// The column headers (`.mk-thead`): Name, Date changed, Size, Where, PC. Results come in the
-/// source's order: no header carries a sort mark.
-fn header(t: &Theme) -> El {
-    let head = |key: &'static str, words: &'static str| kit::label(key, words, type_::COLUMN_HEADER, t.text_tertiary);
-    row()
-        .key("column-headers")
-        .role("row")
-        .h(28.0)
+    el().key("loading-wrap")
         .w_full()
-        .mt(4.0)
-        .px(20.0)
-        .gap(GAP)
-        .center_y()
-        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-        .border_layout()
-        .child(
-            row()
-                .key("col-name-cell")
-                .role("columnheader")
-                .grow(1.0)
-                .min_w(0.0)
-                .center_y()
-                .child(head("col-name", "Name")),
-        )
-        .child(
-            row()
-                .key("col-date-cell")
-                .role("columnheader")
-                .w(DATE_W)
-                .center_y()
-                .child(head("col-date", "Date changed")),
-        )
-        .child(
-            row()
-                .key("col-size-cell")
-                .role("columnheader")
-                .w(SIZE_W)
-                .center_y()
-                .justify_end()
-                .child(head("col-size", "Size")),
-        )
-        .child(
-            row()
-                .key("col-shared-cell")
-                .role("columnheader")
-                .w(WHERE_W)
-                .center_y()
-                .child(head("col-shared", "Where")),
-        )
-        .child(
-            row()
-                .key("col-pc-cell")
-                .role("columnheader")
-                .label("On this PC")
-                .w(PC_W)
-                .center()
-                .child(head("col-pc", "PC")),
-        )
+        .child(view_state(ViewState::Loading { words: &words }, t))
 }
 
-/// One result (`.mk-row`): the name with the match in bold, when it changed, its size, where it
-/// is, and the PC column. Keys: `row-<i>` and `-tile`, `-icon`, `-name`, `-date`, `-size`,
-/// `-dash` (Where), `-pc`.
-fn result_row(i: usize, hit: &Hit, query: &str, selected: bool, t: &Theme) -> El {
+/// The column headers: Name, Date changed, Size, Where, PC. Results come in the source's order: no header carries a
+/// sort mark.
+fn header(t: &Theme) -> El {
+    const COLUMNS: [Column; 5] = [
+        Column::new("name", "Name", Width::Flex(1.0)),
+        Column::new("date", "Date changed", Width::Fixed(DATE_W)),
+        Column::new("size", "Size", Width::Fixed(SIZE_W)).align(Align::End),
+        Column::new("shared", "Where", Width::Fixed(WHERE_W)),
+        Column::new("pc", "PC", Width::Fixed(PC_W)).align(Align::Center).spoken("On this PC"),
+    ];
+    file_row::header(&COLUMNS, None, t)
+}
+
+/// How many tiles stand in a row of the grid.
+const TILES_PER_ROW: usize = 5;
+
+/// The tiles in rows of [`TILES_PER_ROW`].
+fn grid_rows(tiles: Vec<El>) -> Vec<El> {
+    let mut rows = Vec::new();
+    let mut tiles = tiles.into_iter().peekable();
+    while tiles.peek().is_some() {
+        let n = rows.len();
+        rows.push(
+            row()
+                .key(format!("grid-row-{n}"))
+                .w_full()
+                .gap(space::S8)
+                .py(space::S4)
+                .children(tiles.by_ref().take(TILES_PER_ROW)),
+        );
+    }
+    rows
+}
+
+/// One result as a tile of the grid (`ui::file_tile`): its icon, its name, and in its description where it is. Keys
+/// `row-<i>`, `-thumb`, `-icon`, `-name`, so the keyboard and the pointer treat it like the list's row.
+fn result_tile(i: usize, total: usize, hit: &Hit, selected: bool, t: &Theme) -> El {
+    let k = format!("row-{i}");
+    let look = RowLook { selected, position: Some((i + 1, total)), ..RowLook::default() };
+    file_tile::tile(
+        &k,
+        &hit.name,
+        TilePicture::Icon(icon_for(&hit.name, hit.kind == Kind::Folder, None)),
+        &hit.name,
+        None,
+        look,
+        TileSize::Medium,
+        t,
+    )
+    .description(format!("In {}", hit.place))
+    .focusable(true)
+    .tab_index(if selected { 0 } else { -1 })
+}
+
+/// One result (`ui::file_row`): the name, when it changed, its size, where it is, and the PC column. The match in
+/// the name is not set in bold: the shared row writes a name whole.
+fn result_row(i: usize, total: usize, hit: &Hit, selected: bool, t: &Theme) -> El {
     let k = format!("row-{i}");
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
-    let mut name = kit::label(format!("{k}-name"), hit.name.clone(), type_::LIST_ITEM, t.text)
-        .truncate()
-        .min_w(0.0);
-    if let Some((from, to)) = matched(&hit.name, query) {
-        // `mark { font-weight: 700 }`: the letters that match.
-        name = name.spans(vec![Span::new(from, to).weight(700.0)]);
-    }
-    let name_cell = row()
-        .key("name-cell")
-        .grow(1.0)
-        .min_w(0.0)
-        .center_y()
-        .gap(8.0)
-        .child(tile(&k, format!("{k}-icon"), hit.kind, 22.0, 6.0, 14.0, t))
-        .child(name);
     let place = row().key("where-cell").w(WHERE_W).min_w(0.0).center_y().child(
         kit::label(format!("{k}-dash"), hit.place.clone(), style::CELL, meta)
             .truncate()
@@ -665,37 +530,21 @@ fn result_row(i: usize, hit: &Hit, query: &str, selected: bool, t: &Theme) -> El
     if let Some(state) = hit.pc {
         pc = pc.child(pc_glyph(format!("{k}-pc"), state, t.bg, t));
     }
-    row()
-        .key(k.clone())
-        .role("listitem")
-        .label(&hit.name)
+    let cells = vec![
+        kit::label(format!("{k}-date"), hit.changed.clone(), style::CELL_MONO, meta)
+            .w(DATE_W)
+            .truncate(),
+        kit::label(format!("{k}-size"), hit.size.clone(), style::CELL_MONO, meta)
+            .w(SIZE_W)
+            .align(Align::End),
+        place,
+        pc,
+    ];
+    let look = RowLook { selected, position: Some((i + 1, total)), ..RowLook::default() };
+    file_row::row_with(&k, &hit.name, table::tile(&k, format!("{k}-icon"), &hit.name, hit.kind, 22.0, 6.0, 14.0, t), &hit.name, Vec::new(), cells, look, t)
         .description(format!("In {}", hit.place))
-        .h(30.0)
-        .w_full()
-        .px(14.0)
-        .gap(GAP)
-        .center_y()
-        .radius(radius::CONTROL)
-        .fill(if selected { t.selection_row } else { Color::TRANSPARENT })
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .focus_selected(selected)
         // The list is one Tab stop: the selected result; the arrows move inside it.
         .tab_index(if selected { 0 } else { -1 })
-        .child(name_cell)
-        .child(
-            kit::label(format!("{k}-date"), hit.changed.clone(), style::CELL_MONO, meta)
-                .w(DATE_W)
-                .truncate(),
-        )
-        .child(
-            kit::label(format!("{k}-size"), hit.size.clone(), style::CELL_MONO, meta)
-                .w(SIZE_W)
-                .align(Align::End),
-        )
-        .child(place)
-        .child(pc)
 }
 
 /// The results (DW-0802, DW-0802b): the pills, the note of a first sign-in, the list, and the
@@ -703,29 +552,33 @@ fn result_row(i: usize, hit: &Hit, query: &str, selected: bool, t: &Theme) -> El
 /// (DW-0802b): the panel waits until the list has loaded.
 fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
     let ui = &s.frames.find;
-    let query = s.search.text.trim();
     let at = ui.selected_index(hits);
     let rows: Vec<El> = hits
         .iter()
         .enumerate()
         .map(|(i, hit)| {
             let (pressed, opened, menu) = (hit.id.clone(), hit.id.clone(), hit.id.clone());
-            result_row(i, hit, query, at == Some(i), t)
-                .on_press_tx(move |s: &mut State, tx: &mut Tx| {
-                    s.frames.find.selected = Some(pressed.clone());
-                    tx.focus(format!("row-{i}"), false);
-                })
-                .on_double_press(move |s: &mut State| {
-                    let hits = super::hits(s);
-                    if let Some(at) = hits.iter().position(|h| h.id == opened) {
-                        open_result(s, &hits, at);
-                    }
-                })
-                // The usual file menu, plus Show in enclosing folder (DW-0402).
-                .on_secondary_press(move |s: &mut State, _, _| {
-                    s.frames.find.selected = Some(menu.clone());
-                    s.frames.intents.push(Intent::About("DW-0402", menu.clone()));
-                })
+            (if ui.grid {
+                result_tile(i, hits.len(), hit, at == Some(i), t)
+            } else {
+                result_row(i, hits.len(), hit, at == Some(i), t)
+            })
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                s.frames.find.selected = Some(pressed.clone());
+                tx.focus(format!("row-{i}"), false);
+            })
+            .on_double_press(move |s: &mut State| {
+                let hits = super::hits(s);
+                if let Some(at) = hits.iter().position(|h| h.id == opened) {
+                    open_result(s, &hits, at);
+                }
+            })
+            // The usual file menu, plus Show in enclosing folder (DW-0402).
+            .on_secondary_press(move |s: &mut State, at: rune::PointerPress, _: &mut Tx| {
+                s.frames.find.selected = Some(menu.clone());
+                s.frames.find.menu_at = Some((at.x, at.y));
+                s.frames.intents.push(Intent::About("DW-0402", menu.clone()));
+            })
         })
         .collect();
     let list = col()
@@ -735,7 +588,7 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
         .h_full()
         .child(narrow_row(ui.narrow, true, t))
         .children(loading.map(|l| loading_note(l, t)))
-        .child(header(t))
+        .children((!ui.grid).then(|| header(t)))
         .child(
             col()
                 .key("rows")
@@ -744,10 +597,10 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .py(4.0)
-                .px(6.0)
+                .py(space::S4)
+                .px(space::S6)
                 .scroll(rune::ScrollSpec { stick_bottom: false })
-                .children(rows),
+                .children(if ui.grid { grid_rows(rows) } else { rows }),
         );
     let mut body = row().key("search-body").w_full().child(list);
     if s.show_detail_pane
@@ -756,12 +609,16 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
         && let Some(hit) = at.and_then(|i| hits.get(i))
         && let Some(facts) = ui.source.details(&hit.id)
     {
+        let mut facts = facts;
+        if let Some(kept) = ui.kept.get(&hit.id) {
+            facts.kept_offline = *kept;
+        }
         body = body.child(details_pane(hit, &facts, t));
     }
     body
 }
 
-/// No result (DW-0803): the pills, and the empty state that says why that might be.
+/// No result (DW-0803): the pills, and the Empty state that says what to do.
 fn nothing(s: &State, narrow: Narrow, loading: Option<Loading>, t: &Theme) -> El {
     let query = s.search.text.trim();
     col()
@@ -769,21 +626,16 @@ fn nothing(s: &State, narrow: Narrow, loading: Option<Loading>, t: &Theme) -> El
         .w_full()
         .child(narrow_row(narrow, false, t))
         .children(loading.map(|l| loading_note(l, t)))
-        // The Files window's empty state (`ui::empty`), under the names the Files keymap gives
-        // it on the board: `empty`, `empty-tile`, `empty-icon`, `empty-title`, `empty-text`.
-        .child(
-            el().key("empty-area")
-                .center()
-                .grow(1.0)
-                .w_full()
-                .child(crate::ui::empty::empty_state(
-                    "empty",
-                    &icons::SEARCH,
-                    &format!("No results for \u{201C}{query}\u{201D}"),
-                    NO_MATCH,
-                    t,
-                )),
-        )
+        .child(el().key("empty-area").center().grow(1.0).w_full().child(view_state(
+            ViewState::Empty {
+                key: "empty",
+                icon: &icons::SEARCH,
+                title: &format!("No results for \u{201C}{query}\u{201D}"),
+                body: NO_MATCH,
+                action: None,
+            },
+            t,
+        )))
 }
 
 /// The details panel of the selected result (`.mk-det`), as Files draws it (DW-0401), from
@@ -813,7 +665,7 @@ fn details_pane(hit: &Hit, d: &Details, t: &Theme) -> El {
     } else {
         preview(page_preview(t), t)
     };
-    let mut facts = col().key("detail-meta").role("list").gap(6.0).child(meta_row(
+    let mut facts = col().key("detail-meta").role("list").gap(space::S6).child(meta_row(
         "detail-changed",
         "Changed",
         &d.changed,
@@ -851,7 +703,7 @@ fn details_pane(hit: &Hit, d: &Details, t: &Theme) -> El {
         .child(
             row()
                 .key("detail-actions")
-                .gap(8.0)
+                .gap(space::S8)
                 .child(twice(
                     "btn-share",
                     action_button("share", "Share\u{2026}", &icons::SHARE, t)
@@ -910,8 +762,8 @@ fn offline_card(id: &str, d: &Details, t: &Theme) -> El {
         .key("item-0-0")
         .w_full()
         .min_h(40.0)
-        .px(10.0)
-        .gap(8.0)
+        .px(space::S10)
+        .gap(space::S8)
         .center_y()
         .child(
             col()
@@ -923,7 +775,7 @@ fn offline_card(id: &str, d: &Details, t: &Theme) -> El {
                 .child(kit::label("offline-detail", d.offline_note.clone(), sub_style, t.text_tertiary).truncate()),
         )
         .child(
-            switch("offline", title, d.kept_offline, t)
+            crate::ui::switch::switch_sized("offline-switch", "", d.kept_offline, true, crate::ui::button::Size::Md, t).label(title)
                 .description(d.offline_note.clone())
                 .on_press(push(Intent::Do("keep-offline", id))),
         );

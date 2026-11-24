@@ -2,6 +2,22 @@
 
 use super::*;
 
+/// A port nothing listens on: bind, drop, and confirm a connect is refused (the port may have been taken
+/// again by a parallel test between the drop and the check).
+fn closed_port() -> u16 {
+    loop {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        if let Err(e) = std::net::TcpStream::connect(("127.0.0.1", port))
+            && e.kind() == std::io::ErrorKind::ConnectionRefused
+        {
+            return port;
+        }
+    }
+}
+
 #[test]
 fn a_typed_get_that_is_answered_records_an_answer() {
     let base = one_shot_server(Some(
@@ -46,10 +62,7 @@ fn a_typed_get_answered_with_401_is_an_answer_not_a_link_failure() {
 
 #[test]
 fn a_typed_get_with_nothing_listening_records_offline() {
-    let port = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
-    };
+    let port = closed_port();
     let client = link_client(format!("http://127.0.0.1:{port}"));
     let link = client.link();
     run_async(client.get_typed::<serde_json::Value>("/x")).unwrap_err();

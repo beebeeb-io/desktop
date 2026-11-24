@@ -44,6 +44,13 @@ pub struct TrayInputs {
     pub conflicts: u32,
     pub engine: EngineState,
     pub files_remaining: Option<u32>,
+    /// While the engine runs: when its last check that reached Beebeeb finished (its report's `last_tick_ok_at`, unix
+    /// seconds).
+    pub last_check: Option<i64>,
+    /// RC2-6b: while the engine runs, its count of checks that changed something (its report's `changes`). A new one
+    /// is when the windows read their lists again (`host::read_again_after_a_check`); `last_check` moves on every
+    /// check, changed or not, and only says "up to date".
+    pub changes: Option<u64>,
 }
 
 /// The six icons of DW-1230.
@@ -392,6 +399,9 @@ mod tests {
             conflicts: 4,
             engine: EngineState::Offline,
             files_remaining: Some(9),
+            // When the last check finished says nothing to the b.
+            last_check: Some(1_000),
+            changes: Some(3),
         };
         let label = |inputs: &TrayInputs| tray_model(inputs).label;
         assert_eq!(label(&inputs), "Locked");

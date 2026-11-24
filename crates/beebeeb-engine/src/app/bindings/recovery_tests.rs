@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use super::{RecoveryDone, RecoveryRefused};
 use crate::app::{Engine, EngineConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::keychain::AuthVault;
 use crate::signin::gate::GateState;
 use crate::signin::memory_store::MemoryCredentials;
@@ -47,6 +47,10 @@ const LOGOUT: &str = "POST /api/v1/auth/logout";
 const SIGNS_IN: u8 = 0;
 /// `{requires_2fa: true}`, with a session token beside it: a client that stores any token it sees is caught.
 const TWO_FACTOR: u8 = 1;
+/// The password step's registration refuses the recovery token (`invalid_recovery_token`): the recovery is over.
+const REFUSES_TOKEN: u8 = 2;
+/// The finalize gets no answer: the server hangs up after it has the request.
+const HANGS_UP: u8 = 3;
 
 type Meanwhile = Box<dyn FnOnce() + Send>;
 
@@ -88,6 +92,9 @@ fn server(tag: &str) -> Recovery {
                 }
             }
             REGISTER => {
+                if finalize_in.load(Ordering::SeqCst) == REFUSES_TOKEN {
+                    return Reply::error(400, "invalid_recovery_token");
+                }
                 let message = body["client_message"]
                     .as_str()
                     .and_then(|message| b64().decode(message).ok())
@@ -110,6 +117,7 @@ fn server(tag: &str) -> Recovery {
                     meanwhile();
                 }
                 match finalize_in.load(Ordering::SeqCst) {
+                    HANGS_UP => Reply::hang_up(),
                     TWO_FACTOR => Reply::ok(json!({
                         "requires_2fa": true,
                         "session_token": account_in.session_token,
@@ -137,7 +145,7 @@ fn opened(api: &FakeApi, slot: &str) -> (Arc<TestEngine>, MemoryCredentials) {
         state_dir: crate::state_paths::init_for_test(),
         api_base: api.base.clone(),
     };
-    let engine = Engine::open(&REAL, config, host, store.clone()).expect("the engine opens");
+    let engine = Engine::open(&TEST, config, host, store.clone()).expect("the engine opens");
     engine.restore();
     (Arc::new(engine), store)
 }
@@ -331,6 +339,36 @@ fn recovery_sign_in_required_stores_nothing() {
 }
 
 #[test]
+fn recovery_finalize_with_no_answer_holds_nothing() {
+    let fake = server("no-answer");
+    fake.finalize.store(HANGS_UP, Ordering::SeqCst);
+    let (engine, store) = opened(&fake.api, "no-answer");
+    verified(&engine, &fake);
+
+    let done = engine.recovery_set_password_for(engine.session_turn(), new_password());
+
+    assert_eq!(done, Err(RecoveryRefused::Offline));
+    assert_eq!(count(&fake.api, FINALIZE), 1, "the last step was sent");
+    assert!(
+        !holds_a_recovery(&engine),
+        "no answer: the recovery is over, nothing is kept for a retry"
+    );
+    assert!(!engine.has_session());
+    assert_eq!(engine.gate(), GateState::SignedOut);
+    assert_eq!(stored_token(&store, "no-answer"), None);
+    assert!(!stored_key(&store, "no-answer"));
+    assert_eq!(count(&fake.api, PROFILE), 0);
+
+    // A retry has nothing to continue from: nothing is sent.
+    assert_eq!(
+        engine.recovery_set_password_for(engine.session_turn(), new_password()),
+        Err(RecoveryRefused::Overtaken)
+    );
+    assert_eq!(count(&fake.api, REGISTER), 1);
+    assert_eq!(count(&fake.api, FINALIZE), 1);
+}
+
+#[test]
 fn recovery_overtaken_stores_nothing() {
     let fake = server("overtaken");
     let (engine, store) = opened(&fake.api, "overtaken");
@@ -353,6 +391,7 @@ fn recovery_overtaken_stores_nothing() {
     assert_eq!(stored_token(&store, "overtaken"), None);
     assert!(!stored_key(&store, "overtaken"));
     assert_eq!(engine.gate(), GateState::SignedOut);
+    assert!(!holds_a_recovery(&engine), "the last step consumed the recovery");
 }
 
 #[test]
@@ -412,4 +451,73 @@ fn recovery_meter_reads_the_servers_minimum_and_a_short_password_sends_nothing()
         Ok(RecoveryDone::SignedIn)
     );
     assert_eq!(count(&fake.api, START), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The wipe: the held recovery, which holds the key the words derived and the server's
+// recovery token, ends with the flow: when the flow is left, when a sign-in replaces it, and when its engine goes.
+// ---------------------------------------------------------------------------
+
+/// Leaving a half-done sign-in is the engine's own rule for the recovery too: the held flow is forgotten by
+/// `discard_partial_sign_in` itself, whichever host calls it.
+#[test]
+fn signin_wipe_leaving_a_half_done_sign_in_forgets_the_held_recovery() {
+    let fake = server("wipe-leave");
+    let (engine, _store) = opened(&fake.api, "wipe-leave");
+    verified(&engine, &fake);
+    assert!(holds_a_recovery(&engine), "the words were verified: the flow is held");
+    engine.discard_partial_sign_in().expect("nothing is signed in to end");
+    assert!(
+        !holds_a_recovery(&engine),
+        "the key and the recovery token go when the recovery is left"
+    );
+}
+
+/// A sign-in that stores a session ends every other half-done step: a held recovery does not wait behind it.
+#[test]
+fn signin_wipe_a_sign_in_ends_a_held_recovery() {
+    let fake = server("wipe-replaced");
+    let (engine, _store) = opened(&fake.api, "wipe-replaced");
+    verified(&engine, &fake);
+    assert!(holds_a_recovery(&engine), "the words were verified: the flow is held");
+    engine
+        .sign_in_password(&fake.account.email, Zeroizing::new(OLD_PASSWORD.to_string()))
+        .expect("the password still signs in");
+    assert!(
+        !holds_a_recovery(&engine),
+        "the sign-in replaced the recovery: its key and token are gone"
+    );
+}
+
+/// An engine that goes takes its held recovery with it at once, not at another engine's next look into the slot.
+#[test]
+fn signin_wipe_a_dropped_engine_leaves_no_held_recovery() {
+    let fake = server("wipe-drop");
+    let (engine, _store) = opened(&fake.api, "wipe-drop");
+    verified(&engine, &fake);
+    // A second hold of the account runtime keeps the entry's owner alive, so another test's look into the slot (which
+    // drops the entries of dead owners) cannot pass this test for the wrong reason.
+    let acct = engine.acct.clone();
+    let owner = Arc::downgrade(&acct);
+    assert!(super::held_for(&owner), "the words were verified: the flow is held");
+    drop(engine);
+    assert!(
+        !super::held_for(&owner),
+        "the engine went: its recovery's key and token went with it"
+    );
+    drop(acct);
+}
+
+/// The server refuses the recovery token at the password step: the recovery is over, and its key and token go with it.
+#[test]
+fn signin_wipe_a_refused_recovery_token_ends_the_held_recovery() {
+    let fake = server("wipe-refused");
+    let (engine, _store) = opened(&fake.api, "wipe-refused");
+    verified(&engine, &fake);
+    fake.finalize.store(REFUSES_TOKEN, Ordering::SeqCst);
+    assert_eq!(
+        engine.recovery_set_password_for(engine.session_turn(), new_password()),
+        Err(RecoveryRefused::Overtaken)
+    );
+    assert!(!holds_a_recovery(&engine), "a refused recovery holds nothing");
 }

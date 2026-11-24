@@ -2,14 +2,17 @@
 //! the selected item's own details.
 
 use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
-use super::{select_bar, sidebar, toolbar};
+use super::{select_bar, toolbar};
 use crate::State;
+use crate::theme::icons;
+use crate::theme::scale;
 use crate::theme::tokens::{self, Theme};
-use crate::theme::{icons, icons_files};
 use crate::ui::{button, caption, empty, file_list, kit, menu, status_line, toast};
 use rune::{Cx, El, Tx, col, el, row};
 
-/// "4 on this PC · 3 available offline · 4 online only", counted from the rows.
+/// "4 on this PC · 3 available offline · 4 online only", counted from the rows. While the first list still
+/// arrives the rows are only those listed so far, and the words say so: "Listed so far: …" (RC2-10, the large
+/// account read "483 online only" for a folder of thousands).
 pub fn pc_summary(s: &State) -> String {
     if s.listing.items.is_empty() {
         // The whole account is empty (DW-0114), or this folder is (DW-1106).
@@ -26,12 +29,18 @@ pub fn pc_summary(s: &State) -> String {
             .filter(|i| i.pc_status.as_deref() == Some(status))
             .count()
     };
-    format!(
+    let grouped = |n: usize| super::protected::grouped(i64::try_from(n).unwrap_or(i64::MAX));
+    let counts = format!(
         "{} on this PC \u{00B7} {} available offline \u{00B7} {} online only",
-        count("on_this_pc"),
-        count("available_offline"),
-        count("online_only")
-    )
+        grouped(count("on_this_pc")),
+        grouped(count("available_offline")),
+        grouped(count("online_only"))
+    );
+    if s.global.source.status().loading.is_some() {
+        format!("Listed so far: {counts}")
+    } else {
+        counts
+    }
 }
 
 fn pick(s: &mut State, index: usize, tx: &mut Tx) {
@@ -142,71 +151,66 @@ fn pick_sort(s: &mut State, index: usize, tx: &mut Tx) {
     s.pick_background_sort(index, tx);
 }
 
+/// The toast's button (`ui::button`, Sm): `<key>-action`, with the words and its name for assistive technology.
+fn toast_button(
+    words: &'static str,
+    name: &'static str,
+    shortcut: Option<&'static str>,
+    run: fn(&mut State, &mut Tx),
+    t: &Theme,
+) -> El {
+    let mut keys = button::keys("toast-action");
+    keys.label = "toast-action-text".to_string();
+    let b = button::button(
+        keys,
+        words,
+        None,
+        button::Variant::Ghost,
+        button::Size::Sm,
+        button::ButtonState::Enabled,
+        t,
+    )
+    .label(name)
+    .on_press_tx(move |s: &mut State, tx: &mut Tx| run(s, tx));
+    match shortcut {
+        Some(keys) => b.shortcut_hint(keys),
+        None => b,
+    }
+}
+
 /// `again`: does a failure's message offer Try again (`State::offers_try_again`)?
 fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
+    use toast::Lead;
+    let plain = |words: &str, lead| toast::toast_with("toast", words, lead, None, t);
     match kind {
-        Toast::Trashed => toast::toast(
-            &icons::TRASH,
-            toast::Tone::Neutral,
+        Toast::Trashed => toast::toast_with(
+            "toast",
             "Moved to Trash",
-            Some(toast::ToastAction {
-                text: "Undo Ctrl+Z",
-                name: "Undo",
-                shortcut: Some("Ctrl+Z"),
-                run: undo,
-            }),
+            Lead::None,
+            Some(toast_button("Undo Ctrl+Z", "Undo", Some("Ctrl+Z"), undo, t)),
             t,
         ),
-        Toast::Duplicated => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Duplicated", None, t),
-        Toast::Keeping => toast::toast(
-            &icons::AVAILABLE_OFFLINE,
-            toast::Tone::Neutral,
-            "Keeping on this PC",
-            None,
-            t,
+        Toast::Duplicated => plain("Duplicated", Lead::Check),
+        Toast::Keeping => plain("Keeping on this PC", Lead::None),
+        Toast::UploadCancelled => plain("Upload cancelled. The copy is in the Recycle Bin.", Lead::None),
+        Toast::LinkCopied => plain("Link copied", Lead::Check),
+        Toast::ReadOneAtATime => plain(Toast::READ_ONE_AT_A_TIME, Lead::Warn),
+        Toast::Downloading(size) => plain(&crate::frames::open_file::downloading_words(size), Lead::None),
+        Toast::KeptEdits(count) => plain(
+            &crate::frames::office::edit::recovery::unlocked_words(usize::from(count), None).unwrap_or_default(),
+            Lead::Warn,
         ),
-        Toast::UploadCancelled => toast::toast(
-            &icons::TRASH,
-            toast::Tone::Neutral,
-            "Upload cancelled. The copy is in the Recycle Bin.",
-            None,
-            t,
-        ),
-        Toast::LinkCopied => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Link copied", None, t),
-        Toast::ReadOneAtATime => toast::toast(
-            &icons_files::ALERT,
-            toast::Tone::Neutral,
-            Toast::READ_ONE_AT_A_TIME,
-            None,
-            t,
-        ),
-        Toast::KeepFirst => toast::toast(
-            &icons_files::ALERT,
-            toast::Tone::Neutral,
-            crate::frames::office::docs::KEEP_FIRST,
-            None,
-            t,
-        ),
-        Toast::FreedUp => toast::toast(
-            &icons_files::CHECK,
-            toast::Tone::Done,
-            "Freed up space on this PC",
-            None,
-            t,
-        ),
-        Toast::Failed(action, why) => toast::toast(
-            &icons_files::ALERT,
-            toast::Tone::Failed,
+        Toast::FreedUp => plain("Freed up space on this PC", Lead::Check),
+        Toast::Failed(action, why) => toast::toast_with(
+            "toast",
             &Toast::failure(action, why),
+            Lead::Warn,
             // Only where Try again repeats something (`State::offers_try_again`).
-            again.then_some(toast::ToastAction {
-                text: "Try again",
-                name: "Try again",
-                shortcut: None,
-                run: retry,
-            }),
+            again.then(|| toast_button("Try again", "Try again", None, retry, t)),
             t,
-        ),
+        )
+        // A failure is read at once.
+        .role("alert"),
     }
 }
 
@@ -228,7 +232,7 @@ fn empty_folder(root: bool, t: &Theme) -> El {
         col()
             .key("empty-actions")
             .mt(8.0)
-            .gap(8.0)
+            .gap(scale::space::S8)
             .items_center()
             .child(
                 button::outline_button("empty-add", "Add files", Some(&icons::PLUS), t)
@@ -273,13 +277,14 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     } else {
         // The folder as a grid, where the person chose that view (`frames::global::grid`, DW-0119).
         body = body.child(crate::frames::global::grid_body(s, &t).unwrap_or_else(|| {
-            col()
-                .key("file-list-col")
+            // F6 stop: the list pane, its first Tab stop is the rows.
+            crate::ui::focus::pane(col(), "pane-list")
                 .grow(1.0)
                 .min_w(0.0)
                 .h_full()
                 .child(
-                    super::protected::column_headers(s, &t).unwrap_or_else(|| list::column_headers(s.actions.sort, &t)),
+                    super::protected::column_headers(s, &t)
+                        .unwrap_or_else(|| list::column_headers(s.actions.sort, file_list::Fit::of_list(cx), &t)),
                 )
                 // A folder that could not be read says so. It never draws as an empty folder.
                 .child(match s.list_error {
@@ -314,7 +319,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 }
                 (item, facts)
             });
-            body = body.child(if s.selects_several() {
+            let details_pane = if s.selects_several() {
                 let items: Vec<_> = s
                     .selected_rows()
                     .iter()
@@ -322,8 +327,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                     .collect();
                 select_bar::panel(&items, &t)
             } else {
-                details::details_pane(facts, &t)
-            });
+                details::details_pane(facts, s.pin_state(), &t)
+            };
+            body = body.child(crate::ui::focus::pane(
+                col().h_full().child(details_pane),
+                "pane-details",
+            ));
         }
     }
 
@@ -334,11 +343,15 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar::toolbar(s, &t, 0.0))
+        .child(crate::ui::focus::pane(
+            col().w_full().child(toolbar::toolbar(s, &t, 0.0)),
+            "pane-toolbar",
+        ))
         // The one banner of the whole window, or the loading strip (`frames::global`).
         .children(
             super::browse_states::card(s, &t)
                 .or_else(|| crate::frames::global::under_toolbar(s, &t))
+                .or_else(|| super::protected::rebuilt_notice(s, &t))
                 .or_else(|| super::protected::notice(s, &t)),
         )
         // Several rows selected: what can be done to all of them (DW-0403).
@@ -382,7 +395,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let mut body = row()
         .key("body")
         .w_full()
-        .child(sidebar::sidebar(s, &t))
+        .child(crate::ui::sidebar::sidebar(s, &t))
         .child(main)
         // What is in front of the whole body: a preview that needs a connection (`frames::global`).
         .children(crate::frames::global::over_body(s, s.actions.window, &t));
@@ -437,4 +450,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         root = root.child(layer);
     }
     root
+}
+
+/// The dialog Files holds (Share, Version history, Details…) as a layer, for a window that is not Files' own: the
+/// viewer asks for the share and the versions of the open file, and the dialog stands over it. The caller puts this
+/// over what it draws (`frames::viewers::frame`).
+pub fn dialog_over_viewer(s: &State, t: &Theme) -> Option<El> {
+    dialogs::layer(s, t)
 }

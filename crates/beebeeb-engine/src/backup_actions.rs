@@ -1,7 +1,7 @@
 //! LD-0113 for the app's own window: what the person may do to a row at or under the Backups root, and the words
 //! of a refusal.
 //!
-//! The window is an APP surface, so the rule is the web app's (Guus: "make sure that Backups folder is protected,
+//! The window is an APP surface, so the rule is the web app's (the owner: "make sure that Backups folder is protected,
 //! same as on web"): core's `check_app_mutation` on the row's [`BackupPosition`], plus the two things the web adds
 //! around it (a folder at or under the root is never shared; a device's folder or one backed-up folder is deleted
 //! through its own password-confirmed call). One thing the web cannot know and this device can: a row that is this

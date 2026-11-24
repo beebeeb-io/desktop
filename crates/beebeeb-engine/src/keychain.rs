@@ -72,7 +72,7 @@ impl fmt::Debug for SecretBytes {
 // for the one-time migration read/sweep. New code must construct stores via
 // `platform_keychain_store_for(id)` so a reviewer can grep every legacy access.
 
-// The real Keychain store does not EXIST in a macOS test build (Task 9 fix round 2): a test that names it
+// The real Keychain store does not EXIST in a macOS test build: a test that names it
 // fails to compile, instead of reaching the developer's own Keychain items. `TestKeychainStore` takes its
 // place (see `PlatformKeychainStore`).
 #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
@@ -502,7 +502,7 @@ static TEST_KEYCHAIN: std::sync::LazyLock<std::sync::Mutex<std::collections::Has
 static TEST_KEYCHAIN_TOUCHED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Option<String>>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// Account prefixes whose email writes fail, as a locked Keychain's would (Task 12 fix round 2, item 3). Tests only.
+/// Account prefixes whose email writes fail, as a locked Keychain's would. Tests only.
 #[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
 static TEST_KEYCHAIN_EMAIL_WRITES_FAIL: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<Option<String>>>,
@@ -778,6 +778,43 @@ pub type PlatformKeychainStore = MacOsKeychainStore;
 // The function is IDEMPOTENT and INTERRUPT-CONVERGENT: interrupted after a crash
 // at any step, a re-run ends fully-migrated-with-legacy-gone.
 
+// ─── Forget the saved sign-in (RC2-7) ─────────────────────────────────────────
+//
+// The uninstaller's "delete … the saved sign-in" box: every Credential Manager entry of ONE identity's service
+// (session tokens, wrapped keys, account emails, parked sessions: all named `<credential_service>/…`) goes. Only
+// that identity's: `io.beebeeb.app` never matches `io.beebeeb.app.test/…`, nor the reverse.
+
+/// Whether the Credential Manager target name `target` belongs to `service`: `<service>/` and at least one more
+/// character. Windows compares target names without regard to case, so this does too.
+pub fn forget_sign_in_is_own(service: &str, target: &str) -> bool {
+    let Some(head) = target.get(..service.len()) else {
+        return false;
+    };
+    head.eq_ignore_ascii_case(service) && target[service.len()..].strip_prefix('/').is_some_and(|rest| !rest.is_empty())
+}
+
+/// The names among `targets` that [`forget_sign_in`] deletes for `service`.
+pub fn forget_sign_in_targets<'a>(service: &str, targets: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    targets.into_iter().filter(|target| forget_sign_in_is_own(service, target)).collect()
+}
+
+/// What [`forget_sign_in`] did (counts only: a name is never logged or printed).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ForgetSignInReport {
+    /// Entries of this identity found.
+    pub found: usize,
+    /// Of those, deleted.
+    pub deleted: usize,
+    /// Enumerate or delete steps that failed.
+    pub failures: usize,
+}
+
+/// Delete every saved credential of `identity` (and nothing of any other identity). Run by the uninstaller.
+#[cfg(target_os = "windows")]
+pub fn forget_sign_in(identity: &'static EngineIdentity) -> ForgetSignInReport {
+    windows_credentials::forget_all(identity.credential_service())
+}
+
 #[cfg(target_os = "windows")]
 mod windows_credentials {
     //! Win32 Credential Manager backing for `WindowsCredentialStore`.
@@ -910,6 +947,61 @@ mod windows_credentials {
         Ok(())
     }
 
+    /// RC2-7: enumerate `<service>/*` (CredEnumerateW's filter), keep only what [`super::forget_sign_in_is_own`]
+    /// accepts and delete each with its own type. No name leaves this function.
+    pub fn forget_all(service: &str) -> super::ForgetSignInReport {
+        use windows::Win32::Security::Credentials::{CRED_ENUMERATE_FLAGS, CRED_TYPE, CredEnumerateW};
+
+        let mut report = super::ForgetSignInReport::default();
+        let filter: Vec<u16> = format!("{service}/*").encode_utf16().chain(std::iter::once(0)).collect();
+        let mut count: u32 = 0;
+        let mut list: *mut *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: `filter` is NUL-terminated and outlives the call; `list` receives one allocation we `CredFree`.
+        let result =
+            unsafe { CredEnumerateW(PCWSTR(filter.as_ptr()), CRED_ENUMERATE_FLAGS(0), &mut count, &mut list) };
+        if let Err(e) = result {
+            if !list.is_null() {
+                // SAFETY: allocated by CredEnumerateW; freed once.
+                unsafe { CredFree(list as *const core::ffi::c_void) };
+            }
+            if e.code() != HRESULT_ERROR_NOT_FOUND {
+                report.failures += 1;
+            }
+            return report;
+        }
+        // Copy the names out (with their types) before freeing the list.
+        let mut own: Vec<(Vec<u16>, CRED_TYPE)> = Vec::new();
+        if !list.is_null() {
+            for index in 0..count as usize {
+                // SAFETY: `list` holds `count` valid CREDENTIALW pointers until CredFree.
+                let cred = unsafe { &**list.add(index) };
+                if cred.TargetName.is_null() {
+                    continue;
+                }
+                // SAFETY: TargetName is a NUL-terminated wide string inside the list's allocation.
+                let Ok(name) = (unsafe { cred.TargetName.to_string() }) else {
+                    continue;
+                };
+                if super::forget_sign_in_is_own(service, &name) {
+                    own.push((name.encode_utf16().chain(std::iter::once(0)).collect(), cred.Type));
+                }
+            }
+            // SAFETY: allocated by CredEnumerateW; freed exactly once, after the last read above.
+            unsafe { CredFree(list as *const core::ffi::c_void) };
+        }
+        report.found = own.len();
+        for (target, kind) in &own {
+            // SAFETY: `target` is NUL-terminated and outlives the call.
+            match unsafe { CredDeleteW(PCWSTR(target.as_ptr()), *kind, 0) } {
+                Ok(()) => report.deleted += 1,
+                // Gone meanwhile: nothing left of it.
+                Err(e) if e.code() == HRESULT_ERROR_NOT_FOUND => report.deleted += 1,
+                Err(_) => report.failures += 1,
+            }
+        }
+        report
+    }
+
     fn status_error(action: &'static str, code: i32) -> AuthStoreError {
         // Never include secret bytes — only the API name and the HRESULT.
         // Format as hex (`0x{:08X}`, via `u32`) so the high bit reads as the
@@ -922,8 +1014,77 @@ mod windows_credentials {
 }
 
 #[cfg(test)]
+mod forget_sign_in_tests {
+    use super::{forget_sign_in_is_own, forget_sign_in_targets};
+
+    const REAL_SERVICE: &str = "io.beebeeb.app";
+    const TEST_SERVICE: &str = "io.beebeeb.app.test";
+    const NAMES: &[&str] = &[
+        "io.beebeeb.app/acct-1/session_token",
+        "io.beebeeb.app/acct-1/wrapped_master_key",
+        "io.beebeeb.app/parked/acct-2/session_token",
+        "io.beebeeb.app.test/acct-9/session_token",
+        "io.beebeeb.app.test/acct-9/account_email",
+        "io.beebeeb.application/x",
+        "io.beebeeb.app.tester/x",
+        "io.beebeeb.app",
+        "io.beebeeb.app/",
+        "io.beebeeb.app.test",
+        "xio.beebeeb.app/x",
+        "LegacyGeneric:target=io.beebeeb.app/x",
+        "git:https://github.com",
+    ];
+
+    #[test]
+    fn forget_sign_in_real_keeps_test_identity_and_look_alikes() {
+        assert_eq!(
+            forget_sign_in_targets(REAL_SERVICE, NAMES.iter().copied()),
+            vec![
+                "io.beebeeb.app/acct-1/session_token",
+                "io.beebeeb.app/acct-1/wrapped_master_key",
+                "io.beebeeb.app/parked/acct-2/session_token",
+            ]
+        );
+    }
+
+    #[test]
+    fn forget_sign_in_test_keeps_real_identity_and_look_alikes() {
+        assert_eq!(
+            forget_sign_in_targets(TEST_SERVICE, NAMES.iter().copied()),
+            vec!["io.beebeeb.app.test/acct-9/session_token", "io.beebeeb.app.test/acct-9/account_email"]
+        );
+    }
+
+    #[test]
+    fn forget_sign_in_matches_without_case_and_never_on_a_bare_service() {
+        assert!(forget_sign_in_is_own(REAL_SERVICE, "IO.Beebeeb.App/acct/session_token"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.app"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.app/"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.ap"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, ""));
+        // A multi-byte character at the service's length never panics.
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.apé/x"));
+    }
+
+    #[test]
+    fn forget_sign_in_names_the_store_writes_are_its_own() {
+        use super::{AccountId, KeychainAccount, account_path, item_name};
+        let id = AccountId::new("acct-1");
+        for service in [REAL_SERVICE, TEST_SERVICE] {
+            for account in [KeychainAccount::SessionToken, KeychainAccount::WrappedMasterKey] {
+                let name = item_name(service, &account_path(Some(&id), account));
+                assert!(forget_sign_in_is_own(service, &name));
+                let other = if service == REAL_SERVICE { TEST_SERVICE } else { REAL_SERVICE };
+                assert!(!forget_sign_in_is_own(other, &name));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 #[path = "../src/keychain/debug_tests.rs"]
 mod debug_tests;
+#[allow(clippy::module_inception)] // the file holds `mod tests` itself
 #[path = "../src/keychain/tests.rs"]
 mod tests;
 
@@ -1103,6 +1264,9 @@ mod macos_keychain {
 #[path = "../src/keychain/errors.rs"]
 mod errors;
 pub use errors::{AuthResult, AuthStoreError, VaultLockState};
+
+#[path = "../src/keychain/owed_revocations.rs"]
+pub(crate) mod owed_revocations;
 
 #[path = "../src/keychain/session.rs"]
 mod session;

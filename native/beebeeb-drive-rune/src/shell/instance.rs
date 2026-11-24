@@ -38,7 +38,7 @@ pub const EXPLORER_VERB_FLAG: &str = "--explorer-verb=";
 /// Development only: show the files of that `state.db` (read-only) instead of the fixture.
 pub const DB_FLAG: &str = "--db";
 /// The API base URL (`engine_host::open::api_base`): read by a dev build and by the test build
-/// (decision 2462), never by the real app in a build that ships. Set BEFORE any engine thread
+///, never by the real app in a build that ships. Set BEFORE any engine thread
 /// exists (it goes into `EngineConfig.api_base`).
 pub const API_BASE_FLAG: &str = "--api-base";
 /// `--api-base=<url>`: not a form the app reads. Where the build reads the flag, such an argument
@@ -253,6 +253,8 @@ pub enum Delivery {
     NoAnswer,
     /// The channel exists and cannot be reached.
     Unreachable,
+    /// It is there, and was started on another server than the launch named.
+    OtherServer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,7 +296,10 @@ pub fn plan(launch: &Launch, claim: Claim, identity: AppIdentity) -> Plan {
     match claim {
         Claim::First if launch.quit_for_update => Plan::ExitQuietly,
         Claim::First => Plan::BeTheApp,
-        Claim::Running if launch.api_base.is_some() => Plan::Refuse(Refusal::ServerAlreadyChosen),
+        // The running instance compares servers (`Request::ShowOn`): the same one just shows its window.
+        Claim::Running if launch.api_base.is_some() && launch.link.is_none() && !launch.quit_for_update => {
+            Plan::Hand(Request::ShowOn(launch.api_base.clone().unwrap_or_default()))
+        }
         Claim::Running => Plan::Hand(request_for(launch, identity)),
         Claim::Unavailable => Plan::Refuse(Refusal::ChannelUnavailable),
     }
@@ -347,6 +352,7 @@ pub fn after_hand(delivery: Delivery) -> Start {
         Delivery::Acknowledged => Start::Forwarded,
         Delivery::NoAnswer => Start::Refuse(Refusal::NotAnswering),
         Delivery::Unreachable => Start::Refuse(Refusal::ChannelUnavailable),
+        Delivery::OtherServer => Start::Refuse(Refusal::ServerAlreadyChosen),
     }
 }
 
@@ -367,7 +373,7 @@ pub fn refusal_is_shown(launch: &Launch) -> bool {
     !launch.autostart && !launch.quit_for_update && !launch.tooling
 }
 
-/// Whether a START refusal of `refuse_start` is shown in a native message box. These (decision 2462: a refused
+/// Whether a START refusal of `refuse_start` is shown in a native message box. These (a refused
 /// `--api-base`, data made for another server, credentials without data) stop the app until a person acts, so they
 /// are shown at login too: once per login, until fixed. They exist only where `--api-base` or a test build's data
 /// exists, never in a plain release start. Not for the installer's call and not for a tooling run.
@@ -531,7 +537,7 @@ mod tests {
             let launch = parse(flags, false);
             assert_eq!(launch, Launch::default(), "{flags:?}");
             assert!(launch.rune_args.is_empty(), "Rune is handed nothing: {flags:?}");
-            // The test build's shipped profile reads `--api-base` and none of these (decision 2462).
+            // The test build's shipped profile reads `--api-base` and none of these.
             assert_eq!(parse_as(flags, false, true), Launch::default(), "test build: {flags:?}");
         }
         for flag in TOOLING_FLAGS {
@@ -617,7 +623,7 @@ mod tests {
         }
     }
 
-    /// `--api-base=<url>` (#335 review P3-2): where the build reads the flag it is handed to the
+    /// `--api-base=<url>`: where the build reads the flag it is handed to the
     /// check whole, which refuses it, so the spelling never becomes a run on the default server;
     /// where the build does not read the flag it means nothing, like `--api-base` itself.
     #[test]
@@ -663,8 +669,9 @@ mod tests {
         let named = parse_as(&["--api-base", "http://127.0.0.1:9"], false, true);
         assert_eq!(
             plan(&named, Claim::Running, AppIdentity::Test),
-            Plan::Refuse(Refusal::ServerAlreadyChosen)
+            Plan::Hand(Request::ShowOn("http://127.0.0.1:9".to_owned()))
         );
+        assert_eq!(after_hand(Delivery::OtherServer), Start::Refuse(Refusal::ServerAlreadyChosen));
         assert!(refusal_is_shown(&named));
         // The first instance starts with it; a later launch without it is handed over as before.
         assert_eq!(plan(&named, Claim::First, AppIdentity::Test), Plan::BeTheApp);
@@ -678,6 +685,14 @@ mod tests {
             "Beebeeb Test is already running, on the server it started with: --api-base cannot change \
              that. Quit Beebeeb Test, then start it again with --api-base."
         );
+    }
+
+    /// W20 bug 9: the same `--api-base` as the running instance's must just bring its window back. The launch
+    /// is handed over (the running instance compares the server); only a different server is refused.
+    #[test]
+    fn w20_a_second_launch_with_api_base_is_handed_over_to_be_compared() {
+        let named = parse_as(&["--api-base", "http://127.0.0.1:9"], false, true);
+        assert!(matches!(plan(&named, Claim::Running, AppIdentity::Test), Plan::Hand(_)));
     }
 
     #[test]

@@ -231,7 +231,7 @@ pub fn on_escape(s: &mut State) -> bool {
 
 /// The step's states for a render to look at (`--scene APPLOCK-...`): no board frame (D-2), so no golden and no gate.
 /// Ids outside the board's pattern on purpose. Fixture data only.
-pub const SCENES: &[(&str, fn(&mut State))] = &[
+pub const SCENES: &[(&str, super::SceneFn)] = &[
     ("APPLOCK-password-offered", |s| {
         s.account.source = Some(Box::new(BoardAccount::new().knowing(asked)));
         super::go(s, "DW-A52");

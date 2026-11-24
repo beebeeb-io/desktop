@@ -1,7 +1,16 @@
-//! The PDF page worker's rules on PDFs built here (a few objects, an xref table, one filled rectangle a page):
-//! what opens, what a page renders to, the limits asked before rendering, and when the worker stops.
+//! The PDF page worker's rules on PDFs built here (a few objects, an xref table, one filled rectangle a page): what
+//! opens, what a page asked of the helper comes back as, the limits asked before rendering, and when the worker
+//! stops. No test starts a process: the helper is stood in for ([`stand_in`], which draws with the reader find
+//! uses) or scripted ([`Script`]).
 
+use std::cell::RefCell;
 use std::sync::Mutex;
+
+use hayro::hayro_interpret::InterpreterSettings;
+use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::{PixmapSettings, RenderCache, RenderSettings};
+
+use crate::engine_host::office_host::{NoPreview as HostNoPreview, Stop};
 
 use super::*;
 
@@ -122,39 +131,194 @@ fn open(bytes: Vec<u8>) -> Result<Document, NotOpened> {
     Document::open(Zeroizing::new(bytes))
 }
 
-/// Ask for `pages` (all waiting before the worker starts), then let the asker go: what was delivered.
-fn served(document: &Document, pages: &[u32], cancel: bool) -> Vec<(u32, Option<Rendered>)> {
-    let (ask, asks) = mpsc::channel();
-    for page in pages {
-        ask.send(*page).unwrap();
-    }
-    drop(ask);
-    let delivered = Mutex::new(Vec::new());
-    document.serve(&asks, &AtomicBool::new(cancel), &|page, rendered| {
-        delivered.lock().unwrap().push((page, rendered));
-    });
-    delivered.into_inner().unwrap()
+/// Put at the end of a PDF's bytes: the stand-in "crashes" at the first page asked of it, as a helper does on a file
+/// made to break it.
+pub(crate) const STOPS_AT_A_PAGE: &[u8] = b"\n%the-stand-in-stops-at-a-page\n";
+
+/// The helper's stand-in: the same answers the host gives for a PDF, drawn in this process (tests only).
+struct StandIn {
+    document: Result<Document, NotOpened>,
+    stops: bool,
+    stopped: bool,
+    came: Vec<Came>,
 }
 
-/// Ask for `pages` one after the other, each when the one before was answered (a person paging): per page asked,
-/// whether it rendered and whether it lacks text.
-fn served_in_turn(document: &Document, pages: &[u32]) -> Vec<(u32, bool, bool)> {
-    let (ask, asks) = mpsc::channel();
-    let mut rest = pages.iter().copied();
-    ask.send(rest.next().expect("a page to ask for")).unwrap();
-    let asker = Mutex::new((Some(ask), rest));
-    let delivered = Mutex::new(Vec::new());
-    document.serve(&asks, &AtomicBool::new(false), &|page, rendered| {
-        let lacks_text = rendered.as_ref().is_some_and(|rendered| rendered.lacks_text);
-        delivered.lock().unwrap().push((page, rendered.is_some(), lacks_text));
-        let mut asker = asker.lock().unwrap();
-        match asker.1.next() {
-            Some(next) => asker.0.as_ref().expect("the asker").send(next).unwrap(),
-            // The asker goes: `serve` returns.
-            None => asker.0 = None,
+pub(crate) fn stand_in(bytes: Zeroizing<Vec<u8>>) -> Box<dyn Renderer> {
+    let stops = bytes.ends_with(STOPS_AT_A_PAGE);
+    Box::new(StandIn {
+        document: Document::open(bytes),
+        stops,
+        stopped: false,
+        came: Vec::new(),
+    })
+}
+
+impl Renderer for StandIn {
+    fn state(&self) -> OfficeState {
+        if self.stopped {
+            return OfficeState::Stopped {
+                why: Stop::Exited,
+                can_retry: true,
+            };
         }
-    });
-    delivered.into_inner().unwrap()
+        match &self.document {
+            Ok(document) => OfficeState::Pages {
+                pages: document.pages(),
+                sizes: document
+                    .pdf
+                    .pages()
+                    .iter()
+                    .map(|page| {
+                        let (w_pt, h_pt) = page.render_dimensions();
+                        PageSize { w_pt, h_pt }
+                    })
+                    .collect(),
+            },
+            Err(NotOpened::Locked) => OfficeState::NoPreview(HostNoPreview::Password),
+            Err(NotOpened::TooLong { pages }) => OfficeState::Pages {
+                pages: *pages,
+                sizes: Vec::new(),
+            },
+            Err(_) => OfficeState::CannotOpen(CannotOpen::Damaged),
+        }
+    }
+
+    fn poll(&mut self) -> Vec<Came> {
+        std::mem::take(&mut self.came)
+    }
+
+    fn ask(&mut self, page: u32, scale: f32) -> bool {
+        let Ok(document) = &self.document else { return false };
+        let pages = document.pdf.pages();
+        let Some(at) = page.checked_sub(1).and_then(|index| pages.get(index as usize)) else {
+            return false;
+        };
+        if self.stops {
+            self.stopped = true;
+            self.came.push(Came::State);
+            return true;
+        }
+        let pixmap = hayro::render(
+            at,
+            &RenderCache::new(),
+            &InterpreterSettings::default(),
+            &RenderSettings::default(),
+            &PixmapSettings {
+                x_scale: scale,
+                y_scale: scale,
+                bg_color: WHITE,
+            },
+        );
+        self.came.push(Came::Page {
+            page,
+            rendered: Rendered {
+                width: u32::from(pixmap.width()),
+                height: u32::from(pixmap.height()),
+                rgba: pixmap.data_as_u8_slice().to_vec(),
+                lacks_text: writes_in_a_numbered_font_not_in_the_file(at),
+            },
+        });
+        true
+    }
+}
+
+/// An open session on the stand-in (the find tests ask theirs of it).
+pub(crate) fn session(bytes: Vec<u8>) -> Result<Session, NotOpened> {
+    let bytes = Zeroizing::new(bytes);
+    Session::open(stand_in(bytes.clone()), bytes, &AtomicBool::new(false))
+}
+
+/// What a scripted helper was asked and is told to be.
+#[derive(Default)]
+struct Told {
+    state: Option<OfficeState>,
+    /// The state it takes when a page is asked of it.
+    at_a_page: Option<OfficeState>,
+    asked: Vec<(u32, f32)>,
+    dropped: bool,
+}
+
+/// A helper that says what the test tells it to.
+struct Script(Arc<Mutex<Told>>);
+
+fn script(state: OfficeState) -> (Arc<Mutex<Told>>, Box<dyn Renderer>) {
+    let told = Arc::new(Mutex::new(Told {
+        state: Some(state),
+        ..Told::default()
+    }));
+    (told.clone(), Box::new(Script(told)))
+}
+
+impl Renderer for Script {
+    fn state(&self) -> OfficeState {
+        self.0.lock().unwrap().state.clone().expect("a state")
+    }
+    fn poll(&mut self) -> Vec<Came> {
+        Vec::new()
+    }
+    fn ask(&mut self, page: u32, scale: f32) -> bool {
+        let mut told = self.0.lock().unwrap();
+        told.asked.push((page, scale));
+        if let Some(next) = told.at_a_page.take() {
+            told.state = Some(next);
+        }
+        true
+    }
+}
+
+impl Drop for Script {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().dropped = true;
+    }
+}
+
+fn letter(pages: u32) -> OfficeState {
+    OfficeState::Pages {
+        pages,
+        sizes: vec![PageSize { w_pt: 612.0, h_pt: 792.0 }; pages as usize],
+    }
+}
+
+fn not_opened(state: OfficeState) -> Option<NotOpened> {
+    Session::open(script(state).1, Zeroizing::new(Vec::new()), &AtomicBool::new(false)).err()
+}
+
+/// What a served session said: the pages delivered, the finds answered, how often it said "stopped".
+#[derive(Default)]
+struct Said {
+    pages: Vec<(u32, Option<Rendered>)>,
+    found: Vec<(u64, usize)>,
+    stopped: u32,
+}
+
+/// Serve `session`: `asks` wait before it starts; the asker goes once `until` holds of what was said (at once when
+/// nothing is asked).
+fn served(session: Session, asks: &[Ask], cancel: bool, until: impl Fn(&Said) -> bool) -> Said {
+    let (ask, receiver) = mpsc::channel();
+    for one in asks {
+        ask.send(one.clone()).unwrap();
+    }
+    let asker = RefCell::new((!asks.is_empty()).then_some(ask));
+    let said = RefCell::new(Said::default());
+    let check = || {
+        if until(&said.borrow()) {
+            asker.borrow_mut().take();
+        }
+    };
+    session.serve(
+        &receiver,
+        &AtomicBool::new(cancel),
+        &|page, rendered| {
+            said.borrow_mut().pages.push((page, rendered));
+            check();
+        },
+        &|serial, matches| {
+            said.borrow_mut().found.push((serial, matches.len()));
+            check();
+        },
+        &|| said.borrow_mut().stopped += 1,
+    );
+    said.into_inner()
 }
 
 fn pixel(page: &Rendered, x: u32, y: u32) -> [u8; 4] {
@@ -163,17 +327,17 @@ fn pixel(page: &Rendered, x: u32, y: u32) -> [u8; 4] {
 }
 
 #[test]
-fn a_pdf_opens_from_memory_and_a_page_renders_to_its_pixels() {
-    let document = open(sample_pdf(3, 612, 792)).expect("it opens");
-    assert_eq!(document.pages(), 3);
-    let mut delivered = served(&document, &[2], false);
-    assert_eq!(delivered.len(), 1);
-    let (page, rendered) = delivered.pop().unwrap();
+fn a_pdf_opens_in_the_helper_and_a_page_asked_of_it_comes_back_as_its_pixels() {
+    let session = session(sample_pdf(3, 612, 792)).expect("it opens");
+    assert_eq!(session.pages(), 3);
+    let mut said = served(session, &[Ask::Page(2)], false, |said| !said.pages.is_empty());
+    assert_eq!((said.pages.len(), said.stopped), (1, 0));
+    let (page, rendered) = said.pages.pop().unwrap();
     let rendered = rendered.expect("page 2 rendered");
     assert_eq!(page, 2);
     // A Letter page at the viewer's width, in its own proportions.
-    assert!((1_259..=1_260).contains(&rendered.width), "{rendered:?}");
-    assert!((1_629..=1_631).contains(&rendered.height), "{rendered:?}");
+    assert!((1_259..=1_261).contains(&rendered.width), "{rendered:?}");
+    assert!((1_629..=1_632).contains(&rendered.height), "{rendered:?}");
     assert_eq!(rendered.rgba.len(), (rendered.width * rendered.height * 4) as usize);
     // The lower-left quarter is black, the rest the white page: opaque either way.
     let (w, h) = (rendered.width, rendered.height);
@@ -185,22 +349,128 @@ fn a_pdf_opens_from_memory_and_a_page_renders_to_its_pixels() {
 }
 
 #[test]
-fn what_is_not_a_pdf_and_a_pdf_with_too_many_pages_are_not_opened() {
-    assert_eq!(open(b"%PDF-1.7 invented".to_vec()).err(), Some(NotOpened::Unreadable));
-    assert_eq!(open(b"plain words".to_vec()).err(), Some(NotOpened::Unreadable));
-    assert_eq!(open(Vec::new()).err(), Some(NotOpened::Unreadable));
-    assert!(
-        open(sample_pdf(PAGES_MAX as usize, 100, 100)).is_ok(),
-        "at the limit it opens"
-    );
-    assert_eq!(
-        open(sample_pdf(PAGES_MAX as usize + 1, 100, 100)).err(),
-        Some(NotOpened::TooLong { pages: PAGES_MAX + 1 })
-    );
+fn the_page_is_asked_of_the_helper_at_the_viewers_scale_and_only_once_while_it_is_out() {
+    let (told, helper) = script(letter(3));
+    let session = Session::open(helper, Zeroizing::new(Vec::new()), &AtomicBool::new(false)).expect("it opens");
+    // Page 2 asked twice over and nothing answered: the asker goes, the worker ends, the helper is let go.
+    let (ask, asks) = mpsc::channel();
+    ask.send(Ask::Page(2)).unwrap();
+    let asker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(60));
+        ask.send(Ask::Page(2)).unwrap();
+        std::thread::sleep(Duration::from_millis(60));
+    });
+    session.serve(&asks, &AtomicBool::new(false), &|_, _| panic!("no page came"), &|_, _| {}, &|| {
+        panic!("it did not stop")
+    });
+    asker.join().unwrap();
+    let told = told.lock().unwrap();
+    assert_eq!(told.asked, [(2, PAGE_WIDTH_PX / 612.0)]);
+    assert!(told.dropped, "the worker's end ends the helper");
 }
 
 #[test]
-fn a_page_is_never_rendered_past_the_pixel_limits_whatever_its_box_says() {
+fn what_is_not_a_pdf_and_a_pdf_with_too_many_pages_are_not_opened() {
+    for bytes in [b"%PDF-1.7 invented".to_vec(), b"plain words".to_vec(), Vec::new()] {
+        assert_eq!(open(bytes.clone()).err(), Some(NotOpened::Unreadable));
+        assert_eq!(session(bytes).err(), Some(NotOpened::Unreadable));
+    }
+    assert!(
+        session(sample_pdf(PAGES_MAX as usize, 100, 100)).is_ok(),
+        "at the limit it opens"
+    );
+    let long = sample_pdf(PAGES_MAX as usize + 1, 100, 100);
+    assert_eq!(open(long.clone()).err(), Some(NotOpened::TooLong { pages: PAGES_MAX + 1 }));
+    assert_eq!(session(long).err(), Some(NotOpened::TooLong { pages: PAGES_MAX + 1 }));
+}
+
+#[test]
+fn what_the_helper_says_at_the_open_is_what_the_viewer_says() {
+    assert_eq!(not_opened(OfficeState::NoPreview(HostNoPreview::Password)), Some(NotOpened::Locked));
+    // No helper beside the app, no sandbox on this system, a Windows too old for it: nothing is parsed here instead.
+    for none in [
+        HostNoPreview::NotInstalled,
+        HostNoPreview::NoSandbox,
+        HostNoPreview::NeedsWindowsUpdate,
+        HostNoPreview::ThisType,
+    ] {
+        assert_eq!(not_opened(OfficeState::NoPreview(none)), Some(NotOpened::NoRenderer), "{none:?}");
+    }
+    for cannot in [CannotOpen::Damaged, CannotOpen::TooLarge] {
+        assert_eq!(not_opened(OfficeState::CannotOpen(cannot)), Some(NotOpened::Unreadable));
+    }
+    assert_eq!(not_opened(letter(0)), Some(NotOpened::Unreadable));
+    assert_eq!(not_opened(letter(PAGES_MAX + 1)), Some(NotOpened::TooLong { pages: PAGES_MAX + 1 }));
+    // A helper that crashed, timed out or could not be started while it opened the file: Failed, with Try again.
+    for why in [Stop::Exited, Stop::TimedOut, Stop::Protocol, Stop::Failed] {
+        let stopped = OfficeState::Stopped { why, can_retry: true };
+        assert_eq!(not_opened(stopped), Some(NotOpened::Stopped), "{why:?}");
+    }
+    assert_eq!(
+        not_opened(OfficeState::Closed(office_host::CloseWhy::Locked)),
+        Some(NotOpened::Stopped)
+    );
+    // A session that ends while the helper is still opening: the wait ends (this test would hang otherwise), and
+    // the helper is let go.
+    let (told, helper) = script(OfficeState::Opening);
+    let opened = Session::open(helper, Zeroizing::new(Vec::new()), &AtomicBool::new(true));
+    assert_eq!(opened.err(), Some(NotOpened::Stopped));
+    assert!(told.lock().unwrap().dropped);
+}
+
+#[test]
+fn a_helper_that_stops_at_a_page_ends_only_itself_and_the_worker_says_so_once() {
+    // Scripted: the helper is gone when page 1 is asked of it.
+    let (told, helper) = script(letter(2));
+    told.lock().unwrap().at_a_page = Some(OfficeState::Stopped {
+        why: Stop::Exited,
+        can_retry: true,
+    });
+    let session = Session::open(helper, Zeroizing::new(Vec::new()), &AtomicBool::new(false)).expect("it opens");
+    // The asker stays (`ask` is alive past the call): the worker ends on its own.
+    let (ask, asks) = mpsc::channel();
+    ask.send(Ask::Page(1)).unwrap();
+    let stopped = RefCell::new(0);
+    session.serve(&asks, &AtomicBool::new(false), &|_, _| panic!("no page came"), &|_, _| {}, &|| {
+        *stopped.borrow_mut() += 1
+    });
+    assert_eq!(stopped.into_inner(), 1);
+    assert!(told.lock().unwrap().dropped, "the stopped helper is let go");
+    drop(ask);
+
+    // The stand-in the window tests use does the same on a file marked for it; unmarked, the page comes.
+    let mut hostile = sample_pdf(2, 612, 792);
+    hostile.extend_from_slice(STOPS_AT_A_PAGE);
+    let (ask, asks) = mpsc::channel();
+    ask.send(Ask::Page(1)).unwrap();
+    let stopped = RefCell::new(0);
+    session_of(hostile).serve(&asks, &AtomicBool::new(false), &|_, _| panic!("no page came"), &|_, _| {}, &|| {
+        *stopped.borrow_mut() += 1
+    });
+    assert_eq!(stopped.into_inner(), 1);
+    drop(ask);
+}
+
+fn session_of(bytes: Vec<u8>) -> Session {
+    session(bytes).expect("it opens")
+}
+
+#[test]
+fn a_helper_that_is_closed_by_a_lock_while_the_pdf_is_open_ends_the_worker_within_its_idle_wait() {
+    let (told, helper) = script(letter(2));
+    let session = Session::open(helper, Zeroizing::new(Vec::new()), &AtomicBool::new(false)).expect("it opens");
+    // The host's registry closed the helper (a lock): nothing was asked, the asker stays.
+    told.lock().unwrap().state = Some(OfficeState::Closed(office_host::CloseWhy::Locked));
+    let (ask, asks) = mpsc::channel::<Ask>();
+    let stopped = RefCell::new(0);
+    session.serve(&asks, &AtomicBool::new(false), &|_, _| {}, &|_, _| {}, &|| *stopped.borrow_mut() += 1);
+    assert_eq!(stopped.into_inner(), 1);
+    assert!(told.lock().unwrap().dropped);
+    drop(ask);
+}
+
+#[test]
+fn a_page_is_never_asked_past_the_pixel_limits_whatever_its_box_says() {
     // The scale, from the box alone.
     let within = |width: f32, height: f32| {
         let scale = scale_for(width, height).expect("a scale");
@@ -222,126 +492,107 @@ fn a_page_is_never_rendered_past_the_pixel_limits_whatever_its_box_says() {
         "a tall page: by its pixels or its side"
     );
     assert!(within(100.0, 14_400.0) * 14_400.0 <= PAGE_SIDE_MAX + 0.5);
-    // A page five and a half times as tall as wide: within the side limit at the viewer's width, and past the
-    // pixel limit there, so the pixel limit alone holds it.
-    let tall = within(200.0, 1_100.0);
-    assert!(
-        tall < PAGE_WIDTH_PX / 200.0 && 1_100.0 * tall < PAGE_SIDE_MAX - 1.0,
-        "{tall}"
-    );
     for (width, height) in [(0.0, 100.0), (100.0, 0.5), (f32::NAN, 10.0), (f32::INFINITY, 10.0)] {
         assert_eq!(scale_for(width, height), None, "{width} x {height}");
     }
-    // And a real page with such a box renders within them.
-    let document = open(sample_pdf(1, 200, 14_400)).unwrap();
-    let rendered = served(&document, &[1], false).pop().unwrap().1.expect("it renders");
-    assert!(u64::from(rendered.width) * u64::from(rendered.height) <= PAGE_PIXELS_MAX as u64);
-    assert!(rendered.height <= PAGE_SIDE_MAX as u32);
+    // The longest side stays under what the protocol sizes a raster to (4,096 px a side), rounding up included.
+    const {
+        assert!(PAGE_SIDE_MAX + 1.0 < 4_096.0);
+    }
+    // And a real page with such a box comes back within them.
+    let said = served(session_of(sample_pdf(1, 200, 14_400)), &[Ask::Page(1)], false, |said| {
+        !said.pages.is_empty()
+    });
+    let rendered = said.pages[0].1.as_ref().expect("it renders");
+    assert!(u64::from(rendered.width) * u64::from(rendered.height) <= PAGE_PIXELS_MAX as u64 + 8_000);
+    assert!(rendered.height <= PAGE_SIDE_MAX as u32 + 1);
 }
 
 #[test]
-fn only_the_newest_page_waiting_is_rendered_and_a_page_that_is_not_there_is_said() {
-    let document = open(sample_pdf(4, 300, 300)).unwrap();
-    // Three asks waiting when the worker gets to them (the person paged on twice): one render.
-    let delivered = served(&document, &[1, 2, 3], false);
-    assert_eq!(delivered.iter().map(|(page, _)| *page).collect::<Vec<_>>(), [3]);
-    assert!(delivered[0].1.is_some());
-    // No page 0 and no page 5: answered as not rendered, not skipped (the view waits for an answer).
-    for missing in [0, 5] {
-        let delivered = served(&document, &[missing], false);
-        assert_eq!(delivered.len(), 1, "{missing}");
-        assert!(delivered[0].1.is_none(), "{missing}");
+fn only_the_newest_page_waiting_is_asked_and_a_page_that_is_not_there_is_said() {
+    let asks = [Ask::Page(1), Ask::Page(2), Ask::Page(3)];
+    let said = served(session_of(sample_pdf(3, 300, 300)), &asks, false, |said| !said.pages.is_empty());
+    let pages: Vec<u32> = said.pages.iter().map(|(page, _)| *page).collect();
+    assert_eq!(pages, [3]);
+    for missing in [0, 4, u32::MAX] {
+        let said = served(session_of(sample_pdf(3, 300, 300)), &[Ask::Page(missing)], false, |said| {
+            !said.pages.is_empty()
+        });
+        assert!(matches!(said.pages[..], [(page, None)] if page == missing), "{missing}");
     }
 }
 
 #[test]
-fn a_page_being_rendered_when_its_session_ends_is_never_delivered_and_the_worker_ends() {
-    let document = open(sample_pdf(3, 300, 300)).unwrap();
-    let cancel = Arc::new(AtomicBool::new(false));
-    // The session ends (a lock, a sign-out) while page 1 is with the renderer.
-    let ends = cancel.clone();
-    *document.as_a_render_starts.lock().unwrap() = Some(Box::new(move || ends.store(true, Ordering::SeqCst)));
-    // The asker stays, with another page waiting: only the session's end stops the worker.
+fn a_cancelled_worker_asks_and_delivers_nothing_and_ends_although_the_asker_stays() {
+    let (told, helper) = script(letter(2));
+    let session = Session::open(helper, Zeroizing::new(Vec::new()), &AtomicBool::new(false)).expect("it opens");
     let (ask, asks) = mpsc::channel();
-    ask.send(1).unwrap();
-    let delivered = Mutex::new(Vec::new());
-    let more = Mutex::new(Some(ask.clone()));
-    document.serve(&asks, &cancel, &|page, rendered: Option<Rendered>| {
-        delivered.lock().unwrap().push((page, rendered.is_some()));
-        // (Reached only if the page was delivered: the view would ask for the next one.)
-        if let Some(ask) = more.lock().unwrap().as_ref() {
-            let _ = ask.send(2);
-        }
-    });
-    // `serve` returned although the asker is still here (it would wait for the next request otherwise).
-    assert_eq!(
-        document.renders.load(Ordering::SeqCst),
-        1,
-        "the render under way ran to its end, and no other began"
+    ask.send(Ask::Page(1)).unwrap();
+    ask.send(Ask::Find {
+        serial: 1,
+        words: "tide".into(),
+    })
+    .unwrap();
+    session.serve(
+        &asks,
+        &AtomicBool::new(true),
+        &|_, _| panic!("no page"),
+        &|_, _| panic!("no find"),
+        &|| panic!("a session's end is not a stopped helper"),
     );
-    assert_eq!(
-        *delivered.lock().unwrap(),
-        [],
-        "what it made was dropped, not delivered"
-    );
+    let told = told.lock().unwrap();
+    assert!(told.asked.is_empty());
+    assert!(told.dropped, "the helper goes with the session");
     drop(ask);
-    // The same document and asks without the session ending: the page is delivered (the test can fail).
-    *document.as_a_render_starts.lock().unwrap() = None;
-    assert_eq!(served(&document, &[1], false).len(), 1);
-}
-
-#[test]
-fn a_cancelled_worker_renders_and_delivers_nothing_and_ends_when_the_asker_goes() {
-    let document = open(sample_pdf(2, 300, 300)).unwrap();
-    assert!(served(&document, &[1], true).is_empty());
-    // Not rendered and then held back: the renderer was never asked (a page can take seconds, and the document
-    // is to leave memory when its session does).
-    assert_eq!(document.renders.load(Ordering::SeqCst), 0);
-    assert_eq!(served(&document, &[1], false).len(), 1);
-    assert_eq!(document.renders.load(Ordering::SeqCst), 1);
     // Nothing asked, the asker gone: `serve` returns (this test would hang otherwise).
-    assert!(served(&document, &[], false).is_empty());
+    let said = served(session_of(sample_pdf(1, 300, 300)), &[], false, |_| true);
+    assert!(said.pages.is_empty());
 }
 
 #[test]
-fn a_page_whose_text_is_in_a_font_the_file_does_not_carry_says_so_and_no_other_page_does() {
-    use Writes::{Japanese, Latin, Nothing};
-    let document = open(fonts_pdf(&[Nothing, Japanese, Japanese, Latin, Nothing])).expect("it opens");
-    // Paged through and back, on one worker (one font cache): each page answers for itself, also the second
-    // page in the same font, a page after them, and a page shown again.
-    let delivered = served_in_turn(&document, &[1, 2, 3, 4, 5, 3, 1, 2]);
-    assert_eq!(
-        delivered,
-        [
-            (1, true, false),
-            (2, true, true),
-            (3, true, true),
-            (4, true, false),
-            (5, true, false),
-            (3, true, true),
-            (1, true, false),
-            (2, true, true),
-        ]
-    );
-    // A Latin font that is not in the file has a stand-in: nothing is said of it, on a worker of its own too.
-    let latin = open(fonts_pdf(&[Latin])).expect("it opens");
-    assert_eq!(served_in_turn(&latin, &[1]), [(1, true, false)]);
-    // A font written by glyph number has none, whatever its script: said, and the Latin page after it is not.
-    let numbered = open(fonts_pdf(&[Writes::ByGlyphNumber, Latin])).expect("it opens");
-    assert_eq!(served_in_turn(&numbered, &[1, 2]), [(1, true, true), (2, true, false)]);
-    // A Japanese font named "…Sans…": the renderer asks for it as for Helvetica, and the page's own content
-    // says it. The Latin pages around it, which really ask for Helvetica, say nothing.
-    let sans = open(fonts_pdf(&[Latin, Writes::JapaneseSans, Latin, Nothing])).expect("it opens");
-    assert_eq!(
-        served_in_turn(&sans, &[1, 2, 3, 4, 2]),
-        [
-            (1, true, false),
-            (2, true, true),
-            (3, true, false),
-            (4, true, false),
-            (2, true, true)
-        ]
-    );
-    // A page that is not there lacks no text: it is not rendered.
-    assert_eq!(served_in_turn(&document, &[2, 9]), [(2, true, true), (9, false, false)]);
+fn a_page_the_helper_says_misses_content_lacks_text_and_no_other_page_does() {
+    let pdf = fonts_pdf(&[
+        Writes::Latin,
+        Writes::Japanese,
+        Writes::Nothing,
+        Writes::ByGlyphNumber,
+        Writes::JapaneseSans,
+    ]);
+    for (page, lacks) in [(1, false), (2, true), (3, false), (4, true), (5, true)] {
+        let said = served(session_of(pdf.clone()), &[Ask::Page(page)], false, |said| !said.pages.is_empty());
+        let rendered = said.pages[0].1.as_ref().expect("it renders");
+        assert_eq!(rendered.lacks_text, lacks, "page {page}");
+    }
+}
+
+/// RC2-3: the two kinds of PDF that did not open on the Windows test machine (a 3-page text PDF, a minimal 1-page
+/// one), as files. Each opens, with its page count, by the reader the helper uses and through the session.
+#[test]
+fn viewer_pdf_the_two_rc2_pdfs_open_with_their_page_counts() {
+    let files: [(&str, &[u8], u32); 2] = [
+        ("text-3-pages.pdf", include_bytes!("../../tests/fixtures/pdf/text-3-pages.pdf"), 3),
+        ("minimal-1-page.pdf", include_bytes!("../../tests/fixtures/pdf/minimal-1-page.pdf"), 1),
+    ];
+    for (name, bytes, pages) in files {
+        assert_eq!(open(bytes.to_vec()).map(|document| document.pages()), Ok(pages), "{name}");
+        let session = session(bytes.to_vec()).unwrap_or_else(|why| panic!("{name}: {why:?}"));
+        assert_eq!(session.pages(), pages, "{name}");
+        // Page 1 comes back drawn, at the viewer's width.
+        let said = served(session, &[Ask::Page(1)], false, |said| !said.pages.is_empty());
+        let (page, rendered) = &said.pages[0];
+        let rendered = rendered.as_ref().unwrap_or_else(|| panic!("{name}: page 1 was not drawn"));
+        assert_eq!(*page, 1, "{name}");
+        assert!((1_259..=1_261).contains(&rendered.width), "{name}: {rendered:?}");
+        assert_eq!(said.stopped, 0, "{name}");
+    }
+}
+
+/// RC2-3: a PDF cut short is "not readable" (its own words in the view), never a helper that stopped and never a
+/// failed decryption.
+#[test]
+fn viewer_pdf_a_pdf_cut_short_is_unreadable_not_a_stopped_helper() {
+    let whole: &[u8] = include_bytes!("../../tests/fixtures/pdf/text-3-pages.pdf");
+    let cut = whole[..64].to_vec();
+    assert_eq!(open(cut.clone()).err(), Some(NotOpened::Unreadable));
+    assert_eq!(session(cut).err(), Some(NotOpened::Unreadable));
 }

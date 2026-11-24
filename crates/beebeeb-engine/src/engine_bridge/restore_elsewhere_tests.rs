@@ -18,7 +18,7 @@ const VERSION_TWO: &[u8] = b"version two";
 fn bridge_in(dir: &Path) -> EngineBridge {
     let db = Arc::new(StateDb::open(dir.join("state.db")).unwrap());
     let api = Arc::new(ApiClient::new("http://127.0.0.1:9".into(), "token".into(), MASTER_KEY));
-    EngineBridge::new(&crate::identity::REAL, db, api)
+    EngineBridge::new(&crate::identity::TEST, db, api)
 }
 
 /// The name as a server row carries it, sealed as `tests/sync.rs`'s `enc_name` seals it (a fixture, never a write).
@@ -421,7 +421,7 @@ fn keep_there_replaces_an_edited_file_with_an_agreed_hash() {
 /// every hydrate that is not the person's resolution (the queue). Keep there's relief stops at agreed content: an
 /// edited file whose content is known only from fetches (no agreed content recorded) still refuses under Keep there.
 /// Unknown content under Keep there itself is not refused, today as before (S6, task 2191: the person's to resolve, its
-/// copy kept first), so the test covers these two cases (lead ruling 2026-11-15: renamed from the spec's name).
+/// copy kept first), so the test covers these two cases.
 /// Mutant M3b (the `has_agreed_content` condition dropped): red.
 #[test]
 fn keep_there_relief_stops_at_agreed_content() {
@@ -586,7 +586,7 @@ fn put_conflict_row(bridge: &EngineBridge, file_id: &str, name: &str, agreed: &[
 const AGREED_AT_THE_LOOK: &[u8] = b"the agreed content.";
 const SAVED_DURING_IT: &[u8] = b"saved during it!!!!";
 
-/// Lead ruling on L409 (2026-11-15): the relief lets the pre-write hash check pass for an edit against agreed content on
+/// the relief lets the pre-write hash check pass for an edit against agreed content on
 /// Keep there's path, so a save made DURING the download, over a file that was agreed at the look, is caught only by
 /// the start-look compare (S6 R8). It must still be refused, and the save kept. Driven on the native Keep there's entry
 /// (`resolve_theirs_seen`) against the fake account, which serves the file's real chunks, so the download completes
@@ -619,7 +619,7 @@ async fn keep_there_refuses_a_save_made_during_the_download() {
             account.session_token.clone(),
             account.master_key,
         ));
-        let bridge = EngineBridge::new(&crate::identity::REAL, db, api);
+        let bridge = EngineBridge::new(&crate::identity::TEST, db, api);
         let place = sync_root.join("report.docx");
         std::fs::write(&place, AGREED_AT_THE_LOOK).unwrap();
         put_conflict_row(&bridge, &file, "report.docx", AGREED_AT_THE_LOOK);
@@ -662,7 +662,7 @@ async fn keep_there_refuses_a_save_made_during_the_download() {
     drop(fake);
 }
 
-/// Lead ruling (2026-11-15) on the lane's decision: a snapshot node whose upload is still running and that names a
+/// a snapshot node whose upload is still running and that names a
 /// later version is left to the time rule (as macOS's §6.3.2 snapshot fill skips such a node): at an older server time
 /// it is skipped, at a later one it is applied as before. Mutant M9 (the `is_uploading` condition of the `Greater` arm
 /// dropped): red, the older node re-anchors the row.

@@ -121,16 +121,3 @@ pub(super) fn until_drawn(rt: &mut Runtime<State>, words: &str) {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
-
-pub(super) fn click(rt: &mut Runtime<State>, key: &str) {
-    let rect = rt
-        .elements()
-        .into_iter()
-        .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
-        .unwrap_or_else(|| panic!("no element keyed {key}; the window draws:\n{}", drawn(rt)))
-        .rect;
-    let (x, y) = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
-    rt.pointer_down(x, y);
-    rt.pointer_up(x, y);
-    settle(rt);
-}

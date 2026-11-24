@@ -5,14 +5,40 @@
 //! search field) is `ui::toolbar`'s, drawn again here because that file builds it in one private
 //! function (a request to the design-system lane in the PR body: make the halves public).
 
-use rune::{Color, Cx, El, col, el, row, text_input};
+use rune::{Cx, El, col, el, row};
 
 use super::source::OpenFile;
-use super::{Ui, icons, style};
+use super::{Ui, icons};
 use crate::State;
-use crate::theme::tokens::{Theme, radius, type_};
-use crate::ui::toolbar::{ToolState, kbd, segment, segmented, tool_button};
-use crate::ui::{caption, kit, sidebar};
+use crate::theme::scale;
+use crate::theme::tokens::Theme;
+use crate::ui::{caption, focus, sidebar, status_bar, toolbar};
+
+/// The F6 stops of an open file's window: the toolbar, the file itself, the details panel.
+pub const PANE_TOOLBAR: &str = "pane-toolbar";
+pub const PANE_BODY: &str = "pane-body";
+pub const PANE_DETAILS: &str = "pane-details";
+
+/// F (no modifier) on a video: the window goes full screen, or comes back. The window's own key handler (it
+/// holds the transaction `media::on_key` is not given); Esc stays the shell's, which closes the viewer.
+pub(super) fn full_screen_key(s: &State, ev: &rune::KeyEvent) -> bool {
+    let m = &ev.mods;
+    let plain = !m.alt && !m.shift && !m.cmd && !m.ctrl;
+    plain
+        && matches!(&ev.key, rune::Key::Text(k) if k.eq_ignore_ascii_case("f"))
+        && s.viewer
+            .ui
+            .as_ref()
+            .is_some_and(|ui| ui.editor.is_none() && ui.dialog.is_none() && matches!(ui.file.body, super::source::Body::Video(_)))
+}
+
+fn window_keys(s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
+    if full_screen_key(s, ev) {
+        tx.toggle_full_screen();
+        return true;
+    }
+    false
+}
 
 /// The status line's dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,8 +57,6 @@ pub struct Status {
     pub details: String,
 }
 
-const SEARCH_PLACEHOLDER: &str = "Search names";
-
 /// What the toolbar says about the file beyond its path.
 #[derive(Default)]
 pub struct Head {
@@ -42,275 +66,92 @@ pub struct Head {
     pub unsaved: bool,
 }
 
-/// The path and the line under it (`.mk-title` with `.mk-crumbs`).
+/// The file's name and the line under it, with its icon (and the unsaved dot): the shared title block.
 fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
     let facts = head.facts.clone().unwrap_or_else(|| file.facts.clone());
-    let mut crumbs = row().key("crumbs").w_full().min_w(0.0).center_y().gap(4.0);
-    for (i, folder) in file.path.iter().enumerate() {
-        crumbs = crumbs
-            .child(style::fitted(
-                format!("crumb-{i}"),
-                folder,
-                style::CRUMB,
-                t.text_tertiary,
-            ))
-            // When the toolbar is full the separators give way first, as the board's do.
-            .child(kit::glyph(format!("crumb-sep-{i}"), &icons::CHEVRON_RIGHT, 12.0, t.text_tertiary).shrink());
-    }
-    crumbs = crumbs.child(style::fitted(
-        "crumb-name",
-        &file.name,
-        style::CRUMB_NAME,
-        t.text_tertiary,
-    ));
+    let icon = crate::theme::file_icons::icon_for(&file.name, false, None);
+    let mut block = row()
+        .key("viewer-title")
+        .role("group")
+        .label(format!("{}, {}, {}", file.path.join(" / "), file.name, facts))
+        .min_w(0.0)
+        .shrink()
+        .center_y()
+        .gap(scale::space::S6)
+        .child(crate::ui::file_icon::file_icon("viewer-title-icon", icon, 16.0, t))
+        .child(toolbar::title_block(&file.name, Some(&facts), t).shrink());
     if head.unsaved {
-        crumbs = crumbs.child(
+        block = block.child(
             el().key("crumb-dot")
                 .role("image")
                 .label("Not saved")
                 .size(7.0, 7.0)
-                .radius(3.5)
-                .ml(2.0)
-                .fill(t.text)
-                // As the status dot: a little of the ground inside the edge, for Chromium's
-                // lighter outermost rows ("Rune limitations", PR body).
-                .box_shadow(rune::Shadow {
-                    x: 0.0,
-                    y: 0.0,
-                    blur: 0.0,
-                    spread: 0.05,
-                    color: t.toolbar_bg,
-                    inset: true,
-                }),
+                .radius(scale::radius::PILL)
+                .fill(t.text),
         );
     }
-    col()
-        .key("file-info")
-        .role("group")
-        .label(format!("{}, {}", file.name, facts))
-        .px(4.0)
-        .shrink()
-        .child(crumbs)
-        .child(kit::label("item-count", facts, type_::TITLE_SUB, t.text_tertiary).w_full())
+    block
 }
 
 /// The toolbar of an open file. `tools` are the file's own controls, drawn before the "more" button.
-pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El {
-    let nav = row()
-        .key("nav")
-        .child(
-            tool_button("back", "Back", &icons::CHEVRON_LEFT, 16.0, ToolState::Idle, t)
-                .shortcut_hint("Alt+Left")
-                .on_press(super::close),
-        )
-        .child(
-            tool_button("forward", "Forward", &icons::CHEVRON_RIGHT, 16.0, ToolState::Off, t)
-                .shortcut_hint("Alt+Right"),
-        );
-
-    let more = tool_button("more-btn", "More actions", &icons::MORE, 17.0, ToolState::Idle, t);
+pub fn toolbar(_s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El {
+    let more = toolbar::tool("more-btn", "More actions", &icons::MORE, t);
     // The file's own controls and "more" sit 6 apart (`.flex.items-center.gap-1.5`).
-    let file_tools = row().key("file-tools").center_y().gap(6.0).children(tools).child(more);
-
-    // The folder's view switch does nothing for an open file: drawn, dimmed, not operable.
-    let view_toggle = el()
-        .key("view-toggle-dim")
-        .radius(9.0)
-        .fill(t.field)
-        .opacity(0.45)
-        .child(segmented(
-            "view-toggle",
-            "View",
-            vec![
-                segment("view-list", "as List", &icons::VIEW_LIST, false, t)
-                    .disabled(true)
-                    .focusable(false),
-                segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t)
-                    .disabled(true)
-                    .focusable(false),
-            ],
-            t,
-        ));
-
-    let sort_btn = tool_button("sort-btn", "Sort", &icons::SORT, 15.0, ToolState::Off, t).child(kit::glyph(
-        "sort-caret",
-        &icons::CHEVRON_DOWN,
-        11.0,
-        t.text_quaternary,
-    ));
-
-    let panel_btn = tool_button(
-        "panel-toggle-btn",
-        "Details panel",
-        &icons::PANEL_TOGGLE,
-        16.0,
-        if ui.show_details {
-            ToolState::On
-        } else {
-            ToolState::Idle
+    // One Tab stop (`ui::toolbar::roving`): Tab enters it once, Left/Right/Home/End move inside it.
+    let file_tools = toolbar::roving(
+        row().key("file-tools").center_y().gap(scale::space::S6).children(tools).child(more),
+        "File tools",
+    );
+    toolbar::file_bar(
+        toolbar::Bar {
+            name: ui.file.name.clone(),
+            back: (true, toolbar::press(|s, _| super::close(s))),
+            forward: (false, None),
+            title: title(&ui.file, head, t),
+            slot: Some(file_tools),
+            slot_sep: false,
+            view: toolbar::View::NotHere,
+            on_view: None,
+            sort: toolbar::Sort::NotHere,
+            on_sort: None,
+            details: if ui.show_details {
+                toolbar::Details::Open
+            } else {
+                toolbar::Details::Closed
+            },
+            on_details: toolbar::press(|s, _| {
+                if let Some(ui) = super::ui(s) {
+                    ui.toggle_details();
+                }
+            }),
+            inert: false,
+            gate_closed: false,
+            on_explorer: Box::new(|s, _| {
+                let Some((id, name)) = super::ui(s).map(|ui| (ui.file.id.clone(), ui.file.name.clone())) else {
+                    return;
+                };
+                let answer = super::super::show_in_folder::show(s, &id, &name);
+                if let Some(ui) = super::ui(s) {
+                    ui.toast = answer.err().map(str::to_string);
+                }
+            }),
+            new: toolbar::New::Off,
+            on_new: None,
+            search: el(),
+            trailing_inset: 12.0,
         },
         t,
     )
-    .shortcut_hint("Alt+Shift+P")
-    .checked(ui.show_details)
-    .on_press(|s: &mut State| {
-        if let Some(ui) = super::ui(s) {
-            ui.toggle_details();
-        }
-    });
-
-    // Open in File Explorer (board b4ffef881): the last icon button, never dimmed; the viewer shows no folder of its
-    // own, so it opens the Beebeeb location.
-    let explorer_btn = tool_button(
-        "open-explorer",
-        "Open in File Explorer",
-        &crate::theme::icons_settings::FOLDER,
-        16.0,
-        ToolState::Idle,
-        t,
-    )
-    .help("Open in File Explorer")
-    .on_press_tx(crate::ui::toolbar::open_beebeeb_location);
-
-    let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
-
-    let new_btn = row()
-        .key("new-btn")
-        .role("button")
-        .label("New")
-        .h(28.0)
-        .pl(8.0)
-        .pr(9.0)
-        .gap(5.0)
-        .center_y()
-        .radius(radius::CONTROL)
-        .fill(t.accent)
-        .hover(t.press)
-        .press(t.press)
-        .focusable(true)
-        .on_press(|s: &mut State| {
-            if let Some(ui) = super::ui(s) {
-                ui.intent(super::Intent::NewMenu);
-            }
-        })
-        .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
-        .child(style::fitted("new-label", "New", type_::LABEL, t.accent_text_on))
-        .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));
-
-    kit::note_text(
-        "search-placeholder",
-        "search-input",
-        SEARCH_PLACEHOLDER,
-        type_::SEARCH,
-        t.text_tertiary,
-    );
-    let search_field = row()
-        .key("search-box")
-        .role("search")
-        .w(210.0)
-        .h(28.0)
-        .gap(6.0)
-        .pl(9.0)
-        .pr(6.0)
-        .radius(8.0)
-        .fill(t.field)
-        .box_shadow(kit::ring_inset(t.separator))
-        .center_y()
-        .child(kit::glyph("search-icon", &icons::SEARCH, 13.0, t.text_tertiary))
-        .child(
-            text_input(&s.search, type_::SEARCH)
-                .key("search-input")
-                .label("Search names")
-                .shortcut_hint("Ctrl+F")
-                .single_line()
-                .color(t.text)
-                .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)
-                .on_edit(|s: &mut State| &mut s.search)
-                .grow(1.0),
-        )
-        .child(kbd("kbd-hint", "Ctrl+F", t));
-
-    row()
-        .key("toolbar")
-        .role("toolbar")
-        .label(ui.file.name.clone())
-        .h(46.0)
-        .w_full()
-        .fill(t.toolbar_bg)
-        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-        .border_layout()
-        .pl(10.0)
-        .pr(12.0)
-        .center_y()
-        .gap(8.0)
-        .child(nav)
-        .child(title(&ui.file, head, t))
-        .child(el().key("toolbar-spacer").grow(1.0))
-        .child(file_tools)
-        .child(view_toggle)
-        .child(sort_btn)
-        .child(panel_btn)
-        .child(explorer_btn)
-        .child(sep)
-        .child(new_btn)
-        .child(search_field)
 }
 
 /// The status line (`.mk-foot`) with this frame's words.
 pub fn status_bar(status: &Status, t: &Theme) -> El {
     let dot = match status.dot {
-        Dot::Green => t.green,
-        Dot::Warn => style::warn(t),
-        Dot::Red => style::red(t),
+        Dot::Green => status_bar::Dot::Green,
+        Dot::Warn => status_bar::Dot::Warn,
+        Dot::Red => status_bar::Dot::Red,
     };
-    row()
-        .key("status-bar")
-        .role("status")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(
-            row()
-                .key("status-left")
-                .center_y()
-                .gap(7.0)
-                // A tenth of a device pixel of the bar's own colour inside the dot's edge: Chromium's
-                // antialiased 14-pixel disc covers less of its outermost pixel rows than Rune's
-                // (measured 91 % against 98 %), which shows on a dot this dark. A size or a scale
-                // cannot say it: Rune snaps the box to whole pixels ("Rune limitations", PR body).
-                .child(
-                    el().key("status-dot")
-                        .size(7.0, 7.0)
-                        .radius(3.5)
-                        .fill(dot)
-                        .box_shadow(rune::Shadow {
-                            x: 0.0,
-                            y: 0.0,
-                            blur: 0.0,
-                            spread: 0.05,
-                            color: t.status_bar_bg,
-                            inset: true,
-                        }),
-                )
-                .child(kit::label(
-                    "status-text",
-                    status.text.clone(),
-                    type_::STATUS_STRONG,
-                    t.text_secondary,
-                )),
-        )
-        .child(el().key("status-spacer").grow(1.0))
-        .child(kit::label(
-            "status-details",
-            status.details.clone(),
-            type_::STATUS,
-            t.text_tertiary,
-        ))
+    status_bar::bar(Some(dot), Some(&status.text), &status.details, t)
 }
 
 /// What the status line says at the left while content read from the copy on this PC is on screen.
@@ -374,6 +215,7 @@ pub(super) fn origin_status(origin: super::source::Origin, shows_content: bool, 
 }
 
 /// The window with an open file in its content area: `body` between the toolbar and the status line.
+#[allow(clippy::too_many_arguments)]
 pub fn window(
     s: &State,
     cx: &mut Cx<State>,
@@ -385,6 +227,8 @@ pub fn window(
     status: &Status,
     t: &Theme,
 ) -> El {
+    // Keyboard as Windows has it: Tab visits every control.
+    cx.web_focus();
     let mut main = col()
         .key("content-area")
         .role("main")
@@ -392,21 +236,30 @@ pub fn window(
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar(s, ui, &head, tools, t));
+        // The toolbar, the body and the details panel are F6 stops (`ui::focus::pane`).
+        .child(focus::pane(col().w_full().child(toolbar(s, ui, &head, tools, t)), PANE_TOOLBAR));
     if let Some(banner) = banner {
         main = main.child(banner);
     }
     let main = main
         .child({
-            let mut content = row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(body);
+            let mut content = row()
+                .key("viewer-row")
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(focus::pane(row().grow(1.0).min_w(0.0).h_full().child(body), PANE_BODY));
             if ui.show_details {
                 let reduced_quality =
                     super::details::is_reduced(ui.source.player().and_then(|h| h.state_of(&ui.file.id)).as_ref());
-                content = content.child(super::details::panel_with(
-                    &ui.file,
-                    ui.knows_offline(),
-                    reduced_quality,
-                    t,
+                content = content.child(focus::pane(
+                    col().h_full().child(super::details::panel_with(
+                        &ui.file,
+                        ui.knows_offline(),
+                        reduced_quality,
+                        t,
+                    )),
+                    PANE_DETAILS,
                 ));
             }
             content
@@ -417,6 +270,7 @@ pub fn window(
         .key("window")
         .role("window")
         .label(s.identity.main_window_title())
+        .on_key(window_keys)
         .w_full()
         .h_full()
         .fill(t.bg)
@@ -446,47 +300,6 @@ pub fn window(
         })
 }
 
-/// How a button of the kit shows (`.kit-btn`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ButtonKind {
-    /// Paper with a line: the choice the screen expects.
-    Outline,
-    /// Words only.
-    Ghost,
-}
-
-/// A button as wide as its words. `small` is `.kit-btn-sm` (22 high), else `.kit-btn-md` (28).
-/// Keys: `<key>`, `<key>-label`. The caller adds `.on_press(..)`.
-pub fn button(key: &str, label: &str, kind: ButtonKind, small: bool, t: &Theme) -> El {
-    let (ink, text_style, h) = (
-        if kind == ButtonKind::Outline {
-            t.text
-        } else {
-            t.text_secondary
-        },
-        if small { style::BUTTON_SM } else { style::BUTTON_MD },
-        if small { 22.0 } else { 28.0 },
-    );
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(h)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(6.0)
-        .focusable(true)
-        .focus_ring(2.0, 2.0, t.accent_deep)
-        .cursor(rune::Cursor::Pointer);
-    b = match kind {
-        ButtonKind::Outline => b
-            .fill(t.paper)
-            .border(1.0, t.card_border)
-            .border_layout()
-            .hover(t.paper2)
-            .press(t.paper3),
-        ButtonKind::Ghost => b.fill(Color::TRANSPARENT).hover(t.hover).press(t.press),
-    };
-    b.child(kit::label(format!("{key}-label"), label, text_style, ink))
-}
+#[cfg(test)]
+#[path = "chrome_icon_tests.rs"]
+mod icon_tests;

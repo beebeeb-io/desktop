@@ -10,11 +10,13 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::keychain::{SecretBytes, SessionToken};
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::test_api::{ConfirmTokens, FakeApi, OpaqueAccount, Reply, Request};
+
+type Hook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 
 type TestEngine = Engine<MemoryCredentials>;
 
@@ -43,9 +45,9 @@ struct Fake {
     /// Every request body and confirm header it was sent, as text.
     seen: Arc<Mutex<Vec<String>>>,
     /// Runs once, while the next `delete-request` is answered (the call is out).
-    during_request: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    during_request: Hook,
     /// Runs once, while the next step-up's finish is answered (the step-up is out).
-    during_step_up: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    during_step_up: Hook,
 }
 
 impl Fake {
@@ -68,8 +70,8 @@ fn fake() -> Fake {
     let state = Arc::new(Mutex::new("none"));
     let mode = Arc::new(AtomicU8::new(ANSWERS));
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
-    let during_request: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::default();
-    let during_step_up: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::default();
+    let during_request: Hook = Arc::default();
+    let during_step_up: Hook = Arc::default();
     let (state_in, mode_in, seen_in, during_in) = (state.clone(), mode.clone(), seen.clone(), during_request.clone());
     let step_up_in = during_step_up.clone();
     let api = FakeApi::start(Arc::new(move |request: &Request| {
@@ -165,7 +167,7 @@ fn engine(base: &str) -> Arc<TestEngine> {
         state_dir,
         api_base: base.to_string(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 /// Signed in and unlocked, with the session in memory.

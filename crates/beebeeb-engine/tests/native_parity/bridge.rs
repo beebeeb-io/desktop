@@ -537,7 +537,7 @@ async fn hydrate(f: &Fixture, bridge: &EngineBridge, n: usize) -> anyhow::Result
 fn bridge(f: &Fixture, url: &str, account: &str) -> EngineBridge {
     let (token, key) = f.credentials(account);
     EngineBridge::new(
-        &beebeeb_engine::identity::REAL,
+        &beebeeb_engine::identity::TEST,
         Arc::new(StateDb::open(f.root.path().join(format!("{account}.db"))).unwrap()),
         Arc::new(ApiClient::new(url.into(), token.to_string(), *key)),
     )

@@ -277,7 +277,9 @@ fn ld0105_u1_the_cloud_files_callback_runs_that_sequence() {
     let streamed = at("super::streaming::serve(&streamed, &bridge, &handle)");
     let begin = at("let row = bridge.whole_fetch_row(&file_id, u64::try_from(file_size).unwrap_or(0));");
     let block = at("let buf = handle.block_on(async {");
-    let download = at("result = bridge.hydrate_file_to_memory_metered(&file_id, Some(&meter)) => result,");
+    // LD-0092: the download is the lead's part of the one shared fetch per file; a joiner waits on it.
+    let download = at("let result = bridge.hydrate_file_to_memory_metered(&file_id, Some(&*meter)).await;");
+    let raced = at("result = fetch => result,");
     let follow = at("never = row.follow(&meter) => match never {}");
     let transfer = at("match transfer_ok {");
     let ok = at("Ok(()) => { row.finished();");
@@ -285,14 +287,15 @@ fn ld0105_u1_the_cloud_files_callback_runs_that_sequence() {
         streamed < begin
             && begin < block
             && block < download
-            && download < follow
+            && download < raced
+            && raced < follow
             && follow < transfer
             && transfer < ok
     );
     assert_eq!(
         body.matches("row.finished()").count(),
-        1,
-        "the row ends as finished only after a whole transfer"
+        2,
+        "the row ends as finished only after a whole transfer (the whole-file path and the streamed size-mismatch refetch)"
     );
     assert_eq!(body.matches("whole_fetch_row(").count(), 1);
 }

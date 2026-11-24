@@ -43,7 +43,7 @@ pub static REAL: EngineIdentity = EngineIdentity {
     sync_folder_name: "Beebeeb",
     cloud_files_provider_name: "Beebeeb",
     cloud_files_provider_guid: 0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90,
-    status_ui_class_id: 0xc0b33b33_5217_4c0a_9e3f_2f3b8d5e9fa1,
+    status_ui_class_id: 0xc0b3_3b33_5217_4c0a_9e3f_2f3b_8d5e_9fa1,
     thumbnail_provider_class_id: 0xb2e0a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44,
     backup_device_salt: "",
     backup_device_name_suffix: "",
@@ -70,6 +70,17 @@ pub static TEST: EngineIdentity = EngineIdentity {
     macos_app_group: "R8352WDJJR.io.beebeeb.app.test.fileprovider",
     logs_dir_name: "Beebeeb Test",
 };
+
+/// Whether a test build may open an engine as [`TEST`] on macOS: this crate's own unit-test build (`cfg!(test)`,
+/// whose tests run in a throw-away root under `test_sandbox`), and the tests of the native shell, which turn on
+/// the dev-only `macos-test-engine` feature under `[dev-dependencies]`. Compile-time only; a release build with
+/// the feature does not compile (below). [`REAL`] is never refused, whatever this is.
+const TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS: bool = cfg!(test) || cfg!(feature = "macos-test-engine");
+
+#[cfg(all(feature = "macos-test-engine", not(debug_assertions)))]
+compile_error!(
+    "beebeeb-engine: macos-test-engine is for tests only; it is on in a release build (enable it under [dev-dependencies] only)"
+);
 
 impl EngineIdentity {
     /// The identity a bundle identifier names: exactly the two known ones, anything else is `None`.
@@ -117,10 +128,23 @@ impl EngineIdentity {
 
     /// Why this app must not run on `os` (`std::env::consts::OS`), or `None` when it may. The test build has no
     /// macOS App Group and no File Provider extension signed for it, so on a Mac it could only use the real
-    /// app's group container: it does not start there. `Engine::open` refuses with this, and a host asks
-    /// before it makes anything.
+    /// app's group container: it does not start there. `Engine::open` refuses with this.
     pub fn refusal_on(&self, os: &str) -> Option<&'static str> {
-        (!self.is_real() && os == "macos").then_some(
+        self.refusal(os, TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS)
+    }
+
+    /// Why a host must not start on `os`, before it makes anything: [`Self::refusal_on`] without its test-build
+    /// exception, in every build. A host's own start question is never relaxed, also not in a debug binary
+    /// that was linked with `macos-test-engine` on (`cargo build --all-targets` unifies dev-dependency features).
+    pub fn start_refusal_at(&self, os: &str) -> Option<&'static str> {
+        self.refusal(os, false)
+    }
+
+    /// [`Self::refusal_on`] with the one exception spelled out: `tests_may_open` is
+    /// [`TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS`], fixed at compile time (no env var or runtime switch), true only in a
+    /// test build. Every shipped build passes false.
+    fn refusal(&self, os: &str, tests_may_open: bool) -> Option<&'static str> {
+        (!self.is_real() && os == "macos" && !tests_may_open).then_some(
             "This is a test build of Beebeeb. Test builds do not run on macOS: they would share the real app's data there.",
         )
     }
@@ -219,7 +243,7 @@ mod tests {
         assert_eq!(REAL.sync_folder_name(), "Beebeeb");
         assert_eq!(REAL.cloud_files_provider_name(), "Beebeeb");
         assert_eq!(REAL.cloud_files_provider_guid(), 0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90);
-        assert_eq!(REAL.status_ui_class_id(), 0xc0b3_3b33_5217_4c0a_9e3f_2f3b8d5e9fa1);
+        assert_eq!(REAL.status_ui_class_id(), 0xc0b3_3b33_5217_4c0a_9e3f_2f3b_8d5e_9fa1);
         assert_eq!(
             REAL.thumbnail_provider_class_id(),
             0xb2e0a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44
@@ -273,12 +297,49 @@ mod tests {
     /// The test build does not run on macOS; nothing else is refused.
     #[test]
     fn only_the_test_build_on_macos_is_refused() {
-        assert!(TEST.refusal_on("macos").is_some_and(|words| words.contains("macOS")));
+        // `false`: a shipped (non-unit-test) build.
+        assert!(
+            TEST.refusal("macos", false)
+                .is_some_and(|words| words.contains("macOS"))
+        );
         for os in ["windows", "linux", "freebsd", ""] {
-            assert_eq!(TEST.refusal_on(os), None, "{os:?}");
+            assert_eq!(TEST.refusal(os, false), None, "{os:?}");
         }
-        for os in ["macos", "windows", "linux"] {
-            assert_eq!(REAL.refusal_on(os), None, "{os}");
+        // The real app, under either answer of the compile-time exception: never refused.
+        for os in ["macos", "windows", "linux", "freebsd", ""] {
+            for tests_may_open in [false, true] {
+                assert_eq!(REAL.refusal(os, tests_may_open), None, "{os:?}");
+            }
+        }
+        // The exception is compile-time only: this crate's unit tests (`cfg!(test)`) or `macos-test-engine`.
+        const { assert!(TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS) };
+        assert_eq!(
+            TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS,
+            cfg!(test) || cfg!(feature = "macos-test-engine")
+        );
+        assert!(TEST.refusal_on("macos").is_none());
+        assert!(TEST.refusal("macos", true).is_none());
+        // It relaxes the test build on macOS only: elsewhere, and for the real app, it changes nothing.
+        for os in ["macos", "windows", "linux", "freebsd", ""] {
+            assert_eq!(TEST.other_build().refusal_on(os), None, "{os:?}");
+            assert_eq!(TEST.refusal(os, true), None, "{os:?}");
+        }
+    }
+
+    /// A host's start question has no exception: the test build is refused on macOS in every build, the same
+    /// words as a shipped `refusal_on`; nothing else is refused.
+    #[test]
+    fn the_start_question_never_relaxes() {
+        assert_eq!(TEST.start_refusal_at("macos"), TEST.refusal("macos", false));
+        assert!(
+            TEST.start_refusal_at("macos")
+                .is_some_and(|words| words.contains("macOS"))
+        );
+        for os in ["windows", "linux", "freebsd", ""] {
+            assert_eq!(TEST.start_refusal_at(os), None, "{os:?}");
+        }
+        for os in ["macos", "windows", "linux", "freebsd", ""] {
+            assert_eq!(TEST.other_build().start_refusal_at(os), None, "{os:?}");
         }
     }
 

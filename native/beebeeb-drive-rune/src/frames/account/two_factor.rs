@@ -172,7 +172,7 @@ fn backup_codes(f: &Form, t: &Theme) -> El {
             t,
         ),
         fm::codes(&shown, t),
-        row().key("codes-actions").w_full().gap(8.0).child(copy).child(save),
+        row().key("codes-actions").w_full().gap(crate::theme::scale::space::S8).child(copy).child(save),
     ];
     if let Some(saved) = &f.saved {
         let (words, ink) = match saved {
@@ -316,7 +316,8 @@ fn status(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &The
         Some("Each backup code works once. Making new codes stops the old ones working."),
         t,
     ));
-    children.push(lists::list(
+    // Both rows ask for a code: one Tab stop, the arrows between them.
+    children.push(lists::roving_list(
         2,
         None,
         vec![

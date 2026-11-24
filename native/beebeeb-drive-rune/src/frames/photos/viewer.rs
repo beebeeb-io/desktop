@@ -1,14 +1,16 @@
 //! One photo open (DW-0605 to DW-0611): the top bar's two renditions and ⋯, the photo on the
 //! dark stage, the strip, and Share · Offline · Details · Trash.
 
+use crate::theme::scale::space;
 use rune::{Color, El, SurfaceFit, col, el, row};
 
 use super::chrome::{self, Bar, rgb, style};
 use super::grid::{length, megabytes, thousands};
 use super::source::{Kind, Shape, Viewing};
-use super::{Menu, Original, Ui, icons, overlay};
+use super::{Intent, Menu, Original, Ui, icons, overlay};
 use crate::State;
 use crate::theme::tokens::Theme;
+use crate::ui::toolbar::tool;
 use crate::ui::kit;
 
 fn tab(i: usize, words: String, on: bool, t: &Theme) -> El {
@@ -18,7 +20,7 @@ fn tab(i: usize, words: String, on: bool, t: &Theme) -> El {
         .label(words.clone())
         .checked(on)
         .h(24.0)
-        .px(10.0)
+        .px(space::S10)
         .radius(8.0)
         .center()
         .focusable(true)
@@ -41,20 +43,21 @@ fn tab(i: usize, words: String, on: bool, t: &Theme) -> El {
 
 pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
     let original = ui.viewer.as_ref().map_or(Original::Preview, |v| v.original);
-    let mut middle = row().key("ph-tools").gap(6.0).center_y();
+    let mut middle = row().key("ph-tools").gap(space::S6).center_y();
     // A video has one rendition: it streams (DW-0611).
     if viewing.kind == Kind::Photo {
         let whole = megabytes(viewing.original_bytes, true);
         let original_words = match original {
-            Original::Downloading { done } => format!("Original \u{00B7} {} of {whole}", megabytes(done, false)),
+            Original::Downloading { done } => format!("Original \u{00B7} {} of {whole}", super::grid::sized_like(done, viewing.original_bytes, false)),
             _ => format!("Original \u{00B7} {whole}"),
         };
         middle = middle.child(
             row()
                 .key("ph-seg")
                 .role("tablist")
+                .focus_group()
                 .label("Rendition")
-                .padding(2.0)
+                .padding(space::S2)
                 .radius(10.0)
                 .fill(t.field)
                 .box_shadow(kit::ring_inset(t.separator))
@@ -73,8 +76,15 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
                 ),
         );
     }
+    let open = viewing.id;
+    let show_label = crate::frames::show_in_folder::label();
     middle = middle.child(
-        chrome::tbtn("ph-more", "More", &icons::MORE, 17.0, false, t)
+        tool("ph-show-in-folder", show_label, &crate::theme::icons_settings::FOLDER, t)
+            .help(show_label)
+            .on_press(move |s: &mut State| s.photos.ask(Intent::ShowInFolder(open))),
+    );
+    middle = middle.child(
+        tool("ph-more", "More", &icons::MORE, t)
             .expanded(ui.menu.is_some_and(|m| m.which == Menu::More))
             .on_press(|s: &mut State| s.photos.toggle_menu(Menu::More)),
     );
@@ -119,8 +129,8 @@ fn player(ui: &Ui, viewing: &Viewing, seconds: u32, t: &Theme) -> El {
         .key("ph-player")
         .pin(Some(24.0), None, Some(24.0), Some(20.0))
         .h(46.0)
-        .px(16.0)
-        .gap(12.0)
+        .px(space::S16)
+        .gap(space::S12)
         .center_y()
         .radius(12.0)
         .fill(Color::BLACK.alpha(0.45))
@@ -270,6 +280,28 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         );
     }
 
+    // w31: a HEIC or RAW original is said, and the system's app is offered for it.
+    if let Some(words) = ui.source.original_refused(viewer.id).filter(|_| viewing.kind == Kind::Photo) {
+        let id = viewer.id;
+        let app = crate::frames::show_in_folder::os_app_label();
+        stage = stage.child(
+            row()
+                .key("ph-viewer-notice")
+                .role("status")
+                .label(words)
+                .w_full()
+                .px(space::S20)
+                .py(space::S8)
+                .gap(space::S12)
+                .center_y()
+                .child(kit::label("ph-viewer-notice-words", words, style::SUB, white.alpha(0.75)))
+                .child(
+                    chrome::button("ph-open-in-os-app", &format!("Open in {app}"), None, chrome::Tone::Plain, 28.0, crate::theme::tokens::type_::BUTTON_SM, t)
+                        .on_press(move |s: &mut State| s.photos.ask(Intent::OpenInOsApp(id))),
+                ),
+        );
+    }
+
     // The photo on the stage: the open one, or the next one while a trashed one can come back.
     let shown = ui.source.viewing(viewer.id);
     let shown = shown.as_ref().unwrap_or(viewing);
@@ -283,7 +315,12 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         })
         .size(600.0, 400.0)
         .radius(4.0);
-    photo = match ui.source.thumbnail(viewer.id, Shape::Preview) {
+    let whole = if viewer.original == Original::Whole {
+        ui.source.original(viewer.id)
+    } else {
+        None
+    };
+    photo = match whole.or_else(|| ui.source.thumbnail(viewer.id, Shape::Preview)) {
         Some(pixels) => photo.pixels_fit(&pixels, SurfaceFit::Fit),
         None => photo.fill(white.alpha(0.07)),
     };
@@ -318,8 +355,8 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         .role("list")
         .label("Photos nearby")
         .w_full()
-        .gap(4.0)
-        .py(8.0)
+        .gap(space::S4)
+        .py(space::S8)
         .center();
     for (i, item) in viewing.strip.iter().enumerate() {
         let id = item.id;
@@ -352,7 +389,7 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
             .role("button")
             .label(name)
             .items_center()
-            .gap(4.0)
+            .gap(space::S4)
             .focusable(true)
             .child(kit::glyph(format!("ph-act-{i}-icon"), ic, 18.0, white))
             .child(kit::label(format!("ph-act-{i}-label"), name, style::CAP, white))

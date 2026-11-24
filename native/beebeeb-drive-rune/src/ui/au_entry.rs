@@ -259,12 +259,13 @@ pub fn word_box(i: usize, edit: &TextEdit, input: El, state: WordState, h: f32, 
     b
 }
 
-/// The text input of one word box. The caller adds `.on_edit`, `.on_input_change` and
-/// `.on_input_paste`.
+/// The text input of one word box. The caller adds `.on_edit`, `.on_input_change`,
+/// `.on_input_key` (with [`word_step`]) and `.on_input_paste`. It says "N of 12".
 pub fn word_input(edit: &TextEdit, input_key: &'static str, i: usize, not_a_word: bool, t: &Theme) -> El {
     let mut input = text_input(edit, type_entry::WORD)
         .key(input_key)
         .label(format!("Recovery word {}", i + 1))
+        .position_in_set(i + 1, WORDS)
         .single_line()
         .color(t.text)
         .caret(t.accent_deep, t.selection)
@@ -273,6 +274,90 @@ pub fn word_input(edit: &TextEdit, input_key: &'static str, i: usize, not_a_word
         input = input.description("not a recovery word");
     }
     input
+}
+
+/// How many boxes a recovery phrase has, and how many to a row.
+pub const WORDS: usize = 12;
+pub const WORDS_PER_ROW: usize = 3;
+
+/// Where the caret lands in the box a key moved to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaretAt {
+    Start,
+    End,
+}
+
+/// What a key does in box `i` of the twelve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WordStep {
+    /// The box edits as usual (or the screen takes the key).
+    Pass,
+    /// The key does nothing: a space that is not at the end of a word.
+    Swallow,
+    /// Focus box `to`, its caret at its start or end.
+    Move { to: usize, caret: CaretAt },
+}
+
+/// The caret of a word box, without its word: the selection's ordered ends and the word's
+/// length, in the same units (`TextEdit::range` and `text.len()`). A word is lowercase letters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Caret {
+    pub from: usize,
+    pub to: usize,
+    pub len: usize,
+}
+
+impl Caret {
+    /// `edit`'s caret. Reads the selection and the length only, never the characters.
+    pub fn of(edit: &TextEdit) -> Self {
+        let (from, to) = edit.range();
+        Caret {
+            from,
+            to,
+            len: edit.text.len(),
+        }
+    }
+    fn collapsed(self) -> bool {
+        self.from == self.to
+    }
+    fn at_start(self) -> bool {
+        self.collapsed() && self.from == 0
+    }
+    fn at_end(self) -> bool {
+        self.collapsed() && self.to == self.len
+    }
+}
+
+/// The twelve boxes as one grid (4 rows of 3): Left at a box's start goes to the end of the
+/// box before, Right at its end to the start of the next, Up and Down to the same column a row
+/// away (nothing past the edges), Enter to the next box (the last box's Enter is the screen's),
+/// Space at the end of a word to the next box (a word has no space), Backspace in an empty box
+/// to the end of the box before. Home and End stay in the box. A held Shift, Ctrl, Alt or the
+/// logo key leaves every key to the box. Reads only the caret, never the word.
+pub fn word_step(i: usize, key: &rune::Key, mods: rune::Mods, caret: Caret) -> WordStep {
+    use rune::Key;
+    if mods.shift || mods.cmd || mods.ctrl || mods.alt || mods.logo {
+        return WordStep::Pass;
+    }
+    let to = |to: usize, caret: CaretAt| WordStep::Move { to, caret };
+    let last = i + 1 >= WORDS;
+    match key {
+        Key::Left if caret.at_start() && i > 0 => to(i - 1, CaretAt::End),
+        Key::Right if caret.at_end() && !last => to(i + 1, CaretAt::Start),
+        Key::Up if i >= WORDS_PER_ROW => to(i - WORDS_PER_ROW, CaretAt::End),
+        Key::Down if i + WORDS_PER_ROW < WORDS => to(i + WORDS_PER_ROW, CaretAt::End),
+        Key::Up | Key::Down => WordStep::Swallow,
+        Key::Enter if !last => to(i + 1, CaretAt::End),
+        Key::Backspace if caret.len == 0 && i > 0 => to(i - 1, CaretAt::End),
+        Key::Text(typed) if typed.chars().all(char::is_whitespace) && !typed.is_empty() => {
+            if caret.at_end() && caret.len > 0 && !last {
+                to(i + 1, CaretAt::End)
+            } else {
+                WordStep::Swallow
+            }
+        }
+        _ => WordStep::Pass,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -501,4 +586,64 @@ pub fn link_in(keys: &mut Keys, label: &str, style: TextStyle, top: f32, thick: 
             el().child(kit::label(key.clone(), label, style, t.text))
                 .children(bars.collect::<Vec<_>>()),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune::{Key, Mods};
+
+    fn step(i: usize, key: Key, from: usize, to: usize, len: usize) -> WordStep {
+        word_step(i, &key, Mods::default(), Caret { from, to, len })
+    }
+    fn moved(to: usize, caret: CaretAt) -> WordStep {
+        WordStep::Move { to, caret }
+    }
+
+    #[test]
+    fn left_and_right_cross_boxes_only_at_the_words_edges() {
+        assert_eq!(step(4, Key::Left, 0, 0, 5), moved(3, CaretAt::End));
+        assert_eq!(step(4, Key::Left, 2, 2, 5), WordStep::Pass);
+        assert_eq!(step(4, Key::Left, 0, 3, 5), WordStep::Pass, "a selection is the box's");
+        assert_eq!(step(0, Key::Left, 0, 0, 5), WordStep::Pass, "nothing before the first");
+        assert_eq!(step(4, Key::Right, 5, 5, 5), moved(5, CaretAt::Start));
+        assert_eq!(step(4, Key::Right, 4, 4, 5), WordStep::Pass);
+        assert_eq!(step(4, Key::Right, 0, 0, 0), moved(5, CaretAt::Start), "an empty box's caret is at its end");
+        assert_eq!(step(11, Key::Right, 5, 5, 5), WordStep::Pass, "nothing after the last");
+    }
+
+    #[test]
+    fn up_and_down_keep_the_column_and_stop_at_the_edges() {
+        assert_eq!(step(4, Key::Up, 2, 2, 5), moved(1, CaretAt::End));
+        assert_eq!(step(4, Key::Down, 2, 2, 5), moved(7, CaretAt::End));
+        assert_eq!(step(9, Key::Down, 0, 0, 0), WordStep::Swallow);
+        for top in 0..WORDS_PER_ROW {
+            assert_eq!(step(top, Key::Up, 0, 0, 0), WordStep::Swallow);
+            assert_eq!(step(WORDS - 1 - top, Key::Down, 0, 0, 0), WordStep::Swallow);
+        }
+        assert_eq!(step(11, Key::Up, 0, 0, 0), moved(8, CaretAt::End));
+    }
+
+    #[test]
+    fn home_end_stay_enter_and_space_go_on_backspace_goes_back() {
+        assert_eq!(step(4, Key::Home, 3, 3, 5), WordStep::Pass);
+        assert_eq!(step(4, Key::End, 0, 0, 5), WordStep::Pass);
+        assert_eq!(step(4, Key::Enter, 1, 1, 5), moved(5, CaretAt::End));
+        assert_eq!(step(11, Key::Enter, 5, 5, 5), WordStep::Pass, "the last Enter is the screen's");
+        assert_eq!(step(4, Key::Text(" ".into()), 5, 5, 5), moved(5, CaretAt::End));
+        assert_eq!(step(4, Key::Text(" ".into()), 2, 2, 5), WordStep::Swallow);
+        assert_eq!(step(4, Key::Text(" ".into()), 0, 0, 0), WordStep::Swallow, "an empty box keeps its place");
+        assert_eq!(step(11, Key::Text(" ".into()), 5, 5, 5), WordStep::Swallow);
+        assert_eq!(step(4, Key::Text("a".into()), 5, 5, 5), WordStep::Pass);
+        assert_eq!(step(4, Key::Backspace, 0, 0, 0), moved(3, CaretAt::End));
+        assert_eq!(step(4, Key::Backspace, 5, 5, 5), WordStep::Pass);
+        assert_eq!(step(0, Key::Backspace, 0, 0, 0), WordStep::Pass);
+    }
+
+    #[test]
+    fn a_held_modifier_leaves_the_key_to_the_box() {
+        let shift = Mods { shift: true, ..Mods::default() };
+        let caret = Caret { from: 0, to: 0, len: 5 };
+        assert_eq!(word_step(4, &Key::Left, shift, caret), WordStep::Pass);
+    }
 }

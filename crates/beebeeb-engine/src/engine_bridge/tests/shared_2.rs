@@ -281,7 +281,7 @@ pub(super) fn enqueue_test_operation(
 }
 
 // ------------------------------------------------------------------
-// Task 1697 review fix (T3): the remote ingestion path must collect the
+// the remote ingestion path must collect the
 // item ids it APPLIED so the runner can signal the File Provider working
 // set about REMOTE changes — before this, only local ops signaled
 // (`operations_applied`), so Finder stayed blind to server-side

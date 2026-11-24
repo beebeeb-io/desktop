@@ -20,8 +20,8 @@
 //!
 //! **Two profiles** (decision 2541): every helper starts in the sandbox's default profile (no capability). A file
 //! whose stream the helper answers `NoSystemDecoder(codec)` for is restarted once in the system-decoder profile
-//! ([`profile_for_file`]); while the switch `MEDIA_SYSTEM_DECODER_ON` is off, that answer is always `None` and no
-//! helper ever starts in it.
+//! ([`profile_for_file`]). The switch `MEDIA_SYSTEM_DECODER_ON` is on as shipped (the owner's ruling of 2026-11-20);
+//! held off, that answer is always `None` and no helper ever starts in it.
 //!
 //! **Crash reports:** before the first helper of this process starts, the app writes the per-user Windows Error
 //! Reporting exclusion for the helper's exe ([`ErrorReports`]), so a crash of the helper (which holds decrypted
@@ -46,6 +46,7 @@ use beebeeb_office_sandbox::{Child, Limits, Profile, Sandbox, SandboxError};
 use zeroize::Zeroize;
 
 use super::player::{Link, LinkFactory, Refusal};
+use super::refusal_log;
 
 /// The helper's committed memory: 1 GiB (decision D-MED-3).
 pub const HELPER_LIMITS: Limits = Limits { memory_bytes: 1 << 30 };
@@ -58,7 +59,7 @@ pub(crate) const HELPER_NAME: &str = if cfg!(windows) {
 };
 
 /// The profile to restart a helper in for a stream of `codec` (decision 2541), with the shipped switch
-/// (`MEDIA_SYSTEM_DECODER_ON`, off). `None`: the default profile. The app has no route table: a helper started in the
+/// (`MEDIA_SYSTEM_DECODER_ON`, on). `None`: the default profile. The app has no route table: a helper started in the
 /// default profile that answers `NoSystemDecoder(codec)` names a stream whose route is `System`.
 pub fn profile_for_file(codec: Option<Codec>) -> Option<Profile> {
     profile_for_file_with(MEDIA_SYSTEM_DECODER_ON, codec)
@@ -117,7 +118,10 @@ pub(crate) fn excluded_then<T>(
     spawn: impl FnOnce() -> Result<T, Refusal>,
 ) -> Result<T, Refusal> {
     if excluded.0.get().is_none() {
-        reports.exclude(HELPER_NAME).map_err(|_| Refusal::NoSandbox)?;
+        reports.exclude(HELPER_NAME).map_err(|_| {
+            refusal_log::not_started(refusal_log::NotStarted::Exclusion);
+            Refusal::NoSandbox
+        })?;
         let _ = excluded.0.set(());
     }
     spawn()
@@ -201,6 +205,7 @@ pub enum LinkError {
 /// What a sandbox error means to the player: a Windows too old for the sandbox says so (logged once per app start,
 /// the reason only); every other error is "no sandbox".
 pub(crate) fn sandbox_refusal(error: SandboxError) -> Refusal {
+    refusal_log::sandbox_failed(&error);
     if error == SandboxError::NeedsNewerWindows {
         crate::windows_floor::note_needs_windows_update();
         Refusal::NeedsWindowsUpdate
@@ -249,6 +254,7 @@ impl HelperLink {
         let mut child = sandbox.spawn(exe).map_err(sandbox_refusal)?;
         let Some(pipes) = child.take_pipes() else {
             let _ = child.kill();
+            refusal_log::not_started(refusal_log::NotStarted::Pipes);
             return Err(Refusal::NoSandbox);
         };
         match HelperLink::over(Box::new(pipes.from_helper), Box::new(pipes.to_helper)) {
@@ -258,6 +264,7 @@ impl HelperLink {
             }
             Err(_) => {
                 let _ = child.kill();
+                refusal_log::not_started(refusal_log::NotStarted::Threads);
                 Err(Refusal::CouldNotPlay)
             }
         }
@@ -512,8 +519,49 @@ impl LinkFactory for SandboxedHelpers {
     }
 
     fn start_in(&self, profile: Profile) -> Result<Box<dyn Link>, Refusal> {
-        let exe = helper_exe().ok_or(Refusal::NotInstalled)?;
+        let exe = helper_exe().ok_or_else(|| {
+            refusal_log::not_started(refusal_log::NotStarted::NoHelper);
+            Refusal::NotInstalled
+        })?;
         Ok(Box::new(HelperLink::start_in(&exe, profile)?))
+    }
+}
+
+/// The real image helpers (095): [`helper_exe`] in its `--image` mode, confined like every helper (the crash-report
+/// exclusion first, the same limits), always in the system-decoder profile (WIC needs COM; `hevc` for a HEIC).
+/// Nothing is started while the system decoders are switched off.
+pub struct SandboxedPictures;
+
+/// The process of one image helper. Dropping it ends the helper.
+struct PictureChildProcess(std::sync::Mutex<Child>);
+
+impl crate::engine_host::media::PictureChild for PictureChildProcess {
+    fn kill(&self) {
+        let _ = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).kill();
+    }
+}
+
+impl crate::engine_host::media::PictureHelper for SandboxedPictures {
+    fn start(&self, hevc: bool) -> Option<crate::engine_host::media::PictureProcess> {
+        if !MEDIA_SYSTEM_DECODER_ON {
+            return None;
+        }
+        let exe = helper_exe()?;
+        let mut child = excluded_then(&EXCLUDED, &WindowsErrorReports, || {
+            Sandbox::with_profile(HELPER_LIMITS, Profile::SystemDecoder { hevc })
+                .and_then(|sandbox| sandbox.spawn_in_mode(&exe, beebeeb_office_sandbox::Mode::Image))
+                .map_err(sandbox_refusal)
+        })
+        .ok()?;
+        let Some(pipes) = child.take_pipes() else {
+            let _ = child.kill();
+            return None;
+        };
+        Some(crate::engine_host::media::PictureProcess {
+            from: Box::new(pipes.from_helper),
+            to: Box::new(pipes.to_helper),
+            child: Arc::new(PictureChildProcess(std::sync::Mutex::new(child))),
+        })
     }
 }
 

@@ -34,6 +34,7 @@ ManifestDPIAwareness PerMonitorV2
 !include MUI2.nsh
 !include FileFunc.nsh
 !include x64.nsh
+!include WinVer.nsh
 !include WordFunc.nsh
 !include "utils.nsh"
 !include "Win\COM.nsh"
@@ -57,6 +58,9 @@ ${StrLoc}
 !insertmacro RequireDefine VERSIONWITHBUILD       ; 0.9.0.0
 !insertmacro RequireDefine MAINBINARYNAME         ; "beebeeb-desktop" (release) or "beebeeb-desktop-test" (test)
 !insertmacro RequireDefine MAINBINARYSRCPATH      ; the built native exe, already named ${MAINBINARYNAME}.exe
+!insertmacro RequireDefine OFFICERENDERSRCPATH    ; beebeeb-office-render.exe, the Office viewer's helper (beside the app exe)
+!insertmacro RequireDefine MEDIAHELPERSRCPATH     ; beebeeb-media-helper.exe, the video/audio helper (beside the app exe)
+!insertmacro RequireDefine LICENSESRCPATH         ; THIRD-PARTY-LICENSES.md (packaging/licences), the notice installed beside the exes
 !insertmacro RequireDefine INSTALLERICON          ; packaging/windows/icon.ico
 !insertmacro RequireDefine OUTFILE
 !insertmacro RequireDefine ADDITIONALPLUGINSPATH  ; the folder that holds nsis_tauri_utils.dll
@@ -68,6 +72,9 @@ ${StrLoc}
 !define MANUFACTURER "beebeeb"
 ; The oldest installed version this installer upgrades: the bridge release (utils.nsh, RefuseBelowBridge).
 !define MINUPGRADEFROM "0.8.25"
+; The oldest Windows build the app runs on (Windows 10 2004). The Cloud Files drive needs the progressive
+; hydration policy; the engine tests pass on 11 23H2 (22631); older builds are untested. .onInit refuses below it.
+!define MINWINBUILD 19041
 !define INSTALLMODE "currentUser"
 !define ARCH "x64"
 !define ALLOWDOWNGRADES "true"
@@ -455,6 +462,9 @@ FunctionEnd
 ; 1. Confirm uninstall page
 Var DeleteAppDataCheckbox
 Var DeleteAppDataCheckboxState
+; Beebeeb (drive-complete-006b): "Keep downloaded files", ticked by default. Silent uninstall keeps them (never 0).
+Var KeepFilesCheckbox
+Var KeepFilesCheckboxState
 !define /ifndef WS_EX_LAYOUTRTL         0x00400000
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ConfirmShow
 Function un.ConfirmShow ; Add add a `Delete app data` check box
@@ -474,21 +484,29 @@ Function un.ConfirmShow ; Add add a `Delete app data` check box
     StrCpy $3 "${__NSD_CheckBox_EXSTYLE}"
     IntOp $4 0 * $2
   ${EndIf}
-  IntOp $5 100 * $2
+  IntOp $5 95 * $2
   IntOp $6 400 * $2
-  IntOp $7 25 * $2
+  IntOp $7 45 * $2
   IntOp $4 $4 / 96
   IntOp $5 $5 / 96
   IntOp $6 $6 / 96
   IntOp $7 $7 / 96
   System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w "$(deleteAppData)", i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
   Pop $DeleteAppDataCheckbox
-  SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $1
-  SendMessage $DeleteAppDataCheckbox ${WM_SETFONT} $1 1
+  SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $8
+  SendMessage $DeleteAppDataCheckbox ${WM_SETFONT} $8 1
+  ; Beebeeb (drive-complete-006b): the sync folder's choice, below the app-data box, ticked by default.
+  IntOp $5 145 * $2
+  IntOp $5 $5 / 96
+  System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w "$(keepDownloadedFiles)", i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
+  Pop $KeepFilesCheckbox
+  SendMessage $KeepFilesCheckbox ${WM_SETFONT} $8 1
+  SendMessage $KeepFilesCheckbox ${BM_SETCHECK} ${BST_CHECKED} 0
 FunctionEnd
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE un.ConfirmLeave
 Function un.ConfirmLeave
   SendMessage $DeleteAppDataCheckbox ${BM_GETCHECK} 0 0 $DeleteAppDataCheckboxState
+  SendMessage $KeepFilesCheckbox ${BM_GETCHECK} 0 0 $KeepFilesCheckboxState
 FunctionEnd
 !define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassive
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -502,6 +520,12 @@ FunctionEnd
 !include "English.nsh"
 
 Function .onInit
+  ${IfNot} ${AtLeastBuild} ${MINWINBUILD}
+    MessageBox MB_OK|MB_ICONSTOP "Beebeeb needs Windows 10 version 2004 (build ${MINWINBUILD}) or newer, or Windows 11. This PC runs an older Windows, so the installer will stop. Update Windows, then run this installer again." /SD IDOK
+    SetErrorLevel 1
+    Abort
+  ${EndIf}
+
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
     StrCpy $PassiveMode 1
@@ -602,6 +626,18 @@ Section Install
   ; Copy resources
 
   ; Copy external binaries
+  ; Beebeeb: the two helpers the app starts confined; it looks for each beside its own exe (office_host::helper_exe,
+  ; media::transport::HELPER_NAME). Like the app exe they need the VC++ runtime (VCRUNTIME140.dll) from the system, nothing else of ours.
+  File "${OFFICERENDERSRCPATH}"
+  File "${MEDIAHELPERSRCPATH}"
+
+  ; Beebeeb: the third-party licence notice, beside the app exe (Settings > About > Open-source licences opens this
+  ; file by this name, frames/settings/about.rs LICENCES_FILE) and a Start Menu entry for it. Written on every install,
+  ; an update too, so the file always matches the exes.
+  File "${LICENSESRCPATH}"
+  ${If} $NoShortcutMode = 0
+    CreateShortcut "$SMPROGRAMS\${PRODUCTNAME} licences.lnk" "$INSTDIR\THIRD-PARTY-LICENSES.md"
+  ${EndIf}
 
   ; Create file associations
 
@@ -703,6 +739,9 @@ Function un.onInit
   ${IfNot} ${Errors}
     StrCpy $UpdateMode 1
   ${EndIf}
+
+  ; Beebeeb: keep downloaded files unless the person unticks the box (a silent or passive uninstall never shows it).
+  StrCpy $KeepFilesCheckboxState ${BST_CHECKED}
 FunctionEnd
 
 Section Uninstall
@@ -713,6 +752,9 @@ Section Uninstall
 
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
+  ; Beebeeb (drive-complete-006b): the app has stopped and its exe is still here: unregister the sync folder.
+  !insertmacro BB_UNINSTALL_SYNC_FOLDER "$INSTDIR\${MAINBINARYNAME}.exe"
+
   ; Delete the app directory and its content from disk
   ; Copy main executable
   Delete "$INSTDIR\${MAINBINARYNAME}.exe"
@@ -720,6 +762,9 @@ Section Uninstall
   ; Delete resources
 
   ; Delete external binaries
+  Delete "$INSTDIR\beebeeb-office-render.exe"
+  Delete "$INSTDIR\beebeeb-media-helper.exe"
+  Delete "$INSTDIR\THIRD-PARTY-LICENSES.md"
 
   ; Delete app associations
 
@@ -750,6 +795,8 @@ Section Uninstall
       !insertmacro UnpinShortcut "$SMPROGRAMS\${PRODUCTNAME}.lnk"
       Delete "$SMPROGRAMS\${PRODUCTNAME}.lnk"
     ${EndIf}
+
+    Delete "$SMPROGRAMS\${PRODUCTNAME} licences.lnk"
 
     ; Remove desktop shortcuts
     !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"

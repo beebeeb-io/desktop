@@ -171,7 +171,7 @@ fn recent_says_loading_then_could_not_load_and_never_no_notifications_unread() {
     // "Try again" asks again, and an answer is drawn.
     fake.read_mode.store(ANSWER, Ordering::SeqCst);
     let asked_before = asked(&fake.fake, LIST);
-    let again = centre(&rt, "btn-0");
+    let again = centre(&rt, "recent-failed-retry");
     click_at(&mut rt, again);
     poll(&mut rt);
     assert_eq!(asked(&fake.fake, LIST), asked_before + 1, "one read for the one press");
@@ -304,7 +304,7 @@ fn a_session_beebeeb_ended_keeps_nothing_whichever_call_was_told() {
 }
 
 /// What a person sees of the account: every title with its "New", the two states, and "may be out of date".
-fn seen_of(source: &Source) -> (Vec<(String, bool)>, ReadState, ReadState, bool, Vec<Option<bool>>) {
+fn seen_of(source: &Source) -> Seen {
     (
         titles(source),
         source.recent_state(),
@@ -716,7 +716,7 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
     press_in_view(&mut rt, "item-3-1-switch");
     poll_until(&mut rt, "the change was never said", |rt| find(rt, "toast-0").is_some());
     assert_eq!(text_of(&rt, "toast-0-text").as_deref(), Some(ALERT_SAVED));
-    assert_eq!(find(&rt, "toast-0").map(|e| e.role), Some("status".into()));
+    assert_eq!(find(&rt, "toast-0").map(|e| e.role), Some("status"));
     assert_eq!(puts(&fake), 1, "the press was sent");
     in_view(&rt, "toast-0");
     let on = rt.state.settings.source.notifications().groups[0].1[1].on;
@@ -747,7 +747,7 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
         find(rt, "toast-0").is_some()
     });
     assert_eq!(text_of(&rt, "toast-0-text").as_deref(), Some(NOT_LOADED));
-    assert_eq!(find(&rt, "toast-0").map(|e| e.role), Some("alert".into()));
+    assert_eq!(find(&rt, "toast-0").map(|e| e.role), Some("alert"));
     // A press Beebeeb refuses while that stands: said above the notice, both in view.
     fake.put_mode.store(SERVER_ERROR, Ordering::SeqCst);
     press_in_view(&mut rt, "item-3-1-switch");
@@ -757,7 +757,7 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
     assert_eq!(text_of(&rt, "toast-0-text").as_deref(), Some(ALERT_NOT_SAVED));
     assert_eq!(
         find(&rt, "toast-0").map(|e| e.role),
-        Some("alert".into()),
+        Some("alert"),
         "a refusal is drawn as one: never with the mark of a thing that worked"
     );
     let (notice, toast) = (in_view(&rt, "notice"), in_view(&rt, "toast-0"));
@@ -934,3 +934,6 @@ fn a_mark_made_under_one_account_is_never_sent_under_the_next() {
         "the first account's ids were sent under no other session"
     );
 }
+
+/// What a source shows, as the tests compare it.
+type Seen = (Vec<(String, bool)>, ReadState, ReadState, bool, Vec<Option<bool>>);

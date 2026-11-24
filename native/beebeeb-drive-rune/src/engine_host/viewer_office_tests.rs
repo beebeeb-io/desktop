@@ -10,12 +10,16 @@ use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::viewer_api::{LocalCopy, OpenFileError, OpenFileFacts, OpenedFile};
-use beebeeb_engine::app::viewer_edit_api::{EditRefused, NewCopy, SaveEnd};
+use beebeeb_engine::app::office_recovery::{RecoveryEntry, RecoveryRefused};
+use beebeeb_engine::app::viewer_edit_api::{EditFacts, EditRefused, NewCopy, SaveEnd};
 use beebeeb_office_protocol::check;
-use beebeeb_office_protocol::office::{Align, Anchor, AnchorKind, CellText as WireCell, Frozen};
+use beebeeb_office_protocol::office::{
+    Align, Anchor, AnchorKind, CellText as WireCell, Dirty, EditKind, EditOp, Edited, Frozen, HitMode, ListKind, Marks,
+    Opened as WireOpened, PageRect, ParaStyle, Purpose, RectPt, Template, TextAlign,
+};
 use zeroize::Zeroizing;
 
-use super::viewer_office::{Host, HostEvent, OfficeView, TEXTURE_CAP_BYTES};
+use super::viewer_office::{EditShips, Host, HostEdit, HostEvent, OfficeView, TEXTURE_CAP_BYTES};
 use super::*;
 use crate::engine_host::office_host::{
     CannotOpen, CellData, CellRange, CloseWhy, NoPreview as HostNoPreview, OfficeState as HostState, PageSize, Rect,
@@ -69,22 +73,82 @@ struct Log {
     retries: usize,
     closes: Vec<CloseWhy>,
     next: u64,
+    /// An editing session: the edit calls are taken.
+    editing: bool,
+    /// What was asked of the editor, in words ("edit", "hit", "save", ...) and the id it was given.
+    asked: Vec<(&'static str, u64)>,
+    /// Handed at the next `poll_edit`.
+    answers: Vec<HostEdit>,
+    /// Where the editor said its unsaved work is sealed at a lock (the real host's worker calls it).
+    sink: Option<crate::engine_host::office_host::FlushSink>,
 }
 
 #[derive(Clone, Default)]
-struct Fake(Arc<Mutex<Log>>);
+pub(super) struct Fake(Arc<Mutex<Log>>);
 
 impl Fake {
     fn log(&self) -> MutexGuard<'_, Log> {
         self.0.lock().unwrap()
     }
 
-    fn view(&self, kind: OfficeKind) -> OfficeView {
+    pub(super) fn view(&self, kind: OfficeKind) -> OfficeView {
         OfficeView::on(Some(Box::new(self.clone())), kind)
     }
 
+    /// An editing session of `kind`: the host is open for editing once its state says so.
+    pub(super) fn editor(&self, kind: EditKind) -> OfficeView {
+        self.log().editing = true;
+        OfficeView::editing_on(Box::new(self.clone()), kind)
+    }
+
+    /// The id the editor was given for its `what`-th ask of that kind.
+    fn id_of(&self, what: &str) -> u64 {
+        self.log()
+            .asked
+            .iter()
+            .rev()
+            .find(|(asked, _)| *asked == what)
+            .unwrap_or_else(|| panic!("no {what} was asked"))
+            .1
+    }
+
+    pub(super) fn asked_count(&self, what: &str) -> usize {
+        self.log().asked.iter().filter(|(asked, _)| *asked == what).count()
+    }
+
+    /// The door the editor registered for a lock's snapshot.
+    pub(super) fn flush_sink(&self) -> Option<crate::engine_host::office_host::FlushSink> {
+        self.log().sink.clone()
+    }
+
+    pub(super) fn answer(&self, answer: HostEdit) {
+        self.log().answers.push(answer);
+    }
+
+    /// The editor answers a save with `bytes` at `revision`.
+    pub(super) fn saved(&self, bytes: &[u8], revision: u64) {
+        let id = self.id_of("save");
+        self.answer(HostEdit::Saved {
+            id,
+            purpose: Purpose::Save,
+            revision,
+            bytes: Zeroizing::new(bytes.to_vec()),
+        });
+    }
+
+    fn ask(&self, what: &'static str) -> Option<u64> {
+        let mut log = self.log();
+        if !log.editing || !matches!(log.state, Some(HostState::Pages { .. } | HostState::Sheets { .. })) {
+            return None;
+        }
+        let id = log.next;
+        log.next += 1;
+        log.asked.push((what, id));
+        Some(id)
+    }
+
     /// The host moves to `state` and says so at the next poll.
-    fn set(&self, state: HostState) {
+    pub(super) fn set(&self, state: HostState) {
         let mut log = self.log();
         log.state = Some(state);
         log.events.push(HostEvent::State);
@@ -119,6 +183,10 @@ impl Fake {
 }
 
 impl Host for Fake {
+    fn set_flush_sink(&mut self, sink: crate::engine_host::office_host::FlushSink) {
+        self.log().sink = Some(sink);
+    }
+
     fn state(&self) -> HostState {
         self.log().state.clone().unwrap_or(HostState::Opening)
     }
@@ -179,9 +247,37 @@ impl Host for Fake {
             log.state = Some(HostState::Closed(why));
         }
     }
+
+    fn edit(&mut self, _op: EditOp) -> Option<u64> {
+        self.ask("edit")
+    }
+
+    fn hit(&mut self, _page: u32, _x_pt: f32, _y_pt: f32, _mode: HitMode) -> Option<u64> {
+        self.ask("hit")
+    }
+
+    fn copy(&mut self) -> Option<u64> {
+        self.ask("copy")
+    }
+
+    fn layouts(&mut self) -> Option<u64> {
+        self.ask("layouts")
+    }
+
+    fn insert_image(&mut self, _bytes: Zeroizing<Vec<u8>>, _png: bool) -> Option<u64> {
+        self.ask("image")
+    }
+
+    fn save_bytes(&mut self, _purpose: Purpose) -> Option<u64> {
+        self.ask("save")
+    }
+
+    fn poll_edit(&mut self) -> Vec<HostEdit> {
+        std::mem::take(&mut self.log().answers)
+    }
 }
 
-fn pages(n: u32) -> HostState {
+pub(super) fn pages(n: u32) -> HostState {
     HostState::Pages {
         pages: n,
         sizes: vec![A4; n as usize],
@@ -257,6 +353,23 @@ struct EngineState {
     max_asked: Vec<u64>,
     /// Saves, copies and keeps asked of the engine.
     writes: usize,
+    /// The version each file is at (a file not in it: 3), and the files the account may not change.
+    versions: std::collections::HashMap<String, i64>,
+    read_only: Vec<String>,
+    /// Office documents stored: (file id, bytes, the base they were saved from). A conflict stores nothing.
+    stored: Vec<(String, Vec<u8>, i64)>,
+    /// Keep both copies: (file id, bytes).
+    copies: Vec<(String, Vec<u8>)>,
+    /// New documents: (folder, name, bytes).
+    created: Vec<(Option<String>, String, Vec<u8>)>,
+    /// The copy on this PC of a file made by New document cannot be read yet (the real engine: queued, not yet on disk).
+    new_unreadable: bool,
+    /// Answer saves with this instead of storing (`None`: store).
+    save_says: Option<Result<SaveEnd, EditRefused>>,
+    /// The recovery blobs this PC keeps: file id -> (time, base, bytes). Survives a source (a restart of the app).
+    blobs: std::collections::BTreeMap<String, (i64, i64, Vec<u8>)>,
+    /// The version the file is at is one this opening's saves became (`EditFacts::own`): a queued save that landed.
+    own: bool,
 }
 
 struct TestEngine {
@@ -275,6 +388,15 @@ impl TestEngine {
                 fetches: 0,
                 max_asked: Vec::new(),
                 writes: 0,
+                versions: Default::default(),
+                read_only: Vec::new(),
+                stored: Vec::new(),
+                copies: Vec::new(),
+                created: Vec::new(),
+                new_unreadable: false,
+                save_says: None,
+                blobs: Default::default(),
+                own: false,
             }),
         })
     }
@@ -312,7 +434,8 @@ impl ViewerEngine for TestEngine {
             name,
             folders: Vec::new(),
             size,
-            on_this_pc: None,
+            on_this_pc: (self.s().new_unreadable && file_id.starts_with("new"))
+                .then_some(beebeeb_engine::app::viewer_api::OnThisPc::NotSentYet),
             unsettled_here: false,
         })
     }
@@ -339,7 +462,10 @@ impl ViewerEngine for TestEngine {
         })
     }
 
-    fn local(&self, _file_id: &str, _max_bytes: u64, _cancel: &AtomicBool) -> Result<LocalCopy, OpenFileError> {
+    fn local(&self, file_id: &str, _max_bytes: u64, _cancel: &AtomicBool) -> Result<LocalCopy, OpenFileError> {
+        if self.s().new_unreadable && file_id.starts_with("new") {
+            return Err(OpenFileError::CopyNotReadable);
+        }
         Ok(LocalCopy::NotHere)
     }
 
@@ -381,10 +507,106 @@ impl ViewerEngine for TestEngine {
         self.s().writes += 1;
         Err(EditRefused::Failed)
     }
+
+    fn edit_facts(&self, _session: SessionGeneration, file_id: &str, _opening: u64) -> Option<EditFacts> {
+        let s = self.s();
+        Some(EditFacts {
+            version: s.versions.get(file_id).copied().unwrap_or(3),
+            kept: false,
+            can_write: !s.read_only.iter().any(|id| id == file_id),
+            own: s.own,
+        })
+    }
+
+    /// The engine's rule in short: a save from a version older than the file's is a conflict and stores nothing.
+    fn save_office(
+        &self,
+        _session: SessionGeneration,
+        file_id: &str,
+        bytes: &Zeroizing<Vec<u8>>,
+        base: i64,
+        _opening: u64,
+    ) -> Result<SaveEnd, EditRefused> {
+        let mut s = self.s();
+        if let Some(says) = s.save_says {
+            return says;
+        }
+        let now = s.versions.get(file_id).copied().unwrap_or(3);
+        if base < now {
+            return Ok(SaveEnd::Conflict { theirs: now });
+        }
+        s.stored.push((file_id.to_string(), bytes.to_vec(), base));
+        s.versions.insert(file_id.to_string(), now + 1);
+        Ok(SaveEnd::Saved { version: now + 1 })
+    }
+
+    fn save_office_copy(
+        &self,
+        _session: SessionGeneration,
+        file_id: &str,
+        bytes: &Zeroizing<Vec<u8>>,
+        _device: &str,
+        _hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        let mut s = self.s();
+        s.copies.push((file_id.to_string(), bytes.to_vec()));
+        Ok(NewCopy {
+            id: "copy1".into(),
+            name: "Invented (This PC, 09:41).docx".into(),
+        })
+    }
+
+    fn recovery_put(
+        &self,
+        _session: SessionGeneration,
+        file_id: &str,
+        base: i64,
+        bytes: &Zeroizing<Vec<u8>>,
+    ) -> Result<(), RecoveryRefused> {
+        let at = 86_400 * 100 + 14 * 3600 + 32 * 60;
+        self.s().blobs.insert(file_id.to_string(), (at, base, bytes.to_vec()));
+        Ok(())
+    }
+
+    fn recovery_list(&self, _session: SessionGeneration) -> Result<Vec<RecoveryEntry>, RecoveryRefused> {
+        Ok(self
+            .s()
+            .blobs
+            .iter()
+            .map(|(id, (at, base, _))| RecoveryEntry { file_id: id.clone(), saved_at: *at, base: *base })
+            .collect())
+    }
+
+    fn recovery_take(&self, _session: SessionGeneration, file_id: &str) -> Result<Zeroizing<Vec<u8>>, RecoveryRefused> {
+        self.s().blobs.get(file_id).map(|b| Zeroizing::new(b.2.clone())).ok_or(RecoveryRefused::NotFound)
+    }
+
+    fn recovery_discard(&self, _session: SessionGeneration, file_id: &str) -> Result<(), RecoveryRefused> {
+        self.s().blobs.remove(file_id).map(|_| ()).ok_or(RecoveryRefused::NotFound)
+    }
+
+    fn create_office(
+        &self,
+        _session: SessionGeneration,
+        folder: Option<&str>,
+        name: &str,
+        bytes: &Zeroizing<Vec<u8>>,
+    ) -> Result<String, EditRefused> {
+        let mut s = self.s();
+        s.created
+            .push((folder.map(str::to_string), name.to_string(), bytes.to_vec()));
+        let id = format!("new{}", s.created.len());
+        let size = bytes.len() as u64;
+        s.files.push((id.clone(), name.to_string(), size));
+        Ok(id)
+    }
 }
 
 /// What the opener was handed: the kind and how many bytes.
 type Opened = Arc<Mutex<Vec<(OfficeKind, usize)>>>;
+
+/// What the editing opener was handed: the kind and how many bytes.
+type Edits = Arc<Mutex<Vec<(EditKind, usize)>>>;
 
 /// A source on `engine` with every Office type switched on (for this source only), whose renderer is `fake`.
 fn source_with(engine: Arc<TestEngine>, fake: &Fake, opened: Opened) -> EngineViewerSource<TestEngine> {
@@ -397,6 +619,33 @@ fn source_with(engine: Arc<TestEngine>, fake: &Fake, opened: Opened) -> EngineVi
         opened.lock().unwrap().push((kind, bytes.len()));
         fake.view(kind)
     });
+    // The editor is off unless a test turns it on (on Windows its default is on).
+    source.office.edit_on = false;
+    source
+}
+
+/// As [`source_with`], with the editor on for every type: a writable file opens in an editing session on `fake`.
+fn editor_with(
+    engine: Arc<TestEngine>,
+    fake: &Fake,
+    opened: Opened,
+    edits: Edits,
+    template: &Fake,
+) -> EngineViewerSource<TestEngine> {
+    let mut source = source_with(engine, fake, opened);
+    source.office.edit_on = true;
+    source.office.edits = EditShips {
+        docx: true,
+        xlsx: true,
+        pptx: true,
+    };
+    let session = fake.clone();
+    source.office.edit_opener = Box::new(move |_, kind, bytes, _, _| {
+        edits.lock().unwrap().push((kind, bytes.len()));
+        session.editor(kind)
+    });
+    let template = template.clone();
+    source.office.new_opener = Box::new(move |_, kind, _, _, _| template.editor(kind));
     source
 }
 
@@ -416,60 +665,709 @@ fn first_body(source: &mut EngineViewerSource<TestEngine>, id: &str) -> Body {
 // The locks and the route
 // ---------------------------------------------------------------------------------------------------------------
 
-/// Lock 1: no route to the editor's body. Every kind, opened through the engine source, through a stop and a retry.
-#[test]
-fn office_editor_body_never_from_the_engine_source() {
-    let kinds = [
-        ("Invented.docx", OfficeKind::Docx),
-        ("Invented.doc", OfficeKind::Doc),
-        ("Invented.xlsx", OfficeKind::Xlsx),
-        ("Invented.xls", OfficeKind::Xls),
-        ("Invented.pptx", OfficeKind::Pptx),
-    ];
-    for (name, kind) in kinds {
-        let fake = Fake::default();
-        let mut source = source_with(TestEngine::new(&[("f1", name, 64)]), &fake, Opened::default());
-        let mut seen = vec![source.open("f1").unwrap().body];
-        seen.push(first_body(&mut source, "f1"));
-        fake.set(open_state(kind));
-        seen.extend(source.poll("f1"));
-        fake.set(HostState::Stopped {
-            why: Stop::Exited,
-            can_retry: true,
-        });
-        seen.extend(source.poll("f1"));
-        seen.push(source.retry("f1").unwrap().body);
-        fake.set(open_state(kind));
-        seen.extend(source.poll("f1"));
-        assert!(
-            seen.iter().all(|body| !matches!(body, Body::Word(_) | Body::NoEditor)),
-            "{name}: {seen:?}"
-        );
-        // The document was reached twice, so the check above looked at it.
-        let shown = seen
-            .iter()
-            .filter(|body| matches!(body, Body::Doc(_) | Body::Deck(_) | Body::Sheet(_)))
-            .count();
-        assert_eq!(shown, 2, "{name}: {seen:?}");
-        assert_eq!(fake.log().retries, 1, "{name}");
+// ---------------------------------------------------------------------------------------------------------------
+// The editor
+// ---------------------------------------------------------------------------------------------------------------
+
+/// An `Edited` at `revision` (a caret on page one, nothing selected).
+pub(super) fn edited(revision: u64, dirty: Dirty) -> Edited {
+    Edited {
+        revision,
+        caret: Some(PageRect {
+            page: 0,
+            rect: RectPt {
+                x: 72.0,
+                y: 96.0,
+                w: 1.0,
+                h: 14.0,
+            },
+        }),
+        selection: Vec::new(),
+        can_undo: true,
+        can_redo: false,
+        dirty,
+        pages: None,
+        cells: Vec::new(),
+        slides: None,
+        marks: Marks {
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            style: ParaStyle::Normal,
+            align: TextAlign::Left,
+            list: ListKind::None,
+        },
     }
 }
 
-/// Lock 3: the engine source saves nothing of an Office file.
-#[test]
-fn office_engine_source_saves_nothing() {
+fn page_rect(page: u32) -> PageRect {
+    PageRect {
+        page,
+        rect: RectPt {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+        },
+    }
+}
+
+fn typed() -> EditOp {
+    EditOp::InsertText("An invented line.".into())
+}
+
+/// Frames until the source settles something (at most 20 s); `each` runs between two frames.
+fn until_settled(
+    source: &mut EngineViewerSource<TestEngine>,
+    id: &str,
+    mut each: impl FnMut(),
+) -> crate::frames::viewers::source::Settled {
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        source.poll(id);
+        match source.settled(id) {
+            // The revision a landed save holds comes first (its own test); the save's answer is the next one.
+            Some(crate::frames::viewers::source::Settled::SavedRevision(_)) => continue,
+            Some(settled) => return settled,
+            None => {}
+        }
+        each();
+        assert!(Instant::now() < end, "nothing settled");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Everything an editing test holds.
+struct Editor {
+    fake: Fake,
+    engine: Arc<TestEngine>,
+    source: EngineViewerSource<TestEngine>,
+    viewer_opened: Opened,
+    edits: Edits,
+}
+
+/// `name` open in an editor on a fake host that is open (its pages or sheets known).
+fn editor(name: &str, read_only: bool) -> Editor {
+    let engine = TestEngine::new(&[("f1", name, 64)]);
+    if read_only {
+        engine.s().read_only.push("f1".into());
+    }
+    editor_over(engine, name)
+}
+
+/// [`editor`] over an existing engine (a second one is the app after a restart: the blobs stayed).
+fn editor_over(engine: Arc<TestEngine>, name: &str) -> Editor {
     let fake = Fake::default();
-    let engine = TestEngine::new(&[("f1", "Invented.docx", 64)]);
-    let mut source = source_with(engine.clone(), &fake, Opened::default());
+    let template = Fake::default();
+    let (viewer_opened, edits) = (Opened::default(), Edits::default());
+    let mut source = editor_with(engine.clone(), &fake, viewer_opened.clone(), edits.clone(), &template);
     source.open("f1").unwrap();
     first_body(&mut source, "f1");
-    fake.set(pages(2));
-    assert!(matches!(source.poll("f1"), Some(Body::Doc(_))));
-    assert!(matches!(source.save_document("f1", 1), SaveOutcome::Failed));
-    assert!(matches!(source.resolve_document("f1", Keep::Mine), SaveOutcome::Failed));
-    assert!(source.commands("f1", "").is_empty());
-    assert!(!source.can_save());
-    assert_eq!(engine.s().writes, 0);
+    let kind = kinds::office_of(name).unwrap();
+    fake.set(open_state(kind));
+    source.poll("f1");
+    Editor {
+        fake,
+        engine,
+        source,
+        viewer_opened,
+        edits,
+    }
+}
+
+/// A save that landed says first which revision its bytes are (what is typed after them stays unsaved in the window),
+/// then answers as saved. A copy the helper cannot answer at all is said, once, and another refusal is not.
+#[test]
+fn a_landed_save_says_its_revision_first_and_a_copy_too_large_is_said() {
+    use crate::frames::viewers::source::{EditAnswer, Settled};
+    let mut e = editor("Invented.docx", false);
+    assert!(e.source.edit("f1", typed()));
+    e.fake.answer(HostEdit::Edited(Box::new(edited(4, Dirty::All))));
+    assert!(e.source.poll_edit("f1").is_some());
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.source.poll("f1");
+    e.fake.saved(b"PK invented package", 4);
+    let end = Instant::now() + Duration::from_secs(20);
+    let first = loop {
+        e.source.poll("f1");
+        if let Some(settled) = e.source.settled("f1") {
+            break settled;
+        }
+        assert!(Instant::now() < end, "nothing settled");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(matches!(first, Settled::SavedRevision(4)), "the revision comes first");
+    assert!(matches!(e.source.settled("f1"), Some(Settled::Saved { version: 4, .. })), "then the save");
+    assert!(e.source.settled("f1").is_none());
+
+    // Copy: the helper says the selection is too large.
+    assert!(e.source.copy_selection("f1"));
+    let id = e.fake.id_of("copy");
+    e.fake.answer(HostEdit::Failed { id, too_large: true });
+    assert!(matches!(e.source.poll_edit("f1"), Some(EditAnswer::CopyTooLarge)));
+    assert!(e.source.poll_edit("f1").is_none());
+    // A copy refused for another reason says nothing.
+    assert!(e.source.copy_selection("f1"));
+    let id = e.fake.id_of("copy");
+    e.fake.answer(HostEdit::Failed { id, too_large: false });
+    assert!(e.source.poll_edit("f1").is_none());
+}
+
+/// A writable .docx, .xlsx or .pptx opens in an editing session and everything else opens in the viewer, as before:
+/// a file the account may not change, an older format, the editor switched off, and a type the editor does not ship.
+#[test]
+fn a_writable_file_opens_in_the_editor_and_the_rest_in_the_viewer() {
+    for (name, kind) in [
+        ("Invented.docx", EditKind::Docx),
+        ("Invented.xlsx", EditKind::Xlsx),
+        ("Invented.pptx", EditKind::Pptx),
+    ] {
+        let e = editor(name, false);
+        assert_eq!(e.edits.lock().unwrap().iter().map(|(k, _)| *k).collect::<Vec<_>>(), [kind], "{name}");
+        assert!(e.viewer_opened.lock().unwrap().is_empty(), "{name}: not the viewer");
+        assert!(e.source.can_edit("f1"), "{name}");
+    }
+    // Read-only, and the older formats: the viewer, and never the editor.
+    for (name, read_only) in [
+        ("Invented.docx", true),
+        ("Invented.xlsx", true),
+        ("Invented.doc", false),
+        ("Invented.xls", false),
+    ] {
+        let mut e = editor(name, read_only);
+        assert!(e.edits.lock().unwrap().is_empty(), "{name}: the editor never started");
+        assert_eq!(e.viewer_opened.lock().unwrap().len(), 1, "{name}: the viewer did");
+        assert!(!e.source.can_edit("f1"), "{name}");
+        assert!(!e.source.edit("f1", typed()), "{name}");
+        assert!(!e.source.hit("f1", 0, 1.0, 1.0, HitMode::Place), "{name}");
+        assert!(!e.source.copy_selection("f1"), "{name}");
+        assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Failed), "{name}");
+        assert!(matches!(e.source.resolve_document("f1", Keep::Mine), SaveOutcome::Failed), "{name}");
+        assert!(!e.source.saving(), "{name}");
+        assert_eq!(e.engine.s().writes, 0, "{name}");
+        assert!(e.engine.s().stored.is_empty(), "{name}: nothing was written");
+    }
+    // Switched off (a PC without the sandbox), and a type that is not shipped to the editor: the viewer.
+    let fake = Fake::default();
+    let engine = TestEngine::new(&[("f1", "Invented.docx", 64)]);
+    let (opened, edits) = (Opened::default(), Edits::default());
+    let mut source = editor_with(engine, &fake, opened.clone(), edits.clone(), &Fake::default());
+    source.office.edit_on = false;
+    source.open("f1").unwrap();
+    first_body(&mut source, "f1");
+    assert!(edits.lock().unwrap().is_empty() && opened.lock().unwrap().len() == 1, "off: the viewer");
+    let fake = Fake::default();
+    let engine = TestEngine::new(&[("f1", "Invented.pptx", 64)]);
+    let (opened, edits) = (Opened::default(), Edits::default());
+    let mut source = editor_with(engine, &fake, opened.clone(), edits.clone(), &Fake::default());
+    source.office.edits.pptx = false;
+    source.open("f1").unwrap();
+    first_body(&mut source, "f1");
+    assert!(edits.lock().unwrap().is_empty() && opened.lock().unwrap().len() == 1, "pptx off: the viewer");
+    // The shipped switches: the editor on where the sandbox is, slides too (MPL-2.0 accepted 2026-11-18).
+    const {
+        assert!(EditShips::SHIPPED.docx && EditShips::SHIPPED.xlsx && EditShips::SHIPPED.pptx);
+    }
+}
+
+#[test]
+fn the_editors_calls_reach_the_session_and_its_answers_come_back_in_order() {
+    let mut e = editor("Invented.docx", false);
+    assert!(e.source.edit("f1", typed()));
+    assert!(e.source.hit("f1", 0, 10.0, 20.0, HitMode::Place));
+    assert!(e.source.copy_selection("f1"));
+    assert!(e.source.layouts("f1"));
+    assert!(e.source.insert_image("f1", Zeroizing::new(vec![1, 2, 3]), true));
+    for what in ["edit", "hit", "copy", "layouts", "image"] {
+        assert_eq!(e.fake.asked_count(what), 1, "{what}");
+    }
+    e.fake.answer(HostEdit::Edited(Box::new(edited(1, Dirty::Rects(vec![page_rect(0)])))));
+    e.fake.answer(HostEdit::Clip {
+        text: "invented".into(),
+        html: None,
+    });
+    e.fake.answer(HostEdit::Layouts(vec!["Title".into()]));
+    assert!(matches!(e.source.poll_edit("f1"), Some(EditAnswer::Edited(got)) if got.revision == 1));
+    assert!(matches!(e.source.poll_edit("f1"), Some(EditAnswer::Clip { text, .. }) if text == "invented"));
+    assert!(matches!(e.source.poll_edit("f1"), Some(EditAnswer::Layouts(names)) if names == ["Title"]));
+    assert!(e.source.poll_edit("f1").is_none());
+    // Another file's calls are not this one's.
+    assert!(!e.source.edit("f2", typed()) && e.source.poll_edit("f2").is_none());
+    // The renderer stopping is told once.
+    e.fake.set(HostState::Stopped {
+        why: Stop::Exited,
+        can_retry: false,
+    });
+    e.source.poll("f1");
+    assert!(matches!(e.source.poll_edit("f1"), Some(EditAnswer::Stopped)));
+    assert!(!e.source.can_edit("f1") && !e.source.edit("f1", typed()));
+}
+
+/// An edited docx saves as the next version: the bytes the engine gets are the bytes the helper saved, from the base
+/// the press named, and the window gets the document as it is on screen. The helper keeps running.
+#[test]
+fn an_edited_docx_saves_as_the_next_version() {
+    let mut e = editor("Invented.docx", false);
+    assert!(e.source.edit("f1", typed()));
+    e.fake.answer(HostEdit::Edited(Box::new(edited(4, Dirty::All))));
+    assert!(e.source.poll_edit("f1").is_some());
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    assert!(e.source.saving(), "the file is not opened again meanwhile");
+    assert!(e.source.open("f1").is_err(), "an open waits for the save");
+    // The session has not handed the bytes yet: nothing is stored.
+    e.source.poll("f1");
+    assert_eq!(e.fake.asked_count("save"), 1);
+    assert!(e.engine.s().stored.is_empty());
+    let helper_saved = b"PK invented package";
+    e.fake.saved(helper_saved, 4);
+    let fake = e.fake.clone();
+    let settled = until_settled(&mut e.source, "f1", || {
+        let _ = &fake;
+    });
+    let crate::frames::viewers::source::Settled::Saved { id, version, body, .. } = settled else {
+        panic!("saved")
+    };
+    assert_eq!((id.as_str(), version), ("f1", 4));
+    assert!(matches!(body, Body::Doc(_)), "the document on screen, not a placeholder");
+    let stored = e.engine.s().stored.clone();
+    assert_eq!(stored, vec![("f1".to_string(), helper_saved.to_vec(), 3)]);
+    assert!(!e.source.saving());
+    // The session goes on, on the new version.
+    assert!(e.source.can_edit("f1") && e.source.edit("f1", typed()));
+    assert!(e.fake.log().closes.is_empty());
+}
+
+/// A save from a base older than the file's answers Conflict and writes nothing; the edit stays open, and the three
+/// answers each do what they say.
+#[test]
+fn a_save_from_a_stale_base_answers_conflict_and_the_three_answers_work() {
+    let mut e = editor("Invented.docx", false);
+    e.engine.s().versions.insert("f1".into(), 5);
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.fake.saved(b"mine v1", 1);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    let crate::frames::viewers::source::Settled::Conflict(conflict) = settled else {
+        panic!("a conflict")
+    };
+    assert_eq!(conflict.version, 5);
+    assert!(e.engine.s().stored.is_empty(), "nothing was written");
+    assert!(!e.source.saving());
+    assert!(e.source.can_edit("f1"), "the edit stays open");
+
+    // Keep mine: from the version the file is at now (5), not the stale base.
+    assert!(matches!(e.source.resolve_document("f1", Keep::Mine), SaveOutcome::Working));
+    e.fake.saved(b"mine v2", 2);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    let crate::frames::viewers::source::Settled::Saved { version, .. } = settled else {
+        panic!("saved")
+    };
+    assert_eq!(version, 6);
+    assert_eq!(e.engine.s().stored, vec![("f1".to_string(), b"mine v2".to_vec(), 5)]);
+
+    // Keep both: a copy next to the file, under its own id; the file as it was.
+    assert!(matches!(e.source.resolve_document("f1", Keep::Both), SaveOutcome::Working));
+    e.fake.saved(b"mine v3", 3);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    let crate::frames::viewers::source::Settled::Saved { id, version, .. } = settled else {
+        panic!("a copy")
+    };
+    assert_eq!((id.as_str(), version), ("copy1", 1));
+    assert_eq!(e.engine.s().copies, vec![("f1".to_string(), b"mine v3".to_vec())]);
+    assert_eq!(e.engine.s().stored.len(), 1, "the file itself was not saved again");
+
+    // Keep theirs: the file is opened again as Beebeeb has it, and the session with its edits ends.
+    let before = e.edits.lock().unwrap().len();
+    let SaveOutcome::Opened(file) = e.source.resolve_document("f1", Keep::Theirs) else {
+        panic!("opened")
+    };
+    assert_eq!(file.id, "f1");
+    // (The fake host is shared by both sessions: the old one's close is seen by the new one, so it is opened again.)
+    let end = Instant::now() + Duration::from_secs(20);
+    while e.edits.lock().unwrap().len() == before {
+        e.source.poll("f1");
+        assert!(Instant::now() < end, "no new session started");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    e.fake.set(pages(2));
+    assert!(matches!(e.source.poll("f1"), Some(Body::Doc(_))));
+    assert!(e.source.can_edit("f1"), "a new session on the file's bytes");
+}
+
+/// Every way a save can fail before the engine is asked settles as not done and ends the busy state; no stale answer
+/// of an earlier opening is ever drawn.
+#[test]
+fn a_save_that_cannot_get_its_bytes_settles_failed_and_ends_the_busy_state() {
+    // The helper stops while the bytes are asked.
+    let mut e = editor("Invented.docx", false);
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.fake.set(HostState::Stopped {
+        why: Stop::Exited,
+        can_retry: false,
+    });
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Failed));
+    assert!(!e.source.saving() && e.engine.s().stored.is_empty());
+    // The helper refuses the save size.
+    let mut e = editor("Invented.docx", false);
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    let id = e.fake.id_of("save");
+    e.fake.answer(HostEdit::Failed { id, too_large: false });
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Failed));
+    assert!(!e.source.saving());
+    // The engine refuses (an earlier change not sent yet): said, nothing stored.
+    let mut e = editor("Invented.docx", false);
+    e.engine.s().save_says = Some(Err(EditRefused::EarlierChangeNotSent));
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.fake.saved(b"x", 1);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Refused(_)));
+    assert!(!e.source.saving());
+    // A second press while one is on its way is not taken.
+    let mut e = editor("Invented.docx", false);
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Failed));
+}
+
+/// New document: a session from the template, its bytes to the engine, then the file is opened as any file is.
+#[test]
+fn new_document_creates_the_file_and_opens_it() {
+    let fake = Fake::default();
+    let template = Fake::default();
+    let engine = TestEngine::new(&[]);
+    let (opened, edits) = (Opened::default(), Edits::default());
+    let mut source = editor_with(engine.clone(), &fake, opened.clone(), edits.clone(), &template);
+    assert!(source.create_document(Some("folder1"), "Invented.docx", EditKind::Docx, Template::Blank));
+    assert!(source.saving());
+    assert!(!source.create_document(None, "Another.docx", EditKind::Docx, Template::Blank), "one at a time");
+    template.set(pages(1));
+    let mut delivered = false;
+    let settled = until_settled(&mut source, "", || {
+        if !delivered && template.asked_count("save") == 1 {
+            template.saved(b"PK blank letter", 1);
+            delivered = true;
+        }
+    });
+    let crate::frames::viewers::source::Settled::Saved { id, name, version, .. } = settled else {
+        panic!("created")
+    };
+    assert_eq!((id.as_str(), name.as_str(), version), ("new1", "Invented.docx", 3));
+    assert_eq!(
+        engine.s().created,
+        vec![(Some("folder1".to_string()), "Invented.docx".to_string(), b"PK blank letter".to_vec())]
+    );
+    assert!(!source.saving());
+    assert!(template.log().closes.len() == 1, "the template's session is closed");
+    // Opened: the new file is the open one, in an editing session on its bytes.
+    first_body(&mut source, "new1");
+    assert_eq!(edits.lock().unwrap().len(), 1);
+    fake.set(pages(1));
+    assert!(source.poll("new1").is_some() && source.can_edit("new1"));
+}
+
+/// v3 bug 2 (DW-1558): the new file's copy on this PC is not readable yet (queued, not on disk). The editor opens on
+/// the bytes the app just made, not on the copy: no "Couldn't read the copy on this PC".
+#[test]
+fn new_document_opens_on_its_own_bytes_when_the_local_copy_is_not_readable_yet() {
+    let fake = Fake::default();
+    let template = Fake::default();
+    let engine = TestEngine::new(&[]);
+    engine.s().new_unreadable = true;
+    let (opened, edits) = (Opened::default(), Edits::default());
+    let mut source = editor_with(engine.clone(), &fake, opened, edits.clone(), &template);
+    assert!(source.create_document(None, "Invented.docx", EditKind::Docx, Template::Blank));
+    template.set(pages(1));
+    let mut delivered = false;
+    let settled = until_settled(&mut source, "", || {
+        if !delivered && template.asked_count("save") == 1 {
+            template.saved(b"PK blank letter", 1);
+            delivered = true;
+        }
+    });
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Saved { .. }));
+    fake.set(pages(1));
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        if source.can_edit("new1") {
+            break;
+        }
+        if let Some(body) = source.poll("new1") {
+            assert!(
+                !matches!(body, Body::Stopped(Stopped::CopyNotReadable)),
+                "the new file's editor stopped on its own copy"
+            );
+        }
+        assert!(Instant::now() < end, "the editor never opened");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(edits.lock().unwrap().as_slice(), &[(EditKind::Docx, b"PK blank letter".len())]);
+}
+
+/// w23 (the w20 fix held only on the fake platform): the window opens the made file with `Ui::open`, that is a SECOND
+/// `open` of the same source after `Settled::Saved`. That open used to read the copy on this PC again (Windows: queued,
+/// not on disk, or a placeholder: "Couldn't read the copy on this PC", 3 of 3 on the Windows test machine). It opens on the made bytes.
+#[test]
+fn new_document_opened_by_the_window_after_saved_uses_its_own_bytes() {
+    let fake = Fake::default();
+    let template = Fake::default();
+    let engine = TestEngine::new(&[]);
+    engine.s().new_unreadable = true;
+    let (opened, edits) = (Opened::default(), Edits::default());
+    let mut source = editor_with(engine.clone(), &fake, opened, edits.clone(), &template);
+    assert!(source.create_document(None, "Invented.docx", EditKind::Docx, Template::Blank));
+    template.set(pages(1));
+    let mut delivered = false;
+    let settled = until_settled(&mut source, "", || {
+        if !delivered && template.asked_count("save") == 1 {
+            template.saved(b"PK blank letter", 1);
+            delivered = true;
+        }
+    });
+    let crate::frames::viewers::source::Settled::Saved { id, .. } = settled else {
+        panic!("created")
+    };
+    // What `new_file::open_made` does next: `Ui::open(source, id)` -> `source.open(id)`.
+    assert!(source.open(&id).is_ok());
+    fake.set(pages(1));
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        if source.can_edit(&id) {
+            break;
+        }
+        if let Some(body) = source.poll(&id) {
+            assert!(
+                !matches!(body, Body::Stopped(Stopped::CopyNotReadable)),
+                "the new file's editor stopped on its own copy"
+            );
+        }
+        assert!(Instant::now() < end, "the editor never opened");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(edits.lock().unwrap().as_slice(), &[(EditKind::Docx, b"PK blank letter".len())]);
+}
+
+#[test]
+fn new_document_ends_as_failed_when_the_template_never_opens() {
+    let template = Fake::default();
+    let engine = TestEngine::new(&[]);
+    let mut source = editor_with(engine.clone(), &Fake::default(), Opened::default(), Edits::default(), &template);
+    assert!(source.create_document(None, "Invented.docx", EditKind::Docx, Template::Blank));
+    template.set(HostState::Stopped {
+        why: Stop::TimedOut,
+        can_retry: false,
+    });
+    let settled = until_settled(&mut source, "", || {});
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Failed));
+    assert!(!source.saving() && engine.s().created.is_empty());
+    // The editor off: nothing starts.
+    let mut off = EngineViewerSource::on(TestEngine::new(&[]));
+    off.office.edit_on = false;
+    assert!(!off.create_document(None, "Invented.docx", EditKind::Docx, Template::Blank));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Stale pixels and cells
+// ---------------------------------------------------------------------------------------------------------------
+
+fn page_key(page: u32) -> OfficePicture {
+    OfficePicture::Page {
+        page,
+        zoom_pct: 100,
+        dpi: 96,
+    }
+}
+
+/// An editing view of `kind` over `fake`, open with `state`.
+fn editing_view(fake: &Fake, kind: EditKind, state: HostState) -> OfficeView {
+    let mut view = fake.editor(kind);
+    fake.set(state);
+    view.poll();
+    view
+}
+
+/// Ask for `which` and let it come: held.
+fn hold(fake: &Fake, view: &mut OfficeView, which: OfficePicture) {
+    let _ = view.picture(which);
+    if !view.holds(which) {
+        fake.deliver(fake.last_page(), 8, 8, false);
+        view.poll();
+    }
+    assert!(view.holds(which));
+}
+
+#[test]
+fn an_edited_drops_the_pictures_it_names_and_nothing_older_is_drawn() {
+    let fake = Fake::default();
+    let mut view = editing_view(&fake, EditKind::Docx, pages(3));
+    for page in 0..3 {
+        hold(&fake, &mut view, page_key(page));
+    }
+    // Page one was redrawn: only its pictures go, at every scale.
+    let other_scale = OfficePicture::Page {
+        page: 0,
+        zoom_pct: 150,
+        dpi: 96,
+    };
+    hold(&fake, &mut view, other_scale);
+    fake.answer(HostEdit::Edited(Box::new(edited(7, Dirty::Rects(vec![page_rect(0)])))));
+    view.poll();
+    assert!(!view.holds(page_key(0)) && !view.holds(other_scale), "the named page's pictures are gone");
+    assert!(view.holds(page_key(1)) && view.holds(page_key(2)));
+    // The picture is not found for the old revision either: the old scale is not drawn in its place.
+    assert!(view.picture(page_key(0)).is_none(), "no stale picture stands in");
+    fake.deliver(fake.last_page(), 8, 8, false);
+    view.poll();
+    assert_eq!(view.held_at(page_key(0)), Some(7), "held under the revision it claims");
+    // Everything redrawn: every picture of the older revision goes.
+    fake.answer(HostEdit::Edited(Box::new(edited(8, Dirty::All))));
+    view.poll();
+    assert_eq!(view.held_pictures().0, 0);
+}
+
+#[test]
+fn what_was_asked_before_an_edit_is_not_drawn_after_it() {
+    let fake = Fake::default();
+    let mut view = editing_view(&fake, EditKind::Docx, pages(2));
+    assert!(view.picture(page_key(1)).is_none());
+    let asked = fake.last_page();
+    assert!(view.edit(typed()));
+    assert!(fake.log().cancels.contains(&asked), "the ask older than the edit ends");
+    // Its answer still comes (the helper rendered it before the edit): never held.
+    fake.deliver(asked, 8, 8, false);
+    view.poll();
+    assert_eq!(view.held_pictures().0, 0);
+    // Asked again after the edit: that one is drawn.
+    assert!(view.picture(page_key(1)).is_none());
+    fake.deliver(fake.last_page(), 8, 8, false);
+    view.poll();
+    assert!(view.holds(page_key(1)));
+}
+
+#[test]
+fn a_changed_page_count_or_size_updates_the_body_in_place() {
+    let fake = Fake::default();
+    let mut view = editing_view(&fake, EditKind::Docx, pages(2));
+    hold(&fake, &mut view, page_key(0));
+    let wide = PageSize {
+        w_pt: 700.0,
+        h_pt: 842.0,
+    };
+    // Three pages now; the host's state says so before the `Edited` does.
+    let mut change = edited(2, Dirty::All);
+    change.pages = Some(WireOpened {
+        pages: 3,
+        sizes: vec![A4, A4, wide],
+    });
+    fake.set(HostState::Pages {
+        pages: 3,
+        sizes: vec![A4, A4, wide],
+    });
+    fake.answer(HostEdit::Edited(Box::new(change)));
+    let Some(Body::Doc(doc)) = view.poll() else {
+        panic!("still the document, not a state")
+    };
+    assert_eq!(doc.view.pages, 3);
+    assert_eq!(doc.view.page_sizes_pt.last(), Some(&(700.0, 842.0)));
+    assert_eq!(view.held_pictures().0, 0, "the pictures of the old pages went");
+    // Same count, another size: not ignored.
+    fake.set(HostState::Pages {
+        pages: 3,
+        sizes: vec![A4, wide, wide],
+    });
+    let Some(Body::Doc(doc)) = view.poll() else {
+        panic!("still the document")
+    };
+    assert_eq!(doc.view.page_sizes_pt[1], (700.0, 842.0));
+    // A deck's count follows too, and the slide on the stage stays.
+    let deck_fake = Fake::default();
+    let mut deck = editing_view(&deck_fake, EditKind::Pptx, pages(3));
+    let mut change = edited(1, Dirty::All);
+    change.slides = Some(5);
+    change.pages = Some(WireOpened {
+        pages: 5,
+        sizes: vec![A4; 5],
+    });
+    deck_fake.set(pages(5));
+    deck_fake.answer(HostEdit::Edited(Box::new(change)));
+    let Some(Body::Deck(body)) = deck.poll() else {
+        panic!("still the deck")
+    };
+    assert_eq!((body.view.count, body.view.slides.len(), body.view.current), (5, 5, 1));
+}
+
+fn sheet_view(fake: &Fake) -> OfficeView {
+    editing_view(fake, EditKind::Xlsx, sheets(100, 10))
+}
+
+fn cells_of(view: &mut OfficeView) -> Vec<(u32, u32, String)> {
+    let Body::Sheet(sheet) = view.held_body() else {
+        panic!("a sheet")
+    };
+    let mut cells: Vec<_> = sheet.cells.iter().map(|c| (c.row, c.col, c.text.clone())).collect();
+    cells.sort();
+    cells
+}
+
+#[test]
+fn an_edited_drops_the_cell_blocks_it_changed_and_a_re_asked_block_replaces_the_old_one_whole() {
+    let fake = Fake::default();
+    let mut view = sheet_view(&fake);
+    assert_eq!(fake.log().cells, vec![(0, range(0, 0, 64, 10))]);
+    fake.cells(
+        0,
+        range(0, 0, 64, 10),
+        vec![cell(0, 0, "a", None, None), cell(1, 1, "b", None, None), cell(70, 1, "far", None, None)],
+        Vec::new(),
+    );
+    view.poll();
+    assert_eq!(cells_of(&mut view).len(), 3);
+    // Cell B2 changed.
+    let mut change = edited(3, Dirty::Rects(Vec::new()));
+    change.cells = vec![(0, range(1, 1, 1, 1))];
+    fake.answer(HostEdit::Edited(Box::new(change)));
+    view.poll();
+    assert_eq!(cells_of(&mut view), vec![(70, 1, "far".to_string())], "the block it touched is dropped");
+    // The next draw asks the block again; the answer replaces it whole (A1 is empty now).
+    view.wants_cells(0, 0, 0, 10, 4);
+    assert_eq!(fake.log().cells.len(), 2, "asked again");
+    fake.cells(0, range(0, 0, 64, 10), vec![cell(1, 1, "b2", None, None)], Vec::new());
+    view.poll();
+    assert_eq!(
+        cells_of(&mut view),
+        vec![(1, 1, "b2".to_string()), (70, 1, "far".to_string())],
+        "a cell missing from the answer is empty now"
+    );
+    // A cell edited past the sheet's last row grows the sheet.
+    let mut change = edited(4, Dirty::Rects(Vec::new()));
+    change.cells = vec![(0, range(120, 0, 1, 1))];
+    fake.answer(HostEdit::Edited(Box::new(change)));
+    let Some(Body::Sheet(sheet)) = view.poll() else {
+        panic!("a sheet")
+    };
+    assert_eq!(sheet.extent.0, 121);
+}
+
+#[test]
+fn a_block_of_cells_asked_before_an_edit_is_not_drawn_after_it() {
+    let fake = Fake::default();
+    let mut view = sheet_view(&fake);
+    // The first block is on its way; an edit is sent; the old block's answer comes.
+    assert!(view.edit(EditOp::SetCell {
+        sheet: 0,
+        row: 0,
+        col: 0,
+        text: "new".into(),
+    }));
+    fake.cells(0, range(0, 0, 64, 10), vec![cell(0, 0, "old", None, None)], Vec::new());
+    view.poll();
+    assert!(cells_of(&mut view).is_empty(), "older than the edit: dropped");
+    // It is asked again, and that answer is drawn.
+    view.wants_cells(0, 0, 0, 10, 4);
+    assert_eq!(fake.log().cells.len(), 2);
+    fake.cells(0, range(0, 0, 64, 10), vec![cell(0, 0, "new", None, None)], Vec::new());
+    view.poll();
+    assert_eq!(cells_of(&mut view), vec![(0, 0, "new".to_string())]);
 }
 
 #[test]
@@ -634,6 +1532,18 @@ fn host_states_become_their_bodies() {
     }
     assert!(matches!(body_for(Doc, pages(1)), Some(Body::Doc(doc)) if doc.view.older_format));
     assert!(matches!(body_for(Pptx, pages(3)), Some(Body::Deck(deck)) if deck.view.count == 3));
+    // A deck's slides are the size the file says (4:3 here), not the 16:9 the view starts from.
+    let four_three = HostState::Pages {
+        pages: 2,
+        sizes: vec![
+            PageSize {
+                w_pt: 720.0,
+                h_pt: 540.0
+            };
+            2
+        ],
+    };
+    assert!(matches!(body_for(Pptx, four_three), Some(Body::Deck(deck)) if deck.view.page_pt == (720, 540)));
     match body_for(Xlsx, sheets(10, 4)) {
         Some(Body::Sheet(sheet)) => {
             assert_eq!(sheet.tabs, vec!["Invented sheet".to_string()]);
@@ -763,7 +1673,7 @@ fn tiles_ask_their_region() {
             x: 512,
             y: 1024,
             w: 512,
-            h: 512.min(1684 - 1024)
+            h: 512
         })
     );
     // The last column, clipped to the raster.
@@ -826,16 +1736,71 @@ fn what_scrolled_past_is_cancelled() {
     };
     view.picture(seventh);
     let id = fake.last_page();
+    // The view scrolled on: every build from here wants the first page, held, and never the seventh.
+    let first = OfficePicture::Page {
+        page: 0,
+        zoom_pct: 100,
+        dpi: 96,
+    };
     view.poll(); // the frame that asked
-    view.poll(); // one poll without it
+    view.picture(first);
+    fake.deliver(fake.last_page(), 8, 8, false);
+    view.poll(); // one build without it
     assert!(fake.log().cancels.is_empty());
+    view.picture(first);
     view.poll(); // a second
     assert_eq!(fake.log().cancels, vec![id]);
+    view.picture(first);
     view.poll();
     assert_eq!(fake.log().cancels, vec![id], "cancelled once");
     // Wanted again later: asked anew.
     view.picture(seventh);
-    assert_eq!(fake.log().pages.len(), 2);
+    assert_eq!(fake.log().pages.len(), 3);
+}
+
+/// A frame that changes nothing polls and does not build (a pointer that moves, a popover that closes, 240 of them
+/// a second on a fast screen). Such a poll says nothing about what the view wants: an ask the last build wanted
+/// stays out until its answer comes, however many of them pass (dc-R3: at 144 dpi every tile an `Edited` asked for
+/// was cancelled on the third poll, and nothing asked again until the next build, so the page stayed as it was).
+#[test]
+fn a_poll_without_a_build_cancels_nothing_the_last_build_wanted() {
+    let fake = Fake::default();
+    let mut view = editing_view(&fake, EditKind::Docx, pages(1));
+    // A 150 % display at 100 % zoom: the page is drawn in tiles (3 across, 4 down for A4).
+    assert!(kinds::uses_tiles(100, 144));
+    let tiles: Vec<OfficePicture> = (0..4)
+        .flat_map(|row| {
+            (0..3).map(move |col| OfficePicture::Tile {
+                page: 0,
+                zoom_pct: 100,
+                dpi: 144,
+                col,
+                row,
+            })
+        })
+        .collect();
+    let build = |view: &OfficeView| tiles.iter().filter(|tile| view.picture(**tile).is_some()).count();
+
+    // An edit redrew page one (a text colour): the poll says so, and the build that follows asks its tiles.
+    fake.answer(HostEdit::Edited(Box::new(edited(3, Dirty::Rects(vec![page_rect(0)])))));
+    assert!(view.poll().is_some(), "an Edited builds the view again");
+    assert_eq!(build(&view), 0, "nothing of the older revision is drawn");
+    let asked: Vec<u64> = fake.log().pages.iter().map(|page| page.0).collect();
+    assert_eq!(asked.len(), tiles.len(), "every tile is asked once");
+
+    // Three frames that change nothing, before the helper answered.
+    for _ in 0..3 {
+        assert!(view.poll().is_none(), "nothing changed: no build");
+    }
+    assert!(fake.log().cancels.is_empty(), "no ask the last build wanted is cancelled");
+
+    // The answers come: each is drawn.
+    for id in &asked {
+        fake.deliver(*id, 8, 8, false);
+    }
+    assert!(view.poll().is_some(), "the answers build the view again");
+    assert_eq!(build(&view), tiles.len(), "every tile of the edited page is drawn");
+    assert_eq!(fake.log().pages.len(), tiles.len(), "and none was asked twice");
 }
 
 #[test]
@@ -1135,4 +2100,188 @@ fn a_version_that_kept_changing_says_try_again() {
         Some(Body::Stopped(Stopped::Changed))
     );
     assert!(Stopped::Changed.can_retry());
+}
+
+/// P3-7: only the five measured types route to the viewer; the eight others are their own app's.
+#[test]
+fn the_eight_unmeasured_types_have_no_office_route() {
+    for ext in ["docm", "dotx", "dotm", "dot", "xlsm", "xltx", "pptm", "ppsx"] {
+        let name = format!("a.{ext}");
+        assert_eq!(office_route_with(&name, true, ALL), None, "{name}");
+        assert_eq!(kinds::office_route(&name), None, "{name}");
+    }
+    assert_eq!(
+        office_route_with("a.pps", true, ALL),
+        Some(OfficeRoute::NoPreview(OfficeKind::Ppt))
+    );
+}
+
+/// P3-6: a kept `.ppt` has no preview, so the source does not claim it; a kept `.docx` it does.
+#[test]
+fn a_kept_file_opens_here_only_where_the_viewer_shows_it() {
+    let fake = Fake::default();
+    let source = source_with(
+        TestEngine::new(&[("f1", "Invented.docx", 64)]),
+        &fake,
+        Opened::default(),
+    );
+    for name in ["a.docx", "a.doc", "a.xlsx", "a.xls", "a.pptx"] {
+        assert!(source.opens_here_when_kept(name), "{name}");
+    }
+    for name in ["a.ppt", "a.pps", "a.docm", "a.ppsx"] {
+        assert!(!source.opens_here_when_kept(name), "{name}");
+    }
+}
+
+/// P2-3: the Office renderer is live only where the sandbox crate has a module (Windows).
+#[test]
+fn office_is_live_only_where_the_sandbox_exists() {
+    let fake = Fake::default();
+    let source = source_with(
+        TestEngine::new(&[("f1", "Invented.docx", 64)]),
+        &fake,
+        Opened::default(),
+    );
+    assert_eq!(source.office_live(), cfg!(windows));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Recovery: snapshots are kept, survive a restart and restore; a save clears them (w05-recovery-spill-wire)
+// ---------------------------------------------------------------------------------------------------------------
+
+fn snapshot(fake: &Fake, bytes: &[u8], revision: u64) {
+    fake.answer(HostEdit::Saved {
+        id: 900 + revision,
+        purpose: Purpose::Snapshot,
+        revision,
+        bytes: Zeroizing::new(bytes.to_vec()),
+    });
+}
+
+#[test]
+fn a_snapshot_is_kept_survives_a_restart_and_restores() {
+    let mut e = editor("Invented.docx", false);
+    snapshot(&e.fake, b"SNAP-ONE", 2);
+    snapshot(&e.fake, b"SNAP-TWO", 3);
+    assert!(e.source.poll_edit("f1").is_none(), "a snapshot is no answer to the window");
+    let kept = e.engine.s().blobs.get("f1").cloned().expect("kept under the file's id");
+    assert_eq!((kept.1, kept.2), (3, b"SNAP-TWO".to_vec()), "one blob per file: the newest, from the file's version");
+
+    // The app restarts: a new source over the same engine (this PC's blobs stayed).
+    let engine = e.engine.clone();
+    drop(e);
+    let mut again = editor_over(engine, "Invented.docx");
+    let offer = again.source.office_recovery("f1").expect("offered after the restart");
+    let pending = again.source.office_recovery_pending();
+    assert_eq!(pending.len(), 1);
+    assert_eq!((pending[0].file_id.as_str(), pending[0].at.as_str()), ("f1", offer.at.as_str()));
+    assert!(again.source.office_restore("f1"));
+    // A new editing session opened on the blob's bytes, and the editor was told.
+    assert_eq!(again.edits.lock().unwrap().last().map(|(_, len)| *len), Some(8));
+    assert!(matches!(again.source.poll_edit("f1"), Some(EditAnswer::Restored { .. })));
+    assert!(again.engine.s().blobs.contains_key("f1"), "the blob stays until a save or a discard");
+    // Not for another file, and not twice without a blob.
+    assert!(!again.source.office_restore("f2"));
+    again.source.office_discard_recovery("f1");
+    assert!(again.source.office_recovery("f1").is_none() && !again.source.office_restore("f1"));
+}
+
+#[test]
+fn a_restore_saves_from_the_blobs_version_so_a_newer_one_conflicts() {
+    // The blob was edited from version 2; the file is at 3 when it is opened again.
+    let engine = TestEngine::new(&[("f1", "Invented.docx", 64)]);
+    engine.s().blobs.insert("f1".into(), (86_400 * 100, 2, b"KEPT".to_vec()));
+    let mut e = editor_over(engine, "Invented.docx");
+    assert!(e.source.office_restore("f1"));
+    // The restored editing session opens (the fake is shared with the one the restore closed, so it says closed until
+    // then) and a frame reads that: Save is refused before.
+    e.fake.set(open_state(OfficeKind::Docx));
+    e.source.poll("f1");
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.source.poll("f1");
+    e.fake.saved(b"PK saved package", 4);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(
+        matches!(settled, crate::frames::viewers::source::Settled::Conflict(_)),
+        "the newer version is not overwritten: {settled:?}"
+    );
+    assert!(e.engine.s().stored.is_empty());
+}
+
+#[test]
+fn a_landed_save_deletes_the_blob() {
+    let mut e = editor("Invented.docx", false);
+    snapshot(&e.fake, b"SNAP", 2);
+    let _ = e.source.poll_edit("f1");
+    assert!(e.engine.s().blobs.contains_key("f1"));
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.source.poll("f1");
+    e.fake.saved(b"PK saved package", 4);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Saved { .. }));
+    assert!(e.engine.s().blobs.is_empty(), "the blob is gone with the save");
+}
+
+#[test]
+fn a_viewer_and_a_read_only_file_keep_nothing() {
+    let mut e = editor("Invented.docx", true);
+    snapshot(&e.fake, b"SNAP", 2);
+    let _ = e.source.poll_edit("f1");
+    assert!(e.engine.s().blobs.is_empty());
+    assert!(!e.source.office_restore("f1"));
+}
+
+/// v5 bug 7: a save stored here and not sent yet keeps the blob (nothing is in Beebeeb), and once its upload landed
+/// the blob goes, so reopening never offers Restore/Discard for a save the server has.
+#[test]
+fn a_queued_save_keeps_the_blob_until_it_landed() {
+    use crate::frames::viewers::source::Settled;
+    let mut e = editor("Invented.docx", false);
+    snapshot(&e.fake, b"SNAP", 2);
+    let _ = e.source.poll_edit("f1");
+    e.engine.s().save_says = Some(Ok(SaveEnd::Queued { base: 3 }));
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.source.poll("f1");
+    e.fake.saved(b"PK saved package", 4);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(matches!(settled, Settled::Queued { .. }));
+    assert!(e.engine.s().blobs.contains_key("f1"), "not in Beebeeb yet: the blob stays");
+    // Not landed: still there after the poll's looks.
+    let end = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < end {
+        e.source.poll("f1");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(e.engine.s().blobs.contains_key("f1"), "still queued: the blob stays");
+    // The upload lands.
+    e.engine.s().own = true;
+    let end = Instant::now() + Duration::from_secs(10);
+    while e.engine.s().blobs.contains_key("f1") {
+        assert!(Instant::now() < end, "the blob went when the save landed");
+        e.source.poll("f1");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A save confirmed later does not delete a blob kept after the person pressed Save: it may hold what was typed since.
+#[test]
+fn a_save_confirmed_later_keeps_a_blob_made_after_the_press() {
+    let mut e = editor("Invented.docx", false);
+    snapshot(&e.fake, b"SNAP", 2);
+    let _ = e.source.poll_edit("f1");
+    e.engine.s().save_says = Some(Ok(SaveEnd::Queued { base: 3 }));
+    assert!(matches!(e.source.save_document("f1", 3), SaveOutcome::Working));
+    e.source.poll("f1");
+    e.fake.saved(b"PK saved package", 4);
+    let settled = until_settled(&mut e.source, "f1", || {});
+    assert!(matches!(settled, crate::frames::viewers::source::Settled::Queued { .. }));
+    // A blob from the far future of this clock is "newer than the press"; then the upload lands.
+    e.engine.s().blobs.insert("f1".into(), (i64::MAX / 2, 3, b"TYPED-AFTER".to_vec()));
+    e.engine.s().own = true;
+    let end = Instant::now() + Duration::from_millis(3500);
+    while Instant::now() < end {
+        e.source.poll("f1");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(e.engine.s().blobs.contains_key("f1"), "what was typed after the press is not in the saved version");
 }

@@ -63,7 +63,13 @@ pub const RUN_STOPPED: &str = "Making previews stopped: Beebeeb couldn't be reac
 pub const RUN_PAUSED: &str = "Sync is paused, so no previews are being made.";
 pub const CHANGE_FAILED: &str = "Couldn't change photo previews. Try again.";
 pub const CHANGE_BUSY: &str = "A change to photo previews is still on its way.";
+/// Said where the pane would otherwise load for ever.
+pub const NOT_BOUND: &str = "Unlock Beebeeb with this account to see and change these settings.";
 pub const CHANGE_LOCKED: &str = "Unlock Beebeeb to change this.";
+
+/// The photo picker: the platform's (`Platform::pick_photo`), or a test's. BLOCKS: only a worker calls it.
+pub type Picker =
+    Arc<dyn Fn(&str, &std::path::Path) -> Result<Option<PathBuf>, crate::shell::platform::PlatformError> + Send + Sync>;
 
 /// What the host asks of the engine. The app's is [`Engine`]; a test's is a fake.
 pub trait PreviewsEngine: Send + Sync + 'static {
@@ -175,7 +181,7 @@ pub fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -270,6 +276,8 @@ enum Ask {
     Rebuild,
     /// A new unlocked session: start a run when the setting is on and JPEG.
     SessionStart,
+    /// "Choose photo": the picker, then the pick measured.
+    Choose(Picker),
 }
 
 struct Job {
@@ -282,6 +290,8 @@ enum Answer {
     Facts(Result<PreviewsFacts, PreviewsRefused>),
     Summary(Result<PreviewsSummary, PreviewsRefused>),
     Sample(Option<Measured>),
+    /// "Choose photo" ended: the measured pick (`None`: closed without one, or it could not be measured).
+    Chosen(Option<Measured>),
     /// A change was answered (`Err`: it was not made).
     Set(Result<(), PreviewsRefused>),
 }
@@ -304,11 +314,15 @@ pub struct PreviewsHost {
     facts: Option<PreviewsFacts>,
     /// The last read failed, and why (said until a read answers).
     failed: Option<&'static str>,
+    /// `pump` has run at least once (what it saw first is known).
+    pumped: bool,
     reading: bool,
     read_at: Option<Instant>,
     sample: Option<Measured>,
     /// The sample was asked in this generation.
     sampled: bool,
+    /// The picker is open or its pick is being measured: no second one is asked.
+    choosing: bool,
     /// The pane is the one open.
     open: bool,
     /// A change is on its way: no second one is sent.
@@ -341,10 +355,12 @@ impl PreviewsHost {
             generation: 0,
             facts: None,
             failed: None,
+            pumped: false,
             reading: false,
             read_at: None,
             sample: None,
             sampled: false,
+            choosing: false,
             open: false,
             changing: false,
             toast: None,
@@ -447,6 +463,7 @@ impl PreviewsHost {
             return false;
         }
         let mut changed = false;
+        self.pumped = true;
         let now = self.now();
         if now != self.seen {
             if self.seen.is_some() {
@@ -462,6 +479,7 @@ impl PreviewsHost {
             self.read_at = None;
             self.sample = None;
             self.sampled = false;
+            self.choosing = false;
             self.changing = false;
             self.toast = None;
             if self.seen.is_some() {
@@ -504,6 +522,13 @@ impl PreviewsHost {
                     }
                 }
                 Answer::Sample(sample) => self.sample = sample,
+                Answer::Chosen(picked) => {
+                    self.choosing = false;
+                    // A closed picker or an unreadable photo keeps the sample that was shown.
+                    if picked.is_some() {
+                        self.sample = picked;
+                    }
+                }
                 Answer::Set(done) => {
                     self.changing = false;
                     if done.is_err() {
@@ -544,10 +569,27 @@ impl PreviewsHost {
         self.toast.take()
     }
 
-    /// What the pane draws. See the module's doc.
+    /// "Choose photo": `picker` opens on a worker, and the photo picked is measured on this PC (one at a time).
+    pub fn choose_photo(&mut self, picker: Picker) {
+        if self.choosing || !self.mine() {
+            return;
+        }
+        self.choosing = self.send(Ask::Choose(picker));
+    }
+
+    /// What the pane draws. See the module's doc: `Unavailable` only where no engine answers; a vault that is not
+    /// this account's yet (locked, first pump not run) is a pane still loading, never the "not built" frame.
     pub fn photo_previews(&self) -> PhotoPreviews {
-        if self.engine.is_none() || !self.mine() {
+        if self.engine.is_none() {
             return PhotoPreviews::Unavailable;
+        }
+        if !self.mine() {
+            // Pumped and still no vault of this account: locked or signed out, which does not end by waiting.
+            // Before the first pump, or while another account's read turns over, it is a pane still loading.
+            if self.seen.is_none() && self.pumped && self.now().is_none() {
+                return PhotoPreviews::NotBound(NOT_BOUND);
+            }
+            return PhotoPreviews::Loading;
         }
         match (&self.facts, self.failed) {
             (Some(facts), _) => PhotoPreviews::Ready(self.drawn(facts)),
@@ -690,6 +732,20 @@ fn work(engine: &Arc<dyn PreviewsEngine>, run: &PreviewRun, job: Job) -> Option<
             Ok(facts) => Measured::of(facts),
             Err(why) => {
                 log(format!("photo previews: no sample was measured ({})", why.kind()));
+                None
+            }
+        })),
+        Ask::Choose(picker) => Some(Answer::Chosen(match picker("Choose a photo to compare", std::path::Path::new("")) {
+            Ok(Some(picked)) => match engine.measure(session, Some(picked)) {
+                Ok(facts) => Measured::of(facts),
+                Err(why) => {
+                    log(format!("photo previews: the chosen photo was not measured ({})", why.kind()));
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(_) => {
+                log("photo previews: the photo picker did not open");
                 None
             }
         })),

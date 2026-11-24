@@ -110,6 +110,12 @@ impl LockPassword {
     pub(super) fn drop_pending(&self) {
         *self.pending.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
+
+    /// Whether a sign-in's stretched password waits here (the sign-in's wipe tests, `signin_api_tests.rs`).
+    #[cfg(test)]
+    pub(super) fn holds_a_stretch(&self) -> bool {
+        self.pending.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+    }
 }
 
 /// What the server said about one typed password.
@@ -396,6 +402,8 @@ impl<C: CredentialStores> Engine<C> {
     /// count that cannot be written refuses the try. A judged wrong password keeps the count; a success resets it;
     /// an outcome that judged nothing (the server's limit, an ended session, no record offline, an error) restores
     /// what it was.
+    // The guard is held across the awaits on purpose: that is what keeps a second check out.
+    #[allow(clippy::await_holding_lock)]
     async fn counted_password_check(
         &self,
         password: &Zeroizing<String>,

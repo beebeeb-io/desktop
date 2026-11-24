@@ -398,3 +398,75 @@ fn a_failed_read_keeps_the_rows_and_is_not_asked_again_inside_the_age_gate() {
         "not asked again at every wake"
     );
 }
+
+/// RC3-5: copying files into the folder root, the status said "Up to date" while they were queued or on their way.
+#[test]
+fn status_word_is_never_up_to_date_while_a_file_is_queued_or_uploading() {
+    use crate::ui::status_line::{PAUSED, SYNCING, UP_TO_DATE};
+    assert_eq!(with_uploads(Some(UP_TO_DATE), true), Some(SYNCING));
+    assert_eq!(with_uploads(Some(UP_TO_DATE), false), Some(UP_TO_DATE));
+    assert_eq!(
+        with_uploads(Some(PAUSED), true),
+        Some(PAUSED),
+        "the engine's other words stand"
+    );
+    assert_eq!(with_uploads(None, true), None);
+}
+
+/// Queued (waiting) and moving rows count as sending; a stopped one is the panel's to say, not "Syncing".
+#[test]
+fn status_sending_counts_waiting_and_moving_rows_not_stopped_ones() {
+    let waiting = row("a", 10, true, UploadStands::Waiting);
+    let moving = row("b", 10, true, UploadStands::Moving { sent: 1, total: 10 });
+    let stopped = row(
+        "c",
+        10,
+        true,
+        UploadStands::Stopped {
+            words: "x".into(),
+            retryable: true,
+        },
+    );
+    for (rows, sending) in [
+        (vec![waiting.clone()], true),
+        (vec![moving], true),
+        (vec![stopped.clone(), waiting], true),
+        (vec![stopped], false),
+        (vec![], false),
+    ] {
+        let engine = Double::new(read_of(1, rows, false));
+        let mut calls = UploadCalls::new(engine.clone());
+        calls.ask();
+        let start = Instant::now();
+        while engine.reads.load(Ordering::SeqCst) == 0 && start.elapsed() < WAIT {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        take_until(&mut calls, |c| c.sending() == sending || !sending);
+        std::thread::sleep(Duration::from_millis(50));
+        calls.take();
+        assert_eq!(calls.sending(), sending);
+    }
+}
+
+/// Nothing held, the engine moves to Syncing (files copied in from outside): one read finds them.
+#[test]
+fn status_reads_when_the_engine_starts_syncing_with_nothing_held() {
+    let engine = Double::new(three(1));
+    *engine.word.lock().unwrap() = Some(crate::ui::status_line::UP_TO_DATE);
+    let mut calls = UploadCalls::new(engine.clone());
+    calls.take();
+    assert_eq!(engine.reads.load(Ordering::SeqCst), 0, "idle, nothing held: no read");
+    *engine.word.lock().unwrap() = Some(crate::ui::status_line::SYNCING);
+    take_until(&mut calls, |c| c.sending());
+    assert!(calls.sending());
+}
+
+/// The wiring of `EngineFilesSource` (a real engine is not built here): the status line goes through `with_uploads`.
+#[test]
+fn status_line_of_the_files_source_goes_through_with_uploads() {
+    let host = include_str!("mod.rs");
+    let from = host.find("fn sync_state(&self)").expect("sync_state is gone");
+    let body = host[from..].split("\n    fn ").next().unwrap();
+    assert!(body.contains("files_uploads::with_uploads"));
+    assert!(body.contains("self.uploads.sending()"));
+}

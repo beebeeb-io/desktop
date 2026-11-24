@@ -40,9 +40,32 @@ pub const QA_PROVIDER: SyncProvider = SyncProvider {
 };
 
 /// Register a TEST sync root (tests only): [`QA_PROVIDER`], today's policies.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn register_test_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
-    super::register_sync_root_with(sync_root_path, &QA_PROVIDER, HYDRATION_POLICY)
+    // 0x80070001 (ERROR_INVALID_FUNCTION) from CfRegisterSyncRoot is a transient shell/filter-driver state on a
+    // freshly created folder: retry a few times, then fail with the class named so a flake is not mistaken for a bug.
+    let mut last = None;
+    for attempt in 0..5u64 {
+        match super::register_sync_root_with(sync_root_path, &QA_PROVIDER, HYDRATION_POLICY) {
+            Ok(()) => return Ok(()),
+            Err(error) if format!("{error:?}").to_lowercase().contains("80070001") => {
+                last = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last
+        .unwrap()
+        .context("test fixture: CfRegisterSyncRoot kept failing with 0x80070001 (transient environment state, not a product failure)"))
+}
+
+/// Repeat-run harness helper (tests only): how many of `roots` still report a Cloud Files registration. A run that
+/// leaves any behind makes the next run's registration flake, so fixtures assert this is 0 after cleanup.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(dead_code)]
+pub(crate) fn leftover_sync_roots(roots: &[std::path::PathBuf]) -> usize {
+    roots.iter().filter(|root| registered_provider_name(root).is_ok()).count()
 }
 
 /// LD-0105 S7 (W1): the Win32 hydration policy. `PROGRESSIVE` completes a reader's IO as soon as its
@@ -227,8 +250,24 @@ pub fn shell_sync_root_id_as(sync_root: &std::path::Path, provider_name: &str) -
     // Normalise the path string the same way `register_sync_root` does (lossy
     // UTF-8 of the OS path) so the Id is computed from a canonical byte form and
     // both register + unregister agree.
-    let canonical = sync_root.to_string_lossy();
+    // A root reached through a junction, an 8.3 name or another case resolves to one form first
+    // (LD-0116); an already-canonical drive path is unchanged, so existing installs keep their Id.
+    let resolved = canonical_root(sync_root);
+    let canonical = resolved.to_string_lossy();
     format!("{}!{:016x}", provider_name, fnv1a64(canonical.as_bytes()))
+}
+
+/// The root in its one canonical form (junction resolved, 8.3 name expanded, on-disk case, no `\\?\`
+/// prefix on a drive path); as given when it cannot be resolved. Same rule as `engine_bridge::fs`'s
+/// `canonical_root` (a private module, kept in step by hand). LD-0116.
+fn canonical_root(path: &std::path::Path) -> std::path::PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(canon) => match canon.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+            Some(rest) if !rest.starts_with("UNC\\") => std::path::PathBuf::from(rest),
+            _ => canon,
+        },
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 /// LD-0105 S7: what to do about the Explorer (WinRT) registration of a root.
@@ -246,7 +285,7 @@ pub enum ShellStep {
 /// Learn, `CfUnregisterSyncRoot`), so neither an unreadable version (before: `""` ≠ the current
 /// version, then Unregister on any start) nor an older one may cost the person their placeholders.
 /// The policies an existing registration carries are not in effect anyway: the Win32 registration,
-/// re-applied with UPDATE on every start, is (measured on the Legion: modifier 0, 2026-11-05).
+/// re-applied with UPDATE on every start, is (measured on the Windows test machine: modifier 0, 2026-11-05).
 pub fn shell_step(registered: Option<Option<&str>>) -> ShellStep {
     match registered {
         None => ShellStep::Register,
@@ -282,11 +321,11 @@ mod identity_tests {
         assert!(shell_sync_root_id(&REAL, root()).starts_with("Beebeeb!"));
         assert_eq!(
             status_ui_factory_clsid(&REAL),
-            GUID::from_u128(0xc0b3_3b33_5217_4c0a_9e3f_2f3b8d5e9fa1)
+            GUID::from_u128(0xc0b3_3b33_5217_4c0a_9e3f_2f3b_8d5e_9fa1)
         );
         assert_eq!(
             thumbnail_provider_clsid(&REAL),
-            GUID::from_u128(0xb2e0_a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44)
+            GUID::from_u128(0xb2e0_a7d4_9c61_4f3a_8d2e_7a1c_5e9b_0f44)
         );
     }
 
@@ -317,5 +356,27 @@ mod identity_tests {
         );
         assert_ne!(status_ui_factory_clsid(&TEST), status_ui_factory_clsid(&REAL));
         assert_ne!(thumbnail_provider_clsid(&TEST), thumbnail_provider_clsid(&REAL));
+    }
+}
+
+#[cfg(test)]
+mod canonical_id_tests {
+    use super::*;
+
+    /// A root reached through a junction gets the Id of the folder it points at (LD-0116).
+    #[test]
+    fn a_junction_to_the_root_has_the_same_shell_id() {
+        let dir = std::env::temp_dir().join(format!("bb-canon-id-{}", std::process::id()));
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let via = dir.join("via");
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"]).arg(&via).arg(&real).output().unwrap();
+        assert!(out.status.success(), "mklink /J failed");
+        assert_eq!(
+            shell_sync_root_id_as(&via, "BeebeebQA"),
+            shell_sync_root_id_as(&real, "BeebeebQA")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

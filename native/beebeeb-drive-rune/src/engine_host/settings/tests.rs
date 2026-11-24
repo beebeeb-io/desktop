@@ -115,11 +115,9 @@ fn account(email: &str) -> Account {
     let (second_email, second_token) = (second.email.clone(), second.session_token.clone());
     let rest_of_second = account_handler(second.clone());
     let (puts, put_hold) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
-    let (puts_in, put_hold_in): (Arc<Mutex<Vec<(usize, Value)>>>, Arc<Mutex<Option<mpsc::Receiver<()>>>>) =
-        (puts.clone(), put_hold.clone());
+    let (puts_in, put_hold_in): (Puts, Hold) = (puts.clone(), put_hold.clone());
     let (get_hold, gets) = (Arc::new(Mutex::new(None)), Arc::new(AtomicU64::new(0)));
-    let (get_hold_in, gets_in): (Arc<Mutex<Option<mpsc::Receiver<()>>>>, Arc<AtomicU64>) =
-        (get_hold.clone(), gets.clone());
+    let (get_hold_in, gets_in): (Hold, Arc<AtomicU64>) = (get_hold.clone(), gets.clone());
     let (get_mode, put_mode, delay_ms, put_delay_ms, writes) = (
         Arc::new(AtomicU8::new(ANSWER)),
         Arc::new(AtomicU8::new(ANSWER)),
@@ -312,8 +310,8 @@ fn general_and_storage_location_draw_what_beebeeb_says_by_country() {
     assert!(source.wired(Pane::About), "About answers from the build itself");
     assert!(source.wired(Pane::Notifications) && source.wired(Pane::Recent));
     assert!(
-        !source.opens("DW-0782"),
-        "no support bundle behind Report a problem yet"
+        source.opens("DW-0782"),
+        "Report a problem opens: the support bundle is behind it"
     );
     assert!(!source.choose_location(3), "a place that is not live is never chosen");
     assert!(account.writes.lock().unwrap().is_empty());
@@ -802,7 +800,7 @@ fn a_worker_panic_clears_the_in_flight_flag() {
     drop(fake);
     source.read_region();
     assert!(source.reading, "a read is in flight");
-    let toasts = settle(&mut source);
+    let _toasts = settle(&mut source);
     assert!(!source.reading, "the read flag is cleared after the worker returns");
     assert!(!source.pump().busy, "the source is idle");
 
@@ -955,15 +953,17 @@ fn the_running_apps_settings_show_no_sample_value() {
         "About is drawn, not the shell's not-built frame"
     );
     assert!(shows(&rt, "Encryption core"), "About draws the versions");
-    assert!(!shows(&rt, "Check now"), "no updater runs: no Check now");
-    assert!(!shows(&rt, "Release channel"), "no updater runs: no channel");
+    assert!(shows(&rt, "Check for updates"), "the Updates section is always drawn");
+    assert!(shows(&rt, crate::frames::settings::about::NO_UPDATER_LINE), "no updater runs: it says so");
     check_but(&rt, "About", &["311"]);
-    for (frame, pane) in [("DW-0712", "Storage")] {
+    // Storage is wired (w15-storage-wired): drawn, with no sample value in it (the rows read nothing here).
+    {
+        let (frame, pane) = ("DW-0712", "Storage");
         rt.update(move |s, _| crate::frames::settings::go(s, frame));
         rt.frame(0.016);
         assert!(
-            rt.elements().iter().any(|e| e.key.as_deref() == Some("not-built")),
-            "{pane}: the shell's not-built frame"
+            !rt.elements().iter().any(|e| e.key.as_deref() == Some("not-built")),
+            "{pane}: drawn, not the shell's not-built frame"
         );
         check(&rt, pane);
     }
@@ -1062,3 +1062,8 @@ fn about_draws_the_updaters_answer_and_check_now_asks_again() {
     wait(&mut rt, &answered);
     assert_eq!(seen.lock().unwrap().len(), 4, "Check now asked once more");
 }
+
+/// The puts a fake took.
+type Puts = Arc<Mutex<Vec<(usize, Value)>>>;
+/// A receiver a request waits on.
+type Hold = Arc<Mutex<Option<mpsc::Receiver<()>>>>;

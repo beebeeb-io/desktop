@@ -42,6 +42,12 @@ pub fn red_text(dark: bool) -> Color {
     }
 }
 
+/// The hue of the signed-in person's own avatar (`.kit-avatar.hue-250`): only the hue is data, the theme
+/// picks its strength (`Theme::avatar_tint`).
+pub fn account_avatar_tint() -> Color {
+    oklch(0.88, 0.05, 250.0)
+}
+
 // ---------------------------------------------------------------------------
 // Spacing (from --spacing-*)
 // ---------------------------------------------------------------------------
@@ -241,7 +247,15 @@ impl Theme {
     }
 }
 
+/// The palette every frame draws with: the Windows contrast theme while one is on (it overrides light and dark),
+/// else the board's light or dark tokens. The contrast answer is cached and re-read on `WM_SETTINGCHANGE`
+/// (`theme::contrast`), so this stays cheap enough for every frame.
 pub fn theme(dark: bool) -> Theme {
+    super::contrast::system_contrast().unwrap_or_else(|| base(dark))
+}
+
+/// The board's light or dark tokens, never the contrast theme.
+pub fn base(dark: bool) -> Theme {
     let black = Color::BLACK;
     let white = Color::WHITE;
     if dark {
@@ -354,46 +368,4 @@ pub fn theme(dark: bool) -> Theme {
             caption_close: rune::color::hex("#c42b1c").unwrap_or(Color::BLACK),
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// File-type icon colours (the ONE shared palette, task 2320)
-// ---------------------------------------------------------------------------
-
-pub mod file_icon {
-    use rune::{Color, oklch};
-
-    pub fn folder() -> Color {
-        oklch(0.82, 0.17, 84.0)
-    } // Amber
-    pub fn document() -> Color {
-        oklch(0.55, 0.18, 250.0)
-    } // Blue
-    pub fn spreadsheet() -> Color {
-        oklch(0.65, 0.18, 150.0)
-    } // Green
-    pub fn presentation() -> Color {
-        oklch(0.60, 0.20, 30.0)
-    } // Orange-red
-    pub fn image() -> Color {
-        oklch(0.65, 0.18, 150.0)
-    } // Green
-    pub fn video() -> Color {
-        oklch(0.60, 0.20, 320.0)
-    } // Purple
-    pub fn audio() -> Color {
-        oklch(0.65, 0.18, 30.0)
-    } // Orange
-    pub fn pdf() -> Color {
-        oklch(0.55, 0.22, 25.0)
-    } // Red
-    pub fn code() -> Color {
-        oklch(0.55, 0.15, 200.0)
-    } // Teal
-    pub fn archive() -> Color {
-        oklch(0.55, 0.10, 60.0)
-    } // Brown
-    pub fn generic() -> Color {
-        oklch(0.60, 0.00, 0.0)
-    } // Grey
 }

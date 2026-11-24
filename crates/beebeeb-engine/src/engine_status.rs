@@ -28,6 +28,10 @@
 //! - `last_tick_ok_at`: unix seconds of the last tick that returned `Ok` AND in
 //!   which no request failed at the link level. `null` until there is one. Never
 //!   faked: the popover's "Last checked 2 min ago" tooltip is dropped when null.
+//! - `changes`: RC2-6b, how many ticks of this engine run changed what the windows list (items applied, a queued
+//!   operation finished, a conflict, a native pin or "Free up space" reconciled). `last_tick_ok_at` moves on every
+//!   check; this moves only on one that changed something, so a window reads its lists again only then (on a large
+//!   idle account the re-reads after every check were 16 MB of state.db every 30 s). `null` off the tracker.
 //! - `reason`: a stable machine `code` and an optional mono `detail` (at most 30
 //!   characters). Present for `offline` and `error`.
 //!
@@ -165,6 +169,8 @@ pub struct StatusPayload {
     pub error: Option<String>,
     pub activity: Option<Activity>,
     pub last_tick_ok_at: Option<i64>,
+    /// RC2-6b: the ticks that changed something (see the module docs); `None` off the tracker.
+    pub changes: Option<u64>,
     pub reason: Option<Reason>,
 }
 
@@ -179,6 +185,7 @@ impl StatusPayload {
             "bytes_total": self.activity.map(|a| a.bytes_total),
             "bytes_done": self.activity.map(|a| a.bytes_done),
             "last_tick_ok_at": self.last_tick_ok_at,
+            "changes": self.changes,
             "reason": self.reason.as_ref().map(|r| json!({ "code": r.code, "detail": r.detail })),
         })
     }
@@ -210,6 +217,7 @@ pub fn plain_status(state: &str, sync_root: Option<String>, error: Option<&str>)
         error: error.map(str::to_string),
         activity: None,
         last_tick_ok_at: None,
+        changes: None,
         reason,
     }
 }
@@ -343,9 +351,17 @@ struct Inner {
     error: Option<String>,
     reason: Option<Reason>,
     last_tick_ok_at: Option<i64>,
+    /// RC2-6b: ticks of this tracker that changed something ([`StatusTracker::note_change`]).
+    changes: u64,
     /// `true` once the pulse has reported `syncing`, so it knows to report the
     /// way back to `idle` (and only then).
     showing_syncing: bool,
+    /// RC5-1: `true` while the pulse reports `running` ("Checking") because the change feed named something the
+    /// scan has not looked at yet, so it knows to report the way back to `idle`.
+    showing_checking: bool,
+    /// RC5-1: the change feed's last answer to "a change waits for the scan" (the pulse's `changes_pending`), so a
+    /// tick that ends in the seconds before the scan does not say `idle` either.
+    changes_pending: bool,
     /// What the pre-popover emitter last said for this state (`running` until the first tick
     /// ends, then `idle`, `error`, `paused`, `stopped`). The pulse repeats it, so a user who
     /// reads the tray tooltip sees the same words while a file moves as before this slice.
@@ -369,7 +385,10 @@ impl StatusTracker {
                 error: None,
                 reason: None,
                 last_tick_ok_at: None,
+                changes: 0,
                 showing_syncing: false,
+                showing_checking: false,
+                changes_pending: false,
                 legacy_state: "running",
             }),
         }
@@ -383,8 +402,15 @@ impl StatusTracker {
             error: inner.error.clone(),
             activity,
             last_tick_ok_at: inner.last_tick_ok_at,
+            changes: Some(inner.changes),
             reason: inner.reason.clone(),
         }
+    }
+
+    /// RC2-6b: this tick changed what the windows list; the next payload carries the bumped count.
+    pub fn note_change(&self) {
+        let mut inner = self.inner.lock().expect("status tracker poisoned");
+        inner.changes = inner.changes.wrapping_add(1);
     }
 
     /// The engine has started (`running`): nothing is known yet.
@@ -395,6 +421,7 @@ impl StatusTracker {
         inner.reason = None;
         inner.last_tick_ok_at = None;
         inner.showing_syncing = false;
+        inner.showing_checking = false;
         inner.legacy_state = "running";
         Self::payload(&inner, "running", None)
     }
@@ -406,6 +433,7 @@ impl StatusTracker {
         inner.error = None;
         inner.reason = None;
         inner.showing_syncing = false;
+        inner.showing_checking = false;
         inner.legacy_state = "paused";
         Self::payload(&inner, "paused", None)
     }
@@ -417,6 +445,7 @@ impl StatusTracker {
         inner.reason = None;
         inner.last_tick_ok_at = None;
         inner.showing_syncing = false;
+        inner.showing_checking = false;
         inner.legacy_state = "stopped";
         Self::payload(&inner, "stopped", None)
     }
@@ -426,9 +455,24 @@ impl StatusTracker {
     pub fn finish_tick(&self, outcome: &Outcome, now: i64, activity: Activity) -> StatusPayload {
         let mut inner = self.inner.lock().expect("status tracker poisoned");
         inner.showing_syncing = false;
+        inner.showing_checking = false;
         match outcome {
             Outcome::Synced => {
-                inner.state = State::Idle;
+                // RC4-1: a good check with files still to send is not `idle` (the status line reads `idle` as
+                // "Up to date"); the pulse says `idle` when the last one is gone.
+                let working = activity.files_remaining > 0;
+                // RC5-1: nor is one that ends while a change the scan has not looked at yet waits: `running`
+                // ("Checking") until the scan has, and the pulse says what comes next.
+                let checking = !working && inner.changes_pending;
+                inner.state = if working {
+                    State::Syncing
+                } else if checking {
+                    State::Running
+                } else {
+                    State::Idle
+                };
+                inner.showing_syncing = working;
+                inner.showing_checking = checking;
                 inner.error = None;
                 inner.reason = None;
                 inner.last_tick_ok_at = Some(now);
@@ -453,18 +497,35 @@ impl StatusTracker {
     }
 
     /// Called about once a second. Returns the event to emit, if the picture
-    /// changed. `paused` is the live pause flag. `transfer_in_flight` is the
-    /// in-memory board's answer ("is any file moving right now"), which costs
-    /// nothing: `read_activity` (a few state-DB queries) is only called when a
-    /// transfer is moving or the last pulse reported syncing, so an idle engine
-    /// does no work here. It runs under the lock.
+    /// changed. `paused` is the live pause flag. `work_waiting` is the caller's
+    /// cheap answer to "is any file moving right now, or queued to be sent"
+    /// (RC4-1: the queue counts, a queued file waits up to a tick for its upload
+    /// to start): `read_activity` (a few state-DB queries) is only called when
+    /// it says yes or the last pulse reported syncing, so an idle engine does
+    /// next to no work here. It runs under the lock.
     pub fn pulse(
         &self,
         paused: bool,
-        transfer_in_flight: bool,
+        work_waiting: bool,
+        read_activity: impl FnOnce() -> Activity,
+    ) -> Option<StatusPayload> {
+        self.pulse_seeing(paused, work_waiting, false, read_activity)
+    }
+
+    /// [`StatusTracker::pulse`], also told whether the change feed named a change the scan has not looked at yet
+    /// (`changes_pending`, RC5-1). A copied file waits up to a scan interval (8 s) before the scan finds and queues
+    /// it, and the status said "Up to date" all that time. While a change waits and nothing moves, the pulse reports
+    /// `running`, the state the status line words "Checking" (it is not a finished check), and `idle` again once the
+    /// scan has looked and queued nothing; a queued file turns it into `syncing` as before.
+    pub fn pulse_seeing(
+        &self,
+        paused: bool,
+        work_waiting: bool,
+        changes_pending: bool,
         read_activity: impl FnOnce() -> Activity,
     ) -> Option<StatusPayload> {
         let mut inner = self.inner.lock().expect("status tracker poisoned");
+        inner.changes_pending = changes_pending;
         if inner.state == State::Stopped {
             // The engine has been told to stop. A pulse that is still running in the last moments
             // of teardown must not announce `paused` or `syncing` after `stopped`.
@@ -478,6 +539,7 @@ impl StatusTracker {
             inner.error = None;
             inner.reason = None;
             inner.showing_syncing = false;
+            inner.showing_checking = false;
             inner.legacy_state = "paused";
             return Some(Self::payload(&inner, "paused", None));
         }
@@ -491,19 +553,30 @@ impl StatusTracker {
             // Offline, error and stopped outrank syncing (spec section 3).
             return None;
         }
-        if !transfer_in_flight && !inner.showing_syncing {
-            return None;
+        if work_waiting || inner.showing_syncing {
+            let activity = read_activity();
+            if activity.files_remaining > 0 {
+                inner.state = State::Syncing;
+                inner.showing_syncing = true;
+                inner.showing_checking = false;
+                return Some(Self::payload(&inner, inner.legacy_state, Some(activity)));
+            }
+            if inner.showing_syncing {
+                inner.showing_syncing = false;
+                inner.showing_checking = changes_pending;
+                inner.state = if changes_pending { State::Running } else { State::Idle };
+                return Some(Self::payload(&inner, inner.legacy_state, Some(activity)));
+            }
         }
-        let activity = read_activity();
-        if activity.files_remaining > 0 {
-            inner.state = State::Syncing;
-            inner.showing_syncing = true;
-            return Some(Self::payload(&inner, inner.legacy_state, Some(activity)));
+        if changes_pending && inner.state == State::Idle {
+            inner.state = State::Running;
+            inner.showing_checking = true;
+            return Some(Self::payload(&inner, inner.legacy_state, None));
         }
-        if inner.showing_syncing {
+        if !changes_pending && inner.showing_checking {
             inner.state = State::Idle;
-            inner.showing_syncing = false;
-            return Some(Self::payload(&inner, inner.legacy_state, Some(activity)));
+            inner.showing_checking = false;
+            return Some(Self::payload(&inner, inner.legacy_state, None));
         }
         None
     }
@@ -521,6 +594,9 @@ pub struct EngineStatusView {
     pub bytes_total: Option<u64>,
     pub bytes_done: Option<u64>,
     pub last_tick_ok_at: Option<i64>,
+    /// RC2-6b: the engine's count of ticks that changed something (`changes`); a new one is when a window reads its
+    /// lists again.
+    pub changes: Option<u64>,
     pub reason_code: Option<String>,
     pub reason_detail: Option<String>,
     /// The engine's startup check of the files on this PC while it runs (0.8.15, see [`STARTUP_CHECK_KEY`]).
@@ -534,7 +610,7 @@ pub struct StartupCheck {
     pub total: u64,
 }
 
-/// The `engine-status` key that carries the start-up guard's pass (0.8.15), which on Guus's PC walked 37,169 files with
+/// The `engine-status` key that carries the start-up guard's pass (0.8.15), which on the Windows test machine walked 37,169 files with
 /// no sign in any window: `{ "running": bool, "done": n, "total": n }`, as the engine lane writes it (branch
 /// `fix/0815-guard-nonblocking` at 62f794d: `runner::with_startup_guard` on every engine payload, and the same object as
 /// `sync_status.startup_guard`). The pause toggle's bare `{state}` payload does not carry it.
@@ -575,6 +651,10 @@ impl EngineStatusView {
         // about checks.
         if let Some(at) = payload.get("last_tick_ok_at") {
             self.last_tick_ok_at = at.as_i64();
+        }
+        // Like `last_tick_ok_at`: absent only on the pause toggle's bare `{state}`.
+        if let Some(changes) = payload.get("changes") {
+            self.changes = changes.as_u64();
         }
         let reason = payload.get("reason").filter(|r| r.is_object());
         self.reason_code = reason

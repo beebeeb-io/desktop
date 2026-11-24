@@ -12,7 +12,9 @@
 //! 3. Every loader of token + key goes through `load_session_from_vault`, which asks [`stored_key_ownership`] before
 //!    it reads the key and refuses anything but [`KeyOwnership::Matches`] or [`KeyOwnership::Unknown`].
 //! 4. A token-only sign-in removes a key that is not provably the signing-in account's ([`remove_foreign_key`]), and
-//!    is refused while that key cannot be removed.
+//!    is refused while that key cannot be removed. One exception (dc-014): a key tagged with another account's id
+//!    stays (the loader refuses it, rule 3) until that account's local data is cleared (`app::account_switch`), so a
+//!    clear that fails leaves that account able to sign back in without the twelve words.
 //!
 //! Nothing here reads, copies or logs a key or a token; ids are never logged either.
 
@@ -56,6 +58,12 @@ pub fn key_ownership(key_owner: Option<&str>, session_owner: Option<&str>) -> Ke
         (Some(key), Some(session)) if key == session => KeyOwnership::Matches,
         (Some(_), Some(_)) => KeyOwnership::Foreign,
     }
+}
+
+/// Whether a key's owner tag names exactly `user_id`. Blank is never an account.
+pub fn tag_is_account(tag: &str, user_id: &str) -> bool {
+    let (tag, user_id) = (tag.trim(), user_id.trim());
+    !tag.is_empty() && tag == user_id
 }
 
 /// Whether a stored vault key is REMOVED when `signing_in_user_id` / `signing_in_email` signs in with a token only
@@ -136,7 +144,7 @@ pub fn stored_key_state<S: AuthSecretStore>(vault: &AuthVault<S>) -> StoredKey {
 }
 
 /// A token-only sign-in, BEFORE its token is stored: remove a stored key that is not provably the signing-in
-/// account's ([`should_remove_stored_key`]), with its tag. `Ok(true)`: one was removed. `Err`: it is still there, and
+/// account's ([`should_remove_stored_key`]), with its tag, except one tagged with another account's id (rule 4). `Ok(true)`: one was removed. `Err`: it is still there, and
 /// the caller refuses the sign-in ([`FOREIGN_KEY_NOT_REMOVED`]). A tag left without a key is removed too.
 pub fn remove_foreign_key<S: AuthSecretStore>(
     vault: &mut AuthVault<S>,
@@ -147,12 +155,17 @@ pub fn remove_foreign_key<S: AuthSecretStore>(
     // same (a read that fails must not block every sign-in while a delete would work).
     let keep = (|| -> AuthResult<Option<bool>> {
         if !key_present(vault)? {
-            return Ok(match vault.vault_key_owner()? {
-                Some(_) => Some(false),
-                None => None,
-            });
+            return Ok(vault.vault_key_owner()?.map(|_| false));
         }
         let key_owner = vault.vault_key_owner()?;
+        // dc-014: a key tagged with ANOTHER account's id stays until that account's local data is cleared
+        // (`app::account_switch` removes it then). It is never this account's: the loader refuses it (`Foreign`).
+        if key_owner
+            .as_deref()
+            .is_some_and(|owner| !owner.trim().is_empty() && !tag_is_account(owner, signing_in_user_id))
+        {
+            return Ok(Some(true));
+        }
         let stored_email = vault.account_email()?;
         Ok(Some(!should_remove_stored_key(
             key_owner.as_deref(),
@@ -223,10 +236,11 @@ pub fn settle_owner_after_probe<S: AuthSecretStore>(
 
 /// A clear that failed must not stay silent (task 2447 d). On Windows a sign-out and a rejected token clear
 /// everything, so a store with NO session token that still holds a vault key or an owner tag is a clear that did not
-/// finish: this completes it, at the next start, before a sign-in is offered. (macOS keeps the key after a rejected
-/// token on purpose, R9, and proves it at the next sign-in, so it does not call this.) `Ok(true)`: something was
-/// removed. `Err`: it is still there; the sign-in's own check refuses while it is.
-#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+/// finish: this completes it, at the next start, before a sign-in is offered (`Engine::restore`, through
+/// `app::unfinished_sign_out`; every OS but macOS). (macOS keeps the key after a rejected token on purpose, R9, and
+/// proves it at the next sign-in, so it does not call this.) `Ok(true)`: something was removed. `Err`: it is still
+/// there; the sign-in's own check refuses while it is.
+#[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
 pub fn complete_pending_clear<S: AuthSecretStore>(vault: &mut AuthVault<S>) -> AuthResult<bool> {
     match vault.session_token() {
         Ok(Some(_)) => return Ok(false),

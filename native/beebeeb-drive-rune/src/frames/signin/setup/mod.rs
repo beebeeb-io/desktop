@@ -174,7 +174,7 @@ pub enum Answered {
     /// The change did not happen, and what the switch is now is known (`results` holds it).
     NotChanged,
     /// The change did not happen, and what the switch is now is not known.
-    NotKnown,
+    Unknown,
 }
 
 /// Step 1 between "Add a passkey" and its answer. The add runs while Windows' passkey dialog is open, off the
@@ -212,6 +212,9 @@ pub struct Results {
 }
 
 pub struct Ui {
+    /// "Not now" or "Continue" on the Lock step was pressed and its prompt (Windows Hello) has not answered: the
+    /// flow stays on the step until it does, so the prompt is never up over the next step.
+    lock_holds: bool,
     source: Box<dyn SetupSource>,
     pub step: Step,
     pub compare: Option<Compare>,
@@ -266,7 +269,7 @@ fn decode(png_bytes: &[u8]) -> Pixels {
     let rgba: Vec<u8> = match (info.color_type, info.bit_depth) {
         (png::ColorType::Rgba, png::BitDepth::Eight) => bytes.to_vec(),
         (png::ColorType::Rgb, png::BitDepth::Eight) => {
-            bytes.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect()
+            bytes.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect()
         }
         _ => return pixels,
     };
@@ -278,6 +281,7 @@ impl Ui {
     pub fn new(source: Box<dyn SetupSource>) -> Self {
         let sample = source.sample();
         let mut ui = Ui {
+            lock_holds: false,
             step: Step::Passkey,
             folder: source.folder_ask(),
             unsaved: source.folder_unsaved(),
@@ -435,7 +439,7 @@ impl Ui {
         match (outcome.done, outcome.now) {
             // Made (when what is set could not be read back, the value that was asked for stands).
             (true, _) => {}
-            (false, None) => self.answered.push((outcome.switch, Answered::NotKnown)),
+            (false, None) => self.answered.push((outcome.switch, Answered::Unknown)),
             (false, Some(_)) => self.answered.push((outcome.switch, Answered::NotChanged)),
         }
     }
@@ -531,6 +535,9 @@ impl Ui {
             // "Continue" on a step nothing answers for: the next step, nothing asked, nothing claimed.
             return self.advance();
         }
+        if self.lock_holds {
+            return;
+        }
         match self.step {
             Step::Passkey | Step::Done => return,
             Step::Lock => {
@@ -540,6 +547,9 @@ impl Ui {
                 // The delay goes with the switch on only (off never locks).
                 if self.lock_on && self.sets_lock_after() {
                     self.asked(Switch::LockAfter);
+                }
+                if self.hold_for_lock_answer() {
+                    return;
                 }
             }
             Step::Backup => {
@@ -604,10 +614,21 @@ impl Ui {
         if self.compare.is_some() {
             return;
         }
+        if self.lock_holds {
+            return;
+        }
         match self.step {
             Step::Done => return,
             // The sync folder is not skipped from its own question ("Skip setup" leaves the first run).
             Step::Explorer if self.asks_folder() => return,
+            // Works like "Continue" with the switch off: Windows Hello is asked first, and a prompt that did not
+            // confirm leaves app lock as it was ("Not changed", never "Off").
+            Step::Lock if self.available(Step::Lock) => {
+                self.ask_lock_off();
+                if self.hold_for_lock_answer() {
+                    return;
+                }
+            }
             Step::Notifications if self.available(Step::Notifications) => {
                 self.source.set_notifications(false);
                 self.results.notifications = false;
@@ -623,9 +644,34 @@ impl Ui {
         if self.compare.is_some() || self.step == Step::Done {
             return;
         }
+        // "Skip setup" from the Lock step is "Not now" there (the switch off, asked like "Continue").
+        if self.step == Step::Lock && self.available(Step::Lock) {
+            self.ask_lock_off();
+        }
         self.leave_passkey_step();
+        self.lock_holds = false;
         self.step = Step::Done;
         self.focus = Some(TITLE_KEY);
+    }
+
+    /// Whether the Lock step must wait for what it asked: a source that answers later may have Windows Hello up
+    /// for it, and the next step must not be shown under that prompt.
+    fn hold_for_lock_answer(&mut self) -> bool {
+        self.lock_holds = self.lock_pending();
+        self.lock_holds
+    }
+
+    fn lock_pending(&self) -> bool {
+        self.answered
+            .iter()
+            .any(|(s, a)| matches!(s, Switch::AppLock | Switch::LockAfter) && *a == Answered::Waiting)
+    }
+
+    /// Step 2 with the switch off, whatever the switch shows: the source asks Windows Hello first.
+    fn ask_lock_off(&mut self) {
+        self.source.set_app_lock(false, self.lock_after);
+        self.results.app_lock = false;
+        self.asked(Switch::AppLock);
     }
 
     pub fn toggle_lock(&mut self) {
@@ -762,6 +808,12 @@ impl Ui {
             self.take_in(outcome);
         }
         self.take_in_passkey();
+        if self.lock_holds && !self.lock_pending() {
+            self.lock_holds = false;
+            if self.step == Step::Lock {
+                self.advance();
+            }
+        }
         if let Some(folders) = self.source.fresh_folders() {
             self.folders = folders;
         }
@@ -937,7 +989,7 @@ pub fn render_scene(name: &str) -> Option<Ui> {
 }
 
 /// The names [`render_scene`] knows, for the shell's list of scenes.
-pub const RENDER_SCENES: &[(&str, fn(&mut State))] = &[
+pub const RENDER_SCENES: &[crate::frames::signin::Scene<State>] = &[
     ("first-run-not-yet", |s| set_render_scene(s, "first-run-not-yet")),
     ("first-run-folder", |s| set_render_scene(s, "first-run-folder")),
     ("first-run-folder-refused", |s| {
@@ -953,7 +1005,7 @@ fn set_render_scene(s: &mut State, name: &str) {
 }
 
 /// Every board frame of the first run, for `frames::scenes`.
-pub const FRAMES: &[(&str, fn(&mut State))] = &[
+pub const FRAMES: &[crate::frames::signin::Scene<State>] = &[
     ("DW-0201", |s| set_scene(s, "DW-0201")),
     ("DW-0202", |s| set_scene(s, "DW-0202")),
     ("DW-0203", |s| set_scene(s, "DW-0203")),

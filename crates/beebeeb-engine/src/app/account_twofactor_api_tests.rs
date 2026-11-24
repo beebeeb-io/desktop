@@ -9,7 +9,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 
@@ -85,7 +85,7 @@ fn engine(api_base: &str) -> Arc<TestEngine> {
         state_dir,
         api_base: api_base.into(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 fn signed_in(engine: &TestEngine) -> SessionGeneration {
@@ -206,7 +206,7 @@ fn the_email_code_is_checked_before_anything_is_sent() {
     assert!(seen.lock().unwrap().is_empty());
 }
 
-/// Review of desktop#424: an answer that arrives after Beebeeb already changed two-factor reaches the person even
+/// An answer that arrives after Beebeeb already changed two-factor reaches the person even
 /// when the session's turn moved meanwhile (a screen lock does that) for the same account: the new backup codes are
 /// not wiped unseen. A turn that moved because ANOTHER account signed in drops them.
 #[test]
@@ -271,7 +271,7 @@ fn new_backup_codes_reach_the_person_when_the_turn_moves_while_the_request_is_ou
     assert_eq!(answer.err(), Some(AccountFlowFailure::NotSignedIn));
 }
 
-/// Review of desktop#424 (delta 2 P2): a session stored before the owner tag (task 2447) comes back from a restart
+/// A session stored before the owner tag (task 2447) comes back from a restart
 /// with no recorded owner id. A same-account turn move while "New backup codes" is out still delivers the codes
 /// Beebeeb made: the account is known by its id (Beebeeb's answer for this session's token), never guessed.
 #[test]

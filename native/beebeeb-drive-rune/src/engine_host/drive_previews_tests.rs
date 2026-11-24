@@ -278,8 +278,8 @@ fn earlier_generation_answer_is_dropped() {
     *fake.session.lock().unwrap() = SessionGeneration::for_test(2);
     assert_eq!(
         host.photo_previews(),
-        PhotoPreviews::Unavailable,
-        "nothing of ONE before the pump"
+        PhotoPreviews::Loading,
+        "nothing of ONE before the pump, and never the not-built card"
     );
     host.pump();
     assert_eq!(host.photo_previews(), PhotoPreviews::Loading);
@@ -365,6 +365,9 @@ fn apply_stores_the_choice_then_runs_and_never_draws_it_first() {
     host.opened();
     fake.permit();
     pump_until(&mut host, "the pane read", |host| ready(host).is_some());
+    // The session's own run has begun its work: a start that still waits is replaced by the next one
+    // (`PreviewRun::start`), and Apply's would then be the only run there ever is.
+    runs(&fake, 1);
     host.apply(PreviewSize::K4, PreviewFormat::Jpeg);
     // A second press while the first is on its way sends nothing, and says so.
     host.apply(PreviewSize::P720, PreviewFormat::Jpeg);
@@ -456,7 +459,7 @@ fn locked_or_signed_out_hands_out_nothing() {
     let fake = fake();
     let mut host = opened(&fake);
     fake.ready.store(false, Ordering::SeqCst);
-    assert_eq!(host.photo_previews(), PhotoPreviews::Unavailable);
+    assert_eq!(host.photo_previews(), PhotoPreviews::Loading);
     assert_eq!(host.cost(PreviewSize::P1080, PreviewFormat::Jpeg), None);
     host.pump();
     assert!(
@@ -616,11 +619,7 @@ fn off_stops_a_rebuild_that_was_still_queued() {
     host.set_on(false);
     fake.permit();
     runs(&fake, 2);
-    assert_eq!(
-        fake.makes.lock().unwrap()[1].1,
-        true,
-        "the Rebuild's forced run started"
-    );
+    assert!(fake.makes.lock().unwrap()[1].1, "the Rebuild's forced run started");
     assert!(
         !fake.saw_stop.load(Ordering::SeqCst),
         "nothing stopped the forced run before the Off's write"
@@ -655,4 +654,45 @@ fn the_making_notice_needs_a_count() {
         ready(host).is_some_and(|p| p.notice == Some(REBUILDING))
     });
     fake.hold_make.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn a_real_source_never_draws_the_not_built_card() {
+    let fake = fake();
+    // Before the first pump the vault is not "this account's" yet: still loading.
+    let host = PreviewsHost::new(fake.clone(), PreviewRun::new());
+    assert_eq!(host.photo_previews(), PhotoPreviews::Loading);
+    // No engine bound: the shell's own frame.
+    assert_eq!(PreviewsHost::off().photo_previews(), PhotoPreviews::Unavailable);
+}
+
+#[test]
+fn choose_photo_measures_the_picked_photo_and_a_closed_picker_keeps_the_sample() {
+    let fake = fake();
+    fake.has_photo.store(true, Ordering::SeqCst);
+    let mut host = opened(&fake);
+    pump_until(&mut host, "the first sample", |h| h.sample.is_some());
+    let picks = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let picker = |answer: Option<PathBuf>, picks: &std::sync::Arc<Mutex<Vec<String>>>| -> Picker {
+        let picks = picks.clone();
+        Arc::new(move |title: &str, _start: &std::path::Path| {
+            picks.lock().unwrap().push(title.to_string());
+            Ok(answer.clone())
+        })
+    };
+    host.choose_photo(picker(Some(PathBuf::from("a.jpg")), &picks));
+    assert!(host.choosing);
+    pump_until(&mut host, "the pick measured", |h| !h.choosing);
+    assert_eq!(picks.lock().unwrap().len(), 1, "the picker opened once");
+    assert!(host.sample.is_some());
+    // Closed without a photo: nothing changes, nothing is stuck.
+    host.sample = None;
+    host.choose_photo(picker(None, &picks));
+    pump_until(&mut host, "the picker closed", |h| !h.choosing);
+    assert!(host.sample.is_none(), "a closed picker draws no sample of its own");
+    // A picker that fails to open frees the button too.
+    host.choose_photo(Arc::new(|_: &str, _: &std::path::Path| {
+        Err(crate::shell::platform::PlatformError::NotBuilt("the photo picker"))
+    }));
+    pump_until(&mut host, "the failed picker", |h| !h.choosing);
 }

@@ -1,6 +1,6 @@
 # macOS: the menu bar, the popover and the windows (carry note C5)
 
-Decision 2537 (2026-11-15) and D-T-5 (a): the rules of the macOS menu bar, the menu-bar popover, the Beebeeb window and the launch
+The rules of the macOS menu bar, the menu-bar popover, the Beebeeb window and the launch
 decision, whose only copy lives in `src-tauri/`, are carried here before the delete. This is the macOS phase's specification and
 acceptance list for those surfaces.
 

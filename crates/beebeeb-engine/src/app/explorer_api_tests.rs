@@ -12,7 +12,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::explorer_command::{CommandState, ExplorerBinding, Invoked, ReclaimOwner, invoke, served, state_of};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
@@ -56,7 +56,7 @@ fn fixture() -> Fixture {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     let dirs = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let db_path = dirs.0.path().join("state.db");
     let root = dirs.1.path().canonicalize().unwrap();
@@ -174,7 +174,7 @@ fn signed_out_keeping_the_local_data_the_command_frees_nothing_and_its_binding_i
     signed_in(&f.engine, "user-a", "a@example.eu");
     assert_eq!(state_of(owner(&f.engine)), CommandState::Enabled, "the control");
     f.engine.sign_out_keeping_local_data().expect("the sign-out");
-    assert_eq!(f.removed.take(), [f.root.clone()], "the sign-out removed the binding");
+    assert_eq!(f.removed.take(), std::slice::from_ref(&f.root), "the sign-out removed the binding");
     refused_and_untouched(&f, "signed_out");
 }
 
@@ -183,7 +183,7 @@ fn locked_the_command_frees_nothing_and_its_binding_is_removed() {
     let f = fixture();
     signed_in(&f.engine, "user-a", "a@example.eu");
     f.engine.lock();
-    assert_eq!(f.removed.take(), [f.root.clone()], "the lock removed the binding");
+    assert_eq!(f.removed.take(), std::slice::from_ref(&f.root), "the lock removed the binding");
     refused_and_untouched(&f, "locked");
 }
 
@@ -221,7 +221,7 @@ fn a_stop_removes_the_binding_of_the_started_and_the_configured_folder() {
     f.engine.stop();
     assert_eq!(
         f.removed.take(),
-        [f.root.clone()],
+        std::slice::from_ref(&f.root),
         "nothing ran: the configured folder's binding still goes"
     );
 }
@@ -277,7 +277,7 @@ fn asking_windows_again_with_no_engine_changes_nothing() {
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens");
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens");
     let before = engine.view();
     assert!(!engine.add_to_file_explorer_again(), "nothing runs: nothing was asked");
     assert_eq!(engine.view(), before);
@@ -345,8 +345,8 @@ fn turn_off_removes_the_registration_of_the_configured_folder_once_nothing_waits
         &never_starts,
     );
     assert_eq!(done, Ok(()));
-    assert_eq!(*asked.lock().unwrap(), [f.root.clone()]);
-    assert_eq!(f.removed.take(), [f.root.clone()], "sync stopped first");
+    assert_eq!(*asked.lock().unwrap(), std::slice::from_ref(&f.root));
+    assert_eq!(f.removed.take(), std::slice::from_ref(&f.root), "sync stopped first");
 
     // The OS refused: nothing was removed, and the refusal is said.
     let refused = f.engine.turn_off_explorer_with(session, &|_| Err(()), &never_starts);

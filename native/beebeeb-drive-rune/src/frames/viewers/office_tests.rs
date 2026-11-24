@@ -149,14 +149,47 @@ fn tab_stops(rt: &mut Runtime<State>) -> Vec<String> {
     stops
 }
 
-/// Tab to a control and press it with Space.
+/// A tool of the ribbon's row (`rt-N`, `rp-N`).
+fn ribbon_tool(key: &str) -> bool {
+    key.starts_with("rt-") || key.starts_with("rp-")
+}
+
+/// Tab to a control and press it with Space. A live ribbon's tools are one Tab stop (a roving group): Tab into
+/// the row, then the Right arrow to the tool.
 fn operate(rt: &mut Runtime<State>, key: &str) {
+    let mut stops: Vec<String> = Vec::new();
     for _ in 0..80 {
-        if focused(rt).as_deref() == Some(key) {
+        let at = focused(rt);
+        if at.as_deref() == Some(key) {
             press(rt, Key::Text(" ".into()));
             return;
         }
+        // Tab came round without stopping on it: it is inside the ribbon's group.
+        if let Some(at) = at {
+            if stops.contains(&at) {
+                break;
+            }
+            stops.push(at);
+        }
         press(rt, Key::Tab);
+    }
+    if ribbon_tool(key) {
+        for _ in 0..80 {
+            if focused(rt).as_deref().is_some_and(ribbon_tool) {
+                break;
+            }
+            press(rt, Key::Tab);
+        }
+        for _ in 0..80 {
+            if focused(rt).as_deref() == Some(key) {
+                press(rt, Key::Text(" ".into()));
+                return;
+            }
+            if !focused(rt).as_deref().is_some_and(ribbon_tool) {
+                break;
+            }
+            press(rt, Key::Right);
+        }
     }
     panic!("Tab never reached {key}; focus is on {:?}", focused(rt));
 }
@@ -487,4 +520,854 @@ fn nothing_of_a_document_reaches_a_debug_and_wipe_clears_its_cells() {
             .iter()
             .all(|s| s.text.is_empty() && s.table.iter().flatten().flatten().all(String::is_empty))
     );
+}
+
+// ---------------------------------------------------------------------------
+// The live word ribbon (`frames/office/edit/word_ribbon.rs`)
+// ---------------------------------------------------------------------------
+
+mod live_ribbon {
+    use beebeeb_office_protocol::office::{
+        Dirty, EditKind, EditOp, Edited, ListKind, Mark, Marks, PageRect, ParaStyle, RectPt, TextAlign,
+    };
+
+    use super::*;
+    use crate::frames::office::docs::docs_fixture::DOCX_ID;
+    use crate::frames::office::edit::{self, EditUi, word_ribbon};
+    use crate::frames::viewers;
+    use crate::frames::viewers::source::EditAnswer;
+
+    pub type Ops = Rc<RefCell<Vec<EditOp>>>;
+    pub type Answers = Rc<RefCell<Vec<EditAnswer>>>;
+
+    /// A live-looking document whose editor records every op it is given and answers what the test queued.
+    struct Editing {
+        inner: FixtureViewerSource,
+        ops: Ops,
+        answers: Answers,
+        takes: bool,
+    }
+
+    impl ViewerSource for Editing {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.open(id)
+        }
+        fn poll(&mut self, id: &str) -> Option<Body> {
+            self.inner.poll(id)
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.retry(id)
+        }
+        fn can_edit(&self, _: &str) -> bool {
+            true
+        }
+        fn edit(&mut self, _: &str, op: EditOp) -> bool {
+            self.ops.borrow_mut().push(op);
+            self.takes
+        }
+        fn poll_edit(&mut self, _: &str) -> Option<EditAnswer> {
+            let mut answers = self.answers.borrow_mut();
+            (!answers.is_empty()).then(|| answers.remove(0))
+        }
+    }
+
+    pub fn marks() -> Marks {
+        Marks {
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            style: ParaStyle::Normal,
+            align: TextAlign::Left,
+            list: ListKind::None,
+        }
+    }
+
+    pub fn edited(revision: u64, marks: Marks, selection: Vec<PageRect>) -> Edited {
+        Edited {
+            revision,
+            caret: None,
+            selection,
+            can_undo: true,
+            can_redo: false,
+            dirty: Dirty::All,
+            pages: None,
+            cells: Vec::new(),
+            slides: None,
+            marks,
+        }
+    }
+
+    pub fn selection() -> Vec<PageRect> {
+        vec![PageRect {
+            page: 0,
+            rect: RectPt {
+                x: 72.0,
+                y: 300.0,
+                w: 120.0,
+                h: 14.0,
+            },
+        }]
+    }
+
+    /// The agreement open for editing: the editor's state is on, the source records.
+    pub fn editing(takes: bool) -> (Runtime<State>, Ops, Answers) {
+        let (ops, answers) = (Ops::default(), Answers::default());
+        let mut state = init();
+        let source = Editing {
+            inner: FixtureViewerSource::new(),
+            ops: ops.clone(),
+            answers: answers.clone(),
+            takes,
+        };
+        assert!(open_from(&mut state, Box::new(source), DOCX_ID));
+        state.viewer.ui.as_mut().expect("open").office.edit = Some(EditUi::new(EditKind::Docx));
+        (runtime_of(state, false), ops, answers)
+    }
+
+    /// The helper answered `e`: the editor's poll takes it, the frame is drawn again.
+    pub fn answer(rt: &mut Runtime<State>, answers: &Answers, e: Edited) {
+        answers.borrow_mut().push(EditAnswer::Edited(e));
+        rt.update(|s, tx| {
+            edit::poll(s, tx);
+        });
+        // The lit fill is a short transition: let it land.
+        for _ in 0..4 {
+            rt.frame(1.0);
+        }
+    }
+
+    fn checked(rt: &Runtime<State>, key: &str) -> bool {
+        find(rt, key).unwrap_or_else(|| panic!("no element keyed {key}")).fill != rune::Color::TRANSPARENT
+    }
+
+    #[test]
+    fn the_tools_are_lit_from_what_the_helper_said_and_send_the_opposite() {
+        let (mut rt, ops, answers) = editing(true);
+        // Nothing was said yet: nothing is lit, and Undo and Redo have nothing to do.
+        assert!(!checked(&rt, "rt-2"));
+        let undo = find(&rt, "rt-0").expect("Undo");
+        assert!(!undo.focusable, "no revision to go back to yet");
+        let mut m = marks();
+        m.bold = true;
+        m.align = TextAlign::Center;
+        m.list = ListKind::Bullet;
+        m.style = ParaStyle::Heading2;
+        answer(&mut rt, &answers, edited(1, m, Vec::new()));
+        assert!(checked(&rt, "rt-2"), "Bold is lit");
+        assert!(!checked(&rt, "rt-3"), "Italic is not");
+        assert!(checked(&rt, "rt-11"), "Align centre is lit");
+        assert!(!checked(&rt, "rt-10"));
+        assert!(checked(&rt, "rt-8"), "Bulleted list is lit");
+        assert_eq!(words(&rt, "rp-0-label"), "Heading 2");
+        assert!(find(&rt, "rt-0").expect("Undo").focusable);
+        assert!(!find(&rt, "rt-1").expect("Redo").focusable);
+        // A lit Bold turns Bold off; an unlit Italic turns it on.
+        operate(&mut rt, "rt-2");
+        operate(&mut rt, "rt-3");
+        operate(&mut rt, "rt-0");
+        // A lit list tool turns the list off; Numbered turns it on.
+        operate(&mut rt, "rt-8");
+        operate(&mut rt, "rt-9");
+        operate(&mut rt, "rt-12");
+        operate(&mut rt, "rt-15");
+        assert_eq!(
+            *ops.borrow(),
+            [
+                EditOp::Mark {
+                    mark: Mark::Bold,
+                    on: false
+                },
+                EditOp::Mark {
+                    mark: Mark::Italic,
+                    on: true
+                },
+                EditOp::Undo,
+                EditOp::List(ListKind::None),
+                EditOp::List(ListKind::Number),
+                EditOp::Align(TextAlign::Right),
+                EditOp::Indent(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_arrows_rove_inside_the_ribbons_tools_and_tab_stops_on_one() {
+        let (mut rt, ops, answers) = editing(true);
+        // A revision to go back to: Undo is a tool that takes the keyboard.
+        answer(&mut rt, &answers, edited(1, marks(), Vec::new()));
+        // Tab stops on one tool of the row, and each tab above it is a stop of its own.
+        let stops = tab_stops(&mut rt);
+        let tools: Vec<&String> = stops.iter().filter(|key| ribbon_tool(key)).collect();
+        assert_eq!(tools.len(), 1, "one Tab stop for the row of tools: {stops:?}");
+        assert!(stops.contains(&"rib-tab-0-cell".to_string()), "{stops:?}");
+        assert!(stops.contains(&"rib-tab-1-cell".to_string()), "{stops:?}");
+        assert!(stops.contains(&"rib-find".to_string()), "{stops:?}");
+        // Into the row, to its first tool.
+        for _ in 0..80 {
+            if focused(&rt).as_deref().is_some_and(ribbon_tool) {
+                break;
+            }
+            press(&mut rt, Key::Tab);
+        }
+        press(&mut rt, Key::Home);
+        let first = focused(&rt).expect("a tool has the keyboard");
+        assert!(ribbon_tool(&first), "{first}");
+        // Right moves tool by tool, and Left comes back.
+        press(&mut rt, Key::Right);
+        let second = focused(&rt).expect("a tool has the keyboard");
+        assert!(ribbon_tool(&second) && second != first, "Right moved from {first} to {second}");
+        press(&mut rt, Key::Right);
+        let third = focused(&rt).expect("a tool has the keyboard");
+        assert!(ribbon_tool(&third) && third != second && third != first, "{third}");
+        press(&mut rt, Key::Left);
+        assert_eq!(focused(&rt).as_deref(), Some(second.as_str()));
+        // End is the last tool, and Right from it wraps to the first: never out to a tab.
+        press(&mut rt, Key::End);
+        let last = focused(&rt).expect("a tool has the keyboard");
+        assert!(ribbon_tool(&last) && last != first, "{last}");
+        press(&mut rt, Key::Right);
+        assert_eq!(focused(&rt).as_deref(), Some(first.as_str()));
+        press(&mut rt, Key::Left);
+        assert_eq!(focused(&rt).as_deref(), Some(last.as_str()));
+        // Moving pressed nothing and left the open tab alone.
+        assert!(ops.borrow().is_empty(), "the arrows sent {:?}", ops.borrow());
+        assert_eq!(ui(&rt).office.tab, Tab::Home);
+        // Tab leaves the row in one press, and Space presses the tool the arrows chose.
+        press(&mut rt, Key::Home);
+        press(&mut rt, Key::Tab);
+        assert!(!focused(&rt).as_deref().is_some_and(ribbon_tool), "Tab left the row");
+        operate(&mut rt, "rt-2");
+        assert_eq!(
+            *ops.borrow(),
+            [EditOp::Mark {
+                mark: Mark::Bold,
+                on: true
+            }]
+        );
+    }
+
+    #[test]
+    fn a_source_that_does_not_take_the_edit_says_so_and_never_nothing() {
+        let (mut rt, ops, _) = editing(false);
+        operate(&mut rt, "rt-2");
+        assert_eq!(ops.borrow().len(), 1);
+        // The shell's router answers the intent ("Not built yet: ..."): the press is never nothing.
+        let pushed = rt.state.viewer.ui.as_mut().expect("open").take_intents();
+        assert!(!pushed.is_empty(), "the press said it did nothing");
+    }
+
+    #[test]
+    fn the_style_pop_up_picks_with_the_arrows_and_closes() {
+        let (mut rt, ops, _) = editing(true);
+        operate(&mut rt, "rp-0");
+        assert!(has(&rt, "rib-menu"), "the menu hangs under the Style button");
+        assert_eq!(ui(&rt).office.ribbon.open, Some(word_ribbon::Pop::Style));
+        for _ in 0..3 {
+            press(&mut rt, Key::Down);
+        }
+        press(&mut rt, Key::Enter);
+        assert_eq!(*ops.borrow(), [EditOp::ParaStyle(ParaStyle::Heading1)]);
+        assert!(!has(&rt, "rib-menu"));
+        assert!(ui(&rt).office.ribbon.open.is_none());
+    }
+
+    #[test]
+    fn colour_font_size_and_table_pop_ups_send_their_edits() {
+        let (mut rt, ops, _) = editing(true);
+        for (button, downs) in [("rp-1", 2), ("rp-2", 5), ("rt-6", 3), ("rt-18", 2)] {
+            operate(&mut rt, button);
+            assert!(has(&rt, "rib-menu"), "{button} opens a menu");
+            for _ in 0..downs {
+                press(&mut rt, Key::Down);
+            }
+            press(&mut rt, Key::Enter);
+        }
+        let ops = ops.borrow();
+        assert_eq!(ops[0], EditOp::FontFamily("Arial".into()));
+        assert_eq!(ops[1], EditOp::FontSize(12.0));
+        assert!(matches!(ops[2], EditOp::TextColour(c) if (c.r, c.g, c.b) == (0xC0, 0x39, 0x2B)));
+        assert_eq!(ops[3], EditOp::Table { rows: 3, cols: 3 });
+    }
+
+    #[test]
+    fn the_link_pop_up_takes_a_web_or_mail_address_only() {
+        assert_eq!(
+            word_ribbon::link_address("https://beebeeb.io/x"),
+            Some("https://beebeeb.io/x".into())
+        );
+        assert_eq!(
+            word_ribbon::link_address("beebeeb.io"),
+            Some("https://beebeeb.io".into())
+        );
+        assert_eq!(word_ribbon::link_address("a@b.nl"), Some("mailto:a@b.nl".into()));
+        assert_eq!(word_ribbon::link_address("MAILTO:a@b.nl"), Some("MAILTO:a@b.nl".into()));
+        for wrong in [
+            "",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "ftp://x.y",
+            "two words.nl",
+            "plain",
+        ] {
+            assert_eq!(word_ribbon::link_address(wrong), None, "{wrong}");
+        }
+        let (mut rt, ops, _) = editing(true);
+        operate(&mut rt, "rt-16");
+        assert!(has(&rt, "rib-link-input"));
+        press(&mut rt, Key::Text("javascript:x".into()));
+        press(&mut rt, Key::Enter);
+        assert!(
+            ops.borrow().is_empty(),
+            "an address the engine would refuse is not sent"
+        );
+        assert!(has(&rt, "rib-link-wrong"));
+        rt.update(|s, _| {
+            if let Some(link) = s.viewer.ui.as_mut().and_then(|u| u.office.ribbon.link.as_mut()) {
+                link.replace_text("beebeeb.io");
+            }
+        });
+        rt.frame(0.0);
+        press(&mut rt, Key::Enter);
+        assert_eq!(
+            *ops.borrow(),
+            [EditOp::Link {
+                text: String::new(),
+                url: "https://beebeeb.io".into()
+            }]
+        );
+        assert!(ui(&rt).office.ribbon.link.is_none(), "the typed address is not kept");
+    }
+
+    #[test]
+    fn the_selection_tools_show_over_a_selection_only() {
+        let (mut rt, ops, answers) = editing(true);
+        assert!(!has(&rt, "float"));
+        answer(&mut rt, &answers, edited(1, marks(), Vec::new()));
+        assert!(!has(&rt, "float"), "a caret is not a selection");
+        let mut m = marks();
+        m.underline = true;
+        answer(&mut rt, &answers, edited(2, m, selection()));
+        assert!(has(&rt, "float"));
+        for (i, name) in ["Bold", "Italic", "Underline", "Text colour", "Insert link"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                find(&rt, &format!("ft-{i}")).expect("a tool").label.as_deref(),
+                Some(*name)
+            );
+        }
+        assert!(checked(&rt, "ft-2"), "Underline is lit");
+        operate(&mut rt, "ft-0");
+        operate(&mut rt, "ft-2");
+        assert_eq!(
+            *ops.borrow(),
+            [
+                EditOp::Mark {
+                    mark: Mark::Bold,
+                    on: true
+                },
+                EditOp::Mark {
+                    mark: Mark::Underline,
+                    on: false
+                },
+            ]
+        );
+        // Over the first selected line, scaled to the page at this zoom, inside the page.
+        let (x, y, page_w) = word_ribbon::float_at(ui(&rt)).expect("on screen");
+        assert!(x >= 0.0 && x + 160.0 <= page_w + 1.0 && y >= 0.0);
+    }
+
+    #[test]
+    fn a_selection_scrolled_out_of_view_has_no_tools() {
+        let (mut rt, _, answers) = editing(true);
+        answer(&mut rt, &answers, edited(1, marks(), selection()));
+        assert!(word_ribbon::float_at(ui(&rt)).is_some());
+        rt.update(|s, _| {
+            if let Some(d) = viewers::doc_mut(s) {
+                d.go_to_page(3);
+            }
+        });
+        assert!(word_ribbon::float_at(ui(&rt)).is_none());
+    }
+
+    #[test]
+    fn the_status_line_is_the_live_documents() {
+        let (mut rt, _, answers) = editing(true);
+        assert_eq!(words(&rt, "st-0"), "Page 1 of 4");
+        assert!(words(&rt, "st-2").ends_with(" words"));
+        assert_eq!(words(&rt, "st-4"), "English (UK)");
+        assert_eq!(words(&rt, "st-7"), "saved as version 7");
+        assert!(!has(&rt, "status-text"), "never Preparing");
+        assert_eq!(words(&rt, "st-8-zoom"), "100%");
+        answer(&mut rt, &answers, edited(1, marks(), Vec::new()));
+        assert_eq!(words(&rt, "st-7"), "unsaved changes");
+        // The zoom's steps move the document's stage.
+        operate(&mut rt, "st-8-more-btn");
+        assert_eq!(words(&rt, "st-8-zoom"), "110%");
+        operate(&mut rt, "st-8-less-btn");
+        operate(&mut rt, "st-8-less-btn");
+        assert_eq!(words(&rt, "st-8-zoom"), "90%");
+    }
+
+    #[test]
+    fn layout_and_review_keep_only_what_the_web_editor_has() {
+        let (mut rt, _, _) = editing(true);
+        operate(&mut rt, "rib-tab-2-cell");
+        assert_eq!(words(&rt, "rt-0-label"), "Page layout\u{2026}");
+        assert!(!has(&rt, "rt-1"));
+        operate(&mut rt, "rib-tab-3-cell");
+        assert_eq!(words(&rt, "rt-0-label"), "Word count\u{2026}");
+        operate(&mut rt, "rt-0");
+        let said = ui(&rt).toast.clone().expect("it says the count");
+        assert!(said.contains("words") && said.contains("4 pages"), "{said}");
+    }
+
+    #[test]
+    fn the_image_tool_goes_to_inserts_picker_and_the_fixture_ribbon_is_unchanged() {
+        let (mut rt, ops, _) = editing(true);
+        operate(&mut rt, "rt-17");
+        assert_eq!(ui(&rt).office.tab, Tab::Insert);
+        assert!(ops.borrow().is_empty());
+        // The board's own scene keeps its fixture tools and words.
+        let (rt, _) = agreement(Case::Selected, false, true);
+        assert_eq!(words(&rt, "rp-0-label"), "Normal text");
+        assert_eq!(words(&rt, "rp-1-label"), "Inter");
+        assert_eq!(words(&rt, "rp-2-label"), "11");
+        assert!(!find(&rt, "rt-1").expect("Redo").focusable, "the board's Redo is off");
+        assert_eq!(words(&rt, "st-0"), "Page 1 of 4");
+    }
+}
+
+/// 008c: a file the editor's guard refused opens read-only in the viewer, which says why and offers the other app.
+mod edit_guarded {
+    use super::*;
+    use crate::frames::viewers::source::Elsewhere;
+    use beebeeb_office_protocol::office::DroppedPart;
+
+    /// The fixture's deck, as the live source hands it after `EditGuarded`: no editor, the guard's parts, and the
+    /// system's app for the type when it is known. Presses of "Open in …" are counted.
+    struct Guarded {
+        inner: FixtureViewerSource,
+        parts: Vec<DroppedPart>,
+        app: Option<String>,
+        elsewhere: Rc<RefCell<u32>>,
+    }
+
+    impl ViewerSource for Guarded {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.open(id)
+        }
+        fn poll(&mut self, id: &str) -> Option<Body> {
+            self.inner.poll(id)
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.inner.retry(id)
+        }
+        fn can_edit(&self, _: &str) -> bool {
+            self.parts.is_empty()
+        }
+        fn edit_guarded(&self, _: &str) -> Vec<DroppedPart> {
+            self.parts.clone()
+        }
+        fn default_app(&self, _: &str) -> Option<String> {
+            self.app.clone()
+        }
+        fn open_elsewhere(&mut self, _: &str) -> Elsewhere {
+            *self.elsewhere.borrow_mut() += 1;
+            Elsewhere::Opened
+        }
+    }
+
+    fn deck(parts: Vec<DroppedPart>, app: Option<&str>) -> (Runtime<State>, Rc<RefCell<u32>>) {
+        let elsewhere = Rc::new(RefCell::new(0));
+        let mut state = init();
+        let source = Guarded {
+            inner: FixtureViewerSource::new(),
+            parts,
+            app: app.map(str::to_owned),
+            elsewhere: elsewhere.clone(),
+        };
+        assert!(open_from(&mut state, Box::new(source), board::DECK));
+        let mut rt = runtime_of(state, false);
+        rt.frame(16.0);
+        (rt, elsewhere)
+    }
+
+    fn notice(rt: &Runtime<State>) -> String {
+        find(rt, "banner").and_then(|e| e.label).unwrap_or_default()
+    }
+
+    #[test]
+    fn edit_guarded_deck_with_speaker_notes_opens_read_only_with_the_notice() {
+        let (mut rt, elsewhere) = deck(vec![DroppedPart::SpeakerNotes], None);
+        assert!(matches!(ui(&rt).file.body, Body::Deck(_)), "the deck is in the viewer");
+        assert_eq!(notice(&rt), DroppedPart::SpeakerNotes.notice());
+        assert_eq!(find(&rt, "banner").map(|e| e.role), Some("status"));
+        // No default app known: the honest words, never an assumed PowerPoint.
+        assert_eq!(words(&rt, "banner-action-label"), "Open in another app\u{2026}");
+        // Edit is not offered: no editor, no editing chrome.
+        assert!(ui(&rt).office.edit.is_none());
+        assert!(!has(&rt, "edit-chrome"));
+        operate(&mut rt, "banner-action");
+        assert_eq!(*elsewhere.borrow(), 1, "Open in … goes through the viewer's other-app chain");
+    }
+
+    #[test]
+    fn edit_guarded_names_the_systems_app_and_every_part() {
+        let (rt, _) = deck(vec![DroppedPart::ActiveX, DroppedPart::Other], Some("LibreOffice Impress"));
+        assert_eq!(words(&rt, "banner-action-label"), "Open in LibreOffice Impress");
+        let said = notice(&rt);
+        assert!(said.contains(DroppedPart::ActiveX.notice()), "{said}");
+        assert!(said.contains(DroppedPart::Other.notice()), "{said}");
+    }
+
+    #[test]
+    fn edit_guarded_none_draws_no_notice() {
+        let (rt, _) = deck(Vec::new(), Some("PowerPoint"));
+        assert!(!has(&rt, "banner"));
+    }
+}
+
+/// The office windows on the keyboard alone (dc-125b): F6 walks the panes, a dialog hands focus back to what opened
+/// it, and the arrows move the cell cursor of a workbook with focus on the cell.
+mod keys {
+    use super::*;
+    use crate::frames::office::sheets::{Cell, SheetView, sheets_fixture};
+    use crate::frames::office::{PANE_DOCUMENT, PANE_RIBBON, PANE_SIDE, PANE_STATUS, PANE_TOOLBAR};
+
+    const SIDEBAR: &str = "sidebar";
+
+    fn shift() -> Mods {
+        Mods {
+            shift: true,
+            ..Mods::default()
+        }
+    }
+
+    fn f6(rt: &mut Runtime<State>, back: bool) {
+        press_with(rt, Key::Function(6), if back { shift() } else { Mods::default() });
+        rt.settle_all();
+        rt.frame(0.0);
+    }
+
+    /// The pane the keyboard is in: the one of `panes` the focused element is, or is inside.
+    fn pane_of(rt: &Runtime<State>, panes: &[&'static str]) -> Option<&'static str> {
+        let all = rt.elements();
+        let mut at = all.iter().position(|e| e.focused);
+        while let Some(i) = at {
+            if let Some(pane) = panes.iter().copied().find(|pane| all[i].key.as_deref() == Some(pane)) {
+                return Some(pane);
+            }
+            at = all[i].parent;
+        }
+        None
+    }
+
+    /// A board frame of the office viewers, by the scene that shows it.
+    fn viewer(frame: &str) -> Runtime<State> {
+        let mut state = init();
+        match frame {
+            "DW-1507" => crate::frames::office::docs::scene_docx(&mut state),
+            "DW-1509" => crate::frames::office::slides::scene_deck(&mut state),
+            _ => set_scene(&mut state, frame),
+        }
+        runtime_of(state, false)
+    }
+
+    /// F6 from nothing goes once around `panes` in order and wraps; Shift+F6 goes back around.
+    fn walks(rt: &mut Runtime<State>, panes: &[&'static str], what: &str) {
+        for pane in panes {
+            assert!(has(rt, pane), "{what}: {pane} is an F6 stop");
+        }
+        let mut seen = Vec::new();
+        for _ in 0..=panes.len() {
+            f6(rt, false);
+            seen.push(pane_of(rt, panes));
+        }
+        let mut want: Vec<Option<&str>> = panes.iter().copied().map(Some).collect();
+        want.push(Some(panes[0]));
+        assert_eq!(seen, want, "{what}: F6 walks the panes and wraps (focus ends on {:?})", focused(rt));
+        f6(rt, true);
+        assert_eq!(pane_of(rt, panes), panes.last().copied(), "{what}: Shift+F6 wraps back to the last pane");
+        f6(rt, true);
+        assert_eq!(pane_of(rt, panes), Some(panes[panes.len() - 2]), "{what}: Shift+F6 goes back one more");
+        assert!(rt.elements().into_iter().any(|e| e.focused && e.focus_visible), "{what}: with the ring");
+    }
+
+    #[test]
+    fn office_f6_walks_the_panes_of_a_document_being_edited() {
+        let (mut rt, ops, _answers) = live_ribbon::editing(true);
+        let panes = [SIDEBAR, PANE_TOOLBAR, PANE_RIBBON, PANE_SIDE, PANE_DOCUMENT, PANE_STATUS];
+        walks(&mut rt, &panes, "a document being edited");
+        assert!(ops.borrow().is_empty(), "F6 edited nothing: {:?}", ops.borrow());
+    }
+
+    #[test]
+    fn office_f6_walks_the_panes_of_each_viewer() {
+        // The read-only viewers have no ribbon: the toolbar, the panel left of the file (the outline, the filmstrip),
+        // the file, the status line.
+        for frame in ["DW-1507", "DW-1509"] {
+            let mut rt = viewer(frame);
+            walks(&mut rt, &[SIDEBAR, PANE_TOOLBAR, PANE_SIDE, PANE_DOCUMENT, PANE_STATUS], frame);
+        }
+        let mut rt = viewer("DW-1508");
+        walks(&mut rt, &[SIDEBAR, PANE_TOOLBAR, PANE_DOCUMENT, PANE_STATUS], "DW-1508");
+    }
+
+    /// The control labelled `label`, by its key.
+    fn labelled(rt: &Runtime<State>, label: &str) -> String {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.label.as_deref() == Some(label) && e.focusable && !e.exiting)
+            .and_then(|e| e.key)
+            .unwrap_or_else(|| panic!("no control labelled {label}"))
+    }
+
+    #[test]
+    fn office_about_hands_focus_back_to_the_status_lines_about_in_each_viewer() {
+        for frame in ["DW-1507", "DW-1508", "DW-1509"] {
+            let mut rt = viewer(frame);
+            let about = labelled(&rt, "About this viewer");
+            operate(&mut rt, &about);
+            assert!(matches!(ui(&rt).office.over, Some(Over::Licence)), "{frame}: About asked for the card");
+            assert!(has(&rt, "scrim"), "{frame}: the card is drawn");
+            assert_ne!(focused(&rt).as_deref(), Some(about.as_str()), "{frame}: the card took the keyboard");
+            press(&mut rt, Key::Escape);
+            rt.settle_all();
+            rt.frame(0.0);
+            assert!(ui(&rt).office.over.is_none(), "{frame}: Esc closed the card");
+            assert!(on_a_file(&rt), "{frame}: Esc closed the card, not the file");
+            assert_eq!(focused(&rt).as_deref(), Some(about.as_str()), "{frame}: focus is back on About");
+        }
+    }
+
+    fn settled(rt: &mut Runtime<State>) {
+        rt.settle_all();
+        rt.frame(0.0);
+    }
+
+    const PAGE: &str = crate::frames::office::edit::word::SURFACE;
+
+    /// RC2-11: the keys go on in the document once the command search closes, never on the ribbon's search, whether
+    /// it was opened with Ctrl+K from the page or by a press on the search; typing then edits the page.
+    #[test]
+    fn office_focus_palette_close_returns_to_the_page() {
+        use beebeeb_office_protocol::office::EditOp;
+        let (mut rt, ops, _answers) = live_ribbon::editing(true);
+        operate(&mut rt, "rib-find");
+        assert!(matches!(ui(&rt).office.over, Some(Over::Palette(_))));
+        press(&mut rt, Key::Escape);
+        settled(&mut rt);
+        assert!(ui(&rt).office.over.is_none(), "Esc closed the search");
+        assert_eq!(
+            focused(&rt).as_deref(),
+            Some(PAGE),
+            "the page has the keyboard, not the ribbon's search"
+        );
+        ctrl(&mut rt, 'k');
+        settled(&mut rt);
+        assert!(
+            matches!(ui(&rt).office.over, Some(Over::Palette(_))),
+            "Ctrl+K from the page"
+        );
+        press(&mut rt, Key::Escape);
+        settled(&mut rt);
+        assert_eq!(
+            focused(&rt).as_deref(),
+            Some(PAGE),
+            "back on the page after Ctrl+K and Esc"
+        );
+        ops.borrow_mut().clear();
+        press(&mut rt, Key::Text("x".into()));
+        settled(&mut rt);
+        assert!(
+            ops.borrow()
+                .iter()
+                .any(|op| matches!(op, EditOp::InsertText(t) if t == "x")),
+            "typing goes into the document: {:?}",
+            ops.borrow()
+        );
+    }
+
+    /// RC2-11: Insert link, closed with Esc or by its Insert, hands the keyboard to the page, not the toolbar.
+    #[test]
+    fn office_focus_insert_link_close_returns_to_the_page() {
+        use super::super::office_over::{LINK_TEXT, LINK_URL};
+        use crate::frames::office::edit::word_insert::Insert;
+        use beebeeb_office_protocol::office::EditOp;
+        let (mut rt, ops, _answers) = live_ribbon::editing(true);
+        for ok in [false, true] {
+            crate::frames::viewers::ui(&mut rt.state)
+                .expect("open")
+                .office_insert(Insert::Link);
+            settled(&mut rt);
+            assert!(
+                matches!(ui(&rt).office.over, Some(Over::Link(_))),
+                "the link dialog is open"
+            );
+            assert_eq!(focused(&rt).as_deref(), Some(LINK_TEXT));
+            if ok {
+                press(&mut rt, Key::Text("Beebeeb".into()));
+                press(&mut rt, Key::Tab);
+                settled(&mut rt);
+                assert_eq!(focused(&rt).as_deref(), Some(LINK_URL));
+                press(&mut rt, Key::Text("https://beebeeb.io".into()));
+                press(&mut rt, Key::Enter);
+            } else {
+                press(&mut rt, Key::Escape);
+            }
+            settled(&mut rt);
+            assert!(ui(&rt).office.over.is_none(), "ok {ok}: the dialog closed");
+            assert_eq!(
+                focused(&rt).as_deref(),
+                Some(PAGE),
+                "ok {ok}: the page has the keyboard"
+            );
+        }
+        assert!(
+            ops.borrow().iter().any(|op| matches!(op, EditOp::Link { .. })),
+            "Insert sent the link: {:?}",
+            ops.borrow()
+        );
+        ops.borrow_mut().clear();
+        press(&mut rt, Key::Text("y".into()));
+        settled(&mut rt);
+        assert!(
+            ops.borrow()
+                .iter()
+                .any(|op| matches!(op, EditOp::InsertText(t) if t == "y")),
+            "{:?}",
+            ops.borrow()
+        );
+    }
+
+    #[test]
+    fn office_a_ribbon_menu_hands_focus_back_to_its_tool() {
+        let (mut rt, ops, _answers) = live_ribbon::editing(true);
+        // Esc: nothing picked, the Style button has the keyboard again.
+        operate(&mut rt, "rp-0");
+        assert!(has(&rt, "rib-menu"), "the menu hangs under the Style button");
+        press(&mut rt, Key::Escape);
+        rt.settle_all();
+        rt.frame(0.0);
+        assert!(!has(&rt, "rib-menu"), "Esc closed the menu");
+        assert!(on_a_file(&rt), "Esc closed the menu, not the file");
+        assert_eq!(focused(&rt).as_deref(), Some("rp-0"), "focus is back on the Style button");
+        assert!(ops.borrow().is_empty());
+        // A pick goes on in the document: the page has the keyboard, never nothing.
+        press(&mut rt, Key::Text(" ".into()));
+        assert!(has(&rt, "rib-menu"), "Space opens it again from the button");
+        press(&mut rt, Key::Down);
+        press(&mut rt, Key::Enter);
+        rt.settle_all();
+        rt.frame(0.0);
+        assert!(!has(&rt, "rib-menu"));
+        assert_eq!(ops.borrow().len(), 1, "one style was sent");
+        assert_eq!(
+            focused(&rt).as_deref(),
+            Some(crate::frames::office::edit::word::SURFACE),
+            "after a pick the page has the keyboard"
+        );
+    }
+
+    /// A workbook in a renderer that nobody edits: the board's sheet, 40 rows by 12 columns.
+    fn workbook() -> (Runtime<State>, SheetView) {
+        let mut view = sheets_fixture::board();
+        view.col_widths = vec![80.0; 12];
+        view.row_heights = vec![24.0; 40];
+        view.extent = (40, 12);
+        view.selection = None;
+        view.current = Cell { row: 1, col: 1 };
+        let (mut rt, _log) = crate::frames::office::docs::live_tests::live_runtime(Body::Sheet(view.clone()), 1.0, None);
+        rt.on_key = Some(crate::shell::host::on_key);
+        rt.frame(0.0);
+        (rt, view)
+    }
+
+    fn sheet(rt: &Runtime<State>) -> &SheetView {
+        match &ui(rt).file.body {
+            Body::Sheet(view) => view,
+            _ => panic!("not a workbook"),
+        }
+    }
+
+    fn arrow(rt: &mut Runtime<State>, key: Key, mods: Mods) {
+        press_with(rt, key, mods);
+        rt.settle_all();
+        rt.frame(0.0);
+    }
+
+    #[test]
+    fn office_arrows_move_the_cell_cursor_of_a_workbook_and_focus_follows() {
+        let (mut rt, _) = workbook();
+        assert!(!has(&rt, "edit-sheet-grid"), "nobody edits this workbook");
+        // Tab reaches the grid: its one stop is the current cell.
+        let stops = tab_stops(&mut rt);
+        assert!(stops.contains(&"sh-cell-1-1".to_string()), "the current cell is a Tab stop: {stops:?}");
+        assert_eq!(stops.iter().filter(|k| k.starts_with("sh-cell-")).count(), 1, "one stop for the grid: {stops:?}");
+        for _ in 0..80 {
+            if focused(&rt).as_deref() == Some("sh-cell-1-1") {
+                break;
+            }
+            press(&mut rt, Key::Tab);
+        }
+        arrow(&mut rt, Key::Down, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 2, col: 1 }, "Down: B3");
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-2-1"), "focus is on B3");
+        arrow(&mut rt, Key::Right, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 2, col: 2 }, "Right: C3");
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-2-2"));
+        arrow(&mut rt, Key::Up, Mods::default());
+        arrow(&mut rt, Key::Left, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 1, col: 1 }, "Up and Left: B2 again");
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-1-1"));
+        assert_eq!(sheet(&rt).selection, None, "a move selects one cell");
+        assert_eq!(words(&rt, "sh-cellbox-text"), "B2", "the cell box names the cell");
+        // The edge holds.
+        arrow(&mut rt, Key::Left, Mods::default());
+        arrow(&mut rt, Key::Left, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 1, col: 0 });
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-1-0"));
+    }
+
+    #[test]
+    fn office_shift_arrows_extend_the_selection_from_the_cell_cursor() {
+        let (mut rt, _) = workbook();
+        // No Tab first: the arrows take the grid from nowhere.
+        arrow(&mut rt, Key::Down, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 2, col: 1 });
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-2-1"), "the first arrow puts focus on the cell");
+        arrow(&mut rt, Key::Down, shift());
+        arrow(&mut rt, Key::Down, shift());
+        arrow(&mut rt, Key::Right, shift());
+        let view = sheet(&rt);
+        assert_eq!(view.current, Cell { row: 2, col: 1 }, "the cursor stays where the range began");
+        assert_eq!(
+            view.selection,
+            Some((Cell { row: 2, col: 1 }, Cell { row: 4, col: 2 })),
+            "B3:C5"
+        );
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-4-2"), "focus is on the far corner");
+        // A plain arrow leaves the range for one cell, from the cursor.
+        arrow(&mut rt, Key::Right, Mods::default());
+        assert_eq!(sheet(&rt).current, Cell { row: 2, col: 2 });
+        assert_eq!(sheet(&rt).selection, None);
+    }
+
+    #[test]
+    fn office_an_arrow_past_the_view_scrolls_the_workbook_to_the_cell() {
+        let (mut rt, _) = workbook();
+        arrow(&mut rt, Key::Down, Mods::default());
+        for _ in 0..36 {
+            arrow(&mut rt, Key::Down, Mods::default());
+        }
+        let view = sheet(&rt);
+        assert_eq!(view.current, Cell { row: 38, col: 1 });
+        assert!(view.top_left.row > 0, "the view followed the cell: {:?}", view.top_left);
+        assert_eq!(focused(&rt).as_deref(), Some("sh-cell-38-1"), "the cell is drawn and has the keyboard");
+    }
 }

@@ -62,6 +62,8 @@ pub struct SharedRootMapping {
     pub(super) file_name_encrypted: Option<String>,
     pub(super) permission_bits: i64,
     pub(super) approved_at: Option<i64>,
+    /// Accepted, but the sealed key has not arrived yet (status "claimed").
+    pub claimed: bool,
 }
 
 pub(super) fn owned_key_and_pin(
@@ -76,6 +78,16 @@ pub(super) fn owned_key_and_pin(
     EngineError,
 > {
     owned_key_and_record(db, master, id).map(|(key, record)| (key, record.format))
+}
+
+/// The chunk format the file's row records (the pin a thumbnail seal is bound to), for a caller outside the bridge.
+/// `None`: no key material for the id here. Only the pin leaves; never the key.
+pub(crate) fn recorded_pin(
+    db: &StateDb,
+    master: &[u8; 32],
+    id: &str,
+) -> Option<beebeeb_core::chunk_stream::ExpectedChunkFormat> {
+    owned_key_and_pin(db, master, id).ok().map(|(_, pin)| pin)
 }
 
 /// The item's key and the content record of its current sealed name: the format pin AND the version
@@ -218,6 +230,8 @@ pub(super) fn owned_metadata_for_rename(
     Ok(record.seal_name(&key, name, mime)?)
 }
 
+// The legacy sealer is the format this path still writes; the new-item sealers are a later migration.
+#[allow(deprecated)]
 pub(super) fn encrypted_metadata_for_name(
     master_key_bytes: &[u8; 32],
     file_id: &str,
@@ -490,7 +504,7 @@ impl HydrateReport<'_> {
     }
 }
 
-/// Task 1698: the status a SUCCESSFUL hydrate leaves the row in. A `Trashing`
+/// the status a SUCCESSFUL hydrate leaves the row in. A `Trashing`
 /// row (the user is viewing a file from the macOS Trash view) must KEEP its
 /// marker — flipping it to `Local` would reparent the item back under its
 /// folder in the replica's working set (the trash view would lose it). Any
@@ -542,14 +556,14 @@ pub fn hydrate_dest_is_allowed(dest_path: &Path, allowed_roots: &[&Path]) -> boo
     false
 }
 
-/// Task 1670 round 4 (Codex P2 on PR #75, review thread on `runner.rs:1044`):
+/// After a successful hydration,
 /// register `dest_path` as this file's durable cache entry (`mark_cached`,
-/// same as before this round) — UNLESS it is a macOS Finder `fetchContents`
+/// same as before) — UNLESS it is a macOS Finder `fetchContents`
 /// HANDOFF staging file (i.e. [`is_macos_finder_handoff_staging_path`] against
 /// `macos_hydrate_dir`), in which case this deliberately does nothing.
 ///
-/// **Why:** `FileProviderExtension.fetchContents` (round 4,
-/// `BeebeebFileProvider/FileProviderExtension.swift`) copies a staged file
+/// **Why:** `FileProviderExtension.fetchContents`
+/// (`BeebeebFileProvider/FileProviderExtension.swift`) copies a staged file
 /// like this one into the SYSTEM's own
 /// `NSFileProviderManager.temporaryDirectoryURL()` and deletes OUR copy at
 /// `dest_path` immediately after — so `dest_path` can already be gone by the
@@ -620,7 +634,7 @@ pub(super) fn record_hydration_cache_state(
 /// and the Windows Cloud Files path never writes plaintext to disk via this fn —
 /// it uses `hydrate_file_to_memory`).
 ///
-/// **Task 1670 round 2 addition:** the plaintext is staged under a per-call,
+/// **addition:** the plaintext is staged under a per-call,
 /// randomly-suffixed temp name in the SAME directory, then published onto the
 /// real `leaf` name with one atomic `renameat` — anchored to the SAME
 /// already-validated `dir_fd` for the temp create, the write, AND the rename,
@@ -773,7 +787,7 @@ fn write_hydrated_from_reader_checked(
     }
 
     // Stage under a per-call, randomly-suffixed temp name in the same
-    // directory (task 1670 round 2 — see the fn doc comment).
+    // directory (see the fn doc comment).
     let temp_leaf_name = format!(".{}.{}.part", leaf.to_string_lossy(), uuid::Uuid::new_v4());
     let temp_leaf = std::ffi::OsStr::new(&temp_leaf_name);
     let temp_leaf_c = path_to_cstring(temp_leaf)?;

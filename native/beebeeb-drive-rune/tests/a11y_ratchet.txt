@@ -1,0 +1,16 @@
+# Recorded counts for shell/a11y_walk_tests.rs: clickable nodes with an empty name or no role, per area folder,
+# summed over its scenes (light). Counts may only go down; RATCHET_WRITE=1 rewrites this file.
+account 0
+backups 0
+files 0
+global 0
+item 0
+office 0
+search 0
+settings 0
+shared 0
+shell 0
+signin 0
+this_pc 0
+tray 0
+viewers 0

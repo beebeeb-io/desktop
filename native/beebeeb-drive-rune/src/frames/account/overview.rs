@@ -6,7 +6,6 @@ use crate::theme::tokens::{Theme, type_};
 use crate::ui::account_set::{self as set, Lead, Row, Tail};
 use crate::ui::au::Tone;
 use crate::ui::kit;
-use crate::ui::settings_list as lists;
 use rune::{El, col, row};
 
 use super::source::{AccountSource, PaneState, Plan, ProductKind, ProductState};
@@ -28,7 +27,10 @@ fn who_row(index: usize, row: Row, to: (Pane, &'static str), source: &dyn Accoun
 
 pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
     let who = source.identity();
-    let identity = lists::list(
+    // Name and email each open their page: one Tab stop, the arrows between them. A page nothing answers for
+    // leaves its row as text, and then the list is a plain one.
+    let wired = [Pane::Name, Pane::Email].iter().all(|p| source.pane_state(*p) != PaneState::Unwired);
+    let identity = (if wired { crate::ui::settings_list::roving_list } else { crate::ui::settings_list::list })(
         0,
         None,
         vec![
@@ -60,7 +62,7 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
 
     // The phrase was shown once, at sign-up, and never again: this row only says so. It is
     // text, not a button: no reveal, no re-authentication, no regenerate.
-    let recovery = lists::list(
+    let recovery = crate::ui::settings_list::list(
         1,
         Some("Recovery"),
         vec![set::item(
@@ -111,7 +113,7 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
             )
         })
         .collect();
-    let uses = lists::list(
+    let uses = crate::ui::settings_list::list(
         2,
         Some("This account uses"),
         products,
@@ -137,9 +139,9 @@ fn plan_card(plan: &Plan, t: &Theme) -> El {
         ))
         .w_full()
         .center_y()
-        .gap(12.0)
-        .padding(12.0)
-        .radius(10.0)
+        .gap(crate::theme::scale::space::S12)
+        .padding(crate::theme::scale::space::S12)
+        .radius(crate::theme::scale::radius::PANEL)
         .fill(t.card)
         .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -157,7 +159,7 @@ fn plan_card(plan: &Plan, t: &Theme) -> El {
                 .child(
                     row()
                         .key("card-0-line")
-                        .gap(3.4)
+                        .gap(crate::theme::scale::space::S4)
                         .child(kit::label(
                             "card-0-mono",
                             plan.used.clone(),

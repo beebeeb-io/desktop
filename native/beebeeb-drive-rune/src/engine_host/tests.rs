@@ -120,7 +120,7 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
 
     // The local state the engine would have written, with the engine's own writers.
     std::fs::create_dir_all(&state_dir).unwrap(); // the engine's first start makes it
-    let db = StateDb::open(&state_paths::state_db_path_from_state_dir(&state_dir)).unwrap();
+    let db = StateDb::open(state_paths::state_db_path_from_state_dir(&state_dir)).unwrap();
     put(&db, "d-plans", "/Plans", None, true);
     put(&db, "d-2027", "/Plans/2027", Some("d-plans"), true);
     put(&db, "f-1", "/Plans/2027/budget.ods", Some("d-2027"), false);
@@ -286,7 +286,7 @@ fn the_test_build_and_a_dev_build_take_api_base_and_the_real_app_ignores_it() {
     ] {
         let base = run(dev, identity).expect(who);
         assert_eq!(
-            (base.origin(), base.from_flag()),
+            (base.origin(), base.chosen_by_flag()),
             ("http://127.0.0.1:3001", true),
             "{who}"
         );
@@ -328,7 +328,7 @@ fn without_the_flag_every_build_talks_to_the_engines_default_which_is_production
     for (dev, identity) in [(false, &TEST), (true, &TEST), (true, &REAL), (false, &REAL)] {
         let base = open::api_base(None, open::reads_api_base_flag(dev, identity)).expect("no flag is never refused");
         assert_eq!(base, ApiBase::engine_default());
-        assert_eq!((base.origin(), base.from_flag()), (default.as_str(), false));
+        assert_eq!((base.origin(), base.chosen_by_flag()), (default.as_str(), false));
         assert_eq!(base.start_line(), format!("api base: {default} (default)"));
     }
     // A unit-test build cannot reach the production default (the engine's `test-support` replaces it), so the source
@@ -498,7 +498,7 @@ fn run_checks_api_base_before_anything_starts_and_says_the_server_once() {
 fn the_api_base_is_an_argument_never_the_environment() {
     let production = |text: &str| text.split("#[cfg(test)]").next().unwrap().to_string();
     for (file, text) in [
-        ("engine_host.rs", production(include_str!("../engine_host.rs"))),
+        ("engine_host/mod.rs", production(include_str!("mod.rs"))),
         ("engine_host/open.rs", production(include_str!("open.rs"))),
         ("shell/mod.rs", production(include_str!("../shell/mod.rs"))),
     ] {
@@ -652,8 +652,9 @@ fn settings_is_unwired_on_a_live_engine() {
     assert!(s.settings.source.wired(Pane::Notifications) && s.settings.source.wired(Pane::Recent));
     assert!(s.settings.source.wired(Pane::About));
     // Drive's panes (`engine_host::drive_settings`): Storage insights, Sync, Bandwidth, Diagnostics and Thumbnails and
-    // previews (`engine_host::drive_previews`) answer; Storage is the shell's frame.
+    // previews (`engine_host::drive_previews`) answer, and so does Storage (w15-storage-wired).
     for pane in [
+        Pane::Storage,
         Pane::Insights,
         Pane::Sync,
         Pane::Bandwidth,
@@ -662,7 +663,6 @@ fn settings_is_unwired_on_a_live_engine() {
     ] {
         assert!(s.settings.drive.wired(pane), "{pane:?}");
     }
-    assert!(!s.settings.drive.wired(Pane::Storage));
     assert!(!s.settings.source.sample());
 }
 
@@ -678,7 +678,7 @@ fn account_is_the_engines_source_on_a_live_engine_and_unbound_panes_are_unwired(
     assert_ne!(source.pane_state(AccountPane::Security), PaneState::Unwired);
     // The password change answers too: signed out, it says so, and is not the shell's frame.
     assert_ne!(source.pane_state(AccountPane::Password), PaneState::Unwired);
-    // Deleting the account answers too (slice A6, `account_deletion.rs`).
+    // Deleting the account answers too (`account_deletion.rs`).
     assert_ne!(source.pane_state(AccountPane::Delete), PaneState::Unwired);
     assert!(source.identity().email.is_empty() && source.sessions().is_empty());
     // Nothing was read: the Security page is told nothing, and may do nothing.
@@ -717,13 +717,13 @@ fn storage_split_is_none_on_a_live_engine() {
 fn the_snapshot_path_keeps_every_groups_fixtures() {
     let s = snap_state();
     assert!(s.frames.shared.source.wired());
-    assert!(s.frames.shared.source.with_me().len() > 0);
+    assert!(!s.frames.shared.source.with_me().is_empty());
     assert!(s.frames.trash.source.wired());
-    assert!(s.frames.trash.source.items().len() > 0);
+    assert!(!s.frames.trash.source.items().is_empty());
     assert!(s.photos.source.wired());
-    assert!(s.photos.source.days(None).len() > 0);
+    assert!(!s.photos.source.days(None).is_empty());
     assert!(s.this_pc.wired());
-    assert!(s.this_pc.changes().len() > 0);
+    assert!(!s.this_pc.changes().is_empty());
     assert!(s.this_pc.kept_count() > 0);
     assert!(s.settings.source.wired(crate::frames::settings::Pane::About));
     assert!(s.settings.drive.wired(crate::frames::settings::Pane::Storage));
@@ -753,7 +753,7 @@ fn the_local_state_is_where_the_08x_app_kept_it() {
 /// macOS/Linux: the path is a single argv element to `open`/`xdg-open`, never a shell command.
 #[test]
 fn the_open_and_reveal_code_never_routes_through_a_shell() {
-    let source = include_str!("../engine_host.rs");
+    let source = include_str!("mod.rs");
     // Scan from the open_path function to the LiveEngine section.
     let open_section = &source[source.find("fn open_path").unwrap()..];
     let open_section = &open_section[..open_section.find("// LiveEngine").unwrap_or(open_section.len())];
@@ -857,12 +857,12 @@ fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
         "rename refused by sync guard"
     );
     assert_eq!(
-        source.move_to(&[item.clone()], None),
+        source.move_to(std::slice::from_ref(&item), None),
         Err(ActionError::Unavailable),
         "move_to refused by sync guard"
     );
     assert_eq!(
-        source.duplicate(&[item.clone()], &[]),
+        source.duplicate(std::slice::from_ref(&item), &[]),
         Err(ActionError::Unavailable),
         "duplicate refused by sync guard"
     );
@@ -872,12 +872,12 @@ fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
         "upload refused by sync guard"
     );
     assert_eq!(
-        source.open(&[item.clone()]),
+        source.open(std::slice::from_ref(&item)),
         Err(ActionError::Unavailable),
         "open refused by sync guard"
     );
     assert_eq!(
-        source.show_in_file_explorer(&[item.clone()]),
+        source.show_in_file_explorer(std::slice::from_ref(&item)),
         Err(ActionError::Unavailable),
         "show_in_file_explorer refused by sync guard"
     );
@@ -923,13 +923,18 @@ fn the_menu_opens_the_sync_root() {
 /// scan proves the guard is present.
 #[test]
 fn the_sync_guard_is_present_in_the_local_choke_point() {
-    let source = include_str!("../engine_host.rs");
+    let source = include_str!("mod.rs");
     let local_fn = &source[source.find("fn local<T>(&self").unwrap()..];
     let local_fn = &local_fn[..local_fn.find("\n    }").unwrap()];
     assert!(
-        local_fn.contains("is_syncing()"),
-        "the local() choke point checks is_syncing: dropping it would let folder-route ops \
-         through when sync is not running"
+        local_fn.contains(".view().start != Start::Running"),
+        "the local() choke point checks that sync runs (from the published view): dropping it would let \
+         folder-route ops through when sync is not running"
+    );
+    // Task 050: the choke point runs on the window's thread; `is_syncing()` waits for the slot a start holds.
+    assert!(
+        !local_fn.contains(".is_syncing()"),
+        "local() reads the view, never is_syncing()"
     );
     // Task 2488: the choke point's database is the signed-in account's, from the engine's account-bound handle.
     assert!(
@@ -1002,7 +1007,7 @@ fn no_source_file_opens_a_state_database_around_the_account_bound_handle() {
 /// and do not touch the sync folder. Neither calls `self.local(…)`.
 #[test]
 fn trash_and_restore_are_not_gated_by_the_sync_guard() {
-    let source = include_str!("../engine_host.rs");
+    let source = include_str!("mod.rs");
     let trash_fn = &source[source.find("fn trash(&mut self").unwrap()..];
     let trash_fn = &trash_fn[..trash_fn.find("\n    fn ").unwrap()];
     assert!(

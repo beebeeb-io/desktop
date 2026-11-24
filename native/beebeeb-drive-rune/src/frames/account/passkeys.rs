@@ -9,13 +9,13 @@ use crate::theme::tokens::Theme;
 use crate::ui::account_form::{self as fm, Field};
 use crate::ui::account_set::{self as set, Lead, Look, Row, Size};
 use crate::ui::kit;
-use crate::ui::settings_list as lists;
-use rune::{El, el};
+use crate::ui::menu;
+use rune::{El, Tx, el};
 
 use super::form::{self, Form, Problem};
 use super::forms::button;
 use super::source::{AccountSource, Passkey, Password, Refused};
-use super::{AccountUi, Dialog, icons};
+use super::{AccountUi, Dialog, RowKey, icons};
 
 const LINE: &str =
     "An extra way to confirm it's you, and to unlock your data on a new device. It doesn't replace your 12 words.";
@@ -114,7 +114,7 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
                 .role("button")
                 .label(format!("More for {}", p.name))
                 .size(28.0, 28.0)
-                .radius(6.0)
+                .radius(crate::theme::tokens::radius::MD)
                 .center()
                 .hover(t.hover)
                 .press(t.press)
@@ -126,7 +126,8 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
                     t.text_tertiary,
                 ))
                 .on_press(move |s: &mut State| super::ask(s, Dialog::PasskeyMenu(id.clone())));
-            set::item(
+            let id = p.id.clone();
+            let row = set::item(
                 0,
                 i,
                 &Row::new(Lead::Icon(&icons::PASSKEY), p.name.clone())
@@ -135,25 +136,39 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
                     .selected(about == Some(p.id.as_str())),
                 vec![more],
                 t,
-            )
+            );
+            // The row's own keys, with the focus on its More button (the row itself is text): Delete is
+            // Remove (its confirm), F2 Rename where this source can rename, the Menu key or Shift+F10 the menu.
+            super::row_keys(row, move |s: &mut State, k| match k {
+                RowKey::Remove => {
+                    super::ask(s, Dialog::RemovePasskey(id.clone()));
+                    true
+                }
+                RowKey::Rename => start_rename(s, id.clone()),
+                RowKey::Menu => {
+                    super::ask(s, Dialog::PasskeyMenu(id.clone()));
+                    true
+                }
+            })
         })
         .collect();
     let mut list = rune::col()
         .key("passkeys")
         .w_full()
-        .child(lists::list(0, None, rows, None, t).w_full());
+        .child(crate::ui::settings_list::list(0, None, rows, None, t).w_full());
     let mut overlay = None;
     match dialog {
         Some(Dialog::PasskeyMenu(id)) => {
             if let Some(at) = passkeys.iter().position(|p| &p.id == id) {
-                list = list.child(menu(&passkeys[at], at, source.can_rename_passkey(), t));
+                list = list.child(menu(at, source.can_rename_passkey(), t));
             }
         }
         Some(Dialog::RemovePasskey(id)) => {
             overlay = passkeys
                 .iter()
-                .find(|p| &p.id == id)
-                .map(|p| remove_confirm(p, &passkeys, needs_password.then(|| password_field(1, f, t)), t));
+                .enumerate()
+                .find(|(_, p)| &p.id == id)
+                .map(|(i, p)| remove_confirm(p, i, &passkeys, needs_password.then(|| password_field(1, f, t)), t));
         }
         _ => {}
     }
@@ -185,27 +200,58 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     (set::pane(children, t), overlay)
 }
 
-/// The menu on one passkey (DW-A75): Rename, Remove. Under the row, 12 pt in from its end.
-fn menu(passkey: &Passkey, at: usize, can_rename: bool, t: &Theme) -> El {
-    let (rename_id, remove_id) = (passkey.id.clone(), passkey.id.clone());
-    let name = passkey.name.clone();
-    let remove = fm::pop_item(if can_rename { 1 } else { 0 }, "Remove", true, t)
-        .on_press(move |s: &mut State| super::ask(s, Dialog::RemovePasskey(remove_id.clone())));
-    let mut items = Vec::new();
-    // A source that cannot rename (no route, or not bound) gets no "Rename" (never a button that cannot work).
+/// The menu on one passkey (DW-A75, `ui::menu`): Rename, Remove. Under the row, 12 pt in from its end. A
+/// source that cannot rename (no route, or not bound) gets no "Rename" (never a button that cannot work).
+fn menu(at: usize, can_rename: bool, t: &Theme) -> El {
+    let mut entries = Vec::new();
     if can_rename {
-        items.push(fm::pop_item(0, "Rename", false, t).on_press(move |s: &mut State| {
-            s.account.dialog = None;
-            let f = &mut s.account.form;
-            form::type_in(&mut f.rename, &name);
-            f.renaming = Some(rename_id.clone());
-            form::focus(f, Some(form::RENAME_KEY));
-        }));
+        entries.push(menu::Entry::item("rename", "Rename"));
     }
-    items.push(remove);
-    fm::pop(&format!("{}, passkey", passkey.name), items, t)
-        .pin(None, Some(40.0 * (at as f32 + 1.0)), Some(12.0), None)
-        .modal(true, |s: &mut State| s.account.dialog = None)
+    entries.push(menu::Entry::Item {
+        id: "remove",
+        label: "Remove",
+        shortcut: None,
+        checked: false,
+        danger: true,
+        off: false,
+    });
+    menu::menu(
+        "pop-0",
+        "Passkey",
+        180.0,
+        &entries,
+        None,
+        t,
+        |s: &mut State, i: usize, _: &mut Tx| {
+            let Some(Dialog::PasskeyMenu(id)) = s.account.dialog.clone() else {
+                return;
+            };
+            let can_rename = s.account.source.as_deref().is_some_and(|x| x.can_rename_passkey());
+            if can_rename && i == 0 {
+                start_rename(s, id);
+            } else {
+                super::ask(s, Dialog::RemovePasskey(id));
+            }
+        },
+        |_: &mut State, _: usize| {},
+        |s: &mut State, _: &mut Tx| s.account.dialog = None,
+    )
+    .pin(None, Some(40.0 * (at as f32 + 1.0)), Some(12.0), None)
+}
+
+/// Start renaming the passkey `id` (the menu's Rename, F2 on its row): the field under the list, filled with its
+/// name. `false`: this source cannot rename, nothing happens.
+fn start_rename(s: &mut State, id: String) -> bool {
+    let Some(source) = s.account.source.as_deref().filter(|x| x.can_rename_passkey()) else {
+        return false;
+    };
+    let name = source.passkeys().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_default();
+    s.account.dialog = None;
+    let f = &mut s.account.form;
+    form::type_in(&mut f.rename, &name);
+    f.renaming = Some(id);
+    form::focus(f, Some(form::RENAME_KEY));
+    true
 }
 
 /// Rename a passkey, here: Beebeeb's name for it only. Enter saves, Esc cancels.
@@ -216,7 +262,7 @@ fn rename(id: &str, f: &Form, t: &Theme) -> El {
     rune::col()
         .key("rename")
         .w_full()
-        .gap(14.0)
+        .gap(crate::theme::scale::space::S14)
         .child(fm::field(
             0,
             &Field {
@@ -237,10 +283,10 @@ fn rename(id: &str, f: &Form, t: &Theme) -> El {
                 save.default_button().on_press(move |s: &mut State| {
                     let ui = &mut s.account;
                     let name = ui.form.rename.text.trim().to_string();
-                    if let Some(source) = ui.source.as_deref_mut() {
-                        if source.rename_passkey(&id, &name) {
-                            ui.form.renaming = None;
-                        }
+                    if let Some(source) = ui.source.as_deref_mut()
+                        && source.rename_passkey(&id, &name)
+                    {
+                        ui.form.renaming = None;
                     }
                 }),
                 save_b,
@@ -249,7 +295,10 @@ fn rename(id: &str, f: &Form, t: &Theme) -> El {
 }
 
 /// Remove a passkey (DW-A76): the last one that can unlock the data gets the warning in bold.
-fn remove_confirm(passkey: &Passkey, all: &[Passkey], password: Option<El>, t: &Theme) -> El {
+///
+/// The opener is the row's More button (`item-0-<at>-more`, the menu's Remove or Delete on the row). Once the
+/// passkey is removed the next row has that key: focus goes there, else into the list.
+fn remove_confirm(passkey: &Passkey, at: usize, all: &[Passkey], password: Option<El>, t: &Theme) -> El {
     let title = format!("Remove {}?", passkey.name);
     let last_unlocker = passkey.can_unlock && !all.iter().any(|p| p.id != passkey.id && p.can_unlock);
     let paragraph = if last_unlocker {
@@ -271,7 +320,7 @@ fn remove_confirm(passkey: &Passkey, all: &[Passkey], password: Option<El>, t: &
     let id = passkey.id.clone();
     let (remove, remove_b) = button(0, "Remove", Look::Danger, false, t);
     let (cancel, cancel_b) = button(1, "Cancel", Look::Plain, false, t);
-    set::dialog_with(
+    let card = set::dialog_with(
         &title,
         440.0,
         &title,
@@ -311,8 +360,8 @@ fn remove_confirm(passkey: &Passkey, all: &[Passkey], password: Option<El>, t: &
             ),
         ],
         t,
-    )
-    .modal(false, close_wiping)
+    );
+    super::modal_back(card, &format!("item-0-{at}-more"), "list-0", close_wiping)
 }
 
 /// The remove confirm closes with nothing done: what was typed into its password field goes with it.

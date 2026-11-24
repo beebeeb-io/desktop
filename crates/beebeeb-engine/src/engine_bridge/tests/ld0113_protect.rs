@@ -272,13 +272,13 @@ async fn the_engines_own_rename_inside_an_own_backup_is_never_put_back() {
     use crate::watcher::{ProtectionCheck, handle_rename_with};
     let dir = tempfile::tempdir().unwrap();
     let sync_root = dir.path().join("root");
-    let pictures = sync_root.join("Backups").join("GLegion").join("Pictures");
+    let pictures = sync_root.join("Backups").join("TestPC").join("Pictures");
     std::fs::create_dir_all(&pictures).unwrap();
     let bridge = test_bridge(&dir.path().join("state.db"));
     flagged_root(&bridge, FileStatus::CloudOnly);
     let before = crate::backup_protect::own_backups();
     crate::backup_protect::set_own_backups(crate::backup_protect::OwnBackups {
-        device_folder: Some("GLegion".into()),
+        device_folder: Some("TestPC".into()),
         folders: vec![crate::backup_protect::OwnBackupFolder {
             display_name: "Pictures".into(),
             source_path: dir.path().join("src").join("Pictures"),
@@ -371,7 +371,7 @@ async fn a_delete_under_the_root_that_got_through_puts_the_subtree_back() {
     for (id, path, kind) in subtree.clone() {
         live_row(&bridge, id, path, kind);
     }
-    let elsewhere = ("0b5ec0de-0000-4000-8000-0000000000a8", "Backups/GLegion/b.jpg");
+    let elsewhere = ("0b5ec0de-0000-4000-8000-0000000000a8", "Backups/TestPC/b.jpg");
     live_row(&bridge, elsewhere.0, elsewhere.1, ItemKind::File);
     let outside = ("0b5ec0de-0000-4000-8000-0000000000a9", "Docs/kept.txt");
     live_row(&bridge, outside.0, outside.1, ItemKind::File);

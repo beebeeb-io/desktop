@@ -24,14 +24,18 @@
 //!
 //! Must not: log an id, a name, a link or anything the server sends; build a key, a token or a link by hand.
 
-use beebeeb_core::auth_flow::{HttpRequest, HttpResponse, Method};
+use beebeeb_core::auth_flow::{HttpRequest, HttpResponse};
 use beebeeb_core::item_id::{ItemClass, item_class};
 use beebeeb_core::kdf::{FileKey, MasterKey};
-use beebeeb_core::share_flow::link::{CreateLink, LinkOptions, LinkStep, open_link_file_key, rebuild_link};
+use beebeeb_core::auth_flow::Method;
+use beebeeb_core::share_flow::link::{
+    CreateLink, LinkOptions, LinkStep, MAX_EXPIRES_IN_HOURS, MIN_PASSPHRASE_LEN, open_link_file_key, rebuild_link,
+};
 use beebeeb_core::share_flow::{self, ShareFlowError};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use super::bindings::share_folder_link::get;
 use super::owned_state::LocalStateRefused;
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
@@ -74,6 +78,24 @@ impl std::fmt::Debug for LinkChoices {
         f.debug_struct("LinkChoices")
             .field("expires_in_hours", &self.expires_in_hours)
             .field("passphrase", &self.passphrase.as_ref().map(|_| "(set)"))
+            .finish()
+    }
+}
+
+/// What the Share dialog changes on a link that exists. Outer `None` is unchanged; inner `None` is "never" /
+/// "no password". Nothing here is crypto: the password is a gate the server checks, the expiry a server field.
+#[derive(Default)]
+pub struct LinkChange {
+    pub expires_in_hours: Option<Option<u32>>,
+    pub passphrase: Option<Option<Zeroizing<String>>>,
+}
+
+/// Whether there is a password, never the password.
+impl std::fmt::Debug for LinkChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkChange")
+            .field("expires_in_hours", &self.expires_in_hours)
+            .field("passphrase", &self.passphrase.as_ref().map(|p| p.as_ref().map(|_| "(set)")))
             .finish()
     }
 }
@@ -210,7 +232,7 @@ impl<C: CredentialStores> Engine<C> {
         // the file's own live link, never a second one behind it. Only a real choice asks for a new link.
         let plain = choices.is_none_or(|c| c.expires_in_hours.is_none() && c.passphrase.is_none());
         if plain {
-            let mine = listed(send(get(format!("{MINE}?file_id={id}")))?)?;
+            let mine = listed(send(get(&format!("{MINE}?file_id={id}")))?)?;
             let live = live_links(&mine, id);
             link = live
                 .iter()
@@ -247,6 +269,73 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
+impl<C: CredentialStores> Engine<C> {
+    /// WRITES on the server: the expiry and/or the password of the live link `share_id` of the account of
+    /// `session` (`PATCH /api/v1/shares/{id}`). Limits as a new link's (core's): an expiry of 1..=`MAX_EXPIRES_IN_HOURS`
+    /// hours, a password of at least `MIN_PASSPHRASE_LEN` characters after trim; a refused choice (a blank
+    /// password included) is [`ShareLinkError::Invalid`] and nothing is sent. A change for a session that is not
+    /// the one in memory sends nothing. A link that is revoked or not the account's is `NotFound`.
+    pub fn share_link_change_for(
+        &self,
+        session: SessionGeneration,
+        share_id: &str,
+        change: &LinkChange,
+    ) -> Result<(), ShareLinkError> {
+        let id = canonical(share_id)?;
+        let mut body = serde_json::Map::new();
+        if let Some(hours) = change.expires_in_hours {
+            if hours.is_some_and(|h| h == 0 || h > MAX_EXPIRES_IN_HOURS) {
+                return Err(ShareLinkError::Invalid);
+            }
+            body.insert("expires_in_hours".into(), serde_json::json!(hours));
+        }
+        if let Some(passphrase) = &change.passphrase {
+            if passphrase
+                .as_ref()
+                .is_some_and(|typed| typed.trim().chars().count() < MIN_PASSPHRASE_LEN)
+            {
+                return Err(ShareLinkError::Invalid);
+            }
+            body.insert(
+                "passphrase".into(),
+                passphrase.as_ref().map_or(Value::Null, |typed| Value::String(typed.to_string())),
+            );
+        }
+        if body.is_empty() {
+            return Ok(());
+        }
+        if self.acct.session.is_poisoned() {
+            return Err(ShareLinkError::NotSignedIn);
+        }
+        // Through the lock's choke point: a locked screen or a closed vault sends nothing.
+        let (token, key) = self
+            .person_session(|current, now| {
+                (now == session)
+                    .then(|| (Zeroizing::new(current.token.clone()), Zeroizing::new(current.master_key)))
+            })
+            .map_err(|_| ShareLinkError::NotSignedIn)?
+            .ok_or(ShareLinkError::NotSignedIn)?;
+        let client = auth_transport::client_for(&self.config.api_base).map_err(|_| ShareLinkError::Offline)?;
+        let base = self.config.api_base.trim_end_matches('/');
+        let mut req = HttpRequest::session_post(format!("/api/v1/shares/{id}"), Value::Object(body));
+        req.method = Method::Patch;
+        if !self.session_is_still(session, &key) {
+            return Err(ShareLinkError::NotSignedIn);
+        }
+        let resp = self
+            .runtime
+            .block_on(auth_transport::send_to(base, &client, Some(&token), req))
+            .map_err(|_| ShareLinkError::Offline)?;
+        match resp.status {
+            200..=299 => Ok(()),
+            401 => Err(ShareLinkError::SessionEnded),
+            404 => Err(ShareLinkError::NotFound),
+            400 => Err(ShareLinkError::Invalid),
+            _ => Err(ShareLinkError::Refused),
+        }
+    }
+}
+
 /// An id as the server writes it: a canonical lower-case UUID, never normalized (an id is key-derivation input).
 fn canonical(id: &str) -> Result<&str, ShareLinkError> {
     match uuid::Uuid::parse_str(id) {
@@ -259,7 +348,9 @@ fn local_refusal(refusal: LocalStateRefused) -> ShareLinkError {
     match refusal {
         LocalStateRefused::SessionEnded => ShareLinkError::SessionEnded,
         LocalStateRefused::Unreadable => ShareLinkError::Refused,
-        LocalStateRefused::SignedOut | LocalStateRefused::Locked => ShareLinkError::NotSignedIn,
+        LocalStateRefused::SignedOut | LocalStateRefused::Locked | LocalStateRefused::SessionChanged => {
+            ShareLinkError::NotSignedIn
+        }
         // Nothing synced, or a local state that is not this account's: no item of it is this account's.
         _ => ShareLinkError::NotFound,
     }
@@ -287,14 +378,6 @@ pub(super) fn key_of(db: &StateDb, master: &MasterKey, id: &str) -> Result<FileK
         Ok(ItemClass::Owner) => Ok(beebeeb_core::kdf::derive_file_key(master, id.as_bytes())),
         _ => Err(unavailable),
     }
-}
-
-/// A read on the session with no confirm token and no body.
-fn get(path: String) -> HttpRequest {
-    let mut req = HttpRequest::session_post(path, Value::Null);
-    req.method = Method::Get;
-    req.body = None;
-    req
 }
 
 /// The account's links as Beebeeb listed them. An answer that is not a list of links is a read that failed: it

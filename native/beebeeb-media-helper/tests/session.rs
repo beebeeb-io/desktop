@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use beebeeb_media_helper::session::run_with;
+use beebeeb_media_helper::session::run_with_system;
 use beebeeb_media_helper::{ROUTES, Route};
 use beebeeb_media_protocol::{Codec, ErrorCode, FromHelper, KindHint, ToHelper, WireError, read_to_app, write_msg};
 
@@ -55,6 +55,12 @@ struct App {
 
 impl App {
     fn start(file: Vec<u8>, table: &'static [(Codec, Route)]) -> App {
+        // The switch held off: this helper's own decoders alone, the same on every OS (the shipped switch is on,
+        // ux-02; Windows' decoders are `tests/system_decoder.rs`).
+        App::start_with(file, table, false)
+    }
+
+    fn start_with(file: Vec<u8>, table: &'static [(Codec, Route)], system_on: bool) -> App {
         let (to_helper, helper_in) = channel();
         let (helper_out, from_helper) = channel();
         let input = ChanRead {
@@ -62,7 +68,7 @@ impl App {
             buf: Vec::new(),
             pos: 0,
         };
-        let join = std::thread::spawn(move || run_with(input, ChanWrite(helper_out), table));
+        let join = std::thread::spawn(move || run_with_system(input, ChanWrite(helper_out), table, system_on));
         App {
             to_helper,
             from_helper: ChanRead {
@@ -409,4 +415,85 @@ fn helper_sends_an_audio_files_title_and_artist_after_opened() {
     app.send(&ToHelper::WantVideo { w: 64, h: 36 });
     assert!(matches!(app.next(), FromHelper::Frame { .. }), "a video sends no tags");
     app.send(&ToHelper::Close);
+}
+
+/// w12-video-start: the sound of an H.264 + MP3 file is proven by its decode and its clock, not by ear (the Windows test machine has no
+/// sound device). The picture and the PCM are asked for in turn, as the player does: each PCM answer starts where the
+/// one before ended, the tone is there (not silence), and after a second of sound the picture is a second on too.
+#[test]
+fn helper_decodes_an_mp3_track_beside_the_h264_picture() {
+    let mut app = App::start(fixture("h264-mp3.avi"), ROUTES);
+    let FromHelper::Opened(opened) = app.open(KindHint::Video) else {
+        panic!("the file opens");
+    };
+    assert_eq!(opened.video.map(|video| video.codec), Some(Codec::H264));
+    assert_eq!(opened.audio.map(|audio| audio.codec), Some(Codec::Mp3));
+    assert_eq!(opened.no_sound, None, "its sound plays");
+    let (rate, channels, part) = (48_000u32, 2u16, 4_800u32);
+    let (mut next_pts, mut frames, mut sum_sq, mut count) = (0u64, 0u64, 0f64, 0u64);
+    let mut last_picture = None;
+    for _ in 0..10 {
+        app.send(&ToHelper::WantAudio {
+            rate,
+            channels,
+            frames: part,
+        });
+        let FromHelper::Audio {
+            pts_ms,
+            channels: got,
+            samples,
+        } = app.next()
+        else {
+            panic!("PCM for every ask in the first second");
+        };
+        assert_eq!(got, channels);
+        assert_eq!(pts_ms, next_pts, "each answer starts where the one before ended");
+        frames += (samples.len() / usize::from(channels)) as u64;
+        next_pts = frames * 1000 / u64::from(rate);
+        sum_sq += samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum::<f64>();
+        count += samples.len() as u64;
+        for _ in 0..3 {
+            app.send(&ToHelper::WantVideo { w: 64, h: 36 });
+            let FromHelper::Frame { pts_ms, .. } = app.next() else {
+                panic!("a frame for every ask in the first second");
+            };
+            assert!(last_picture.is_none_or(|last| pts_ms > last), "the picture moves on");
+            last_picture = Some(pts_ms);
+        }
+    }
+    assert_eq!(next_pts, 1_000, "a second of sound was decoded");
+    let rms = (sum_sq / count as f64).sqrt();
+    assert!(rms > 0.01, "the track's tone, not silence: rms {rms}");
+    assert!(
+        last_picture.is_some_and(|pts| pts >= 900),
+        "the picture is a second on too"
+    );
+    app.send(&ToHelper::Close);
+}
+
+/// ux-57: H.264 + AAC with the switch on, in a process where the system's decoders do not start (every OS but
+/// Windows; on Windows the sandbox's profiles). The first helper asks for the restart by naming AAC; the last helper
+/// (`LastHelper` before `Open`) plays the picture and names the track that stays silent.
+#[cfg(not(windows))]
+#[test]
+fn the_last_helper_plays_h264_without_the_aac_the_system_cannot_decode() {
+    let mut first = App::start_with(fixture("h264-aac.mkv"), ROUTES, true);
+    assert_eq!(
+        first.open(KindHint::Video),
+        FromHelper::Error(ErrorCode::NoSystemDecoder(Codec::Aac)),
+        "the first helper asks for the system decoder's profile"
+    );
+    first.send(&ToHelper::Close);
+
+    let mut last = App::start_with(fixture("h264-aac.mkv"), ROUTES, true);
+    last.send(&ToHelper::LastHelper);
+    let FromHelper::Opened(opened) = last.open(KindHint::Video) else {
+        panic!("the last helper opens the video");
+    };
+    assert_eq!(opened.video.map(|video| video.codec), Some(Codec::H264));
+    assert_eq!(opened.audio, None, "no audio stream is offered");
+    assert_eq!(opened.no_sound, Some(Codec::Aac), "the silent track is named");
+    last.send(&ToHelper::WantVideo { w: 64, h: 36 });
+    assert!(matches!(last.next(), FromHelper::Frame { .. }), "the picture plays");
+    last.send(&ToHelper::Close);
 }

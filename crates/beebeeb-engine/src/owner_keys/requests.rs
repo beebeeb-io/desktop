@@ -144,7 +144,7 @@ impl crate::engine_bridge::EngineBridge {
             return Ok(EnvelopeOutcome::Absent);
         };
         if cached.is_none() {
-            *cached = Some(RequestKeys::load(&self.api()).await);
+            *cached = Some(RequestKeys::load(self.api()).await);
         }
         let Some(found) = cached.as_mut().and_then(|keys| keys.row_keys(master, row)) else {
             return Ok(EnvelopeOutcome::Unresolved);

@@ -7,18 +7,20 @@
 //!   per type for the run of the app, on a COM thread of its own (never the window's), and held.
 //! - The start: on a COM thread of its own the handlers are listed again, the one whose `GetName` is the id picked is
 //!   found (a handler gone since the menu: refused), and `IAssocHandler::Invoke` gets the kept file as a data object
-//!   (`SHCreateItemFromParsingName` → `BindToHandler(BHID_DataObject)`), under the launch lock (`launch.rs`).
+//!   (`SHCreateItemFromParsingName` → `BindToHandler(BHID_DataObject)`), under the launch lock (`launch.rs`), and only
+//!   while the session of the press is still the one once the lock is taken (`files_launch.rs`).
 //! - Never: a registry write, `MakeDefault` / `SetAsDefaultFor`, a temporary copy, a path made from a name.
 //!
 //! Must not: log a path or a file's name.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::frames::files::source::{ActionError, AppChoice};
 
 /// At most this many apps in the submenu.
+#[cfg(any(test, windows))]
 pub(crate) const MAX_APPS: usize = 8;
 
 /// The extension Windows is asked about, as it takes it: ".docx", lower case. `None`: the name has none.
@@ -37,6 +39,7 @@ fn is_own(handler: &str, own_exe: &str) -> bool {
 /// The submenu's apps from the handlers Windows reported, `(GetName, GetUIName)` in its order: none whose program is
 /// `own_exe` (Beebeeb is the submenu's first line already, and is never made a type's app), none without words, at
 /// most [`MAX_APPS`].
+#[cfg(any(test, windows))]
 pub(crate) fn choices(handlers: impl IntoIterator<Item = (String, String)>, own_exe: &str) -> Vec<AppChoice> {
     handlers
         .into_iter()
@@ -81,6 +84,57 @@ impl Apps {
     }
 }
 
+/// The friendly name of the app the system opens `ext` (".pptx") with by default, held per type for the run of the
+/// app (`None` inside: asked, no name). The first ask goes to the system on a thread of its own and `wake` runs once
+/// it answered; until then, and when there is no default (or it is this app), `None`: the caller says "another app".
+/// Never waits.
+pub(crate) fn default_app_name(ext: &str, wake: impl FnOnce() + Send + 'static) -> Option<String> {
+    static KNOWN: std::sync::OnceLock<Mutex<HashMap<String, Option<Option<String>>>>> = std::sync::OnceLock::new();
+    let known = KNOWN.get_or_init(Mutex::default);
+    let ext = ext.to_lowercase();
+    {
+        let mut held = known.lock().unwrap_or_else(PoisonError::into_inner);
+        match held.get(&ext) {
+            Some(Some(name)) => return name.clone(),
+            Some(None) => return None,
+            None => {
+                held.insert(ext.clone(), None);
+            }
+        }
+    }
+    let asked = ext.clone();
+    let started = std::thread::Builder::new().name("default-app-name".into()).spawn(move || {
+        let name = default_name(ask_default(&asked), &own_exe());
+        known.lock().unwrap_or_else(PoisonError::into_inner).insert(asked, Some(name));
+        wake();
+    });
+    if started.is_err() {
+        known.lock().unwrap_or_else(PoisonError::into_inner).insert(ext, Some(None));
+    }
+    None
+}
+
+/// The system's answer as a name to show: none when empty or when it is this app's own program.
+fn default_name(answer: Option<(String, String)>, own_exe: &str) -> Option<String> {
+    let (exe, name) = answer?;
+    let name = name.trim();
+    (!name.is_empty() && !is_own(&exe, own_exe)).then(|| name.to_owned())
+}
+
+/// Windows: `AssocQueryStringW` for the default `open` verb of `ext`: `(executable, friendly app name)`.
+#[cfg(windows)]
+fn ask_default(ext: &str) -> Option<(String, String)> {
+    let exe = win::assoc(ext, windows::Win32::UI::Shell::ASSOCSTR_EXECUTABLE).unwrap_or_default();
+    let name = win::assoc(ext, windows::Win32::UI::Shell::ASSOCSTR_FRIENDLYAPPNAME)?;
+    Some((exe, name))
+}
+
+/// Every other system: not asked here (the Office editor, and so its guard, runs on Windows only).
+#[cfg(not(windows))]
+fn ask_default(_ext: &str) -> Option<(String, String)> {
+    None
+}
+
 /// The path of this app's own program, as Windows names a handler's.
 fn own_exe() -> String {
     std::env::current_exe()
@@ -111,33 +165,44 @@ fn ask_windows(_ext: String, answer: impl FnOnce(Vec<AppChoice>) + Send + 'stati
     answer(Vec::new());
 }
 
-/// Open `path`, the copy kept on this PC, in the handler whose `GetName` is `app_id`, on a COM thread of its own.
-/// `Ok`: the thread started, and `done` gets what happened (a handler gone since the menu, or a start that failed:
-/// `Failed`). Every other system: not there.
+/// What starts the app picked on the kept copy, on the thread [`open_in`] makes: the path, the app's id, and `still`,
+/// which it asks inside the launch lock right before the start (`false`: the press's session moved on; nothing
+/// starts). The system's own is [`SYSTEM`]; a test hands a stand-in.
+pub(crate) type Invoke = fn(&Path, &str, &dyn Fn() -> bool) -> Result<(), ActionError>;
+
+/// Windows' handlers, with COM set up on the thread that starts one.
+#[cfg(windows)]
+pub(crate) const SYSTEM: Option<Invoke> = Some(invoke_with_com);
+/// Every other system has no handlers to start.
+#[cfg(not(windows))]
+pub(crate) const SYSTEM: Option<Invoke> = None;
+
+#[cfg(windows)]
+fn invoke_with_com(path: &Path, app_id: &str, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    match win::Com::enter() {
+        Some(_com) => win::invoke(path, app_id, still),
+        None => Err(ActionError::Failed),
+    }
+}
+
+/// Open `path`, the copy kept on this PC, in the handler whose `GetName` is `app_id`, with `invoke` on a thread of its
+/// own. `Ok`: the thread started, and `done` gets what happened (a handler gone since the menu, a start that failed,
+/// or a session that moved on before the lock was taken: an `Err`). `None` (every other system): not there.
 pub(crate) fn open_in(
+    invoke: Option<Invoke>,
     path: PathBuf,
     app_id: String,
+    still: impl Fn() -> bool + Send + 'static,
     done: impl FnOnce(Result<(), ActionError>) + Send + 'static,
 ) -> Result<(), ActionError> {
-    #[cfg(windows)]
-    {
-        std::thread::Builder::new()
-            .name("files-open-in-app".into())
-            .spawn(move || {
-                let answer = match win::Com::enter() {
-                    Some(_com) => win::invoke(&path, &app_id),
-                    None => Err(ActionError::Failed),
-                };
-                done(answer);
-            })
-            .map(|_| ())
-            .map_err(|_| ActionError::Failed)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (path, app_id, done);
-        Err(ActionError::NotOnThisSystem)
-    }
+    let Some(invoke) = invoke else {
+        return Err(ActionError::NotOnThisSystem);
+    };
+    std::thread::Builder::new()
+        .name("files-open-in-app".into())
+        .spawn(move || done(invoke(&path, &app_id, &still)))
+        .map(|_| ())
+        .map_err(|_| ActionError::Failed)
 }
 
 #[cfg(windows)]
@@ -208,6 +273,34 @@ mod win {
         }
     }
 
+    /// One string of the default association of `ext` (its `open` verb), as `AssocQueryStringW` answers it. `None`:
+    /// no association, or an empty answer.
+    pub(super) fn assoc(ext: &str, what: windows::Win32::UI::Shell::ASSOCSTR) -> Option<String> {
+        use windows::Win32::UI::Shell::{ASSOCF_INIT_IGNOREUNKNOWN, ASSOCF_NOTRUNCATE, AssocQueryStringW};
+        use windows::core::w;
+        let ext = HSTRING::from(ext);
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        // SAFETY: `buf` is `len` u16s long and outlives the call; the strings are nul-terminated HSTRINGs / literals.
+        // The call writes at most `len` u16s and sets `len` to the count written, the nul included.
+        let ok = unsafe {
+            AssocQueryStringW(
+                ASSOCF_INIT_IGNOREUNKNOWN | ASSOCF_NOTRUNCATE,
+                what,
+                &ext,
+                w!("open"),
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &raw mut len,
+            )
+        };
+        if ok.is_err() {
+            return None;
+        }
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let text = String::from_utf16_lossy(&buf[..end]);
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     /// A handler's `(GetName, GetUIName)`. `None`: it gives one of them not.
     pub(super) fn names(handler: &IAssocHandler) -> Option<(String, String)> {
         // SAFETY: COM is set up on this thread by the caller. Each string Windows allocates is copied, then freed
@@ -233,8 +326,8 @@ mod win {
     }
 
     /// Start the handler named `app_id` on the file at `path` (the copy kept on this PC). The handlers are listed again
-    /// here: one gone since the menu was drawn is refused.
-    pub(super) fn invoke(path: &Path, app_id: &str) -> Result<(), ActionError> {
+    /// here: one gone since the menu was drawn is refused. It starts only while `still()` holds inside the launch lock.
+    pub(super) fn invoke(path: &Path, app_id: &str, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -252,7 +345,9 @@ mod win {
             let data: IDataObject = item
                 .BindToHandler(None, &BHID_DataObject)
                 .map_err(|_| ActionError::Failed)?;
-            launch::locked(|| handler.Invoke(&data)).map_err(|_| ActionError::Failed)
+            launch::locked(|| still().then(|| handler.Invoke(&data)))
+                .ok_or(ActionError::Unavailable)?
+                .map_err(|_| ActionError::Failed)
         }
     }
 }
@@ -292,6 +387,16 @@ mod tests {
     }
 
     #[test]
+    fn default_app_name_leaves_out_this_app_and_empty_names() {
+        let own = r"C:\Program Files\Beebeeb\beebeeb-drive.exe";
+        let ppt = r"C:\Program Files\Microsoft Office\root\Office16\POWERPNT.EXE";
+        assert_eq!(default_name(Some((ppt.into(), "PowerPoint".into())), own), Some("PowerPoint".into()));
+        assert_eq!(default_name(Some((own.into(), "Beebeeb".into())), own), None);
+        assert_eq!(default_name(Some((ppt.into(), "  ".into())), own), None);
+        assert_eq!(default_name(None, own), None);
+    }
+
+    #[test]
     fn open_with_extension_is_windows_own_form() {
         assert_eq!(extension_of("Service agreement.docx").as_deref(), Some(".docx"));
         assert_eq!(extension_of("REPORT.XLSX").as_deref(), Some(".xlsx"));
@@ -319,7 +424,7 @@ mod tests {
     /// The instrument first, on a type every Windows has: `.txt` has handlers, Notepad among them.
     #[cfg(windows)]
     #[test]
-    #[ignore = "O-CP3: VM 401"]
+    #[ignore = "O-CP3: the Windows test machine"]
     fn windows_reports_handlers_for_txt() {
         let _com = win::Com::enter().expect("COM");
         let reported: Vec<(String, String)> = win::handlers(".txt").iter().filter_map(win::names).collect();
@@ -334,7 +439,7 @@ mod tests {
     /// by its PID. Mutant: invoke with an empty data object → no process.
     #[cfg(windows)]
     #[test]
-    #[ignore = "O-CP3: VM 401"]
+    #[ignore = "O-CP3: the Windows test machine"]
     fn invoke_opens_the_kept_path() {
         let notepads = || -> Vec<u32> {
             let out = std::process::Command::new("tasklist")
@@ -357,7 +462,7 @@ mod tests {
             .find(|(name, _)| name.to_lowercase().contains("notepad"))
             .expect("Notepad is a handler of .txt")
             .0;
-        win::invoke(&path, &notepad).expect("invoked");
+        win::invoke(&path, &notepad, &|| true).expect("invoked");
         let started = (0..50)
             .find_map(|_| {
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -368,7 +473,7 @@ mod tests {
             .args(["/PID", &started.to_string(), "/F"])
             .output();
         assert!(
-            win::invoke(&path, "no such handler").is_err(),
+            win::invoke(&path, "no such handler", &|| true).is_err(),
             "a handler that is not there is refused"
         );
     }

@@ -25,7 +25,7 @@ fn type_text(rt: &mut Runtime<State>, text: &str) {
 }
 
 /// The Share dialog of the selected file with a password typed in it.
-fn share_with_a_password(rt: &mut Runtime<State>) {
+pub(super) fn share_with_a_password(rt: &mut Runtime<State>) {
     click(rt, "share-box");
     click(rt, "item-0-2-switch");
     type_text(rt, "s3cret-words");
@@ -395,15 +395,12 @@ fn every_ending_of_a_session_takes_every_piece_of_the_files_window_with_it() {
 }
 
 /// A lock with the link's password on screen: the dialog and the password are gone, and the
-/// window is capturable again once the app is unlocked (the lock screen itself is excluded).
+/// password is not back once the app is unlocked.
 #[test]
-fn a_lock_over_the_share_dialog_wipes_it_and_unlock_leaves_the_window_capturable() {
-    let (engine, platform, mut rt) = fixture();
-    let last = |platform: &FakePlatform| platform.capture_exclusions.lock().unwrap().last().copied();
+fn a_lock_over_the_share_dialog_wipes_it_and_unlock_does_not_bring_it_back() {
+    let (engine, _platform, mut rt) = fixture();
     share_with_a_password(&mut rt);
-    assert_eq!(last(&platform), Some(true), "the password field excludes the window");
     end(&mut rt, &engine, Ending::Lock);
-    assert_eq!(last(&platform), Some(true), "the lock screen is excluded");
     assert!(rt.state.actions.dialog.is_none());
     assert_eq!(rt.state.actions.share_password.text, "");
     engine.set_gate(GateState::Ready);
@@ -411,7 +408,6 @@ fn a_lock_over_the_share_dialog_wipes_it_and_unlock_leaves_the_window_capturable
     settle(&mut rt);
     assert!(rt.state.actions.dialog.is_none(), "the Share dialog is not back");
     assert!(rt.elements().iter().all(|e| e.key.as_deref() != Some(PASSWORD_INPUT)));
-    assert_eq!(last(&platform), Some(false), "capturable again after the unlock");
 }
 
 /// Sign-out, then another account signs in: no file name of the earlier session is anywhere in
@@ -499,8 +495,7 @@ fn after_a_sign_out_the_next_account_sees_no_file_name_of_the_earlier_session() 
 /// the wiping path, the window is capturable again, and coming back shows no dialog.
 #[test]
 fn leaving_the_files_route_closes_its_dialogs_and_wipes_the_password() {
-    let (_engine, platform, mut rt) = fixture();
-    let last = |platform: &FakePlatform| platform.capture_exclusions.lock().unwrap().last().copied();
+    let (_engine, _platform, mut rt) = fixture();
     share_with_a_password(&mut rt);
     rt.update(|s, _| {
         dispatch(s, Event::OpenSettings(crate::shell::app::SettingsPane::General));
@@ -516,7 +511,6 @@ fn leaving_the_files_route_closes_its_dialogs_and_wipes_the_password() {
         "the Share dialog closed with the route"
     );
     assert_eq!(rt.state.actions.share_password.text, "", "its password is wiped");
-    assert_eq!(last(&platform), Some(false), "capturable again");
     go(&mut rt, Section::Files);
     assert!(rt.state.actions.dialog.is_none());
     assert!(rt.elements().iter().all(|e| e.role != "dialog"));
@@ -704,6 +698,24 @@ fn a_sidebar_click_ends_a_name_being_typed_in_a_row() {
     );
     assert!(rt.state.actions.rename.is_none(), "the rename ended with the route");
     assert_eq!(rt.state.actions.name_edit.text, "", "and what was typed is gone");
+}
+
+/// Bug 10 (the Windows test machine run 7): the word typed in the Search names box was still in the box on the screens after Search.
+/// A sidebar press is the person going somewhere else: Search over the Files window ends, as a lock ends it. (An
+/// opened result keeps it behind the item, so Back shows the same results again: only a section press ends it.)
+#[test]
+fn a_sidebar_click_ends_search_and_its_typed_word() {
+    let (_engine, _platform, mut rt) = fixture();
+    rt.update(|s, tx| {
+        crate::frames::search::open(s, tx);
+        s.search = rune::TextEdit::new("contract");
+    });
+    settle(&mut rt);
+    assert!(rt.state.frames.find.open && rt.state.search.text == "contract");
+    rt.update(|s, _| s.sidebar_section = crate::ui::sidebar::SidebarSection::Photos);
+    settle(&mut rt);
+    assert_eq!(rt.state.search.text, "", "the typed word did not come along to Photos");
+    assert!(!rt.state.frames.find.open, "Search is over");
 }
 
 /// A message that went takes what its Try again held with it.

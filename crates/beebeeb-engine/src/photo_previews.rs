@@ -19,6 +19,7 @@ pub mod encode;
 pub mod plan;
 pub mod runner;
 pub mod seal;
+pub mod thumbs_upload;
 
 #[cfg(test)]
 pub(crate) mod tests;

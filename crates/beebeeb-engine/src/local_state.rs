@@ -33,6 +33,146 @@ pub(crate) fn state_db_for_config_unbound(
         .map_err(|e| format!("open state.db: {e}"))
 }
 
+/// What became of the state database at a sign-out or sign-in (backlog 1857).
+#[derive(Debug, PartialEq, Eq)]
+pub enum StateDbCheck {
+    /// No `state.db`, or one that opens: nothing was changed.
+    Sound,
+    /// `state.db` is corrupt (SQLite says not-a-database or malformed). It was moved aside to this path, with its
+    /// `-wal` and `-shm` files, so the next sign-in starts a fresh one. The caller says so to the person.
+    MovedAside(PathBuf),
+}
+
+/// Is this open error SQLite's "the file is corrupt"? By result code only (`error_category`), never by text.
+pub fn is_corrupt_state_db_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    crate::engine_bridge::error_category(error) == "database_corrupt"
+}
+
+/// Opens `state.db` in `state_dir`. A corrupt one is moved aside (never deleted: the person may still want it
+/// looked at) and reported as [`StateDbCheck::MovedAside`]. Any other failure to open (busy, read-only, a
+/// permission error) is an `Err` and the file stays where it is: it fails closed, it never starts over on a
+/// database that may be healthy.
+pub fn move_corrupt_state_db_aside(state_dir: &std::path::Path) -> Result<StateDbCheck, String> {
+    let path = crate::state_paths::state_db_path_from_state_dir(state_dir);
+    match std::fs::metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(StateDbCheck::Sound),
+        Err(error) => return Err(format!("check state.db: {error}")),
+        Ok(meta) if !meta.is_file() => return Err("state.db is not a file".to_string()),
+        Ok(_) => {}
+    }
+    let opened = crate::state_db::StateDb::open(&path).and_then(|db| db.has_account_data().map(|_| ()));
+    let error = match opened {
+        Ok(()) => return Ok(StateDbCheck::Sound),
+        Err(error) => error,
+    };
+    if !is_corrupt_state_db_error(&error) {
+        return Err(format!("open state.db: {error}"));
+    }
+    let aside = unused_aside_path(state_dir)?;
+    std::fs::rename(&path, &aside).map_err(|e| format!("move the corrupt state.db aside: {e}"))?;
+    for suffix in ["-wal", "-shm"] {
+        let mut from = path.clone().into_os_string();
+        from.push(suffix);
+        let mut to = aside.clone().into_os_string();
+        to.push(suffix);
+        let _ = std::fs::rename(from, to);
+    }
+    // RC2-4: the fresh `state.db` lists the files again with no content agreed with the server. The marker asks the
+    // engine to check the files on disk against the server's content once the first pull is in
+    // (`EngineBridge::check_after_rebuild`). A marker that cannot be written leaves them held, as before: never lost.
+    if let Err(error) = RebuiltCheck::owe(state_dir) {
+        tracing::warn!(%error, "state.db rebuilt: the check of the files on disk could not be asked for; they stay held");
+    }
+    tracing::warn!("state.db was corrupt; moved aside, the next sign-in starts fresh");
+    Ok(StateDbCheck::MovedAside(aside))
+}
+
+/// RC2-4: the file next to `state.db` that says a rebuilt `state.db` still owes the check of the files on disk.
+pub const REBUILT_CHECK_FILENAME: &str = "state.db.rebuilt-check";
+
+/// RC2-4: the check a rebuilt `state.db` owes. Its file lists the ids of files already checked whose bytes on disk
+/// differ from the server's content (held as real edits; never downloaded again by this check). Ids only, no names.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RebuiltCheck {
+    /// When the engine first saw the rebuild's first pull in (seconds since the epoch), if it has.
+    pub pulled_at: Option<i64>,
+    pub differing: std::collections::BTreeSet<String>,
+}
+
+/// RC2-4: the check ends only once no file is left to check this long after the first pull, so rows a platform
+/// marks synced a little after that pull (Windows' placeholders) are checked too.
+pub const REBUILT_CHECK_SETTLE_SECS: i64 = 600;
+
+impl RebuiltCheck {
+    fn path(state_dir: &std::path::Path) -> PathBuf {
+        state_dir.join(REBUILT_CHECK_FILENAME)
+    }
+
+    /// A rebuild owes the check: a fresh marker (a second rebuild starts it again, empty).
+    pub fn owe(state_dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::write(Self::path(state_dir), b"")
+    }
+
+    /// The check owed in `state_dir`, or `None` when none is.
+    pub fn read(state_dir: &std::path::Path) -> std::io::Result<Option<Self>> {
+        match std::fs::read_to_string(Self::path(state_dir)) {
+            Ok(text) => {
+                let mut owed = Self::default();
+                for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    match line.strip_prefix("pulled_at=") {
+                        Some(at) => owed.pulled_at = at.parse().ok(),
+                        None => {
+                            owed.differing.insert(line.to_string());
+                        }
+                    }
+                }
+                Ok(Some(owed))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Records the files found differing so far.
+    pub fn save(&self, state_dir: &std::path::Path) -> std::io::Result<()> {
+        let mut text = String::new();
+        if let Some(at) = self.pulled_at {
+            text.push_str(&format!("pulled_at={at}\n"));
+        }
+        for id in &self.differing {
+            text.push_str(id);
+            text.push('\n');
+        }
+        let path = Self::path(state_dir);
+        let tmp = state_dir.join(format!("{REBUILT_CHECK_FILENAME}.tmp"));
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(tmp, path)
+    }
+
+    /// Every file is checked: no check is owed any more.
+    pub fn finish(state_dir: &std::path::Path) -> std::io::Result<()> {
+        match std::fs::remove_file(Self::path(state_dir)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+}
+
+fn unused_aside_path(state_dir: &std::path::Path) -> Result<PathBuf, String> {
+    for n in 0..1000 {
+        let name = if n == 0 {
+            "state.db.corrupt".to_string()
+        } else {
+            format!("state.db.corrupt-{n}")
+        };
+        let candidate = state_dir.join(name);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err("no free name to move the corrupt state.db to".to_string())
+}
+
 /// Task 1670 round 2: wipe the macOS hydrate-cache staging directory at every
 /// account-security boundary (sign-out, lock, daemon startup) so a decrypted
 /// plaintext copy staged for a Finder open can never outlive the boundary
@@ -121,8 +261,7 @@ pub fn disposable_cache_roots_in(
 }
 
 /// `…/Logs/<the identity's log folder>` (`Logs/Beebeeb` for the real app) anywhere in `path`: the lifecycle log's directory, in the home or in the app's
-/// container (spec 2026-10-06 §8). It survives sign-out, Repair and the account reset (lead ruling
-/// T5-⚠c), so no purge may treat anything under it as disposable, whatever root it sits in.
+/// container (spec 2026-10-06 §8). It survives sign-out, Repair and the account reset, so no purge may treat anything under it as disposable, whatever root it sits in.
 pub fn is_lifecycle_log_path(identity: &crate::identity::EngineIdentity, path: &std::path::Path) -> bool {
     let names: Vec<&str> = path.components().filter_map(|part| part.as_os_str().to_str()).collect();
     names

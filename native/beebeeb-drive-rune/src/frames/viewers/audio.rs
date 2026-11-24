@@ -2,7 +2,6 @@
 //! title and artist, the scrubber with elapsed and remaining time, previous / pause / next, and
 //! the folder's other recordings as the queue.
 
-use rune::tok::Family;
 use rune::{Align, Color, El, Icon, TextStyle, col, el, row};
 
 use super::chrome::{Dot, Status};
@@ -10,17 +9,18 @@ use super::kinds::clock;
 use super::source::{AudioDoc, Picture};
 use super::{Intent, Ui, details, media, media_icons, style, video};
 use crate::State;
+use crate::theme::scale;
 use crate::media::player::{PlayState, PlayerHandle};
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
-use crate::ui::toolbar::{ToolState, tool_button};
+use crate::ui::toolbar::{self, ToolState, tool_button};
 
 /// `.t-cap`: 11px/500 on 14px.
 const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
 /// `.kit-list-title`: 10px/600 on 13px, tracked 0.01em.
 const LIST_TITLE: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.1);
 /// `.kit-item-value.font-mono`: 12.5px on 17px.
-const VALUE: TextStyle = TextStyle::new(12.5, 400.0).family(Family::Mono).lh(17.0);
+const VALUE: TextStyle = crate::theme::scale::text::FIELD_MONO;
 /// `.kit-item-title`: 13px/500 on 17px.
 const ITEM: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0).tracking(-0.06);
 
@@ -73,28 +73,13 @@ pub fn status(doc: &AudioDoc, can_play: bool) -> Status {
     }
 }
 
-/// Previous or next: two chevrons (`.mk-tbtn`). Keys: `<key>`, `<key>-icon`, `<key>-icon-2`.
+/// Previous or next: the shared tool button with the chevron, pressed to step the queue.
 fn skip(key: &'static str, name: &'static str, icon: &'static Icon, delta: isize, can: bool, t: &Theme) -> El {
-    // The board draws both in the same ink at either end of the queue; the one that cannot
-    // step is not operable.
-    let ink = t.text_secondary;
-    row()
-        .key(key)
-        .role("button")
-        .label(name)
-        .disabled(!can)
-        .size(56.0, 28.0)
-        .gap(4.0)
-        .center()
-        .radius(7.0)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(can)
-        .on_press(move |s: &mut State| {
-            media::step(s, delta);
-        })
-        .child(kit::glyph(format!("{key}-icon"), icon, 20.0, ink))
-        .child(kit::glyph(format!("{key}-icon-2"), icon, 20.0, ink))
+    // The one that cannot step (an end of the queue) is not operable.
+    let button = toolbar::tool(key, name, icon, t).on_press(move |s: &mut State| {
+        media::step(s, delta);
+    });
+    if can { button } else { button.disabled(true).focusable(false) }
 }
 
 /// What the player says of THIS recording, when the source hands a player whose current item it is. Another
@@ -141,7 +126,7 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
         .role("image")
         .label(format!("Artwork of {title}"))
         .size(260.0, 260.0)
-        .radius(14.0)
+        .radius(crate::theme::tokens::radius::XL)
         .box_shadow(rune::Shadow {
             x: 0.0,
             y: 18.0,
@@ -202,7 +187,7 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
     let scrubber = col()
         .key("scrubber")
         .w_full()
-        .gap(4.0)
+        .gap(scale::space::S4)
         .child(
             track.w_full().h(4.0).radius(2.0).fill(style::bar_track(t)).child(
                 el().key("scrub-fill")
@@ -232,7 +217,7 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
         );
     let at = doc.queue.iter().position(|t| t.current);
     let (first, last) = (at == Some(0), at.is_none_or(|i| i + 1 >= doc.queue.len()));
-    let mut transport = row().key("transport").center_y().gap(24.0).child(skip(
+    let mut transport = row().key("transport").center_y().gap(scale::space::S24).child(skip(
         "prev",
         "Previous",
         &media_icons::BACK,
@@ -290,7 +275,7 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
         .key("player")
         .w(360.0)
         .items_center()
-        .gap(16.0)
+        .gap(scale::space::S16)
         .child(artwork)
         .child(names)
         .child(scrubber)
@@ -305,7 +290,7 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
 }
 
 fn queue(doc: &AudioDoc, t: &Theme) -> El {
-    let mut list = col()
+    let list = col()
         .key("queue")
         .role("list")
         .label(format!("Up next, {}", doc.folder))
@@ -319,14 +304,14 @@ fn queue(doc: &AudioDoc, t: &Theme) -> El {
                 t.text_tertiary,
             )
             .w_full()
-            .px(13.0)
+            .px(scale::space::S13)
             .mb(6.0),
         );
     // `.kit-list-body`: the rows in one outlined box, a hairline between them.
     let mut rows = col()
         .key("queue-body")
         .w_full()
-        .radius(10.0)
+        .radius(scale::radius::PANEL)
         .box_shadow(kit::ring(kit::HAIR, t.separator));
     for (i, track) in doc.queue.iter().enumerate() {
         let id = track.id.clone();
@@ -338,8 +323,8 @@ fn queue(doc: &AudioDoc, t: &Theme) -> El {
             .checked(track.current)
             .w_full()
             .h(28.0)
-            .px(10.0)
-            .gap(8.0)
+            .px(scale::space::S10)
+            .gap(scale::space::S8)
             .center_y()
             .border_sides([if i == 0 { 0.0 } else { kit::HAIR }, 0.0, 0.0, 0.0], t.separator)
             .focusable(true)
@@ -396,7 +381,7 @@ pub fn body(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
     let live = Live::of(ui);
     // A refusal: the words, and "Open in another app\u{2026}" one press away.
     if let Some(why) = live.as_ref().and_then(|l| l.state.refused.as_ref()) {
-        return video::refused(&video::refusal_words(why), t);
+        return video::refused_for(why, t);
     }
     row()
         .key("viewer-body")

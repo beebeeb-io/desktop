@@ -55,7 +55,11 @@ pub enum SignOutMode {
     /// Done in the call (the board's frames).
     AtOnce,
     /// Refused: unsent changes.
+    #[cfg_attr(not(test), allow(dead_code))]
     Refused,
+    /// Refused: an open editor holds unsaved changes (until `sign_out_discarding_unsaved`, or the mode is reset).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Unsaved,
     /// On its way: answered after this many polls (`u32::MAX`: never, in a test's lifetime).
     After(u32),
 }
@@ -257,6 +261,7 @@ impl BoardAccount {
     fn sign_out_held(&mut self, all: bool) -> Option<SignOutAnswer> {
         match self.sign_out_mode {
             SignOutMode::AtOnce => None,
+            SignOutMode::Unsaved => Some(SignOutAnswer::Unsaved),
             SignOutMode::Refused => Some(SignOutAnswer::Refused(BOARD_SIGN_OUT_REFUSED)),
             SignOutMode::After(polls) => {
                 self.signing_out = Some((all, polls));
@@ -617,6 +622,11 @@ impl AccountSource for BoardAccount {
         }
         self.signed_out = Some("this app");
         SignOutAnswer::Done
+    }
+    fn sign_out_discarding_unsaved(&mut self) -> SignOutAnswer {
+        self.wire.push("sign out, discarding unsaved changes".into());
+        self.sign_out_mode = SignOutMode::AtOnce;
+        self.sign_out_this_app()
     }
     fn sign_out_all_apps(&mut self) -> SignOutAnswer {
         if let Some(answer) = self.sign_out_held(true) {

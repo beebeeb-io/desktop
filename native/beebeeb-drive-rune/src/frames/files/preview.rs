@@ -13,6 +13,8 @@ use super::dialogs::Dialog;
 use super::source::{Action, ActionError};
 use crate::State;
 use crate::source::{DriveItem, format_size};
+use crate::theme::file_icons::icon_for;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, icons_files};
 use crate::ui::settings_dialog::DIALOG_TITLE;
@@ -96,11 +98,11 @@ impl State {
         true
     }
 
-    /// Open in its app, from the panel: the panel closes and the file goes to its own app, never to the window's
-    /// viewer (the button names where it opens).
+    /// Open, from the panel: the panel closes and the file opens in the window's viewer (w29: nothing opens in
+    /// another app without "Open in another app").
     pub fn open_from_preview(&mut self, tx: &mut Tx) {
         self.close_dialog(tx);
-        self.open_selection_with(tx, false);
+        self.open_selection(tx);
     }
 
     /// Open in another app…: Windows' app chooser; the file is decrypted for the app picked.
@@ -168,24 +170,9 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
-/// `.mk-tbtn`: a 28 pt square with a glyph.
-fn tool(key: &str, name: &str, icon: &'static rune::Icon, size: f32, t: &Theme) -> El {
-    row()
-        .key(key.to_string())
-        .role("button")
-        .label(name)
-        .size(28.0, 28.0)
-        .center()
-        .radius(7.0)
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::glyph(format!("{key}-icon"), icon, size, t.text_secondary))
-}
-
 /// The card's head: close, the file's name and where the preview is, Share, Open in its app (Files' panel only).
 fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
-    let mut title = col().key("pv-title").grow(1.0).min_w(0.0).px(4.0).child(
+    let mut title = col().key("pv-title").grow(1.0).min_w(0.0).px(scale::space::S4).child(
         kit::label("pv-name", item.name.clone(), type_::TITLE, t.text)
             .role("heading")
             .level(2)
@@ -199,7 +186,7 @@ fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
             t.text_tertiary,
         ));
     }
-    let close = tool("pv-close", "Close preview", &icons_files::CLOSE, 14.0, t);
+    let close = crate::ui::toolbar::tool("pv-close", "Close preview", &icons_files::CLOSE, t);
     let close = match mode {
         Mode::Files => close.on_press_tx(|s: &mut State, tx: &mut Tx| s.close_dialog(tx)),
         Mode::ReadOnly { close: press, .. } => close.on_press_tx(*press),
@@ -208,19 +195,26 @@ fn head(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
         .key("pv-head")
         .w_full()
         .h(44.0)
-        .px(12.0)
-        .gap(8.0)
+        .px(scale::space::S12)
+        .gap(scale::space::S8)
         .center_y()
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
         .child(close)
+        .child(crate::ui::file_icon::file_icon(
+            "preview-head-icon",
+            icon_for(&item.name, false, item.mime.as_deref()),
+            16.0,
+            t,
+        ))
         .child(title);
     // Nothing of a read-only panel shares or opens the file.
     if matches!(mode, Mode::ReadOnly { .. }) {
         return head;
     }
     let mut head = head.child(
-        tool("pv-share", "Share\u{2026}", &icons::SHARE, 15.0, t).on_press(|s: &mut State| s.share_from_preview()),
+        crate::ui::toolbar::tool("pv-share", "Share\u{2026}", &icons::SHARE, t)
+            .on_press(|s: &mut State| s.share_from_preview()),
     );
     if matches!(state, Previewed::Shown(_)) {
         head = head.child(
@@ -248,7 +242,7 @@ fn page(p: &Page) -> El {
         .w(440.0)
         .h_full()
         .padding(40.0)
-        .gap(10.0)
+        .gap(scale::space::S10)
         .radius(3.0)
         .fill(Color::WHITE)
         .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)))
@@ -333,7 +327,7 @@ fn blank(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
         .grow(1.0)
         .w_full()
         .center()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .px(40.0)
         .child(
             el().key("pv-blank-tile")
@@ -341,11 +335,11 @@ fn blank(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
                 .radius(16.0)
                 .center()
                 .fill(t.text.alpha(0.07))
-                .child(kit::glyph(
+                .child(crate::ui::file_icon::file_icon(
                     "pv-blank-icon",
-                    &icons_files::DOC_BLANK,
+                    icon_for(&item.name, false, item.mime.as_deref()),
                     28.0,
-                    t.text_secondary,
+                    t,
                 )),
         )
         .child(kit::label("pv-blank-title", title, DIALOG_TITLE, t.text).mt(8.0))
@@ -371,7 +365,7 @@ fn blank(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
     blank.child(
         row()
             .key("pv-blank-actions")
-            .gap(8.0)
+            .gap(scale::space::S8)
             .mt(12.0)
             .child(
                 button::outline_button("pv-open-with", "Open in another app\u{2026}", None, t)
@@ -390,7 +384,7 @@ pub(crate) fn card(item: &DriveItem, state: &Previewed, mode: &Mode, size: (f32,
             .grow(1.0)
             .min_h(0.0)
             .w_full()
-            .padding(24.0)
+            .padding(scale::space::S24)
             .justify_center()
             .fill(t.text.alpha(0.05))
             .clip_rounded(0.0)
@@ -402,7 +396,7 @@ pub(crate) fn card(item: &DriveItem, state: &Previewed, mode: &Mode, size: (f32,
         .role("dialog")
         .label(format!("Preview of {}", item.name))
         .size(w, h)
-        .radius(12.0)
+        .radius(crate::theme::scale::radius::DIALOG)
         .fill(t.card)
         .box_shadow(kit::drop(30.0, 80.0, Color::BLACK.alpha(0.34)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))

@@ -13,7 +13,7 @@ fn a_running_payload_is_the_old_shape_with_empty_new_keys() {
         json!({
             "state": "running", "legacy_state": "running", "sync_root": ROOT, "error": null,
             "files_remaining": null, "bytes_total": null, "bytes_done": null,
-            "last_tick_ok_at": null, "reason": null
+            "last_tick_ok_at": null, "changes": 0, "reason": null
         })
     );
 }
@@ -29,7 +29,7 @@ fn an_idle_payload_after_a_good_tick_carries_the_check_time_and_no_reason() {
         json!({
             "state": "idle", "legacy_state": "idle", "sync_root": ROOT, "error": null,
             "files_remaining": 0, "bytes_total": 0, "bytes_done": 0,
-            "last_tick_ok_at": 1_760_000_000_i64, "reason": null
+            "last_tick_ok_at": 1_760_000_000_i64, "changes": 0, "reason": null
         })
     );
 }
@@ -47,8 +47,32 @@ fn a_syncing_payload_carries_files_and_bytes_and_still_says_idle_to_old_consumer
         json!({
             "state": "syncing", "legacy_state": "idle", "sync_root": ROOT, "error": null,
             "files_remaining": 14, "bytes_total": 1_288_490_189_u64, "bytes_done": 489_626_271_u64,
-            "last_tick_ok_at": 100, "reason": null
+            "last_tick_ok_at": 100, "changes": 0, "reason": null
         })
+    );
+}
+
+/// RC2-6b: `changes` moves only on a tick that changed something; every check moves `last_tick_ok_at`.
+#[test]
+fn changes_moves_only_on_a_tick_that_changed_something() {
+    let t = tracker();
+    let first = t.finish_tick(&Outcome::Synced, 100, Activity::default());
+    let quiet = t.finish_tick(&Outcome::Synced, 130, Activity::default());
+    assert_eq!((first.changes, quiet.changes), (Some(0), Some(0)));
+    assert_ne!(first.last_tick_ok_at, quiet.last_tick_ok_at);
+    t.note_change();
+    let changed = t.finish_tick(&Outcome::Synced, 160, Activity::default());
+    assert_eq!(changed.changes, Some(1));
+    assert_eq!(t.paused().changes, Some(1), "a pause keeps the count");
+
+    let mut view = EngineStatusView::default();
+    view.apply(&changed.to_json());
+    assert_eq!(view.changes, Some(1));
+    view.apply(&json!({ "state": "paused" }));
+    assert_eq!(
+        view.changes,
+        Some(1),
+        "the pause toggle's bare state says nothing about changes"
     );
 }
 
@@ -276,6 +300,25 @@ fn the_pulse_reports_syncing_while_work_is_in_flight_and_idle_once_when_it_ends(
     assert_eq!(t.pulse(false, true, Activity::default), None);
 }
 
+/// RC4-1: a good tick that leaves files to send is not `idle` (the status line reads `idle` as "Up to date"); the
+/// pulse then keeps looking with nothing in flight, and says `idle` once when the last file is gone.
+#[test]
+fn status_stays_syncing_after_a_good_tick_that_leaves_files_to_send() {
+    let t = tracker();
+    let p = t.finish_tick(&Outcome::Synced, 100, busy(18, 4_096, 0));
+    assert_eq!(p.state, State::Syncing);
+    assert_eq!(p.activity, Some(busy(18, 4_096, 0)));
+    assert_eq!(p.last_tick_ok_at, Some(100), "the check still stamps its time");
+    assert_eq!(p.to_json()["legacy_state"], "idle", "old consumers still read idle");
+    let s = t.pulse(false, false, || busy(18, 4_096, 0)).expect("files still wait");
+    assert_eq!(s.state, State::Syncing);
+    let s = t
+        .pulse(false, false, Activity::default)
+        .expect("the way back is reported");
+    assert_eq!(s.state, State::Idle);
+    assert_eq!(t.pulse(false, false, Activity::default), None);
+}
+
 #[test]
 fn offline_error_and_stopped_outrank_syncing() {
     for outcome in [
@@ -483,4 +526,106 @@ fn once_syncing_the_pulse_keeps_reading_until_it_has_reported_the_way_back() {
         None
     );
     assert_eq!(reads, 0);
+}
+
+// ── RC5-1: a change the scan has not looked at yet ──────────────────────
+
+fn never_read() -> Activity {
+    panic!("nothing moves or waits: the queue is not read")
+}
+
+/// RC5-1 red test: files copied in, the journal has them, the scan (every 8 s) has not looked yet. Sampled then, the
+/// status said `idle` ("Up to date"). It says `running` (the status line's "Checking"), then `syncing` once the scan
+/// queued them, then `idle` when the last is sent.
+#[test]
+fn a_change_the_scan_has_not_looked_at_is_not_up_to_date() {
+    let t = tracker();
+    assert_eq!(
+        t.finish_tick(&Outcome::Synced, 100, Activity::default()).state,
+        State::Idle
+    );
+    let mut view = EngineStatusView::default();
+    let s = t
+        .pulse_seeing(false, false, true, never_read)
+        .expect("the change is reported at once");
+    assert_eq!(s.state, State::Running);
+    assert_eq!(s.last_tick_ok_at, Some(100), "the last check's time is kept");
+    view.apply(&s.to_json());
+    assert_ne!(view.state, "idle");
+    assert_eq!(t.pulse_seeing(false, false, true, never_read), None, "already told");
+    // The scan queued the 18 files: the queue has them, the feed has nothing new.
+    let s = t
+        .pulse_seeing(false, true, false, || busy(18, 4_096, 0))
+        .expect("syncing");
+    assert_eq!(s.state, State::Syncing);
+    let s = t.pulse_seeing(false, false, false, Activity::default).expect("sent");
+    assert_eq!(s.state, State::Idle);
+    assert_eq!(t.pulse_seeing(false, false, false, Activity::default), None);
+}
+
+/// RC5-1: a change the scan looked at and queued nothing for (an edit of a file already sent with the same bytes)
+/// ends in `idle` again, said once.
+#[test]
+fn checking_ends_in_idle_when_the_scan_queued_nothing() {
+    let t = tracker();
+    t.finish_tick(&Outcome::Synced, 100, Activity::default());
+    assert_eq!(
+        t.pulse_seeing(false, false, true, never_read).unwrap().state,
+        State::Running
+    );
+    assert_eq!(
+        t.pulse_seeing(false, false, false, never_read).unwrap().state,
+        State::Idle
+    );
+    assert_eq!(t.pulse_seeing(false, false, false, never_read), None);
+}
+
+/// RC5-1: a tick that ends while a change waits for the scan is not `idle` either; nor is the end of a batch.
+#[test]
+fn a_tick_or_a_batch_ending_while_a_change_waits_says_checking() {
+    let t = tracker();
+    assert_eq!(
+        t.pulse_seeing(false, false, true, never_read),
+        None,
+        "before the first check: already running"
+    );
+    let p = t.finish_tick(&Outcome::Synced, 100, Activity::default());
+    assert_eq!(p.state, State::Running);
+    assert_eq!(p.last_tick_ok_at, Some(100));
+    assert_eq!(
+        t.pulse_seeing(false, false, false, never_read).unwrap().state,
+        State::Idle
+    );
+
+    assert_eq!(
+        t.pulse_seeing(false, true, false, || busy(2, 20, 5)).unwrap().state,
+        State::Syncing
+    );
+    let s = t.pulse_seeing(false, false, true, Activity::default).unwrap();
+    assert_eq!(s.state, State::Running, "the batch is sent, but more was copied in");
+    assert_eq!(
+        t.pulse_seeing(false, false, false, never_read).unwrap().state,
+        State::Idle
+    );
+}
+
+/// RC5-1: offline, paused and stopped still outrank a waiting change.
+#[test]
+fn a_waiting_change_does_not_outrank_offline_paused_or_stopped() {
+    let t = tracker();
+    t.finish_tick(
+        &Outcome::Down {
+            down: Down::Offline(Reason::from(LinkReason::Connect)),
+            error: None,
+        },
+        100,
+        Activity::default(),
+    );
+    assert_eq!(t.pulse_seeing(false, false, true, never_read), None);
+    assert_eq!(
+        t.pulse_seeing(true, false, true, never_read).unwrap().state,
+        State::Paused
+    );
+    t.stopped();
+    assert_eq!(t.pulse_seeing(false, false, true, never_read), None);
 }

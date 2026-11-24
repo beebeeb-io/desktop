@@ -17,6 +17,12 @@ struct Inner {
     next: u64,
 }
 
+impl Default for InodeMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InodeMap {
     pub fn new() -> Self {
         Self {

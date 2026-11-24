@@ -10,6 +10,7 @@ use super::media::TABLE_KEY;
 use super::source::TableDoc;
 use super::{Intent, Ui, details, icons, style, text, ui};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 
@@ -63,6 +64,11 @@ pub fn shares(doc: &TableDoc) -> Vec<f32> {
 }
 
 pub fn body(ui: &Ui, doc: &TableDoc, t: &Theme) -> El {
+    body_in(ui, doc, t, "viewer-body", ui.table_rows())
+}
+
+/// [`body`] rooted at `root_key` (the live preview roots elsewhere than the editor).
+pub fn body_in(ui: &Ui, doc: &TableDoc, t: &Theme, root_key: &str, table_rows: Vec<&Vec<String>>) -> El {
     let shares = shares(doc);
     let mut head = row().key("csv-head").role("row").w_full().h(HEAD_H);
     for (c, column) in doc.columns.iter().enumerate() {
@@ -93,7 +99,7 @@ pub fn body(ui: &Ui, doc: &TableDoc, t: &Theme) -> El {
         .shrink()
         .min_h(0.0)
         .scroll(rune::ScrollSpec { stick_bottom: false });
-    for (r, values) in ui.table_rows().into_iter().enumerate() {
+    for (r, values) in table_rows.into_iter().enumerate() {
         let mut line = row().key(format!("csv-row-{r}")).role("row").w_full().h(ROW_H);
         for (c, column) in doc.columns.iter().enumerate() {
             let selected = ui.media.cell == Some((r, c));
@@ -157,11 +163,11 @@ pub fn body(ui: &Ui, doc: &TableDoc, t: &Theme) -> El {
                 .child(rows),
         );
     col()
-        .key("viewer-body")
+        .key(root_key.to_string())
         .grow(1.0)
         .min_w(0.0)
         .h_full()
-        .padding(16.0)
+        .padding(scale::space::S16)
         .fill(style::stage(t))
         .clip_rounded(0.0)
         .child(table)

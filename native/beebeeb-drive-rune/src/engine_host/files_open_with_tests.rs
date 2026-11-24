@@ -22,6 +22,11 @@ use super::*;
 use crate::engine_host::EngineFilesSource;
 use crate::frames::files::source::FilesSource;
 
+// Review of #467: each start compares the session of its press inside the launch lock, a session end empties the
+// launch worker's queue, and Open With asks the engine whether the copy is here.
+#[path = "files_launch_tests.rs"]
+mod files_launch_tests;
+
 const PASSWORD: &str = "an invented password for open with";
 const NOTES: &str = "a0000000-0000-4000-8000-000000000601";
 const TOOL: &str = "a0000000-0000-4000-8000-000000000602";
@@ -200,7 +205,7 @@ fn open_with_is_refused_without_sync_and_without_a_session() {
 #[test]
 fn off_windows_the_chooser_says_not_on_this_system() {
     assert_eq!(
-        choose_app(std::path::Path::new("an invented path.txt")),
+        choose_app(std::path::Path::new("an invented path.txt"), || true),
         Err(ActionError::NotOnThisSystem)
     );
 }
@@ -232,12 +237,11 @@ fn put_kept(set: &Set, id: &str, name: &str, status: FileStatus, kept: bool) {
         .expect("written");
 }
 
-/// DW-1562's Open With ▸ an app on the real engine: only a copy KEPT on this PC (kept AND its bytes here, for this
-/// session) gets past the engine's check; off Windows the start then says it is not on this system. A file that is
-/// only listed, here but not kept, or kept and still coming down is refused before any start.
+/// Open With ▸ an app follows the default app's rule (dc-096): any file is handed over, online-only included (Cloud
+/// Files hydrates it); off Windows the start then says it is not on this system. A folder is never handed over.
 #[cfg(not(windows))]
 #[test]
-fn open_with_an_app_needs_the_copy_kept_on_this_pc() {
+fn open_with_an_app_hands_over_any_file() {
     let mut set = set("a5-app", true, true);
     let _running = hold_running(&set.engine);
     let app = crate::frames::files::source::AppChoice {
@@ -245,30 +249,9 @@ fn open_with_an_app_needs_the_copy_kept_on_this_pc() {
         label: "Invented".into(),
     };
     let notes = row(NOTES, "Invented notes.txt", false);
-    assert_eq!(
-        set.source.open_in_app(&notes, &app),
-        Err(ActionError::Failed),
-        "online only"
-    );
-    put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Local, false);
-    assert_eq!(
-        set.source.open_in_app(&notes, &app),
-        Err(ActionError::Failed),
-        "here, not kept"
-    );
-    put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Downloading, true);
-    assert_eq!(
-        set.source.open_in_app(&notes, &app),
-        Err(ActionError::Failed),
-        "kept, still coming down"
-    );
+    assert_eq!(set.source.open_in_app(&notes, &app), Err(ActionError::NotOnThisSystem), "online only");
     put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Local, true);
-    assert_eq!(
-        set.source.open_in_app(&notes, &app),
-        Err(ActionError::NotOnThisSystem),
-        "kept and here: past every check, and off Windows there is no handler to start"
-    );
-    // A folder is never handed to an app.
+    assert_eq!(set.source.open_in_app(&notes, &app), Err(ActionError::NotOnThisSystem), "kept and here");
     assert_eq!(
         set.source.open_in_app(&row(FOLDER, "Invented folder", true), &app),
         Err(ActionError::Failed)
@@ -278,13 +261,13 @@ fn open_with_an_app_needs_the_copy_kept_on_this_pc() {
 /// What the stand-in starts saw, in order. Each takes the launch lock, as the system's own do.
 static STARTED: std::sync::Mutex<Vec<(&'static str, PathBuf)>> = std::sync::Mutex::new(Vec::new());
 
-fn open_stand_in(path: &std::path::Path) -> Result<(), ActionError> {
-    launch::locked(|| STARTED.lock().unwrap().push(("open", path.to_path_buf())));
+fn open_stand_in(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    launch::locked(|| still().then(|| STARTED.lock().unwrap().push(("open", path.to_path_buf()))));
     Ok(())
 }
 
-fn reveal_stand_in(path: &std::path::Path) -> Result<(), ActionError> {
-    launch::locked(|| STARTED.lock().unwrap().push(("reveal", path.to_path_buf())));
+fn reveal_stand_in(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    launch::locked(|| still().then(|| STARTED.lock().unwrap().push(("reveal", path.to_path_buf()))));
     Ok(())
 }
 
@@ -297,9 +280,11 @@ fn files_open_never_waits_on_the_launch_lock() {
     let mut set = set("a6-worker", true, true);
     let _running = hold_running(&set.engine);
     let root = set.engine.sync_root().expect("a sync folder");
-    set.source.starts = Starts {
+    set.source.starts = files_launch::Starts {
         open: open_stand_in,
         reveal: reveal_stand_in,
+        has_default_app: |_| true,
+        app: None,
     };
     let (holding, held) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel::<()>();

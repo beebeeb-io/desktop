@@ -14,11 +14,10 @@
 use crate::State;
 use crate::frames::global::source::Loading;
 use crate::source::DriveItem;
-use crate::theme::icons_settings;
-use crate::theme::tokens::{Theme, type_};
-use crate::ui::kit;
-use rune::tok::Family;
-use rune::{Color, El, TextStyle, col, el, row};
+use crate::ui::view_state::{ViewState, view_state};
+use crate::theme::tokens::Theme;
+use crate::ui::status_bar::{Dot, bar};
+use rune::El;
 
 /// DW-1108 against DW-0101 and DW-0121 (the same state, two pictures on the board): offline, does
 /// the list itself say so (rows that need a connection dimmed and worded, the status line
@@ -45,11 +44,15 @@ fn loading(s: &State) -> Option<Loading> {
 }
 
 fn listed_words(loading: &Loading) -> String {
-    format!(
-        "{} of {} listed",
-        super::protected::grouped(loading.listed as i64),
-        super::protected::grouped(loading.total as i64)
-    )
+    match figure(loading) {
+        Some(figure) => format!("{figure} listed"),
+        // w31: the list's size is not known yet.
+        None => crate::frames::global::source::LIST_ON_ITS_WAY.to_string(),
+    }
+}
+
+fn figure(loading: &Loading) -> Option<String> {
+    loading.figure(|n| super::protected::grouped(n as i64))
 }
 
 /// The words under the window's title while the first list arrives: how many are listed so far.
@@ -87,154 +90,32 @@ pub fn status_words(s: &State) -> Option<String> {
     ))
 }
 
-fn line(dot: Color, state: &str, details: &str, t: &Theme) -> El {
-    row()
-        .key("status-bar")
-        .role("status")
-        .h(28.0)
-        .w_full()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .child(
-            row()
-                .key("status-left")
-                .center_y()
-                .gap(7.0)
-                .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(dot))
-                .child(kit::label("status-text", state, type_::STATUS_STRONG, t.text_secondary)),
-        )
-        .child(el().key("status-spacer").grow(1.0))
-        .child(kit::label("status-details", details, type_::STATUS, t.text_tertiary))
-}
-
 /// The status line of these states: "Getting your files ready" while the first list loads,
 /// "Offline" without a connection (whatever the sync state's own word is). `None`: neither.
 pub fn status_line(s: &State, details: &str, t: &Theme) -> Option<El> {
     if loading(s).is_some() {
-        return Some(line(t.text_tertiary, "Getting your files ready", details, t));
+        return Some(bar(Some(Dot::Busy), Some("Getting your files ready"), details, t));
     }
-    offline(s).then(|| line(t.text_quaternary, "Offline", details, t))
+    offline(s).then(|| bar(Some(Dot::Idle), Some("Offline"), details, t))
 }
 
-const CARD_TITLE: TextStyle = TextStyle::new(13.0, 600.0).lh(17.0);
-const CARD_TEXT: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
-const CARD_FIGURE: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
-const CARD_STEP: TextStyle = TextStyle::new(11.5, 400.0).lh(15.0);
-const CARD_STEP_VALUE: TextStyle = TextStyle::new(11.5, 500.0).lh(15.0);
-
-/// The card above the rows while the first list loads (DW-1107). `None`: nothing loads, the
-/// person already opened something (the strip takes over), or a banner has the place.
+/// The card above the rows while the first list loads (DW-1107): `ui::view_state` Loading, its words the
+/// title and how far the list is. `None`: nothing loads, the person already opened something (the strip
+/// takes over), or a banner has the place.
 pub fn card(s: &State, t: &Theme) -> Option<El> {
     let loading = loading(s)?;
     if s.actions.first_load_strip || s.global.banner().is_some() {
         return None;
     }
-    let figure = format!(
-        "{} of {}",
-        super::protected::grouped(loading.listed as i64),
-        super::protected::grouped(loading.total as i64)
-    );
-    let left = loading.left.as_ref().map(|left| format!(" \u{00B7} {left} left"));
-    // The bar moves in whole percents, as the strip's does.
-    let percent = (loading.listed.saturating_mul(100))
-        .checked_div(loading.total)
-        .unwrap_or(0)
-        .min(100);
-    let title = "Getting your files ready";
-    let words = "Your file list is downloading and being decrypted on this PC. You can start using Beebeeb before it's finished.";
-    let step = |key: &str, name: &str, value: &str| {
-        row()
-            .key(format!("ready-{key}"))
-            .gap(4.0)
-            .child(kit::label(
-                format!("ready-{key}-name"),
-                format!("{name}:"),
-                CARD_STEP,
-                t.text_tertiary,
-            ))
-            .child(kit::label(format!("ready-{key}-value"), value, CARD_STEP_VALUE, t.text))
+    // w31: while the list's size is not known yet the card stands with no count ("0 of 0" is no count).
+    let words = match figure(&loading) {
+        Some(figure) => format!(
+            "Getting your files ready: {figure}{}",
+            loading.left.as_ref().map(|left| format!(" \u{00B7} {left} left")).unwrap_or_default()
+        ),
+        None => "Getting your files ready".to_string(),
     };
-    let mut count = row().key("ready-count").items_center().child(kit::label(
-        "ready-figure",
-        figure.clone(),
-        CARD_FIGURE,
-        t.text_secondary,
-    ));
-    if let Some(left) = &left {
-        count = count.child(kit::label("ready-left", left.clone(), CARD_TEXT, t.text_secondary));
-    }
-    let head = row()
-        .key("ready-head")
-        .w_full()
-        .gap(12.0)
-        .items_center()
-        .child(
-            el().key("ready-tile")
-                .a11y_hidden()
-                .size(34.0, 34.0)
-                .radius(9.0)
-                .fill(t.text.alpha(0.06))
-                .center()
-                .child(kit::glyph("ready-icon", &icons_settings::SYNC, 17.0, t.text_secondary)),
-        )
-        .child(
-            col()
-                .key("ready-words")
-                .grow(1.0)
-                .min_w(0.0)
-                .child(kit::label("ready-title", title, CARD_TITLE, t.text))
-                .child(kit::label("ready-text", words, CARD_TEXT, t.text_secondary).truncate()),
-        )
-        .child(count);
-    // The filled part and the rest share the bar's width by their percents.
-    let bar = row()
-        .key("ready-bar")
-        .role("progressbar")
-        .label(format!("{title}: {percent} percent"))
-        .w_full()
-        .h(3.0)
-        .radius(1.5)
-        .clip_rounded(1.5)
-        .fill(t.separator)
-        .child(
-            el().key("ready-bar-fill")
-                .h_full()
-                .grow(percent as f32)
-                .radius(1.5)
-                .fill(t.text),
-        )
-        .child(el().key("ready-bar-rest").h_full().grow((100 - percent) as f32));
-    Some(
-        col()
-            .key("ready-card")
-            .role("status")
-            .label(format!(
-                "{title}. {words} {figure}{}. File list: {}. Thumbnails: {}.",
-                left.unwrap_or_default(),
-                loading.file_list.words(),
-                loading.thumbnails.words()
-            ))
-            .mt(12.0)
-            .mx(16.0)
-            .padding(16.0)
-            .gap(10.0)
-            .radius(12.0)
-            .fill(t.card)
-            .box_shadow(kit::ring(kit::HAIR, t.separator))
-            .child(head)
-            .child(bar)
-            .child(
-                row()
-                    .key("ready-steps")
-                    .gap(24.0)
-                    .child(step("list", "File list", loading.file_list.words()))
-                    .child(step("thumbs", "Thumbnails", loading.thumbnails.words())),
-            ),
-    )
+    Some(view_state(ViewState::Loading { words: &words }, t))
 }
 
 /// The rows the list holds so far during the first download: the first seven of the board's.

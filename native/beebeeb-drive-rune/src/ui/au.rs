@@ -15,7 +15,7 @@ use rune::{
     text_input,
 };
 
-use super::{caption, kit};
+use super::{button, caption, kit};
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
 
@@ -35,8 +35,6 @@ pub mod type_au {
     pub const SUB_MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
     /// `.kit-btn-lg` label: 13px/500 on 19.5px.
     pub const BUTTON_LG: TextStyle = TextStyle::new(13.0, 500.0).lh(19.5).tracking(-0.065);
-    /// `.kit-btn-md` label: 13px/500 on 18.57px.
-    pub const BUTTON_MD: TextStyle = TextStyle::new(13.0, 500.0).lh(18.5714).tracking(-0.065);
     /// `.kit-field-outer`: 11px/500 on 15px.
     pub const FIELD_LABEL: TextStyle = TextStyle::new(11.0, 500.0).lh(15.0);
     /// `.kit-field-value`: 13px/400.
@@ -436,18 +434,7 @@ pub enum ButtonKind {
     Ghost,
 }
 
-/// How a button stands: the board draws a working button at half strength when pressing it
-/// only re-checks (offline), and a running one at full strength with its handler off.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ButtonState {
-    Enabled,
-    /// Half strength, still pressable (DW-A20: "dimmed but tappable").
-    Dim,
-    /// Work is running: full strength, takes no press and no focus (DW-A18).
-    Busy,
-    /// Not yet possible: half strength, takes no press and no focus.
-    Disabled,
-}
+pub use crate::ui::button::ButtonState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonSize {
@@ -467,57 +454,16 @@ pub fn button(
     state: ButtonState,
     t: &Theme,
 ) -> El {
-    let key = keys.next("btn");
-    let (ink, style, h) = (
-        match kind {
-            ButtonKind::Primary => t.accent_text_on,
-            ButtonKind::Outline => t.text,
-            ButtonKind::Ghost => t.text_secondary,
-        },
-        if size == ButtonSize::Lg {
-            type_au::BUTTON_LG
-        } else {
-            type_au::BUTTON_MD
-        },
-        if size == ButtonSize::Lg { 32.0 } else { 28.0 },
-    );
-    let mut b = row()
-        .key(key.clone())
-        .role("button")
-        .label(label)
-        .w_full()
-        .h(h)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(6.0);
-    b = match kind {
-        ButtonKind::Primary => b
-            .fill(t.accent)
-            .hover(oklch(0.78, 0.17, 84.0))
-            .press(oklch(0.74, 0.17, 84.0)),
-        ButtonKind::Outline => b
-            .fill(t.paper)
-            .border(1.0, t.card_border)
-            .border_layout()
-            .hover(t.paper2)
-            .press(t.paper3),
-        ButtonKind::Ghost => b.hover(t.hover).press(t.press),
+    let variant = match kind {
+        ButtonKind::Primary => button::Variant::Primary,
+        ButtonKind::Outline => button::Variant::Secondary,
+        ButtonKind::Ghost => button::Variant::Ghost,
     };
-    if matches!(state, ButtonState::Dim | ButtonState::Disabled) {
-        b = b.opacity(0.5);
-    }
-    b = if matches!(state, ButtonState::Busy | ButtonState::Disabled) {
-        b.disabled(true)
-    } else {
-        b.focusable(true)
-            .focus_ring(2.0, 2.0, t.accent_deep)
-            .cursor(rune::Cursor::Pointer)
+    let size = match size {
+        ButtonSize::Lg => button::Size::Lg,
+        ButtonSize::Md => button::Size::Md,
     };
-    if let Some(icon) = icon {
-        b = b.child(kit::glyph(format!("{key}-icon"), icon, 16.0, ink));
-    }
-    b.child(kit::label(format!("{key}-label"), label, style, ink))
+    button::button(button::keys(&keys.next("btn")), label, icon, variant, size, state, t).w_full()
 }
 
 // ---------------------------------------------------------------------------
@@ -571,23 +517,15 @@ pub fn banner(
         .child(words)
 }
 
-/// A pill: a short state, with a dot before it when `dot`.
-pub fn pill(key: &str, label: &str, tone_: Tone, dot: bool, t: &Theme) -> El {
-    let (mark, ink, wash) = tone(tone_, t);
-    let mut p = row()
-        .key(key.to_string())
-        .role("status")
-        .label(label)
-        .h(20.0)
-        .px(8.0)
-        .gap(5.0)
-        .center_y()
-        .radius(10.0)
-        .fill(wash);
-    if dot {
-        p = p.child(el().key("status-dot").size(6.0, 6.0).radius(3.0).fill(mark));
+/// The shared pill's tone for an account tone.
+pub fn pill_tone(tone_: Tone) -> super::pill::Tone {
+    use super::pill::Tone as P;
+    match tone_ {
+        Tone::Neutral | Tone::Ink => P::Neutral,
+        Tone::Green => P::Good,
+        Tone::Red => P::Bad,
+        Tone::Amber => P::Warn,
     }
-    p.child(kit::label(format!("{key}-text"), label, type_au::PILL, ink))
 }
 
 // ---------------------------------------------------------------------------

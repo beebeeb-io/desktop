@@ -227,3 +227,21 @@ fn fxr_the_stage_draws_its_own_videos_state_only() {
         "another file's refusal is not this video's"
     );
 }
+
+/// The player has said nothing of the video yet when it is started: the poll waits for the player's state, takes the
+/// file it names, and then stops asking.
+#[test]
+fn w13_the_poll_ends_on_the_players_own_state() {
+    let mut ui = Ui::new(Box::new(FixturePhotos::new()));
+    ui.open(video_id());
+    assert_eq!(ui.settle_playing(), (false, false), "nothing started, nothing to wait for");
+    ui.playing = Some((video_id(), a_player()));
+    assert_eq!(ui.settle_playing(), (false, true), "no state yet: keep asking");
+    assert!(ui.playing_file.is_none());
+    ui.playing = Some((video_id(), holding_refused("pv")));
+    assert_eq!(ui.settle_playing(), (true, false), "the state names the file");
+    assert_eq!(ui.playing_file.as_deref(), Some("pv"));
+    assert_eq!(ui.settle_playing(), (false, false), "settled: the poll is over");
+    ui.stop_playing();
+    assert!(ui.playing_file.is_none(), "a stopped video leaves no file behind");
+}

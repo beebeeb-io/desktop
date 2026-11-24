@@ -18,7 +18,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, ItemKind};
@@ -184,7 +184,7 @@ fn engine_at(base: &str) -> Arc<TestEngine> {
         state_dir: crate::state_paths::init_for_test(),
         api_base: base.to_string(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 /// A session in memory, as a sign-in and an unlock leave it.
@@ -617,7 +617,7 @@ fn share_invite_cut_off_mid_flow_is_not_sent_and_a_retry_keeps_the_one_folder_ke
     assert_eq!(h.db.share_sealed_key(OWN, INVITE).unwrap(), None);
 }
 
-/// Review of desktop#424 (crypto P2-3): the session's turn moves between the invite (answered "claimed") and its
+/// The session's turn moves between the invite (answered "claimed") and its
 /// approval. Nothing is sealed or approved, and the claimed invite, which holds no key, is withdrawn while the same
 /// account is still signed in. Another account: nothing more is sent, and the answer never says nothing was shared
 /// while the claimed invite stays.
@@ -684,7 +684,7 @@ fn share_invite_answers_and_logs_carry_no_key_material() {
         ]
     });
     assert_eq!(answers[2], InviteAnswer::Refused(InviteRefused::InvalidEmail));
-    // The withdrawal failed, so the claimed invite stays: never answered as nothing shared (review of desktop#424).
+    // The withdrawal failed, so the claimed invite stays: never answered as nothing shared.
     assert_eq!(
         answers[0],
         InviteAnswer::Unfinished {
@@ -812,7 +812,7 @@ fn share_invite_asks_beebeeb_whose_account_it_is_when_the_session_does_not_say()
     assert!(!g.routes().iter().any(|r| r == INVITES));
 }
 
-/// Review of desktop#426 (P2): an approval that LEFT and got no answer may have been applied, so when the
+/// An approval that LEFT and got no answer may have been applied, so when the
 /// withdrawal fails too the answer says so (`approval_sent`), for a file and for a folder alike.
 #[test]
 fn share_invite_unfinished_says_whether_the_approval_left_without_an_answer() {
@@ -831,7 +831,7 @@ fn share_invite_unfinished_says_whether_the_approval_left_without_an_answer() {
     }
 }
 
-/// Review of desktop#427 (P2): only a 4xx proves the approval was refused; a 5xx may have been applied.
+/// Only a 4xx proves the approval was refused; a 5xx may have been applied.
 #[test]
 fn share_invite_unfinished_is_sent_for_a_500_and_not_for_a_4xx() {
     for (status, sent) in [(500u16, true), (503, true), (403, false), (409, false)] {
@@ -851,7 +851,7 @@ fn share_invite_unfinished_is_sent_for_a_500_and_not_for_a_4xx() {
     }
 }
 
-/// Review of desktop#427 (delta 2, P2): an approval that was never made (the key could not be sealed) cannot have
+/// An approval that was never made (the key could not be sealed) cannot have
 /// landed, whatever the status; a sealed one may have, unless a 4xx proves it was refused.
 #[test]
 fn an_approval_may_have_landed_only_when_one_was_made_and_no_4xx_refused_it() {

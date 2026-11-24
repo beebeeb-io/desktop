@@ -340,7 +340,7 @@ impl<C: CredentialStores> Engine<C> {
         let Some(recorded) = on_this_pc(&entry.status) else {
             return Ok(LocalCopy::NotHere);
         };
-        // Review of desktop#432 (P1-2): a copy of an older version than the one the local state holds is never
+        // A copy of an older version than the one the local state holds is never
         // read: the viewer labels what it shows with that version, and an edit saved from older bytes under it
         // would replace the newer version without the two-versions question. Before the size check below: the
         // pull has already moved the row's size to the newer version's. Its own answer, never `not_read()`: a
@@ -364,7 +364,7 @@ impl<C: CredentialStores> Engine<C> {
             OnThisPc::InSync => Ok(LocalCopy::NotHere),
             OnThisPc::NotSentYet => Err(OpenFileError::CopyNotReadable),
         };
-        let Some(path) = self.local_copy_path(&entry.path) else {
+        let Some(path) = self.local_copy_path(&entry) else {
             return not_read();
         };
         // This process's own fetch of the file is refused until the read is over: a file that stops being
@@ -410,7 +410,7 @@ impl<C: CredentialStores> Engine<C> {
     /// Where the file at `rel_path` of the local state is in the account's folder on this computer. `None`: no
     /// folder is known, the path is not one below it, or its name leads to a different file here (a Windows
     /// short name): that file is never read as this one.
-    fn local_copy_path(&self, rel_path: &str) -> Option<PathBuf> {
+    fn local_copy_path(&self, entry: &crate::state_db::FileEntry) -> Option<PathBuf> {
         let root = match self.configured_sync_root().ok()? {
             Some(root) => root,
             // No folder named in the settings: the identity's own, as `Engine::sync_root` answers. A test names
@@ -421,8 +421,22 @@ impl<C: CredentialStores> Engine<C> {
             None => return None,
         };
         // As the Files window resolves a row for the system's Open: below the folder, by plain names only.
-        let path = crate::file_ops::full_path(&root, rel_path).ok()?;
-        matches!(crate::name_alias::conflict_below(&root, &path), Ok(None)).then_some(path)
+        let path = crate::file_ops::full_path(&root, &entry.path).ok()?;
+        (matches!(crate::name_alias::conflict_below(&root, &path), Ok(None)) && self.place_is_this_rows(&root, entry))
+            .then_some(path)
+    }
+
+    /// Whether the entry at `entry`'s place below `root` is this row's, asked of the local state: not another row's
+    /// whose name differs only by case, or that has the same name (`drive_v2::case_place`). One that cannot be asked
+    /// is not read as this row's.
+    pub(crate) fn place_is_this_rows(&self, root: &std::path::Path, entry: &crate::state_db::FileEntry) -> bool {
+        let Ok(state) = self.local_state() else {
+            return false;
+        };
+        matches!(
+            state.with(|db| crate::drive_v2::case_place::place_is_another_rows(db, root, entry)),
+            Ok(Ok(false))
+        )
     }
 }
 
@@ -441,7 +455,7 @@ fn copy_is_behind(db: &crate::state_db::StateDb, file_id: &str) -> rusqlite::Res
     }
     let copy = match contract.local_hash {
         Some(_) => Some(contract.local_base_version).filter(|version| *version > 0),
-        // A mixed candidate (no hash) is not one version's bytes (delta check of desktop#432).
+        // A mixed candidate (no hash) is not one version's bytes.
         None => db
             .fetched_content(file_id)?
             .and_then(|(version, hash)| hash.map(|_| version)),
@@ -467,7 +481,7 @@ fn is_read_here(is_dir: bool, is_link: bool, not_local: bool) -> bool {
 /// disk.
 fn wholly_here(path: &Path) -> Option<u64> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
-    is_plain_and_wholly_here(&metadata).then(|| metadata.len())
+    is_plain_and_wholly_here(&metadata).then_some(metadata.len())
 }
 
 /// Opens `path` for the read. Unix: a link is never followed, and the open never waits (a pipe put where the
@@ -621,7 +635,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
-/// CP2 row 10.3 (L266.4): a 403 and a version that kept changing are named, never said as a failed decryption.
+/// a 403 and a version that kept changing are named, never said as a failed decryption.
 #[cfg(test)]
 mod refusal_words_tests {
     use super::*;

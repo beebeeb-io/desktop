@@ -190,7 +190,8 @@ fn a_hydrate_reports_per_file_bytes_and_records_a_down_row() {
 
     // Read the board from inside the caller's own progress callback: that is the
     // moment a popover snapshot would see mid-transfer.
-    let seen: Arc<Mutex<Vec<(u64, u64, u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    type Snapshot = (u64, u64, u64, u64);
+    let seen: Arc<Mutex<Vec<Snapshot>>> = Arc::new(Mutex::new(Vec::new()));
     let board = bridge.transfers().clone();
     let seen_in = seen.clone();
     let progress = move |done: u64, total: u64| {
@@ -1161,12 +1162,23 @@ async fn flow7_a_cut_upload_restarts_in_a_fresh_session_and_never_continues_the_
 
     // The cut: chunk 1's response hangs; the transfer loop is cancelled
     // exactly like the harness's tokio timeout (the future is dropped).
-    let cut = tokio::time::timeout(
-        Duration::from_millis(1500),
-        bridge.process_due_operations(dir.path(), 200),
-    )
-    .await;
-    assert!(cut.is_err(), "the first pass must be cut mid-upload");
+    // The cut waits for the signal, not a wall clock: chunk 1's request has reached the server.
+    let seen = Arc::clone(&server.requests);
+    let chunk_received = async move {
+        for _ in 0..6000 {
+            if seen.lock().unwrap().iter().any(|r| r.method == "PUT" && r.path.contains("/chunks/")) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("chunk 1 never reached the server");
+    };
+    let cut = tokio::select! {
+        r = bridge.process_due_operations(dir.path(), 200) => Some(r),
+        _ = chunk_received => None,
+    };
+    assert!(cut.is_none(), "the first pass must be cut mid-upload");
     assert!(
         bridge.db.upload_completion_name("op-upload-resume").unwrap().is_some(),
         "the completion name is stored before the first chunk is sent"

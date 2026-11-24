@@ -153,7 +153,16 @@ fn with_no_runner_the_watch_closes_the_vault_and_an_offline_check_keeps_it_open(
         "the instrument: no sync or heartbeat call after the refused start: {runner_calls:?}"
     );
     // One check per period, never two in a burst.
-    let times: Vec<Instant> = checks.lock().unwrap().iter().map(|(at, _)| *at).collect();
+    // A hung-up check is retried by the API client within the same check (a burst of hang-ups, a few hundred ms
+    // apart): those requests count as the one check they are, at the time of its first request.
+    let mut times: Vec<Instant> = Vec::new();
+    let mut last_status = None;
+    for (at, status) in checks.lock().unwrap().iter() {
+        if !(*status == hang_up && last_status == Some(hang_up)) {
+            times.push(*at);
+        }
+        last_status = Some(*status);
+    }
     for pair in times.windows(2) {
         let apart = pair[1].duration_since(pair[0]);
         assert!(

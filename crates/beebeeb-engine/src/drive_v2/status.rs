@@ -214,6 +214,20 @@ pub fn reason_for(change: &UnsentChange) -> Option<&'static str> {
     })
 }
 
+/// Task 2054: the words for an upload the server refused because the chosen storage country cannot take new files. A
+/// country, never a city; the file stays queued, so the words say it is kept and will be tried again. An empty
+/// country names none.
+pub fn storage_country_words(country: &str) -> String {
+    let country = country.trim();
+    if country.is_empty() {
+        return "Your storage country can’t take new files right now. This file stays in the queue and is tried again later."
+            .to_string();
+    }
+    format!(
+        "{country} can’t take new files right now. Your choice is set to only {country}, so this file stays in the queue and is tried again later."
+    )
+}
+
 /// Task 2530: a way out a problem row may offer (the engine's list, `state_db::parked_exit`).
 pub use crate::state_db::ParkExit as Exit;
 
@@ -509,3 +523,21 @@ mod held_tests;
 
 #[cfg(test)]
 mod exits_tests;
+
+#[cfg(test)]
+mod region_strict_words_tests {
+    use super::storage_country_words;
+
+    #[test]
+    fn region_strict_words_name_the_country_and_say_the_file_is_kept() {
+        let words = storage_country_words("Finland");
+        assert!(words.starts_with("Finland can’t take new files"), "{words}");
+        assert!(words.contains("stays in the queue"), "{words}");
+    }
+
+    #[test]
+    fn region_strict_words_without_a_country_name_none() {
+        assert!(!storage_country_words("").contains("  "));
+        assert!(storage_country_words(" ").starts_with("Your storage country"));
+    }
+}

@@ -8,7 +8,6 @@ use rune::{Cx, El, KeyEvent, Tx};
 
 use super::Ui;
 use super::kinds::OfficePicture;
-use super::office_over::Over;
 use super::source::{Body, FixtureViewerSource, OpenFile};
 use crate::State;
 use crate::frames::office::docs::{self, Asks, DocBody, Live};
@@ -111,7 +110,13 @@ pub fn office_try_again(s: &mut State) {
 /// The deck's keys (Present's arrows, Space, Esc; F5 and Ctrl+Enter in the window). `true`: taken. A document's and a
 /// workbook's keys move their scroll viewport with `tx` too.
 pub(super) fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    if deck_mut(s).is_some_and(|deck| deck.on_key(&ev.key, &ev.mods)) {
+    // Something is open over the deck (the command search, a question): the arrows are its, not the deck's.
+    let covered = super::ui(s).is_some_and(|ui| ui.office.over.is_some());
+    if !covered && deck_mut(s).is_some_and(|deck| deck.on_key(&ev.key, &ev.mods)) {
+        return true;
+    }
+    // A deck being edited: its chords (Ctrl+D, Ctrl+Z, ...) when the stage does not have the keyboard.
+    if crate::frames::office::edit::slide::window_key(s, tx, ev) {
         return true;
     }
     if docs::on_key(s, ev, tx) {
@@ -272,18 +277,20 @@ mod tests {
 
     /// The editor stays unreachable: the viewer has no route to DW-1558, DW-1559 or DW-1560, which are placeholders.
     #[test]
-    fn office_glue_editor_frames_stay_placeholders() {
+    fn office_glue_editor_frames_are_filled() {
         let is_placeholder = |frames: &[crate::ui::gate::Scene<State>], id: &str| {
             frames
                 .iter()
-                .any(|(f, scene)| *f == id && *scene as usize == crate::frames::placeholder::scene as usize)
+                .any(|(f, scene)| *f == id && *scene as usize == crate::frames::placeholder::scene as *const () as usize)
         };
-        assert!(is_placeholder(dialogs::FRAMES, "DW-1558"));
-        assert!(is_placeholder(sheets::FRAMES, "DW-1559"));
-        assert!(is_placeholder(slides::FRAMES, "DW-1560"));
-        assert!(
-            super::super::kinds::OFFICE_VIEWER_ON,
-            "the viewer is on since O-CP3; the editor frames stay placeholders"
-        );
+        assert!(!is_placeholder(dialogs::FRAMES, "DW-1558"));
+        assert!(!is_placeholder(sheets::FRAMES, "DW-1559"));
+        assert!(!is_placeholder(slides::FRAMES, "DW-1560"));
+        const {
+            assert!(
+                super::super::kinds::OFFICE_VIEWER_ON,
+                "the viewer is on since O-CP3; the editor frames are filled"
+            )
+        };
     }
 }

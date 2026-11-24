@@ -28,12 +28,14 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::app::{Engine, EngineConfig};
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
 use crate::test_api::fake_account::{CONTENT_CHUNK_BYTES, FakeAccount, TEST_PHRASE, account_handler};
 use crate::test_api::{FakeApi, Handler, Reply, Request};
+
+type Current = Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>;
 
 type TestEngine = Engine<MemoryCredentials>;
 
@@ -101,7 +103,7 @@ struct Fake {
     api: FakeApi,
     account: Arc<FakeAccount>,
     /// Each file's current version: its object id and its plaintext (the manifest is built from it).
-    current: Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>,
+    current: Current,
 }
 
 impl Fake {
@@ -130,7 +132,7 @@ impl Fake {
 fn fake(tag: &str) -> Fake {
     let (account, _) = FakeAccount::register(&format!("{tag}@example.eu"), "an invented password", TEST_PHRASE);
     let account = Arc::new(account);
-    let current: Arc<Mutex<HashMap<String, (String, Vec<u8>)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let current: Current = Arc::new(Mutex::new(HashMap::new()));
     let rest: Handler = account_handler(account.clone());
     let current_in = current.clone();
     let api = FakeApi::start(Arc::new(move |req: &Request| {
@@ -171,7 +173,7 @@ fn engine_at(base: &str) -> Arc<TestEngine> {
         state_dir,
         api_base: base.to_string(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"))
 }
 
 /// A session in memory, as a sign-in and an unlock of `account` leave it.
@@ -900,7 +902,7 @@ fn media_real_stride_run_counts_fetches_per_chunk() {
 
 // ── 12. Core's largest stride ────────────────────────────────────────────────────────────────────────────────────
 
-/// Row 9 (lead ruling 22:12): core's largest stride (256 MiB, for files over 4 GiB) holds the chunk played AND the
+/// Row 9: core's largest stride (256 MiB, for files over 4 GiB) holds the chunk played AND the
 /// next one, whatever the ceiling (384 MiB), so a play finds the next chunk read ahead at every boundary instead of
 /// fetching it there. The play runs at the shipped limits scaled down by 1 024 (a 256 KiB stride, every limit and the
 /// read size divided by 1 024, a file of 16½ chunks: "over 4 GiB"); the shipped numbers are asserted on the cap itself
@@ -928,7 +930,7 @@ fn media_largest_stride_has_the_next_chunk_ready_at_each_boundary() {
     while at < LEN {
         let len = step.min(LEN - at);
         let index = u32::try_from(at / CHUNK).expect("a test chunk's index");
-        if index > 0 && at % CHUNK == 0 {
+        if index > 0 && at.is_multiple_of(CHUNK) {
             let next = CHUNK.min(LEN - at);
             let cache = reader.shared.lock();
             assert!(

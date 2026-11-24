@@ -33,15 +33,21 @@ fn bandwidth_is_read_when_its_pane_opens_never_at_launch() {
         0,
         "no read for a pane nobody opened"
     );
-    assert_eq!(source.bandwidth(), Bandwidth::default(), "and no value before the read");
+    let before = source.bandwidth();
+    assert_eq!(
+        Bandwidth { now: String::new(), upload: Default::default(), download: Default::default(), ..before.clone() },
+        Bandwidth::default(),
+        "and no limit, history or switch value before the read"
+    );
+    assert_eq!(before.now, "Nothing is moving", "Right now reads the engine's rate: none recorded, nothing moves");
 
     source.opened(Pane::Bandwidth);
     settle(&mut source);
     assert_eq!(fake.limit_reads.load(Ordering::SeqCst), 1);
     let pane = source.bandwidth();
     assert_eq!((pane.upload_limit, pane.download_limit), (Some(8), None));
-    // What the engine has no answer for stays as the empty pane draws it.
-    assert!(pane.devices.is_empty() && pane.now.is_empty() && pane.upload.speed.is_none());
+    // No devices card, and no transfer recorded: nothing moves.
+    assert!(pane.devices.is_empty() && pane.now == "Nothing is moving" && pane.upload.speed.is_none());
     assert_eq!(pane.test, Default::default());
     assert!(!pane.waiting_metered);
 }
@@ -178,11 +184,10 @@ fn the_traffic_is_the_signed_in_accounts_own_last_20_hours() {
     *fake.account.lock().unwrap() = Some("other@beebeeb.io".into());
     let mut source = source;
     settle(&mut source);
-    assert_eq!(
-        source.bandwidth(),
-        Bandwidth::default(),
-        "nothing held across the account change"
-    );
+    let other = source.bandwidth();
+    assert_eq!(other.history, History::default(), "no traffic held across the account change");
+    assert_eq!((other.upload_limit, other.download_limit), (None, None), "no limit held across it");
+    assert_eq!(other.now, "Nothing is moving");
     source.opened(Pane::Bandwidth);
     settle(&mut source);
     assert!(
@@ -234,4 +239,25 @@ fn a_speed_limit_keeps_its_megabits_through_the_engines_unit() {
         assert_eq!(mbps(stored), Some(limit));
     }
     assert_eq!(kib_per_s(Some(10)), 1_220);
+}
+
+#[test]
+fn bandwidth_pane_shows_the_live_rate_read_from_the_transfer_board() {
+    let fake = Fake::new();
+    *fake.board.lock().unwrap() = Some((0, 0));
+    let mut source = open_bandwidth(&fake);
+    assert!(source.bandwidth().upload.speed.is_none(), "nothing moved yet: a dash");
+
+    // An upload moved 20 MB and a download 5 MB in the 10 seconds since the last read. The pump's clock is handed in:
+    // read from the machine, the time the test itself takes is part of the 10 seconds and the rate drawn is a little
+    // under 500 KB/s on a slow run ("499", the full Windows suite of 11-23).
+    *fake.board.lock().unwrap() = Some((20_000_000, 5_000_000));
+    let (read_at, ..) = source.totals.expect("the pane's first read holds the board's totals");
+    assert_eq!(source.rate_at, Some(read_at), "the read and its totals are stamped with one clock");
+    assert!(!source.pump_rate(read_at + Duration::from_secs(1)), "not read again inside 2 seconds");
+    assert!(source.pump_rate(read_at + Duration::from_secs(10)));
+    let pane = source.bandwidth();
+    assert_eq!(pane.upload.speed, Some(("2.0".into(), "MB/s".into())));
+    assert_eq!(pane.download.speed, Some(("500".into(), "KB/s".into())));
+    assert_eq!(pane.now, "Syncing");
 }

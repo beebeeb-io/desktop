@@ -54,6 +54,9 @@ pub enum Report {
     Failed,
     /// Paused or stopped: what it says when it is not working.
     Quiet,
+    /// Paused by the engine itself: this PC is on a metered connection and syncing on those is off (the
+    /// `paused` report with reason `metered`). Sync anyway lifts it until the connection changes.
+    Metered,
 }
 
 /// The numbers of the engine's last report while it syncs.
@@ -129,6 +132,9 @@ pub struct Facts {
     pub local: Option<Local>,
     /// The account's used and total bytes as last read from Beebeeb; `None` until read.
     pub storage: Option<(u64, u64)>,
+    /// The state database exists and could not be read (not "nothing has synced yet"): the list says so
+    /// and offers Try again, never an empty list.
+    pub unreadable: bool,
 }
 
 /// What the flyout draws for `facts`. `name` is the app's (the build's identity), `now` the clock.
@@ -142,7 +148,19 @@ pub fn snapshot(facts: &Facts, name: &str, now: DateTime<LocalTime>) -> Snapshot
         Gate::NeedsRecoveryPhrase => (Status::NeedsRecoveryPhrase, Changes::Hidden(Hidden::NoKeys)),
         Gate::KeyStoreUnavailable => (Status::KeysUnreadable, Changes::Hidden(Hidden::NoKeys)),
         Gate::NoPlan => (Status::NoPlan { waiting: false }, nothing_yet(name)),
-        Gate::Ready => (ready(facts, now), recent(facts.local.as_ref(), name, now)),
+        Gate::Ready => {
+            let status = ready(facts, now);
+            let changes = if facts.unreadable {
+                Changes::Failed
+            } else {
+                match recent(facts.local.as_ref(), name, now) {
+                    // The first answer is still out: not a finished-looking empty list.
+                    Changes::Empty { .. } if status == Status::Checking => Changes::Loading,
+                    changes => changes,
+                }
+            };
+            (status, changes)
+        }
     };
     let button = status.action().filter(|&(action, _)| offered(action, facts.gate));
     Snapshot {
@@ -169,6 +187,10 @@ fn ready(facts: &Facts, now: DateTime<LocalTime>) -> Status {
     }
     if matches!(facts.report, Report::Unknown | Report::Starting) {
         return Status::Checking;
+    }
+    // DW-1222: the engine holds sync on a metered connection; the button is Sync anyway.
+    if facts.report == Report::Metered {
+        return Status::WaitingMetered;
     }
     if local.held_for_quota > 0 {
         return Status::StorageFull {
@@ -223,19 +245,25 @@ fn ready(facts: &Facts, now: DateTime<LocalTime>) -> Status {
 }
 
 /// The buttons the running app carries out: Pause and Resume (the engine's pause switch, through
-/// the shell), Review… and Show (they move the window), and Sign in while signed out (the window
-/// is on sign-in then). Every other one waits for its engine call (`FRAMES.md`, "Not wired").
+/// the shell), Review… and Show (they move the window), Sign in while signed out and Unlock while locked
+/// (the window shows what the session needs), Try again (the engine checks again), Restart to update
+/// (Settings, where the updater is), and Add storage and Choose a plan (the plans page in the browser).
+/// Sync anyway lifts the engine's metered hold until the connection changes (`EngineActions::sync_anyway`); Try
+/// again for File Explorer waits for a shell call that adds Beebeeb to it.
 fn offered(action: Action, gate: Gate) -> bool {
     match action {
-        Action::Pause | Action::Resume | Action::Review | Action::ShowProblems => true,
-        Action::SignIn => gate == Gate::SignedOut,
-        Action::SyncAnyway
+        Action::Pause
+        | Action::Resume
+        | Action::Review
+        | Action::ShowProblems
         | Action::TryAgain
         | Action::AddStorage
-        | Action::RestartToUpdate
-        | Action::Unlock
         | Action::ChoosePlan
-        | Action::RetryExplorer => false,
+        | Action::RestartToUpdate
+        | Action::SyncAnyway => true,
+        Action::SignIn => gate == Gate::SignedOut,
+        Action::Unlock => gate == Gate::Locked,
+        Action::RetryExplorer => false,
     }
 }
 

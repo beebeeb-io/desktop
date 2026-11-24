@@ -156,7 +156,9 @@ fn office_sheets_stats_use_the_values() {
 }
 
 #[test]
-fn office_sheets_an_anchor_draws_its_picture_at_its_place() {
+fn office_sheets_bounds_an_anchor_draws_at_its_from_cell_plus_its_offset() {
+    // The protocol's words: the corner sits `x_pt`, `y_pt` into its `from` cell (here C3, past one 80 pt column and two
+    // 24 pt rows), not that far from the sheet's corner.
     let mut view = big();
     view.anchors.push(SheetAnchor {
         anchor: 7,
@@ -181,15 +183,23 @@ fn office_sheets_an_anchor_draws_its_picture_at_its_place() {
     );
     let grid = find(&rt, "sh-grid").expect("the grid");
     let at = find(&rt, "sh-anchor-7").expect("the anchor is drawn");
+    let from = find(&rt, "sh-cell-2-1").expect("its from cell");
     assert!(
-        (at.rect[0] - grid.rect[0] - (ROW_HEAD_W + 100.0)).abs() < 0.6,
-        "x: {:?} in {:?}",
+        (at.rect[0] - (from.rect[0] + 100.0)).abs() < 0.6,
+        "x: {:?}, from cell {:?}",
         at.rect,
-        grid.rect
+        from.rect
     );
     assert!(
-        (at.rect[1] - grid.rect[1] - (HEADER_H + 60.0)).abs() < 0.6,
-        "y: {:?} in {:?}",
+        (at.rect[1] - (from.rect[1] + 60.0)).abs() < 0.6,
+        "y: {:?}, from cell {:?}",
+        at.rect,
+        from.rect
+    );
+    assert!(
+        (at.rect[0] - grid.rect[0] - (ROW_HEAD_W + 80.0 + 100.0)).abs() < 0.6
+            && (at.rect[1] - grid.rect[1] - (HEADER_H + 48.0 + 60.0)).abs() < 0.6,
+        "from the grid's corner: {:?} in {:?}",
         at.rect,
         grid.rect
     );

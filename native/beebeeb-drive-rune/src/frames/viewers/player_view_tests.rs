@@ -72,7 +72,7 @@ fn audio_view_without_player_draws_the_fixture() {
     ] {
         assert!(keys.iter().any(|k| k == key), "the fixture draws {key}");
     }
-    for key in ["audio-reduced", "refused-words", "refused-open", "video-stage"] {
+    for key in ["audio-reduced", "refused-text", "refused-open", "video-stage"] {
         assert!(!keys.iter().any(|k| k == key), "{key} belongs to the player's views");
     }
     let track = rt
@@ -121,36 +121,18 @@ fn video_view_letterboxes_to_fit() {
     assert_eq!(ask_size(0.0, 0.0), (1, 1));
 }
 
-/// 5. A refusal names the FORMAT (never the file), in the board's words.
+/// 5. A refusal names the FORMAT (never the file) and the cause; the table's own tests are in `refusal_text`.
 #[test]
 fn refusal_words_name_the_format() {
     assert_eq!(
         refusal_words(&Refusal::NoDecoder("ProRes".into())),
-        "This PC can't play ProRes files here."
+        "This file uses ProRes, which Beebeeb doesn't support yet. Open it in another app."
     );
-    assert_eq!(
-        refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)),
-        "This PC can't play HEVC video without Microsoft's HEVC extension."
-    );
-    // Switch on: only HEVC names Microsoft's extension; any other system codec says "here" (row 24).
-    assert_eq!(
-        refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Aac)),
-        "This PC can't play AAC files here."
-    );
-    // An edition of Windows with no media codecs (row 25).
-    assert_eq!(
-        refusal_words(&Refusal::NoSystemMedia(Codec::Aac)),
-        "This PC can't play AAC files: this edition of Windows has no media codecs."
-    );
-    assert_eq!(refusal_words(&Refusal::CouldNotPlay), "This file could not be played.");
-    assert_eq!(
-        refusal_words(&Refusal::NoSandbox),
-        "Playback isn't available on this PC."
-    );
-    assert_eq!(
-        refusal_words(&Refusal::NotInstalled),
-        "Playback isn't available on this PC."
-    );
+    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains("HEVC Video Extensions"));
+    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Aac)).contains("AAC"));
+    assert!(refusal_words(&Refusal::NoSystemMedia(Codec::Aac)).contains("no media codecs"));
+    assert!(refusal_words(&Refusal::CouldNotPlay).contains("damaged"));
+    assert_ne!(refusal_words(&Refusal::NoSandbox), refusal_words(&Refusal::NotInstalled));
 }
 
 /// A window that draws only the no-sound line, so the test needs no player.
@@ -178,7 +160,7 @@ fn no_sound_scene() -> Runtime<State> {
 fn no_sound_line_names_the_missing_track() {
     assert_eq!(
         no_sound_words(NoSound::Codec(Codec::Aac)),
-        "Sound isn't available on this PC (AAC)"
+        "No sound: this PC has no decoder for AAC audio"
     );
     assert_eq!(no_sound_words(NoSound::Device), "Sound isn't available on this PC");
     let rt = no_sound_scene();
@@ -187,7 +169,7 @@ fn no_sound_line_names_the_missing_track() {
         .into_iter()
         .find(|e| e.key.as_deref() == Some("video-no-sound-words") && !e.exiting)
         .expect("the line is drawn");
-    assert_eq!(words.text.as_deref(), Some("Sound isn't available on this PC (AAC)"));
+    assert_eq!(words.text.as_deref(), Some("No sound: this PC has no decoder for AAC audio"));
 }
 
 /// 7. The line offers "Open in another app\u{2026}" one press away.
@@ -280,7 +262,7 @@ impl super::super::source::ViewerSource for OneVideo {
 }
 
 /// 9. Space on a video opened from Files is the viewer's (it reaches the source's Play, which opens the video for the
-/// press's session), and another key is not.
+///    press's session), and another key is not.
 #[test]
 fn space_on_a_files_video_toggles_its_player() {
     use std::sync::atomic::Ordering;
@@ -315,7 +297,7 @@ fn space_on_a_files_video_toggles_its_player() {
 }
 
 /// 10. Space is play when paused and pause when playing, whichever way the bar's button or the key asks; nothing
-/// before the player has a state (a fake source's `None` never reaches `play` or `pause`).
+///     before the player has a state (a fake source's `None` never reaches `play` or `pause`).
 #[test]
 fn space_on_a_video_is_play_then_pause() {
     let mut s = state(1_000, 10_000);
@@ -327,7 +309,7 @@ fn space_on_a_video_is_play_then_pause() {
 }
 
 /// 11. Esc on a video opened from Files: the shell's Esc leaves the route, the viewer sync closes the file, and the
-/// source (which owns the player's stop) is dropped with it.
+///     source (which owns the player's stop) is dropped with it.
 #[test]
 fn esc_on_a_files_video_closes_it_and_stops_the_player() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -368,18 +350,15 @@ fn the_scrubber_seeks_to_where_it_is_pressed() {
 #[test]
 fn hevc_words_do_not_ask_for_an_extension_while_the_switch_is_off() {
     let off = refusal_words_with(false, &Refusal::NoSystemDecoder(Codec::Hevc));
-    assert_eq!(off, "Beebeeb can't play HEVC video yet. Open it in another app.");
+    assert!(off.contains("HEVC (H.265)") && off.contains("can't play yet"), "{off}");
     assert!(!off.contains("Microsoft") && !off.contains("extension"));
     let aac = refusal_words_with(false, &Refusal::NoSystemDecoder(Codec::Aac));
     assert!(
         !aac.contains("This PC can't"),
         "the cause is Beebeeb's, not the PC's: {aac}"
     );
-    // With the switch on, today's words.
-    assert_eq!(
-        refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)),
-        "This PC can't play HEVC video without Microsoft's HEVC extension."
-    );
+    // With the switch on, the PC's own answer: what to install.
+    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains("HEVC Video Extensions"));
     // The app's own words follow the protocol's constant.
     assert_eq!(
         refusal_words(&Refusal::NoSystemDecoder(Codec::Hevc)),
@@ -407,4 +386,274 @@ fn a_too_old_windows_says_so_in_the_media_view() {
         refusal_words(&Refusal::NeedsWindowsUpdate),
         "This file can't be shown until Windows is updated."
     );
+}
+
+/// ux-02: the helper's `NoDecoder` names no format; the sentence had a hole ("can't play  files here").
+#[test]
+fn media_no_decoder_without_a_name_says_this_kind_of_file() {
+    let words = refusal_words(&Refusal::NoDecoder(String::new()));
+    assert_eq!(words, "Beebeeb doesn't support this kind of file yet. Open it in another app.");
+    assert!(!words.contains("  "), "{words}");
+}
+
+/// ux-02 (the owner's ruling of 2026-11-20): as shipped, a PC without the system decoder for a format says so in
+/// plain words, and the button under them is "Open in default app". Every other refusal keeps its own button, and
+/// so does every refusal while the switch is held off (the PC was never asked).
+#[test]
+fn media_a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app() {
+    use super::{OPEN_DEFAULT, OPEN_ELSEWHERE, refusal_action, refusal_action_with};
+    assert_eq!(OPEN_DEFAULT, "Open in default app");
+    let hevc = Refusal::NoSystemDecoder(Codec::Hevc);
+    let words = refusal_words(&hevc);
+    assert!(words.contains("HEVC (H.265)") && words.contains("doesn't have the decoder"), "{words}");
+    assert!(words.contains("Microsoft Store"), "{words}");
+    assert!(words.contains("default app"), "{words}");
+    assert!(!words.contains("yet"), "the PC has no decoder; it is not Beebeeb that cannot yet: {words}");
+    for why in [
+        hevc.clone(),
+        Refusal::NoSystemDecoder(Codec::H264),
+        Refusal::NoSystemDecoder(Codec::Aac),
+        Refusal::NoSystemMedia(Codec::Hevc),
+    ] {
+        assert_eq!(refusal_action(&why), OPEN_DEFAULT, "{why:?}");
+        assert!(refusal_words(&why).contains("default app"), "{why:?}");
+        assert_eq!(refusal_action_with(false, &why), OPEN_ELSEWHERE, "{why:?}");
+    }
+    for why in [
+        Refusal::NoDecoder("ProRes".into()),
+        Refusal::CouldNotPlay,
+        Refusal::NotSignedIn,
+        Refusal::NotInstalled,
+        Refusal::NoSandbox,
+    ] {
+        assert_eq!(refusal_action(&why), OPEN_ELSEWHERE, "{why:?}");
+    }
+    // The button on screen carries the words.
+    fn refused_view(_: &State, _: &mut rune::Cx<State>) -> rune::El {
+        rune::col().key("window").child(super::refused_for(
+            &Refusal::NoSystemDecoder(Codec::Hevc),
+            &theme(false),
+        ))
+    }
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(init(), refused_view, (900.0, 400.0), env);
+    rt.frame(0.0);
+    let texts: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter(|e| !e.exiting)
+        .filter_map(|e| e.text)
+        .collect();
+    assert!(texts.iter().any(|text| text == OPEN_DEFAULT), "the button: {texts:?}");
+    assert!(texts.contains(&words), "the words: {texts:?}");
+    assert!(
+        !texts.iter().any(|text| text.contains("another app")),
+        "one button, the default app's: {texts:?}"
+    );
+}
+
+/// Up / Down, M and F on a recording or a video (task 159): the volume in 10 % steps (0 to 100 %), mute, each said in
+/// the toast; F is the window's full-screen key on a video only. The player is real, with seams that answer nothing.
+mod media_keys {
+    use std::sync::Arc;
+
+    use rune::{Key, KeyEvent, Mods};
+
+    use super::super::super::kinds::{AudioDoc, Track, VideoDoc};
+    use super::super::super::source::{Body, Details, OpenError, OpenFile, ViewerSource};
+    use crate::media::audio_out::AudioError;
+    use crate::media::player::{
+        AudioFactory, AudioSink, Link, LinkFactory, MediaBytes, MediaOpener, PlayerHandle, Refusal,
+    };
+    use crate::media::video::VideoSurface;
+    use crate::{State, init};
+
+    struct NoOpener;
+    impl MediaOpener for NoOpener {
+        fn open(&self, _file_id: &str) -> Result<Box<dyn MediaBytes>, Refusal> {
+            Err(Refusal::CouldNotPlay)
+        }
+    }
+    struct NoLinks;
+    impl LinkFactory for NoLinks {
+        fn start(&self) -> Result<Box<dyn Link>, Refusal> {
+            Err(Refusal::NotInstalled)
+        }
+    }
+    struct NoAudio;
+    impl AudioFactory for NoAudio {
+        fn start(&self, _rate_hint: u32) -> Result<Box<dyn AudioSink>, AudioError> {
+            Err(AudioError::NoDevice)
+        }
+    }
+
+    /// A source that hands the test's player; an id starting with `v` is a video, any other a recording.
+    struct Plays(PlayerHandle);
+    impl ViewerSource for Plays {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            let body = if id.starts_with('v') {
+                Body::Video(VideoDoc { length: 0 })
+            } else {
+                Body::Audio(AudioDoc {
+                    title: "Invented take".into(),
+                    artist: String::new(),
+                    length: 0,
+                    at: 0,
+                    playing: false,
+                    folder: "Invented demos".into(),
+                    queue: vec![Track {
+                        id: id.into(),
+                        title: "Invented take".into(),
+                        length: 0,
+                        current: true,
+                    }],
+                })
+            };
+            Ok(OpenFile {
+                id: id.into(),
+                path: Vec::new(),
+                name: format!("Invented {id}"),
+                facts: String::new(),
+                version: 1,
+                body,
+                details: Details {
+                    kind: String::new(),
+                    size: String::new(),
+                    facts: Vec::new(),
+                    offline: false,
+                },
+                newer: None,
+            })
+        }
+        fn poll(&mut self, _: &str) -> Option<Body> {
+            None
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.open(id)
+        }
+        fn can_play(&self) -> bool {
+            true
+        }
+        fn player(&self) -> Option<PlayerHandle> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn opened(id: &str) -> (State, PlayerHandle) {
+        let player = PlayerHandle::new(
+            Arc::new(NoOpener),
+            Arc::new(NoLinks),
+            Arc::new(NoAudio),
+            None,
+            VideoSurface::new(),
+        );
+        let mut state = init();
+        state.viewer.ui = Some(super::super::super::Ui::open(Box::new(Plays(player.clone())), id).expect("it opens"));
+        (state, player)
+    }
+
+    fn key(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            mods: Mods::default(),
+        }
+    }
+
+    fn toast(state: &State) -> Option<String> {
+        state.viewer.ui.as_ref().and_then(|ui| ui.toast.clone())
+    }
+
+    fn on_key(state: &mut State, k: Key) -> bool {
+        super::super::super::media::on_key(state, &key(k))
+    }
+
+    #[test]
+    fn up_and_down_step_the_volume_by_ten_and_stop_at_the_ends() {
+        for id in ["a1", "v1"] {
+            let (mut state, player) = opened(id);
+            assert!(on_key(&mut state, Key::Down), "Down is the player's on {id}");
+            assert_eq!(super::super::super::media::volume_percent(&player), 90);
+            assert_eq!(toast(&state).as_deref(), Some("Volume 90 %"));
+            assert!(on_key(&mut state, Key::Up));
+            assert!(on_key(&mut state, Key::Up));
+            assert_eq!(super::super::super::media::volume_percent(&player), 100, "stops at 100 %");
+            assert_eq!(toast(&state).as_deref(), Some("Volume 100 %"));
+            for _ in 0..12 {
+                on_key(&mut state, Key::Down);
+            }
+            assert_eq!(super::super::super::media::volume_percent(&player), 0, "stops at 0 %");
+            assert_eq!(toast(&state).as_deref(), Some("Volume 0 %"));
+        }
+    }
+
+    #[test]
+    fn a_volume_set_off_the_grid_steps_back_onto_it() {
+        let (mut state, player) = opened("a1");
+        player.set_volume(0.43);
+        assert!(on_key(&mut state, Key::Up));
+        assert_eq!(super::super::super::media::volume_percent(&player), 50);
+    }
+
+    #[test]
+    fn m_mutes_and_unmutes_and_says_so_keeping_the_volume() {
+        for id in ["a1", "v1"] {
+            let (mut state, player) = opened(id);
+            on_key(&mut state, Key::Down);
+            assert!(on_key(&mut state, Key::Text("m".into())), "M is the player's on {id}");
+            assert!(player.muted());
+            assert_eq!(toast(&state).as_deref(), Some("Muted"));
+            assert_eq!(super::super::super::media::volume_percent(&player), 90, "muting keeps the volume");
+            assert!(on_key(&mut state, Key::Text("M".into())));
+            assert!(!player.muted());
+            assert_eq!(toast(&state).as_deref(), Some("Sound on"));
+            // A volume step while muted is heard.
+            on_key(&mut state, Key::Text("m".into()));
+            on_key(&mut state, Key::Up);
+            assert!(!player.muted(), "a volume step unmutes");
+        }
+    }
+
+    #[test]
+    fn ctrl_m_and_shift_up_are_not_the_players() {
+        let (mut state, player) = opened("a1");
+        let ctrl = KeyEvent {
+            key: Key::Text("m".into()),
+            mods: Mods {
+                ctrl: true,
+                ..Mods::default()
+            },
+        };
+        assert!(!super::super::super::media::on_key(&mut state, &ctrl));
+        let shift_up = KeyEvent {
+            key: Key::Up,
+            mods: Mods {
+                shift: true,
+                ..Mods::default()
+            },
+        };
+        assert!(!super::super::super::media::on_key(&mut state, &shift_up));
+        assert!(!player.muted());
+        assert_eq!(super::super::super::media::volume_percent(&player), 100);
+    }
+
+    #[test]
+    fn f_is_full_screen_on_a_video_only() {
+        let (video, _) = opened("v1");
+        let (audio, _) = opened("a1");
+        let f = key(Key::Text("f".into()));
+        assert!(super::super::super::chrome::full_screen_key(&video, &f));
+        assert!(!super::super::super::chrome::full_screen_key(&audio, &f), "a recording has no picture");
+        let ctrl_f = KeyEvent {
+            key: Key::Text("f".into()),
+            mods: Mods {
+                ctrl: true,
+                ..Mods::default()
+            },
+        };
+        assert!(!super::super::super::chrome::full_screen_key(&video, &ctrl_f));
+    }
 }

@@ -88,7 +88,10 @@ struct Fake {
     path: PathBuf,
     view: Mutex<SyncView>,
     usage: Mutex<Result<(i64, i64), String>>,
+    trash: Mutex<Result<u64, String>>,
     broken: AtomicBool,
+    /// The transfer board's (upload, download) bytes done; `None`: no board.
+    board: Mutex<Option<(u64, u64)>>,
     syncing: AtomicBool,
     paused: Mutex<Vec<bool>>,
     kept_calls: Mutex<Vec<(String, bool)>>,
@@ -134,7 +137,9 @@ impl Fake {
                 ..SyncView::default()
             }),
             usage: Mutex::new(Ok((240 * GB, 1_000 * GB))),
+            trash: Mutex::new(Ok(3)),
             broken: AtomicBool::new(false),
+            board: Mutex::new(None),
             syncing: AtomicBool::new(true),
             paused: Mutex::new(Vec::new()),
             kept_calls: Mutex::new(Vec::new()),
@@ -163,7 +168,7 @@ impl Fake {
 
 impl DriveEngine for Fake {
     fn view(&self) -> SyncView {
-        self.view.lock().unwrap().clone()
+        *self.view.lock().unwrap()
     }
     fn account(&self) -> Option<String> {
         self.account.lock().unwrap().clone()
@@ -180,6 +185,12 @@ impl DriveEngine for Fake {
         let answer = read(&db);
         self.after_read.pass();
         Ok(answer)
+    }
+    fn transfer_totals(&self) -> Option<(u64, u64)> {
+        *self.board.lock().unwrap()
+    }
+    fn trash_count(&self, _session: SessionGeneration) -> Result<u64, String> {
+        self.trash.lock().unwrap().clone()
     }
     fn storage_info(&self) -> Result<(i64, i64), String> {
         self.in_usage.pass();
@@ -329,8 +340,9 @@ fn source(fake: &Arc<Fake>, platform: Arc<FakePlatform>) -> EngineDriveSettings<
 fn settle(source: &mut EngineDriveSettings<Fake>) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let (_, more) = source.pump(0.0);
-        if !more && source.idle() {
+        // `more` stays true while App activity samples, so only the workers' idleness ends the wait.
+        source.pump(0.0);
+        if source.idle() {
             source.pump(0.0);
             return;
         }
@@ -527,7 +539,7 @@ fn apply_keep_changes_only_the_folders_named_while_sync_runs() {
 /// panes on the board's fixture draw values (the check can fail). Storage insights draws its own page.
 #[test]
 fn every_unwired_pane_draws_no_sample_value() {
-    for (frame, pane) in [("DW-0712", Pane::Storage), ("DW-0744", Pane::Previews)] {
+    for (frame, pane) in [("DW-0744", Pane::Previews)] {
         let engine = drawn(
             frame,
             Box::new(EngineDriveSettings::new(account(), Arc::new(FakePlatform::default()))),
@@ -542,6 +554,7 @@ fn every_unwired_pane_draws_no_sample_value() {
         assert!(!has(&board, "not-built"), "{frame}: the fixture draws its pane");
     }
     for (frame, pane) in [
+        ("DW-0712", Pane::Storage),
         ("DW-0783", Pane::Insights),
         ("DW-0746", Pane::Sync),
         ("DW-0785", Pane::Bandwidth),
@@ -555,10 +568,56 @@ fn every_unwired_pane_draws_no_sample_value() {
         assert!(!has(&engine, "not-built"), "{frame} draws its own pane");
         let texts = texts(&engine);
         for sample in ["18.4 GB", "Anna", "3 items", "35.2", "94.0"] {
+            // Storage's Trash row says what Beebeeb counted, and the fake counts three.
+            if pane == Pane::Storage && sample == "3 items" {
+                continue;
+            }
             assert!(!texts.iter().any(|t| t.contains(sample)), "{frame} draws {sample}");
         }
     }
 }
+
+/// Storage (DW-0712, w14 bug 2): wired on the real source, and it draws what was read: the use, the rows by type
+/// (largest first, from the insights), the Trash's count from Beebeeb. A Trash count that did not come draws nothing,
+/// never a zero.
+#[test]
+fn storage_is_wired_and_draws_what_was_read() {
+    let fake = account();
+    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
+    assert!(source.wired(Pane::Storage));
+    source.opened(Pane::Storage);
+    settle(&mut source);
+    let st = source.storage();
+    assert_eq!((st.used.as_str(), st.total.as_str()), ("240 GB", "1 TB"));
+    assert_eq!(st.trash, "3 items");
+    assert!(!st.kinds.is_empty(), "the rows by type come from the insights' read");
+    assert_eq!(st.kinds[0].1, "Photos and media", "largest first");
+    assert!(st.kinds.iter().all(|(_, _, size)| !size.is_empty() && !size.contains('\u{b7}')));
+
+    *fake.trash.lock().unwrap() = Err("down".into());
+    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
+    source.opened(Pane::Storage);
+    settle(&mut source);
+    assert_eq!(source.storage().trash, "", "no count said, none drawn");
+}
+
+/// The Storage pane drawn on the real source shows the rows, not the shell's frame.
+#[test]
+fn storage_frame_draws_rows_not_the_placeholder() {
+    let fake = account();
+    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
+    source.opened(Pane::Storage);
+    settle(&mut source);
+    let rt = drawn("DW-0712", Box::new(source));
+    assert!(!has(&rt, "not-built"));
+    let texts = texts(&rt);
+    assert!(texts.iter().any(|t| t.contains("3 items")), "{texts:?}");
+}
+
+/// Every Settings sidebar pane on the real engine's sources (the app's own `init_on_engine`): none draws the "not
+/// built yet" frame while its source is bound.
+#[path = "drive_settings_walk_tests.rs"]
+mod walk;
 
 fn drawn(frame: &'static str, drive: Box<dyn DriveSettings>) -> Runtime<State> {
     let mut state = crate::init();
@@ -1006,4 +1065,63 @@ fn the_engines_glue_reads_the_signed_in_accounts_state() {
         Insights::Ready(data) => assert_eq!(data.totals, "2 files · 4.2 GB"),
         other => panic!("insights are ready, not {other:?}"),
     }
+}
+
+/// App activity (DW-0790): with Diagnostics open every pump past the interval adds a sample; on any other pane the
+/// sampler is stopped and the page has no rows.
+#[test]
+fn app_activity_samples_only_while_diagnostics_is_open() {
+    struct Steady;
+    impl app_activity::Probe for Steady {
+        fn read(&mut self) -> app_activity::Reading {
+            app_activity::Reading {
+                cpu_percent: 2.0,
+                memory_bytes: 100_000_000,
+                ..Default::default()
+            }
+        }
+    }
+    let fake = account();
+    let mut source = EngineDriveSettings::new(fake, Arc::new(FakePlatform::default()));
+    source.activity = app_activity::AppActivity::with_probe(Box::new(Steady), Duration::ZERO);
+    settle(&mut source);
+    source.opened(Pane::Storage);
+    source.pump(0.0);
+    assert!(source.diagnostics().activity.is_empty(), "closed: no sampling");
+    source.opened(Pane::Diagnostics);
+    let mut last = 0;
+    for _ in 0..3 {
+        let (changed, more) = source.pump(0.0);
+        assert!(changed && more);
+        let now = source.diagnostics().activity[0].samples.len();
+        assert_eq!(now, last + 1);
+        last = now;
+    }
+    source.opened(Pane::Storage);
+    source.pump(0.0);
+    assert!(source.diagnostics().activity.is_empty(), "left: the sampler stopped");
+}
+
+/// The window leaving Settings while Diagnostics is open stops the sampler, as leaving the pane does.
+#[test]
+fn closing_settings_on_diagnostics_stops_the_sampler() {
+    struct Idle;
+    impl app_activity::Probe for Idle {
+        fn read(&mut self) -> app_activity::Reading {
+            app_activity::Reading::default()
+        }
+    }
+    let fake = account();
+    let mut source = EngineDriveSettings::new(fake, Arc::new(FakePlatform::default()));
+    source.activity = app_activity::AppActivity::with_probe(Box::new(Idle), Duration::ZERO);
+    settle(&mut source);
+    source.opened(Pane::Diagnostics);
+    source.pump(0.0);
+    assert!(source.activity.running());
+    let drive: &mut dyn DriveSettings = &mut source;
+    drive.closed();
+    assert!(!source.activity.running(), "the window closed: nothing samples");
+    let (_, more) = source.pump(0.0);
+    assert!(!more, "and nothing asks for a frame");
+    assert!(source.diagnostics().activity.is_empty());
 }

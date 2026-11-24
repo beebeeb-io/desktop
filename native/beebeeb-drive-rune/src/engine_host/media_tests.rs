@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use beebeeb_engine::app::viewer_api::{LocalCopy, OpenedFile};
-use beebeeb_media_protocol::{AudioInfo, Codec, FromHelper, Opened, ToHelper};
+use beebeeb_media_protocol::{AudioInfo, Codec, FromHelper, KindHint, Opened, ToHelper, VideoInfo};
 use zeroize::Zeroizing;
 
 use super::*;
@@ -204,6 +204,8 @@ struct FakeLink {
     inbox: Vec<FromHelper>,
     /// Where the next answered PCM starts.
     pts_ms: u64,
+    /// Video frames answered.
+    frames: u64,
 }
 
 impl LinkFactory for FakeLinks {
@@ -211,6 +213,7 @@ impl LinkFactory for FakeLinks {
         Ok(Box::new(FakeLink {
             inbox: Vec::new(),
             pts_ms: 0,
+            frames: 0,
         }))
     }
 }
@@ -218,6 +221,30 @@ impl LinkFactory for FakeLinks {
 impl Link for FakeLink {
     fn send(&mut self, msg: &ToHelper) -> io::Result<()> {
         match msg {
+            // A video: 2 x 2 at 30 frames a second, no audio track.
+            ToHelper::Open {
+                hint: KindHint::Video, ..
+            } => self.inbox.push(FromHelper::Opened(Opened {
+                duration_ms: 90_000,
+                video: Some(VideoInfo {
+                    w: 2,
+                    h: 2,
+                    fps_milli: 30_000,
+                    codec: Codec::Vp9,
+                }),
+                audio: None,
+                reduced_quality: false,
+                no_sound: None,
+            })),
+            ToHelper::WantVideo { w, h } => {
+                self.inbox.push(FromHelper::Frame {
+                    pts_ms: self.frames * 1000 / 30,
+                    w: *w,
+                    h: *h,
+                    rgba: vec![0x40; *w as usize * *h as usize * 4],
+                });
+                self.frames += 1;
+            }
             ToHelper::Open { .. } => self.inbox.push(FromHelper::Opened(Opened {
                 duration_ms: 90_000,
                 video: None,
@@ -488,12 +515,61 @@ fn closing_a_video_stops_it() {
     assert!(world.handle().state().is_none(), "closing the video stops it");
 }
 
+/// w12-video-start: a video's view draws the player's frame and place only when it is run, and before this the poll
+/// never asked for a run (it answered "nothing new" for every video): the stage stayed black and the times stood at
+/// 0:00 until a press ran the view. The poll now answers every change the view draws, and only a change.
+#[test]
+fn a_videos_poll_runs_the_view_for_its_first_frame_and_its_place() {
+    let world = World::new(true);
+    let _stop = StopsThePlayer(world.clone());
+    let mut source = source(&world);
+    let file = source.open("v1").expect("opens");
+    assert!(matches!(file.body, Body::Video(_)));
+    assert!(source.poll("v1").is_none(), "nothing plays yet: nothing new");
+    world.handle().set_view_size(2, 2);
+    assert!(source.play("v1", true));
+    assert!(
+        matches!(source.poll("v1"), Some(Body::Video(_))),
+        "the player holds the file now: the view runs (Pause, not Play)"
+    );
+    wait_until("the first frame", || world.handle().frame().is_some());
+    assert!(
+        matches!(source.poll("v1"), Some(Body::Video(_))),
+        "the first frame came: the view runs and puts it on the stage"
+    );
+    wait_until("the place moved a second", || {
+        world.handle().state().is_some_and(|state| state.at_ms >= 1_000)
+    });
+    assert!(
+        matches!(source.poll("v1"), Some(Body::Video(doc)) if doc.length == 90),
+        "the place moved: the view runs and says it, with the file's length"
+    );
+    // Paused, nothing moves: after the pause itself is drawn the poll has nothing new.
+    assert!(source.play("v1", false));
+    wait_until("the pause lands in the player", || {
+        world.handle().phase() == Phase::Paused
+    });
+    while source.poll("v1").is_some() {}
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(source.poll("v1").is_none(), "paused: nothing new, the view is not run");
+}
+
+/// W20: a PDF opened from Files went to Edge. A kept PDF opens in the in-app viewer (playback or not).
+#[test]
+fn w20_a_kept_pdf_opens_in_the_viewer() {
+    for ready in [true, false] {
+        let source = source(&World::new(ready));
+        assert!(source.previews("c.pdf"));
+        assert!(source.opens_here_when_kept("c.pdf") && source.opens_here_when_kept("C.PDF"));
+    }
+}
+
 #[test]
 fn kept_audio_opens_in_the_player_when_playback_is_available() {
     let ready = source(&World::new(true));
     assert!(ready.opens_here_when_kept("a.mp3") && ready.opens_here_when_kept("b.mp4"));
     assert!(ready.previews("a.mp3") && ready.previews("b.mp4"));
-    assert!(!ready.opens_here_when_kept("c.pdf") && !ready.opens_here_when_kept("d.txt"));
+    assert!(!ready.opens_here_when_kept("d.txt"));
     let not_ready = source(&World::new(false));
     assert!(!not_ready.opens_here_when_kept("a.mp3") && !not_ready.opens_here_when_kept("b.mp4"));
 }
@@ -538,4 +614,30 @@ fn mfx_a_recordings_doc_is_its_own_while_another_plays() {
     assert!(!doc.playing, "it is not the one playing");
     let current: Vec<&str> = doc.queue.iter().filter(|t| t.current).map(|t| t.id.as_str()).collect();
     assert_eq!(current, ["t2"], "the queue marks the open file");
+}
+
+/// ux-02: the engine's kind of refusal is written in the log, every word readable, and nothing else.
+#[test]
+fn media_open_refusals_are_logged_by_kind() {
+    let kinds = [
+        (OpenFileError::NotSignedIn, "kind=not signed in"),
+        (OpenFileError::SessionEnded, "kind=session ended"),
+        (OpenFileError::NotYours, "kind=not yours"),
+        (OpenFileError::NothingSynced, "kind=nothing synced"),
+        (OpenFileError::NotFound, "kind=not found"),
+        (OpenFileError::TooLarge { size: 123_456_789 }, "kind=too large"),
+        (OpenFileError::OverLimit, "kind=over limit"),
+        (OpenFileError::CopyNotReadable, "kind=copy not readable"),
+        (OpenFileError::Cancelled, "kind=cancelled"),
+        (OpenFileError::Offline, "kind=offline"),
+        (OpenFileError::NoAccess, "kind=no access"),
+        (OpenFileError::ChangedWhileOpening, "kind=changed while opening"),
+        (OpenFileError::Failed, "kind=failed"),
+    ];
+    for (error, want) in kinds {
+        let text = crate::media::refusal_log::tests::logged(|| {
+            let _ = refusal_of(error);
+        });
+        assert!(text.trim_end().ends_with(&format!("media file not opened {want}")), "{error:?}: {text}");
+    }
 }

@@ -71,7 +71,7 @@ fn group_labels_outside_the_allow_list_fold_into_other() {
     assert_eq!(allowed_label("Tax 2025", QUEUE_KIND_LABELS), "other");
     assert_eq!(allowed_label("auth", PAUSE_REASON_LABELS), "auth");
     assert_eq!(allowed_label("key_replaced", PAUSE_REASON_LABELS), "key_replaced");
-    // Task 2267 (fix round 2): changes found while sync was paused, held for the person's review.
+    // Task 2267: changes found while sync was paused, held for the person's review.
     assert_eq!(
         allowed_label("found_while_paused", PAUSE_REASON_LABELS),
         "found_while_paused"

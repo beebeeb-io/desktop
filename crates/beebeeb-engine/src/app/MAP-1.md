@@ -7,7 +7,7 @@ Modules 1–34, sorted by path.
 | Module | Purpose | Public API |
 |---|---|---|
 | `account_actions_api.rs` | What a host's account screens do beyond reading (`super::account_api`): sign THIS app out, prove the password for a guarded change (step-up) | — |
-| `account_api.rs` | The account as Beebeeb holds it, for a host without a UI toolkit (the native Account and Devices and sessions panes): who is signed in, the | — |
+| `account_api.rs` | The account as Beebeeb holds it, for a host without a UI toolkit (the native Account and Devices and sessions panes): who is signed in, the | OwnerSettled (3) |
 | `account_email_api.rs` | Changing the sign-in email, over core's `account_flows` (`change_email`, `verify_email`), for the native Account panes. | — |
 | `account_email_resend_api.rs` | Changing the sign-in email, the parts after the first step (`account_email_api`): send the 8-digit code AGAIN (`POST /api/v1/me/email/resend | — |
 | `account_email_resend_api_tests.rs` | The code sent again and the mirrored email, on a real handle against the engine's fake account. | — |
@@ -17,14 +17,22 @@ Modules 1–34, sorted by path.
 | `account_twofactor_api_tests.rs` | Two-factor and email change at the engine: over a real local socket (the bearer token goes with each request, a refused code is a fixed kind | — |
 | `account_twofactor_status_api.rs` | The two-factor status the Account pages show (added, last used, backup codes left), read from Beebeeb for the session in memory. | — |
 | `account_twofactor_status_api_tests.rs` | The two-factor status read on a real handle against the engine's fake account on loopback. | — |
+| `app_lock_after_tests.rs` | "Locks again after" and the away lock at the engine (decision 2519): the stored delay `lock.after`, its default, who may change it with whic | — |
+| `app_lock_api.rs` | App lock, the screen level's per-device switch (core #117; the owner's ruling of 2026-11-14: off, the app never locks by itself and opens di | — |
+| `app_lock_api_tests.rs` | App lock at the engine, against the loopback fake of the password path (`lock_password_api_tests.rs`): core's rule for who may change it and | — |
 | `backup_devices_api.rs` | The account's OTHER devices' backups, for a host without a UI toolkit (the native Backups section), and "Delete this backup" of one of them | — |
 | `backup_devices_api_tests.rs` | Other devices' backups at the engine: the read over a tree of plain manifests (what is listed, what is left out, the honest rows), and the g | — |
 | `backup_places_api.rs` | What the app WINDOW may change of the rows it shows, for a host without a UI toolkit (the native Files window's Backups tree): [`Engine::bac | — |
 | `backup_places_api_tests.rs` | The places of the Backups tree at the engine: what the app rule refuses (asked, never re-derived), which device folder is this PC's, and the | — |
 | `backups_api.rs` | Backups as a shell reaches them (LD-0113): what the Backups section reads about THIS computer's backup, and the switch of one known folder. | — |
 | `backups_api_tests.rs` | `Engine::backups_overview` / `Engine::set_backup_folder` with the engine's own parts: the rows from a real state database in a folder of the | — |
+| `bindings.rs` | The engine's calls for the plan40 batch-1 slices, one file per slice, so no two slices share a file and `app.rs` holds ONE line for all of t | — |
 | `conflicts_api.rs` | Two versions of a file, for a host without a UI toolkit (the native Files window's conflict dialog): the files that changed in two places an | — |
 | `conflicts_api_tests.rs` | Two versions at the engine, against the fake account on loopback: which rows are listed and from what (the file on disk, the server's curren | — |
+| `credential_stores.rs` | Where the handle keeps an account's session token and vault key, and the one older layout it still reads: the flat layout of a 0.8.x PC from | — |
+| `credential_stores_tests.rs` | The flat layout of a 0.8.x PC at the engine handle (`credential_stores`): its session moves into the account's slot at open, a failed move n | — |
+| `downloads_api.rs` | What this account downloads now, for the native Files window's "Downloading" rows (DW-0412): the copies coming down, each with how far it ha | — |
+| `downloads_api_tests.rs` | `Engine::downloads_for` with a real handle, a state database of the test's own and a board of the host. | — |
 | `explorer_api.rs` | Explorer's "Free up space" command and the engine handle (task 2490). | — |
 | `explorer_api_tests.rs` | Explorer's "Free up space" command against a real engine handle (task 2490): the signed-in owner frees as before; signed out keeping the loc | — |
 | `files_facts_api.rs` | What the Files window's sidebar says about the account beside the list, for a host without a UI toolkit: how many files are kept on this PC | — |
@@ -32,11 +40,3 @@ Modules 1–34, sorted by path.
 | `guide_mark.rs` | The first-time guide's "done" mark, as a shell reaches it: for the session's own account and no other. | — |
 | `guide_mark_tests.rs` | The first-time guide's mark at the engine: whose it is, what a sign-out, another account, a reset and a session change do to it. | — |
 | `kept_api.rs` | What this PC keeps (Available offline), for a host without a UI toolkit (the native This PC section and Keep on this PC). | — |
-| `kept_api_tests.rs` | `Engine::set_kept` with the engine's own parts: a real handle (`Engine::open`, in-memory credentials, the process's test state folder, which | — |
-| `lock_api.rs` | The two-level lock of this app, bound to core's rules (decision 2495; core's contract `docs/superpowers/specs/2026-11-13-two-level-lock-desi | Call (22), CallRefused, LockState, LockedAction |
-| `lock_api_tests.rs` | The choke point of a person's call (`Engine::person_session`) and the census that keeps it the only one. | — |
-| `lock_password_api.rs` | The screen lock's password path: the wrong-try accounting, the server's grant-nothing password proof for the current session, and the local | — |
-| `lock_password_api_tests.rs` | The screen lock's password path at the engine, against the local fake API: core's counted tries, the server's grant-nothing password proof ( | — |
-| `owned_state.rs` | The local state as a shell reaches it (task 2488): through a handle that is bound to the signed-in account. | — |
-| `owned_state_tests.rs` | The account-bound handle on the local state (task 2488), at the engine: who is handed the state, who is not and why, and that a handle does | — |
-| `passkeys_api.rs` | The account's passkeys, for a host without a UI toolkit (the native Passkeys pane and the sign-in screen's "Use a passkey"): list them, add | — |

@@ -19,11 +19,40 @@ pub const INVALID_STREAM_DATA: u32 = 0xC00D_36CB;
 /// measured).
 pub const FAILED: u32 = 0x8000_4005;
 
+/// Whether an `E_FAIL` at the first read of this codec means the decoder refused the stream's bit depth (10-bit
+/// H.264 and HEVC Main 10, measured). Every codec is named, no wildcard (ux-26).
+fn system_rejects_bit_depth(codec: Codec) -> bool {
+    match codec {
+        Codec::H264 | Codec::Hevc => true,
+        Codec::Vp8
+        | Codec::Vp9
+        | Codec::Av1
+        | Codec::Mpeg2
+        | Codec::ProRes
+        | Codec::Dnx
+        | Codec::Mp3
+        | Codec::Aac
+        | Codec::Flac
+        | Codec::Alac
+        | Codec::Opus
+        | Codec::Vorbis
+        | Codec::Pcm
+        | Codec::Ac3
+        | Codec::Eac3
+        | Codec::Mp2
+        | Codec::Mpeg4Part2
+        | Codec::Vc1
+        | Codec::Wma
+        | Codec::Other => false,
+    }
+}
+
 /// What a failed Media Foundation call on a `System` stream of `codec` tells the app. A failure of the app's own reads
 /// is decided before this (the session's read flags win).
 pub fn failure(hresult: u32, codec: Codec) -> ErrorCode {
     match hresult {
         CODEC_NOT_FOUND => ErrorCode::NoSystemDecoder(codec),
+        FAILED if system_rejects_bit_depth(codec) => ErrorCode::TenBit,
         UNSUPPORTED_CONTAINER | FAILED => ErrorCode::NoDecoder,
         INVALID_FILE_FORMAT | INVALID_STREAM_DATA => ErrorCode::Corrupt,
         // INVALID_MEDIA_TYPE among them: a decoder that is there but did not start is not a missing one.
@@ -444,7 +473,9 @@ mod tests {
         );
         assert_eq!(failure(INVALID_MEDIA_TYPE, Codec::Hevc), ErrorCode::Internal);
         assert_eq!(failure(UNSUPPORTED_CONTAINER, Codec::Aac), ErrorCode::NoDecoder);
-        assert_eq!(failure(FAILED, Codec::H264), ErrorCode::NoDecoder);
+        assert_eq!(failure(FAILED, Codec::H264), ErrorCode::TenBit);
+        assert_eq!(failure(FAILED, Codec::Hevc), ErrorCode::TenBit);
+        assert_eq!(failure(FAILED, Codec::Aac), ErrorCode::NoDecoder);
         assert_eq!(failure(INVALID_STREAM_DATA, Codec::Aac), ErrorCode::Corrupt);
         assert_eq!(failure(0x8007_0005, Codec::Aac), ErrorCode::Internal);
     }

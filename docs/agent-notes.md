@@ -43,7 +43,7 @@ The current architecture is in `README.md` → "Architecture"; the module map an
 
 - App bundle id `io.beebeeb.app`; File Provider extension id `io.beebeeb.app.FileProvider`; domain id `io.beebeeb.app.domain`; app group `R8352WDJJR.io.beebeeb.app.fileprovider`.
 - Cross-platform logic stays in Rust (auth/session, crypto, sync, queueing, conflicts, cache policy, protocol) — not duplicated in the frontend.
-- The Tauri warning that `io.beebeeb.app` ends in `.app` is known — keep the identifier unless Guus migrates the App Store Connect record.
+- The Tauri warning that `io.beebeeb.app` ends in `.app` is known — keep the identifier unless the owner migrates the App Store Connect record.
 
 ## macOS File Provider rules
 
@@ -107,7 +107,7 @@ Both lines verify updates with minisign. The native line (0.9.0 and later) trust
 
 ## Storage location (task 1919, by COUNTRY since task 2050)
 
-A storage location is a COUNTRY, never a city (Guus, 2026-10-19; `docs/canon/data-residency.md` in the workspace). `europe` is the default; the rows are the API's (`GET /api/v1/me/region` `choices` = public `GET /api/v1/storage-regions`), rendered as sent — the desktop keeps NO list, city or country table; `account_set_region` sends the row's `id` verbatim with `regionStrict` stated. **No city is decoded at all** (`StorageChoice`/`RegionInfo` have no `city` field); the 0.8.x guard `tests/noCityInCopy.test.ts` (gone with the React frontend) failed on a city name or a `city` read anywhere in the React sources and the Tauri shell. Uploads send no region. Detail (older-server folding, "Only store in <country>", verify recipe): docs/runbook/desktop-task-history.md.
+A storage location is a COUNTRY, never a city (owner, 2026-10-19; `docs/canon/data-residency.md` in the workspace). `europe` is the default; the rows are the API's (`GET /api/v1/me/region` `choices` = public `GET /api/v1/storage-regions`), rendered as sent — the desktop keeps NO list, city or country table; `account_set_region` sends the row's `id` verbatim with `regionStrict` stated. **No city is decoded at all** (`StorageChoice`/`RegionInfo` have no `city` field); the 0.8.x guard `tests/noCityInCopy.test.ts` (gone with the React frontend) failed on a city name or a `city` read anywhere in the React sources and the Tauri shell. Uploads send no region. Detail (older-server folding, "Only store in <country>", verify recipe): docs/runbook/desktop-task-history.md.
 
 ## Brand
 

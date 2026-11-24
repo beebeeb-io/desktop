@@ -102,7 +102,7 @@ fn every_board_frame_has_a_scene_that_draws_its_marks() {
         ),
         (
             "DW-0603",
-            "ph-menu-4-check",
+            "ph-menu-item-4-check",
             "Photos",
             "12,430 photos \u{00B7} 842 videos \u{00B7} 216 GB",
         ),
@@ -126,7 +126,7 @@ fn every_board_frame_has_a_scene_that_draws_its_marks() {
         ),
         (
             "DW-0606",
-            "ph-menu-3",
+            "ph-menu-item-3",
             "Today 09:12",
             "Anna's iPhone \u{00B7} Harbour.heic",
         ),
@@ -183,8 +183,8 @@ fn the_board_copy_of_each_frame_is_drawn() {
     );
     assert_eq!(text(&runtime("DW-0602"), "ph-bulk-count"), "3 photos \u{00B7} 42 MB");
     let menu = runtime("DW-0603");
-    assert_eq!(text(&menu, "ph-menu-3-sc"), "Ctrl+Plus");
-    assert_eq!(text(&menu, "ph-menu-4-sc"), "Ctrl\u{2212}");
+    assert_eq!(text(&menu, "ph-menu-item-3-shortcut"), "Ctrl+Plus");
+    assert_eq!(text(&menu, "ph-menu-item-4-shortcut"), "Ctrl\u{2212}");
     let open = runtime("DW-0605");
     assert_eq!(text(&open, "ph-seg-1-label"), "Original \u{00B7} 30.9 MB");
     assert_eq!(
@@ -239,7 +239,7 @@ fn names_and_roles() {
         assert_eq!((e.role, e.label.as_deref()), (role, Some(label)), "{key}");
     }
     assert_eq!(info(&runtime("DW-0603"), "ph-menu").role, "menu");
-    assert_eq!(info(&runtime("DW-0116"), "ph-empty-title").role, "heading");
+    assert_eq!(info(&runtime("DW-0116"), "ph-empty").role, "group");
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn photos_across_by_menu_and_by_keys() {
     }
     assert_eq!(rt.state.photos.across, 7, "7 is the smallest");
     click(&mut rt, "ph-across");
-    click(&mut rt, "ph-menu-3");
+    click(&mut rt, "ph-menu-item-3");
     assert_eq!(rt.state.photos.across, 5, "a click on 5");
     click(&mut rt, "ph-across");
     press(&mut rt, Key::Escape);
@@ -436,7 +436,7 @@ fn the_open_photo_actions() {
     );
 
     click(&mut rt, "ph-more");
-    click(&mut rt, "ph-menu-0");
+    click(&mut rt, "ph-menu-item-0");
     click(&mut rt, "ph-more");
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
@@ -476,16 +476,19 @@ fn share_says_which_way_keeps_the_encryption_and_asks_for_it() {
     let mut rt = runtime("DW-0607");
     let harbour = id(board::HARBOUR);
     assert!(text(&rt, "ph-dlg-note").starts_with("Copy link keeps it encrypted. Send a copy decrypts it"));
-    click(&mut rt, "ph-item-0-0-pop");
     click(&mut rt, "ph-item-0-2-switch");
-    assert_eq!(text(&rt, "ph-item-0-0-pop-label"), "Can edit");
+    assert_eq!(text(&rt, "ph-item-0-0-pop-label"), "Can download", "a link has no Can edit");
+    // Password on and none typed: no link, the dialog stays and says so.
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.photos.take_intents().is_empty());
+    assert!(matches!(&rt.state.photos.dialog, Some(Dialog::Share(d)) if d.password_missing));
+    rt.state.photos.share_password = rune::TextEdit::new("hunter2").secure();
     press(&mut rt, Key::Enter);
     assert_eq!(
         rt.state.photos.take_intents(),
         vec![Intent::CopyLink {
             id: harbour,
-            can_edit: true,
-            days: Some(30),
+            expires: crate::frames::files::actions_data::LinkExpiry::Month,
             password: true
         }]
     );
@@ -689,4 +692,81 @@ fn ctrl_click_checks_a_photo_and_starts_selecting() {
     assert!(!rt.state.photos.selecting);
     click(&mut rt, "ph-tile-0-2");
     assert!(!rt.state.photos.selecting && rt.state.photos.selected.is_empty());
+}
+
+/// A small original reads in KB: "0 MB" says nothing about a 40 KB picture.
+#[test]
+fn a_small_original_is_written_in_kilobytes() {
+    use super::grid::megabytes;
+    assert_eq!(megabytes(40_960, true), "41 KB");
+    assert_eq!(megabytes(999, true), "1 KB");
+    assert_eq!(megabytes(0, true), "0 KB");
+    assert_eq!(megabytes(1_000_000, true), "1 MB");
+    assert_eq!(megabytes(30_900_000, true), "30.9 MB");
+}
+
+/// W20 bug 7: the Settings gear in the Photos window's sidebar did nothing (from Files it opens), whether or not a
+/// viewer had been open before.
+#[test]
+fn w20_the_gear_in_the_photos_window_opens_settings() {
+    let mut rt = runtime("DW-0601");
+    assert!(!rt.state.shell.app.in_settings());
+    click(&mut rt, "settings-btn");
+    assert!(rt.state.shell.app.in_settings(), "the gear opened nothing on Photos");
+}
+
+#[test]
+fn a_tile_without_a_thumbnail_shows_the_photo_or_video_icon() {
+    use crate::theme::file_icon_colors::tint_color;
+    use crate::theme::file_icons::{Tint, icon_for};
+    use crate::ui::kit;
+    let colours = |ui: Ui| {
+        let mut rt = runtime_of(ui);
+        kit::record();
+        rt.state.photos.take_intents();
+        rt.frame(0.0);
+        kit::take()
+            .into_iter()
+            .filter(|(k, _)| k.ends_with("-type-icon"))
+            .map(|(_, n)| n.color)
+            .collect::<Vec<_>>()
+    };
+    let none = colours(Ui::new(Box::new(NoThumbnails(FixturePhotos::new()))));
+    let photo = Some(tint_color(icon_for("", false, Some("image/*")).tint, false));
+    let video = Some(tint_color(icon_for("", false, Some("video/*")).tint, false));
+    assert_eq!(icon_for("", false, Some("image/*")).tint, Tint::Image);
+    assert!(none.contains(&photo) && none.contains(&video), "photo and video icons drawn");
+    assert!(colours(Ui::new(Box::new(FixturePhotos::new()))).is_empty(), "a thumbnail, no type icon");
+}
+
+/// The status line says the PC's real sync state, not a fixed "Up to date": each state its own words and dot.
+#[test]
+fn the_status_line_says_the_real_sync_state() {
+    use crate::frames::PcStatus;
+    use crate::ui::status_bar::{Dot, PAUSED, SIGN_IN_AGAIN, SYNCING, SYNC_STOPPED, UP_TO_DATE, dot_for};
+    struct Pc(&'static str);
+    impl PcStatus for Pc {
+        fn sync_words(&self) -> String {
+            self.0.into()
+        }
+        fn summary(&self) -> String {
+            String::new()
+        }
+    }
+    let cases = [
+        (UP_TO_DATE, Dot::Green),
+        (SYNCING, Dot::Busy),
+        (PAUSED, Dot::Idle),
+        ("Offline", Dot::Idle),
+        (SYNC_STOPPED, Dot::Idle),
+        (SIGN_IN_AGAIN, Dot::Idle),
+    ];
+    for (words, dot) in cases {
+        let mut rt = runtime("DW-0601");
+        rt.state.frames.pc = Box::new(Pc(words));
+        rt.frame(0.0);
+        assert_eq!(text(&rt, "status-text"), words);
+        assert_eq!(dot_for(words), dot, "{words}");
+        assert!(has(&rt, "status-dot"), "{words} has its dot");
+    }
 }

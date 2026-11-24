@@ -475,10 +475,20 @@ fn expired_request_shows_expired() {
     let (engine, mut source, _) = with_prompts(&server);
     *server.expires_at.lock().unwrap() = GONE;
     let request = found(&mut source);
-    let before = server.fake.routes().len();
+    // Only the approval's own routes: the signed-in engine's background work (sync, quota) may still be asking the
+    // fake for its own routes at this moment, and that is not the review's network.
+    let review_routes = |server: &Server| {
+        server
+            .fake
+            .routes()
+            .into_iter()
+            .filter(|r| r.contains("/api/v1/auth/cli-") || r.contains("/api/v1/auth/confirm-opaque-"))
+            .count()
+    };
+    let before = review_routes(&server);
     assert_eq!(source.sign_in_request_gone(request.id()), Some(Denial::Expired));
     assert_eq!(source.waiting_sign_in_request(request.id()), None);
-    assert_eq!(server.fake.routes().len(), before, "read from the request: no network");
+    assert_eq!(review_routes(&server), before, "read from the request: no network");
 
     *server.expires_at.lock().unwrap() = LIVE;
     let mut fresh = Source::new(engine.clone());

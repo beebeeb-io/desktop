@@ -1,6 +1,6 @@
 # Rust CI speed: measurements and changes (2026-11-11)
 
-Lane C1. Goal (Guus, 2026-11-11): the Rust CI jobs "more efficient and faster … SUPER FAST".
+Lane C1. Goal (owner, 2026-11-11): the Rust CI jobs "more efficient and faster … SUPER FAST".
 Every number here is a measured count or a measured second; the instrument is named next to it.
 
 ## 1. Baseline
@@ -13,7 +13,7 @@ Every number here is a measured count or a measured second; the instrument is na
 | Rust check (Windows) | 661 s | ~70 s | 101 s | 482 s | `finished in 320.73s` |
 | Rust check (macOS) | 666 s | ~40 s | 80 s | 538 s | `finished in 365.50s` |
 
-### 1.2 The Legion (WSL2, Ryzen 9 9955HX3D, 16 logical CPUs), `v2-next` at `3d39dc9b`
+### 1.2 The the Windows test machine (WSL2, Ryzen 9 9955HX3D, 16 logical CPUs), `v2-next` at `3d39dc9b`
 
 Instrument: `cargo test --locked` with libtest's `--report-time` (per-test seconds), `XDG_CONFIG_HOME`
 and `TMPDIR` on the ext4 disk as in CI; `cargo --timings`; `/usr/bin/time`; a timing wrapper around the linker.
@@ -72,7 +72,7 @@ Three causes cover the list: **real time by design** (1, 11, 12, 15–18: 115 s)
 (3–7, 10: 170 s), **one fsync per SQLite commit** (2, 8, 9, 13, 14, 19, 20: 112 s).
 
 **Test #1 is a floor.** It needs 65–67 s of real time whatever the machine, so no configuration of the
-library suite finishes in under ~66 s while it runs on every PR. The Legion's 72 s is that one test plus 5 s.
+library suite finishes in under ~66 s while it runs on every PR. The the Windows test machine's 72 s is that one test plus 5 s.
 Shortening it would change what it proves (a chunk "slower than a minute"); it is left as it is and reported
 to the lead as a decision (§8).
 
@@ -81,7 +81,7 @@ to the lead as a decision (§8).
 Old base `3d39dc9b`, library suite, every run `2668 passed; 6 failed; 7 ignored` (the count never moved).
 "Sum" is the sum of the per-test seconds: the work, whatever the thread count.
 
-### 2.1 Legion, 16 logical CPUs, 16 libtest threads
+### 2.1 the Windows test machine, 16 logical CPUs, 16 libtest threads
 
 | # | Configuration | `finished in` | Sum of test seconds | Rebuild cost |
 |---|---|---|---|---|
@@ -96,7 +96,7 @@ The 6 KDF tests: 169.6 s → 16.0 s (`recovery_phrase_unlock_tests` 126.5 → 12
 not in the list. On tmpfs the 10 001-row test goes 43.2 → 7.8 s and the 25×100-row test 21.4 → 6.5 s.
 On 16 CPUs the wall time barely moves (72 → 68 s) because test #1 alone is 65 s.
 
-### 2.2 Four cores (`taskset -c 0,2,4,6` on the Legion): the hosted runner's shape
+### 2.2 Four cores (`taskset -c 0,2,4,6` on the Windows test machine): the hosted runner's shape
 
 The instrument first: the baseline on four cores finishes in 160.75 s; GitHub's Linux runner measured 165.17 s.
 
@@ -142,7 +142,7 @@ other, so no test group was needed and none was written. Dropped.
 
 ## 3. Compile
 
-Legion, fresh target directory each time, `cargo test --locked --no-run` (other lanes were building on the same
+the Windows test machine, fresh target directory each time, `cargo test --locked --no-run` (other lanes were building on the same
 machine, so wall seconds carry noise; CPU seconds are steadier).
 
 | Configuration | Wall | CPU (user) | Library test binary | Target dir | of which dependencies |
@@ -164,7 +164,7 @@ machine, so wall seconds carry noise; CPU seconds are steadier).
   so the check step is gone and `scripts/assert-test-build-covers-all-targets.py` fails the job if a bench
   target (the one kind the test build leaves out) ever appears. Then this pull request's first run showed the
   crate compiling AGAIN in the test step after a `--no-run` build (Linux 55 s, macOS 47 s, Windows 88 s).
-  Reproduced on the Legion with `cargo -v`: `Dirty beebeeb-desktop: the file …/out/tauri-codegen-assets/<hash>.html
+  Reproduced on the Windows test machine with `cargo -v`: `Dirty beebeeb-desktop: the file …/out/tauri-codegen-assets/<hash>.html
   has changed (… 663995254ns after last build …)` — Tauri's `generate_context!` rewrites an embedded asset
   while the library's two units compile, so the NEXT cargo invocation after any fresh build recompiles the crate.
   The old workflow paid this in its test step on every run. One cargo invocation per job avoids it.
@@ -230,9 +230,9 @@ plus a `native` output in `scripts/ci-changed-areas.py` (the `rust` rule already
 is the mirror: on for `native/**`, the toolchain file and the workflow). Three things to check when doing it:
 the count guard requires a `src/lib.rs` harness with tests (a binary-only crate needs a flag for that), the
 engine crate that both the Tauri app and the native UI depend on must turn BOTH areas on, and the new job names
-become required checks only when Guus adds them to the ruleset.
+become required checks only when the owner adds them to the ruleset.
 
-## 5. Legion: before and after (merged base, head `83870abd`, library + 3 integration binaries)
+## 5. the Windows test machine: before and after (merged base, head `83870abd`, library + 3 integration binaries)
 
 | | Truth line (library) | Count guard |
 |---|---|---|
@@ -244,7 +244,7 @@ become required checks only when Guus adds them to the ruleset.
 
 "After" is exactly what the action runs on a hosted Linux runner: `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
 cargo test --locked`, temp files on `/dev/shm`, libtest's default threads. 3 of 3 runs: same counts, 0.08 s
-spread. On 16 CPUs the suite was already at the 65 s floor, so the Legion gains 3.6 s; the gain is on small
+spread. On 16 CPUs the suite was already at the 65 s floor, so the Windows test machine gains 3.6 s; the gain is on small
 machines. Three earlier runs with 16 threads and line-table debuginfo on the same head: 68.93 s, 69.21 s, 69.25 s,
 same counts.
 
@@ -301,7 +301,7 @@ The other runs of this pull request (kept because they decided things):
 limit (not a known flake). Windows: `round7_signout_retries_completed_identity_without_reupload` and
 `ld0105_f2b_native_a_buffered_robocopy_…` (both are the known runner flakes of workspace task 2425) and
 `ld0113_protect_native_tests::new_version_updates_read_only_placeholder` (not listed there): three in one run,
-and no faster (187.6 s vs 177.5 s with 8). The 4-core simulation on the Legion did not predict any of it (its
+and no faster (187.6 s vs 177.5 s with 8). The 4-core simulation on the Windows test machine did not predict any of it (its
 16-thread runs passed), so the simulation is trusted for CPU and I/O, not for scheduling on a 3-core VM.
 **8 threads passed once on each OS and is faster on macOS (122.5 s) and a little on Windows (177.5 vs 198.5 s),
 but one green run is not evidence that it does not flake, so the default stays at libtest's own.** It is one
@@ -325,7 +325,7 @@ creating a `release/*` branch is admin-only.
 
 ## 7. What is still slow, and why
 
-After the change the library suite's sum of test seconds on the Legion is about 600 s; wall time is the 65 s
+After the change the library suite's sum of test seconds on the Windows test machine is about 600 s; wall time is the 65 s
 floor plus 4 s.
 
 | Test(s) | Seconds | Why it stays |
@@ -348,7 +348,7 @@ and the home volume; not investigated, it needs its own measured pull request).
 1. **The 65 s test.** `ld0105_s0_a_chunk_slower_than_a_minute_…` puts a 65 s floor under every Rust job on every
    machine; without it the 4-core suite is 36.9 s (measured, §2.2 row 8) and a warm self-hosted job about 55 s
    instead of about 85 s. Options: (a) leave it (this PR); (b) run it in its own parallel job, which needs a new
-   required check on the `release/*` ruleset (Guus) or accepts that the per-PR required checks no longer cover
+   required check on the `release/*` ruleset (the owner) or accepts that the per-PR required checks no longer cover
    it; (c) rework its fixture onto a virtual clock so it proves "longer than 60 s, bytes at least every 10 s"
    without waiting (a test rewrite in `direct_download`, owner's call). Recommended: (c), else (b).
 2. **8 test threads on macOS/Windows** would cut macOS test execution from 229 to about 122 s. It passed once
@@ -358,7 +358,7 @@ and the home volume; not investigated, it needs its own measured pull request).
 
 ## 9. Not done
 
-- No runner registered, no repository variable or setting changed (Guus's actions).
+- No runner registered, no repository variable or setting changed (the owner's actions).
 - `sccache`, `mold`, a macOS RAM disk, `cache-all-crates`: not measured (reasons in §3 and §7).
 - No sleep or poll loop rewritten, no test database switched to memory, no test touched at all: 0 `.rs` files
   changed. The pass/fail/ignored counts are the base's on all three OSes.
@@ -367,7 +367,7 @@ and the home volume; not investigated, it needs its own measured pull request).
 - The `apt-get` step on the hosted Linux job (24–42 s) was left alone.
 - Windows and macOS self-hosted timings: not measured (no runner exists).
 
-### 1.4 The 50 slowest tests (baseline, Legion, seconds)
+### 1.4 The 50 slowest tests (baseline, the Windows test machine, seconds)
 
 | # | s | test |
 |---|---|---|

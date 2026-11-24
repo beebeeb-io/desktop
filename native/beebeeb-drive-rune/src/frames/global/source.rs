@@ -59,7 +59,7 @@ pub fn size_words(bytes: u64) -> String {
     for (unit, size) in UNITS {
         if bytes >= size {
             let tenths = bytes.saturating_mul(10) / size;
-            return if tenths % 10 == 0 || tenths >= 100 {
+            return if tenths.is_multiple_of(10) || tenths >= 100 {
                 format!("{} {unit}", tenths / 10)
             } else {
                 format!("{}.{} {unit}", tenths / 10, tenths % 10)
@@ -79,6 +79,16 @@ pub enum Step {
     Done,
 }
 
+impl Loading {
+    /// "18,240 of 40,112"; `None` while the list's size is not known yet (w31).
+    pub fn figure(&self, grouped: impl Fn(u64) -> String) -> Option<String> {
+        (self.total > 0).then(|| format!("{} of {}", grouped(self.listed), grouped(self.total)))
+    }
+}
+
+/// What stands in for the count while the list's size is not known yet (w31).
+pub const LIST_ON_ITS_WAY: &str = "Loading your file list";
+
 impl Step {
     pub fn words(self) -> &'static str {
         match self {
@@ -93,6 +103,7 @@ impl Step {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Loading {
     pub listed: u64,
+    /// 0: the list is on its way and its size is not known yet (w31: no "0 of 0" is drawn).
     pub total: u64,
     /// "about 1 min"; `None` while there is no estimate yet.
     pub left: Option<String>,
@@ -113,6 +124,9 @@ pub struct GlobalStatus {
     /// `Some`: there is no connection, and this is how old the list is.
     pub offline: Option<ListedAt>,
     pub loading: Option<Loading>,
+    /// w31: the account's file list has never arrived on this PC and the last try to get it failed. The rows shown
+    /// are not the account's files: a banner says so, with Try again.
+    pub list_failed: bool,
     /// An update is downloaded and waits for a restart: its version. The window draws nothing
     /// for it (the board puts it in the b's flyout, DW-1210); the shell reads it from here.
     pub update_ready: Option<String>,
@@ -126,6 +140,8 @@ pub trait GlobalSource: Send + 'static {
     /// Ask again whether there is a connection (Try again on a preview that needs one).
     /// `true`: there is one now.
     fn check_connection(&mut self) -> bool;
+    /// w31: Try again on a file list that could not be loaded: the engine gets it now. Never waits.
+    fn retry_list(&mut self) {}
 }
 
 /// Nothing is connected that knows: a quiet window, and never a connection.
@@ -144,6 +160,8 @@ impl GlobalSource for Quiet {
 #[derive(Default)]
 pub struct GlobalFixture {
     pub status: GlobalStatus,
+    /// How often the file list was asked for again (`retry_list`).
+    pub list_retries: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// What `check_connection` answers; a `true` also ends the offline state.
     pub back_online: bool,
     /// How often the connection was checked.
@@ -169,6 +187,9 @@ impl GlobalSource for GlobalFixture {
             self.status.offline = None;
         }
         self.back_online
+    }
+    fn retry_list(&mut self) {
+        self.list_retries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

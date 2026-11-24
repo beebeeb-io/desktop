@@ -87,7 +87,7 @@ fn sf2265_forged_name_blob_owner_copy_is_refused() {
     });
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -162,7 +162,7 @@ fn sf2265_purpose_bound_owner_copy_opens_and_registers_l7_custody() {
     let (fixture, seen, bodies) = owner_copy_test(root, invites, json!({"keys":[]}));
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -209,11 +209,11 @@ fn sf2265_legacy_copy_proves_batch_key_but_never_custody() {
     );
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
-    // Review P2-1: the proven key is batch-only. It is not custody, so no
+    // the proven key is batch-only. It is not custody, so no
     // caller may treat it as one (it would seal index names under a key the
     // server could have chosen).
     let error = run(bridge.shared_folder_custody_key(root))
@@ -251,7 +251,7 @@ fn sf2265_legacy_copy_with_forged_rows_is_refused() {
     );
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -289,7 +289,7 @@ fn sf2265_non_approved_invite_is_never_read() {
     );
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );

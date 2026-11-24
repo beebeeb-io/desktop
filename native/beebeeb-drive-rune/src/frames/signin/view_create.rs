@@ -13,6 +13,7 @@ use super::view::actions;
 use super::view_steps::{escape_first, open};
 use super::{EMAIL_KEY, Intent, PASSWORD_KEY, Ui, icons, view_create_phrase as later};
 use crate::State;
+use crate::theme::scale::space;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys};
 use crate::ui::kit;
@@ -198,7 +199,7 @@ fn verify(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         ck::sentence_with_time("resend", "You can ask for a new code in", &clock(ui.resend_left()), t)
     };
     column
-        .child(col().w_full().gap(8.0).child(wait).child(centred(
+        .child(col().w_full().gap(space::S8).child(wait).child(centred(
             au::link(k, "Use a different email", None, t).on_press_tx(cact(Ui::different_email)),
         )))
         .child(actions(6.0).child(primary(
@@ -230,7 +231,7 @@ fn terms(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                 k,
                 &crate::theme::icons::DOC_GENERIC,
                 "Terms of Service",
-                "Opens beebeeb.io/terms",
+                "Opens beebeeb.io/legal/terms",
                 &icons::CHEVRON,
                 t,
             ),
@@ -242,7 +243,7 @@ fn terms(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                 k,
                 &icons::SHIELD,
                 "Privacy Policy",
-                "Opens beebeeb.io/privacy",
+                "Opens beebeeb.io/legal/privacy",
                 &icons::CHEVRON,
                 t,
             ),

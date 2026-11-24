@@ -6,9 +6,10 @@
 use super::menus::file_menu;
 use super::open_with_menu::{self, OPEN_WITH};
 use super::source::{AppChoice, Call, FilesFixture};
-use super::tests::{Calls, NONE, asked, click, find, focused, ids, info, press, right_click, runtime_of, settle};
+use super::tests::{Calls, NONE, asked, click, find, focused, info, press, right_click, runtime_of, settle};
 use super::{MenuKind, Toast};
 use crate::State;
+use crate::shell::app::Screen;
 use crate::frames::office::open_with::{
     AGREEMENT_ID, AGREEMENT_ROW, BOARD_STATUS, WORD_ON, agreement, scene_open_with,
 };
@@ -200,21 +201,84 @@ fn open_with_names_the_app_by_the_identity_it_was_handed() {
     }
 }
 
+/// The toast an online-only "Service agreement.docx" (38 KB) shows while Windows fetches it.
+const DOWNLOADING: Toast = Toast::Downloading(Some(38 * 1024));
+
+/// the owner 11-21: an online-only file is handed over like a kept one (Windows' Cloud Files fetches it), and the window
+/// says how much is coming down. Each line that hands it to another app: an app, and Other….
 #[test]
-fn an_app_press_on_a_file_not_kept_says_keep_first_and_opens_nothing() {
-    for line in ["menu-1-item-1", "menu-1-item-3"] {
+fn an_app_press_on_a_file_not_kept_hands_it_over_and_says_the_download_size() {
+    for (line, call) in [
+        ("menu-1-item-1", Call::OpenInApp(AGREEMENT_ID.into(), app(1).id)),
+        ("menu-1-item-3", Call::OpenWith(AGREEMENT_ID.into())),
+    ] {
         let (mut rt, calls) = spied_with(false, Some(vec![app(1), app(2)]));
         open_the_submenu(&mut rt);
         click(&mut rt, line);
         settle(&mut rt);
         assert!(rt.state.actions.menu.is_none(), "{line} closes the menu");
-        assert_eq!(asked(&calls), [], "{line}: nothing is opened, fetched or decrypted");
-        assert_eq!(rt.state.live_toast(), Some(Toast::KeepFirst), "{line}");
-        assert_eq!(
-            info(&rt, "toast").label.as_deref(),
-            Some(crate::frames::office::docs::KEEP_FIRST),
-            "{line}"
-        );
+        assert_eq!(asked(&calls), [call], "{line}: handed over");
+        assert_eq!(rt.state.live_toast(), Some(DOWNLOADING), "{line}");
+        assert_eq!(info(&rt, "toast").label.as_deref(), Some("Downloading 38 KB…"), "{line}");
+        assert_eq!(DOWNLOADING.stays(), std::time::Duration::from_secs(3), "the usual 3 s");
+    }
+}
+
+/// Review of #467, P3-2: right after Keep on this PC the row is marked kept while the copy still comes down. The source
+/// is asked at the press (the engine: kept AND the bytes here), not the row's mark: handed over, with the size toast.
+#[test]
+fn open_with_on_a_file_kept_but_not_here_yet_says_the_download_size() {
+    for line in ["menu-1-item-1", "menu-1-item-3"] {
+        let mut s = with_agreement(true);
+        let mut fixture = FilesFixture::default();
+        fixture.apps = Some(vec![app(1), app(2)]);
+        fixture.not_here = vec![AGREEMENT_ID.into()];
+        let calls = fixture.calls.clone();
+        s.actions.source = Box::new(fixture);
+        let mut rt = runtime_of(s);
+        click(&mut rt, &format!("row-{AGREEMENT_ROW}-date"));
+        assert!(rt.state.selection_is_kept(), "the row says kept");
+        open_the_submenu(&mut rt);
+        click(&mut rt, line);
+        settle(&mut rt);
+        assert_eq!(asked(&calls).len(), 1, "{line}: handed over");
+        assert_eq!(rt.state.live_toast(), Some(DOWNLOADING), "{line}");
+    }
+}
+
+/// A refusal (sync off, locked) keeps its words: no size toast over it.
+#[test]
+fn an_app_press_the_source_refuses_says_why_not_the_size() {
+    let mut s = with_agreement(false);
+    let mut fixture = FilesFixture::default();
+    fixture.apps = Some(vec![app(1)]);
+    fixture.fail.lock().unwrap().push((super::Action::OpenWith, super::source::ActionError::Unavailable));
+    s.actions.source = Box::new(fixture);
+    let mut rt = runtime_of(s);
+    click(&mut rt, &format!("row-{AGREEMENT_ROW}-date"));
+    open_the_submenu(&mut rt);
+    click(&mut rt, "menu-1-item-1");
+    settle(&mut rt);
+    assert!(
+        matches!(rt.state.live_toast(), Some(Toast::Failed(..))),
+        "{:?}",
+        rt.state.live_toast()
+    );
+}
+
+/// Open (the default app, `frames::open_file`) on an online-only file with no preview: handed to the system's app,
+/// with the size toast; on a kept file, nothing new is said.
+#[test]
+fn open_on_a_file_not_kept_hands_it_to_the_default_app_and_says_the_download_size() {
+    for (kept, toast) in [(false, Some(DOWNLOADING)), (true, None)] {
+        let mut s = with_agreement(kept);
+        let calls = crate::frames::open_file::testing::wire_into(&mut s, false);
+        let mut rt = runtime_of(s);
+        click(&mut rt, &format!("row-{AGREEMENT_ROW}-date"));
+        press(&mut rt, Key::Enter, NONE);
+        settle(&mut rt);
+        assert_eq!(*calls.lock().unwrap(), [Call::OpenDefault(AGREEMENT_ID.into())], "kept: {kept}");
+        assert_eq!(rt.state.live_toast(), toast, "kept: {kept}");
     }
 }
 
@@ -241,13 +305,18 @@ fn beebeeb_in_the_submenu_makes_the_same_open_call_as_open_beebeeb() {
     assert_eq!(info(&rt, "menu-item-0-label").text.as_deref(), Some("Open (Beebeeb)"));
     click(&mut rt, "menu-item-0");
     let opened = asked(&by_open);
-    assert_eq!(opened, [Call::Open(ids(&[AGREEMENT_ID]))]);
+    assert!(opened.is_empty(), "the viewer opens it, not another app: {opened:?}");
+    let on_viewer = |rt: &Runtime<State>| {
+        matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(AGREEMENT_ID))
+    };
+    assert!(on_viewer(&rt));
     // …is what Beebeeb in the submenu does, and no other app is asked.
     let (mut rt, by_line) = spied_with(true, Some(vec![app(1)]));
     open_the_submenu(&mut rt);
     click(&mut rt, "menu-1-item-0");
     assert!(rt.state.actions.menu.is_none());
     assert_eq!(asked(&by_line), opened);
+    assert!(on_viewer(&rt));
 }
 
 #[test]

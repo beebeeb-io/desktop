@@ -58,7 +58,7 @@ impl SpeedWindow {
         self.samples.push_back((now, cumulative_bytes));
         // Drop samples older than `span`
         let cutoff = now.checked_sub(span).unwrap_or(now);
-        while self.samples.front().map_or(false, |(t, _)| *t < cutoff) {
+        while self.samples.front().is_some_and(|(t, _)| *t < cutoff) {
             self.samples.pop_front();
         }
         if self.samples.len() < 2 {
@@ -93,6 +93,12 @@ pub struct FetchSpeed {
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl Default for FetchSpeed {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FetchSpeed {
     pub fn new() -> Self {
         FetchSpeed {
@@ -129,23 +135,21 @@ pub struct NeedsAttention {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn needs_attention(db: &crate::state_db::StateDb) -> Option<Vec<NeedsAttention>> {
     let rows = db.poisoned().ok()?;
-    Some(
-        rows.into_iter()
-            .filter(|r| r.needs_attention)
-            .filter_map(|r| match db.get_file(&r.file_id) {
-                Ok(Some(entry)) => Some(Ok(NeedsAttention {
-                    file_id: r.file_id,
-                    path: entry.path,
-                    size: entry.size_bytes.max(0) as u64,
-                })),
-                // No files row: no exit, no row (above).
-                Ok(None) => None,
-                // Review P3-7: a read error fails the whole read, so the poll keeps the rows it had.
-                Err(e) => Some(Err(e)),
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?,
-    )
+    rows.into_iter()
+        .filter(|r| r.needs_attention)
+        .filter_map(|r| match db.get_file(&r.file_id) {
+            Ok(Some(entry)) => Some(Ok(NeedsAttention {
+                file_id: r.file_id,
+                path: entry.path,
+                size: entry.size_bytes.max(0) as u64,
+            })),
+            // No files row: no exit, no row (above).
+            Ok(None) => None,
+            // Review P3-7: a read error fails the whole read, so the poll keeps the rows it had.
+            Err(e) => Some(Err(e)),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
 }
 
 /// The needs-attention rows the last read returned, kept with the engine generation they were read
@@ -336,7 +340,7 @@ impl ReceiveMeter {
     /// `wire_bytes` that were added are not used after all (a body that broke off, a chunk that
     /// did not authenticate): no longer progress. They stay in [`Self::received`].
     pub fn discard(&self, wire_bytes: u64) {
-        let _ = self.kept.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |k| {
+        let _ = self.kept.try_update(Ordering::Relaxed, Ordering::Relaxed, |k| {
             Some(k.saturating_sub(wire_bytes))
         });
     }
@@ -345,7 +349,7 @@ impl ReceiveMeter {
     pub fn rollback_to(&self, mark: u64) {
         let _ = self
             .kept
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |k| Some(k.min(mark)));
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |k| Some(k.min(mark)));
     }
 
     /// LD-0105 W2: `wire_bytes` arrived but are not progress by themselves (a range session counts its
@@ -480,10 +484,34 @@ impl std::fmt::Debug for Wake {
     }
 }
 
+/// dc-163: the least time between two reports of the first-listing count. The ingest reports at most this often
+/// (not per row), and every report rings the wake hook, so a window redraws the count about five times a second.
+pub const LISTING_REPORT_EVERY: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Debug, Default)]
 pub struct TransferBoard {
     inner: Mutex<Inner>,
     wake: Wake,
+    /// (rows ingested, rows in the snapshot) while a snapshot is being applied; `None` otherwise.
+    first_listing: Mutex<Option<(u64, u64)>>,
+    /// w31: whether the account's file list has ever arrived on this PC ([`FirstList`], as its number).
+    first_list: std::sync::atomic::AtomicU8,
+    /// w31: a window asked for the pull now (Try again on a first list that failed); the runner's loop waits on it.
+    pull_now: tokio::sync::Notify,
+}
+
+/// w31: the account's first file list on this PC, as the running engine last said it. Until it arrived the local
+/// state holds no server row at all (at most the folders this PC's own sync folder gave it), so a window must not
+/// draw that as the account's files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FirstList {
+    /// The list arrived (this run or an earlier one), or no engine said anything yet.
+    #[default]
+    Here,
+    /// Never listed, and the engine is getting it.
+    Awaited,
+    /// Never listed, and the last try failed. The engine tries again at every check.
+    Failed,
 }
 
 impl TransferBoard {
@@ -498,6 +526,65 @@ impl TransferBoard {
         if let Ok(mut slot) = self.wake.0.lock() {
             *slot = Some(Arc::new(wake));
         }
+    }
+
+    /// How far the listing of the account's files has come while a snapshot is ingested (DW-0802b): `(listed, total)`.
+    /// `None` when no snapshot is being applied. In memory, never waits on anything but a short lock.
+    pub fn first_listing(&self) -> Option<(u64, u64)> {
+        self.first_listing.lock().ok().and_then(|slot| *slot)
+    }
+
+    /// A snapshot of `total` rows is being ingested and `listed` are in. Rings the wake hook. dc-163: the ingest
+    /// calls this at most every [`LISTING_REPORT_EVERY`], never per row, so each call may ring.
+    pub fn set_first_listing(&self, listed: u64, total: u64) {
+        match self.first_listing.lock() {
+            Ok(mut slot) => *slot = Some((listed, total)),
+            Err(_) => return,
+        }
+        self.ring();
+    }
+
+    /// The snapshot is whole (or its ingest failed): no listing is in progress. Rings the wake hook.
+    pub fn end_first_listing(&self) {
+        let had = self
+            .first_listing
+            .lock()
+            .ok()
+            .is_some_and(|mut slot| slot.take().is_some());
+        if had {
+            self.ring();
+        }
+    }
+
+    /// w31: where the account's first file list is. In memory, never waits.
+    pub fn first_list(&self) -> FirstList {
+        match self.first_list.load(Ordering::SeqCst) {
+            1 => FirstList::Awaited,
+            2 => FirstList::Failed,
+            _ => FirstList::Here,
+        }
+    }
+
+    /// w31: the runner says where the first list is. Rings the wake hook when that changed.
+    pub fn set_first_list(&self, state: FirstList) {
+        let number = match state {
+            FirstList::Here => 0,
+            FirstList::Awaited => 1,
+            FirstList::Failed => 2,
+        };
+        if self.first_list.swap(number, Ordering::SeqCst) != number {
+            self.ring();
+        }
+    }
+
+    /// w31: ask the running engine for its pull now instead of at its next tick. A permit is kept when it is busy.
+    pub fn ask_pull_now(&self) {
+        self.pull_now.notify_one();
+    }
+
+    /// w31: the runner's wait for [`Self::ask_pull_now`].
+    pub async fn pull_asked(&self) {
+        self.pull_now.notified().await;
     }
 
     fn ring(&self) {
@@ -613,7 +700,7 @@ impl TransferBoard {
                     .iter()
                     .filter_map(|(id, t)| {
                         // No timestamp → keep (conservative); timestamp too old → prune.
-                        if t.failed_at_secs.map_or(false, |s| s + FAILED_ROW_TTL_SECS < now_secs) {
+                        if t.failed_at_secs.is_some_and(|s| s + FAILED_ROW_TTL_SECS < now_secs) {
                             Some(id.clone())
                         } else {
                             None
@@ -864,7 +951,7 @@ impl FetchRow {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn follow(&self, meter: &ReceiveMeter) -> std::convert::Infallible {
         let Some(guard) = &self.guard else {
-            return std::future::pending().await;
+            match std::future::pending::<std::convert::Infallible>().await {}
         };
         let mut tick = tokio::time::interval(FOLLOW_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

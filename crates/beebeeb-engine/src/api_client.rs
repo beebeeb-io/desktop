@@ -82,6 +82,8 @@ pub use tracking::{MyActivity, MyActivityEvent};
 mod two_factor;
 pub use two_factor::TwoFactorStatus;
 mod previews;
+mod pins;
+pub use pins::{MAX_PINS, pinned_ids_of};
 mod upload;
 pub use previews::{PreviewPutError, preview_retry_wait};
 
@@ -91,6 +93,7 @@ mod region_set_fixture {
     use crate::account_dto::SetPreferredRegionResponse;
     use serde_json::Value;
     use std::collections::{HashMap, VecDeque};
+    #[cfg(test)]
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
 
@@ -114,14 +117,17 @@ mod region_set_fixture {
         requests: Vec<RegionRequest>,
     }
 
+    #[cfg(test)]
     pub(super) struct RegionFixtureHandle {
         id: String,
         pub base_url: String,
     }
 
+    #[cfg(test)]
     static FIXTURE_ID: AtomicUsize = AtomicUsize::new(1);
     static FIXTURES: OnceLock<Mutex<HashMap<String, Arc<Mutex<RegionFixture>>>>> = OnceLock::new();
 
+    #[cfg(test)]
     impl RegionFixtureHandle {
         pub fn start(responses: Vec<(String, Value)>) -> Self {
             let id = format!("set-region-fixture-{}", FIXTURE_ID.fetch_add(1, Ordering::Relaxed));
@@ -251,6 +257,7 @@ mod tests {
     mod errors;
     mod ids;
     mod link;
+    mod pins;
     mod provenance;
     mod proxy;
     mod region;

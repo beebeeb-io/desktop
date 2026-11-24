@@ -37,6 +37,15 @@ pub struct Details {
     pub picture: bool,
 }
 
+/// Where a file went that has no preview in the app (`frames::open_file`, steps 2 and 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outside {
+    /// The app the system has for its kind.
+    DefaultApp,
+    /// The system has none: its file manager shows the file selected in its folder.
+    Explorer,
+}
+
 /// Why an action did not happen. The window says it in words (DW-0109), never as a code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionError {
@@ -63,6 +72,9 @@ pub enum ActionError {
     NotOnThisSystem,
     /// This app cannot do it yet (a link to a folder, to several items, a view-only link): nothing was sent.
     NotYet,
+    /// Copy link left it: the item is a folder, and only a file has a link here. Nothing was sent, and Try again
+    /// would change nothing.
+    NotAFile,
     /// Copy link left it: the file already has a link, and that link cannot be copied again yet. No second link
     /// was made, and Try again would change nothing.
     HasLink,
@@ -70,6 +82,20 @@ pub enum ActionError {
     /// its drive, too big for it, or the move failed), and it is never deleted for good. The file and its upload
     /// stay as they were.
     NotToRecycleBin,
+    /// New file left it: the disk of this PC has no room for it. Nothing was made; asking again after making room
+    /// works.
+    NoRoom,
+    /// New file left it: more than a new file is made with here. Nothing was made, and Try again would change
+    /// nothing.
+    TooLarge,
+    /// Another item here has the very same name, and this PC holds one entry for the two: the press would reach the
+    /// other item's file, so nothing was done. Asking again changes nothing; renaming one on the web does.
+    NameShared,
+    /// Another item here has the same name but for capital letters, and this PC (which does not tell them apart)
+    /// holds one entry for the two: the press would reach the other item's file, so nothing was done.
+    NameSharedButCase,
+    /// Pin to sidebar left it: the sidebar already holds as many pins as web allows. Nothing was changed.
+    PinLimit,
 }
 
 /// What a person asked for, in the words the failure message uses (DW-0109: "Couldn't rename.").
@@ -115,6 +141,10 @@ pub enum Action {
     RetryUpload,
     /// Cancel upload (DW-0427).
     CancelUpload,
+    /// Pin to sidebar: the folder joins the account's pinned folders.
+    Pin,
+    /// Unpin from sidebar.
+    Unpin,
 }
 
 impl Action {
@@ -145,6 +175,8 @@ impl Action {
             Action::PauseUploads => "pause the uploads",
             Action::RetryUpload => "try that upload again",
             Action::CancelUpload => "cancel the upload",
+            Action::Pin => "pin to the sidebar",
+            Action::Unpin => "unpin from the sidebar",
         }
     }
 }
@@ -157,6 +189,7 @@ pub enum Call {
     Duplicate(Vec<String>),
     KeepOffline(Vec<String>, bool),
     CopyLink(Vec<String>),
+    #[allow(dead_code)]
     Open(Vec<String>),
     ShowInFileExplorer(Vec<String>),
     /// Into the folder with this id (`None`: the root).
@@ -181,10 +214,19 @@ pub enum Call {
     RestoreVersion(String, String),
     /// Windows' app chooser for the file with this id (DW-0408b).
     OpenWith(String),
+    /// The file with this id went outside the app, to the app the system has for its kind (`open_file` step 2).
+    OpenDefault(String),
+    /// The file with this id went outside the app, to the file manager with it selected (`open_file` step 3).
+    OpenRevealed(String),
+    /// The same for a path that is not an item of the drive.
+    OpenPathDefault(std::path::PathBuf),
+    OpenPathRevealed(std::path::PathBuf),
     /// The file with this id (its copy kept on this PC) opened in the app with this id (DW-1562).
     OpenInApp(String, String),
     /// The file with this id that changed in two places: what is kept (DW-0429).
     KeepVersion(String, super::actions_data::Keep),
+    /// The folder with this id is pinned (`true`) or unpinned.
+    Pin(String, bool),
     /// The upload with this id is tried again now (DW-0427).
     RetryUpload(String),
     /// The account left: what was uploading is cancelled and forgotten.
@@ -276,6 +318,7 @@ pub trait FilesSource: Send + 'static {
     /// accepted: the link arrives as `Change::Link` and the WINDOW copies it (only a handler's `Tx` can).
     fn copy_link(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
     /// Open these files in their apps (downloaded and decrypted on this PC first).
+    #[allow(dead_code)]
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
     fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
     /// Upload these files of this PC into the folder with this id (`None`: the root).
@@ -338,6 +381,26 @@ pub trait FilesSource: Send + 'static {
     fn share_of(&self, _item: &DriveItem) -> Option<String> {
         None
     }
+    /// The account's pinned folders as the sidebar shows them, in the order pinned: only those this PC's local state
+    /// knows. Never waits (what is held; read in the background). Empty: none, or not known yet.
+    fn pinned(&self) -> Vec<DriveItem> {
+        Vec::new()
+    }
+    /// The ids of every pinned folder (known here or not): what the limit counts and what a toggle looks at.
+    fn pinned_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Pin (`true`) or unpin the folder. Accepted at once and written to the account in the background; a write that
+    /// fails is read back, so the sidebar returns to what the account holds.
+    fn set_pinned(&mut self, _folder: &DriveItem, _pin: bool) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// Read the account's pins again (the window got focus: a pin made on the web shows up).
+    fn refresh_pins(&mut self) {}
+    /// The item with this id, as this account's local state holds it. `None`: not known, or not this account's.
+    fn item_of(&self, _id: &str) -> Option<DriveItem> {
+        None
+    }
     /// The versions of a file, the current one first (DW-0413). Empty: not known.
     fn versions(&self, _item: &DriveItem) -> Vec<super::actions_data::Version> {
         Vec::new()
@@ -366,6 +429,16 @@ pub trait FilesSource: Send + 'static {
     fn open_with(&mut self, _item: &DriveItem) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
+    /// Steps 2 and 3 of `frames::open_file`: the file (its copy on this PC) with the app the system has for its
+    /// kind, else the system's file manager with the file selected. Only `open_file` calls it, after the in-app
+    /// preview was ruled out. Never decrypts or copies anything for the app.
+    fn open_outside(&mut self, _item: &DriveItem) -> Result<Outside, ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// [`FilesSource::open_outside`] for a file that is not an item of the drive (the licence notice beside the exe).
+    fn open_path_outside(&mut self, _path: &std::path::Path) -> Result<Outside, ActionError> {
+        Err(ActionError::Unavailable)
+    }
     /// The apps Windows reports for this file's type (DW-1562), at most 8, never Beebeeb. Called on the window's thread
     /// while the menu is drawn: never waits (what is held; asked once in the background). Empty: none known.
     fn apps_for(&self, _item: &DriveItem) -> Vec<AppChoice> {
@@ -375,6 +448,13 @@ pub trait FilesSource: Send + 'static {
     fn open_in_app(&mut self, _item: &DriveItem, _app: &AppChoice) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
+    /// Is this file kept on this PC AND are its bytes here, now? Open With hands only such a copy to another app. The
+    /// engine answers from its own facts; the default, for a source with no engine, is the row's mark.
+    fn kept_here(&self, item: &DriveItem) -> bool {
+        item.pc_status.as_deref() == Some("available_offline")
+    }
+    /// A session ended (a lock, a sign-out, another account): what it asked to start and has not begun goes.
+    fn forget_starts(&mut self) {}
     /// The files that changed in two places and wait for a choice, the first to answer first (DW-0429).
     fn conflicts(&self) -> Vec<super::actions_data::Conflict> {
         Vec::new()
@@ -434,6 +514,11 @@ pub trait FilesSource: Send + 'static {
     }
     /// What a row of a protected folder is beyond a folder: a device, a service (DW-0422).
     fn backup_entry(&self, _item: &DriveItem) -> Option<super::protected::BackupEntry> {
+        None
+    }
+    /// The one-time "the local file list was rebuilt" words, once, after the engine moved a damaged state.db aside
+    /// (144b); `None` every call after, and for a source with no engine.
+    fn take_rebuilt_notice(&mut self) -> Option<String> {
         None
     }
     /// The note over a folder a service manages (DW-0424).
@@ -558,6 +643,12 @@ pub struct FilesFixture {
     changes: Vec<Change>,
     /// The apps Open With lists (DW-1562). `None`: the board's (Microsoft Word for a Word file).
     pub apps: Option<Vec<AppChoice>>,
+    /// Ids the engine would say are not here yet (kept, still coming down): `kept_here` is false whatever the row says.
+    pub not_here: Vec<String>,
+    /// Whether the system has an app for the kind of file asked (`open_outside`): a test turns it off.
+    pub no_default_app: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// How often a session end told it to forget its starts. Shared like `calls` (and kept out of them).
+    pub starts_forgotten: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// What New folder, Rename and Move changed in the board's folders: shared with the
     /// [`BoardDrive`] that lists them, so a change is still there when the folder is shown again.
     pub edits: SharedEdits,
@@ -566,6 +657,8 @@ pub struct FilesFixture {
     /// A source that would accept a change of a protected item: so a test can show that the
     /// WINDOW refuses it before it asks (`protected_tests.rs`).
     pub lenient: bool,
+    /// The pinned folders, in the order pinned.
+    pub pins: Vec<DriveItem>,
 }
 
 /// What the fixture's actions changed in the board's folders.
@@ -719,6 +812,24 @@ impl FilesSource for FilesFixture {
         super::protected_fixture::notice(folder)
     }
 
+    fn pinned(&self) -> Vec<DriveItem> {
+        self.pins.clone()
+    }
+
+    fn pinned_ids(&self) -> Vec<String> {
+        self.pins.iter().map(|item| item.id.clone()).collect()
+    }
+
+    fn set_pinned(&mut self, folder: &DriveItem, pin: bool) -> Result<(), ActionError> {
+        self.refuse(if pin { Action::Pin } else { Action::Unpin }, std::slice::from_ref(folder))?;
+        self.record(Call::Pin(folder.id.clone(), pin));
+        self.pins.retain(|item| item.id != folder.id);
+        if pin {
+            self.pins.push(folder.clone());
+        }
+        Ok(())
+    }
+
     fn sort_of(&self, folder: Option<&str>) -> Option<super::Sort> {
         self.sorts.get(&folder.map(str::to_string)).copied()
     }
@@ -792,6 +903,7 @@ impl FilesSource for FilesFixture {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
         self.refuse(Action::Open, items)?;
         self.record(Call::Open(ids(items)));
@@ -934,6 +1046,27 @@ impl FilesSource for FilesFixture {
         super::actions_data::More::preview(item)
     }
 
+    fn open_outside(&mut self, item: &DriveItem) -> Result<Outside, ActionError> {
+        self.refuse(Action::Open, std::slice::from_ref(item))?;
+        if self.no_default_app.load(std::sync::atomic::Ordering::SeqCst) {
+            self.record(Call::OpenRevealed(item.id.clone()));
+            Ok(Outside::Explorer)
+        } else {
+            self.record(Call::OpenDefault(item.id.clone()));
+            Ok(Outside::DefaultApp)
+        }
+    }
+
+    fn open_path_outside(&mut self, path: &std::path::Path) -> Result<Outside, ActionError> {
+        if self.no_default_app.load(std::sync::atomic::Ordering::SeqCst) {
+            self.record(Call::OpenPathRevealed(path.to_path_buf()));
+            Ok(Outside::Explorer)
+        } else {
+            self.record(Call::OpenPathDefault(path.to_path_buf()));
+            Ok(Outside::DefaultApp)
+        }
+    }
+
     fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {
         self.refuse(Action::OpenWith, std::slice::from_ref(item))?;
         self.record(Call::OpenWith(item.id.clone()));
@@ -951,6 +1084,14 @@ impl FilesSource for FilesFixture {
         self.refuse(Action::OpenWith, std::slice::from_ref(item))?;
         self.record(Call::OpenInApp(item.id.clone(), app.id.clone()));
         Ok(())
+    }
+
+    fn kept_here(&self, item: &DriveItem) -> bool {
+        !self.not_here.contains(&item.id) && item.pc_status.as_deref() == Some("available_offline")
+    }
+
+    fn forget_starts(&mut self) {
+        self.starts_forgotten.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn conflicts(&self) -> Vec<super::actions_data::Conflict> {

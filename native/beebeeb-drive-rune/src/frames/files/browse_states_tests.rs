@@ -1,7 +1,7 @@
 //! Tests of the list offline (DW-1108) and during the first download (DW-1107).
 
 use super::browse_states::ListedSoFar;
-use super::source::{BoardDrive, Call};
+use super::source::BoardDrive;
 use super::tests::*;
 use super::{Intent, Toast};
 use crate::State;
@@ -155,26 +155,11 @@ fn first_download() -> (Runtime<State>, Calls) {
 #[test]
 fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
     let (mut rt, calls) = first_download();
-    assert_eq!(text(&rt, "ready-title"), "Getting your files ready");
     assert_eq!(
-        text(&rt, "ready-text"),
-        "Your file list is downloading and being decrypted on this PC. You can start using Beebeeb before it's finished."
+        text(&rt, "loading-words"),
+        "Getting your files ready: 18,240 of 40,112 \u{00B7} about 1 min left"
     );
-    assert_eq!(
-        [text(&rt, "ready-figure"), text(&rt, "ready-left")],
-        ["18,240 of 40,112", " \u{00B7} about 1 min left"]
-    );
-    assert_eq!(
-        [text(&rt, "ready-list-value"), text(&rt, "ready-thumbs-value")],
-        ["In progress", "Waiting for the file list"]
-    );
-    let bar = info(&rt, "ready-bar");
-    assert_eq!(
-        (bar.role, bar.label.as_deref()),
-        ("progressbar", Some("Getting your files ready: 45 percent"))
-    );
-    let (whole, filled) = (bar.rect[2], info(&rt, "ready-bar-fill").rect[2]);
-    assert!((filled / whole - 0.45).abs() < 0.01, "{filled} of {whole}");
+    assert_eq!(info(&rt, "loading-bar").role, "progressbar");
     assert_eq!(text(&rt, "status-text"), "Getting your files ready");
     assert_eq!(text(&rt, "status-details"), "18,240 of 40,112 listed");
     assert_eq!(text(&rt, "item-count"), "18,240 of 40,112 listed");
@@ -183,9 +168,14 @@ fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
     // A listed file works at once; then the card gives way to the strip (DW-0118).
     click(&mut rt, "row-5-date");
     press(&mut rt, Key::Enter, NONE);
-    assert_eq!(asked(&calls), [Call::Open(ids(&["budget"]))]);
+    assert!(asked(&calls).is_empty(), "the viewer opens it, not another app");
+    rt.update(|s, _| {
+        s.viewer.ui = None;
+        crate::shell::host::dispatch(s, crate::shell::app::Event::Escape);
+    });
+    settle(&mut rt);
     assert!(rt.state.actions.toast != Some(Toast::LinkCopied));
-    assert!(find(&rt, "ready-card").is_none(), "the card is gone");
+    assert!(find(&rt, "loading").is_none(), "the card is gone");
     assert_eq!(
         text(&rt, "item-count"),
         "7 items",
@@ -207,7 +197,7 @@ fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
 #[test]
 fn no_card_when_nothing_loads_and_the_scenes_are_these_states() {
     let (rt, _, _) = spied();
-    assert!(find(&rt, "ready-card").is_none());
+    assert!(find(&rt, "loading").is_none());
     let scene = |frame: &str| {
         let mut state = init();
         let run = super::browse_states::SCENES
@@ -267,4 +257,79 @@ fn a_folder_keeps_its_own_view_and_the_panel_follows_the_selection() {
     rt.update(|s, _| grid::set(s, false));
     settle(&mut rt);
     assert!(find(&rt, "row-0-date").is_some());
+}
+
+/// w31 (the Windows test machine, 2026-11-20): what the local state holds before the account's file list ever arrived: the sync
+/// folder's own folders, and no file.
+struct FoldersOnly(BoardDrive);
+
+impl crate::source::DriveSource for FoldersOnly {
+    fn list(&self, folder_id: Option<&str>) -> Result<crate::source::Listing, crate::source::SourceError> {
+        let mut listing = self.0.list(folder_id)?;
+        listing.items.retain(|item| item.is_folder);
+        Ok(listing)
+    }
+
+    fn storage(&self) -> Option<crate::source::StorageSummary> {
+        self.0.storage()
+    }
+}
+
+fn before_the_first_list(status: crate::frames::global::GlobalStatus) -> (Runtime<State>, GlobalFixture) {
+    let mut state = init();
+    state.source = Box::new(FoldersOnly(BoardDrive::new()));
+    (state.listing, state.list_error) = crate::load(state.source.as_ref(), None);
+    assert!(
+        !state.listing.items.is_empty() && state.listing.items.iter().all(|item| item.is_folder),
+        "folders and no file, as on that PC"
+    );
+    let fixture = GlobalFixture::of(status);
+    let seen = GlobalFixture {
+        status: fixture.status.clone(),
+        back_online: false,
+        checks: fixture.checks.clone(),
+        list_retries: fixture.list_retries.clone(),
+    };
+    state.global = Ui::new(Box::new(fixture));
+    state.show_detail_pane = false;
+    state.clear_selection();
+    let (rt, _, _) = spied_on(state);
+    (rt, seen)
+}
+
+/// w31: while the account's file list is on its way (its size not known yet) the window says so, above the folders
+/// it has: never a finished list of folders with no word, and never "0 of 0".
+#[test]
+fn w31_before_the_first_list_arrives_the_window_says_it_is_loading() {
+    use crate::frames::global::source::{Loading, Step};
+    let (rt, _) = before_the_first_list(crate::frames::global::GlobalStatus {
+        loading: Some(Loading {
+            listed: 0,
+            total: 0,
+            left: None,
+            file_list: Step::InProgress,
+            thumbnails: Step::WaitingForFileList,
+        }),
+        ..Default::default()
+    });
+    assert_eq!(text(&rt, "loading-words"), "Getting your files ready");
+    assert_eq!(text(&rt, "status-text"), "Getting your files ready");
+    assert_eq!(text(&rt, "status-details"), "Loading your file list");
+    assert_eq!(text(&rt, "item-count"), "Loading your file list");
+}
+
+/// w31: a first file list that could not be loaded is said, with Try again, which asks the engine for it now.
+#[test]
+fn w31_a_first_list_that_failed_is_said_with_try_again() {
+    let (mut rt, seen) = before_the_first_list(crate::frames::global::GlobalStatus {
+        list_failed: true,
+        ..Default::default()
+    });
+    assert!(find(&rt, "loading").is_none());
+    assert!(find(&rt, "banner").is_some(), "the failure is said");
+    let button = info(&rt, "banner-action");
+    assert_eq!((button.role, button.label.as_deref()), ("button", Some("Try again")));
+    assert!(find(&rt, "banner-dismiss").is_none(), "it cannot be dismissed while it is true");
+    click(&mut rt, "banner-action");
+    assert_eq!(seen.list_retries.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

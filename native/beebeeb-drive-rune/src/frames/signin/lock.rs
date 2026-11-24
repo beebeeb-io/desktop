@@ -235,6 +235,14 @@ impl Ui {
         self.pump();
     }
 
+    /// The app quits (`on_quit`): the prompt this lock screen waits for is taken away and no longer waited for, so a
+    /// quit that Windows then cancels (a shutdown another app refused) leaves Unlock asking again.
+    pub(super) fn lock_end_hello(&mut self) {
+        if std::mem::take(&mut self.lock.hello_waiting) {
+            self.source.cancel_hello();
+        }
+    }
+
     /// The window came to the front while the screen is locked: Windows Hello starts by itself, once per lock.
     pub(super) fn lock_window_focused(&mut self) {
         if self.lock.level == Some(Level::Screen) && !self.lock.auto_asked {
@@ -314,7 +322,7 @@ pub fn wait_words(wait_ms: u64) -> &'static str {
 
 /// Scenes of the lock's states the board has no frame for (core's contract, section 7: "no frame yet"), for a
 /// render to look at: `--scene LOCK-...`. Fixture data only; none has a golden, so none is gated.
-pub const SCENES: &[(&str, fn(&mut crate::State))] = &[
+pub const SCENES: &[crate::frames::signin::Scene<crate::State>] = &[
     ("LOCK-hello-unavailable", |s| lock_scene(s, false, false)),
     ("LOCK-screen-password", |s| lock_scene(s, false, true)),
     ("LOCK-vault-closed", |s| lock_scene(s, true, false)),

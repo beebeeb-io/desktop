@@ -26,6 +26,8 @@ pub(crate) enum Kind {
     // Nothing raises one through a `Notice` yet; the account's own security alerts come from Beebeeb.
     #[allow(dead_code)]
     Security,
+    /// DW-A11: another device asks to sign in and the request reached this PC. Security, so always on.
+    SignInRequest,
     /// "Sync finished" (Sync on this PC).
     SyncFinished,
     /// "Files need a decision" (Sync on this PC).
@@ -79,7 +81,7 @@ pub(crate) fn kind_of(notice: &Notice) -> Kind {
 /// "Allow notifications" silences them); every other kind needs "Allow notifications" and its own switch.
 pub(crate) fn wanted(kind: Kind, switches: &Switches) -> bool {
     match kind {
-        Kind::Security => true,
+        Kind::Security | Kind::SignInRequest => true,
         _ if !switches.allow => false,
         Kind::SyncFinished => switches.sync_finished,
         Kind::NeedsDecision => switches.needs_decision,
@@ -103,6 +105,10 @@ pub(crate) fn words(kind: Kind) -> Words {
         Kind::Security => Words {
             title: "Security change on your account",
             body: "Open Beebeeb to see what changed.",
+        },
+        Kind::SignInRequest => Words {
+            title: "Sign-in request",
+            body: "Another device is asking to sign in. Open Beebeeb to approve or deny.",
         },
         Kind::SyncFinished => Words {
             title: "Sync finished",
@@ -128,6 +134,7 @@ pub(crate) fn words(kind: Kind) -> Words {
 }
 
 /// The words of a notice.
+#[allow(dead_code)] // no caller yet
 pub(crate) fn words_of(notice: &Notice) -> Words {
     words(kind_of(notice))
 }
@@ -248,6 +255,17 @@ pub(crate) fn show(notice: &Notice) {
         return;
     }
     if show_kind(identity, kind).is_err() {
+        tracing::warn!("toast not shown");
+    }
+}
+
+/// DW-A11: a sign-in request arrived. Always shown (security); the app opens on click and the Approve page
+/// holds the request.
+pub(crate) fn show_sign_in_request() {
+    let Some(identity) = KEPT_IDENTITY.get().copied() else {
+        return;
+    };
+    if show_kind(identity, Kind::SignInRequest).is_err() {
         tracing::warn!("toast not shown");
     }
 }

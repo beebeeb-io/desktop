@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 use super::super::{Engine, EngineConfig};
 use super::*;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use crate::test_api::{FakeApi, Reply, Request};
@@ -58,7 +58,8 @@ fn bodies(account: &FakeAccount) -> [Value; 4] {
             { "id": INV_MINE, "file_id": PLAN, "status": "approved", "sender_email": "other@example.eu",
               "file_name_encrypted": "{\"not\":\"for this key\"}", "encrypted_file_key": SECRETS[3],
               "sender_public_key": "AAAA", "size_bytes": 2048, "approved_at": "2026-11-02T10:00:00Z" },
-            { "id": INV_CLAIMED, "file_id": TRIP, "status": "claimed", "sender_email": "other@example.eu" },
+            { "id": INV_CLAIMED, "file_id": TRIP, "status": "claimed", "sender_email": "other@example.eu",
+              "is_folder": true, "created_at": "2026-11-03T10:00:00Z" },
         ] }),
         json!({ "invites": [
             sent(INV_A, TRIP, "Invented trip", "one@example.eu", "approved", "write"),
@@ -70,7 +71,8 @@ fn bodies(account: &FakeAccount) -> [Value; 4] {
               "expires_at": "2026-12-01T00:00:00Z", "has_passphrase": true },
             { "id": INV_IN, "file_id": TRIP, "token": SECRETS[0] },
             { "id": INV_MINE, "file_id": PLAN, "token": SECRETS[0], "revoked": true },
-            { "id": INV_A, "file_id": THEIRS, "token": SECRETS[0] },
+            { "id": INV_A, "file_id": THEIRS, "token": SECRETS[0],
+              "file": { "name_encrypted": encrypted(account, THEIRS, "Linked only.txt"), "size_bytes": 3 } },
         ] }),
         json!({ "file_requests": [
             { "id": INV_A, "title": "Invented request", "files_received": 3, "max_files": 50, "closed": false,
@@ -125,7 +127,7 @@ fn engine(fake: &Fake, sign_in: bool) -> Engine<MemoryCredentials> {
         state_dir: crate::state_paths::init_for_test(),
         api_base: fake.api.base.clone(),
     };
-    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the engine opens");
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens");
     engine.restore();
     if sign_in {
         engine
@@ -154,7 +156,7 @@ fn the_overview_is_the_servers_rows_with_names_opened_here_and_no_key_material()
     assert_eq!(overview.session, engine.session_turn());
     assert_eq!(overview.owner_email.as_deref(), Some(fake.account.email.as_str()));
 
-    // Incoming: the invitation waits, the approved one is shared with the account, the claimed one is neither. A
+    // Incoming: the invitation waits, the approved one is shared with the account, the claimed one (accepted, no sealed key yet) is shown as still opening. A
     // name that is not an envelope, or does not open, is the fixed words.
     let incoming: Vec<_> = overview
         .incoming
@@ -164,8 +166,9 @@ fn the_overview_is_the_servers_rows_with_names_opened_here_and_no_key_material()
     assert_eq!(
         incoming,
         [
-            (INV_IN, ENCRYPTED_ITEM, true, true),
-            (INV_MINE, ENCRYPTED_ITEM, false, false)
+            (INV_IN, OPENING_SHARED_FOLDER, true, true),
+            (INV_MINE, ENCRYPTED_ITEM, false, false),
+            (INV_CLAIMED, OPENING_SHARED_FOLDER, false, true)
         ]
     );
     assert_eq!(overview.incoming[0].from_email, "sender@example.eu");
@@ -191,7 +194,7 @@ fn the_overview_is_the_servers_rows_with_names_opened_here_and_no_key_material()
         ]
     );
 
-    // Links: one per item, never a revoked one; the name is the share's, else the fixed words.
+    // Links: one per item, never a revoked one; the name is the item's (read from the link row when no invite names it), else the fixed words.
     let links: Vec<_> = overview
         .links
         .iter()
@@ -206,7 +209,7 @@ fn the_overview_is_the_servers_rows_with_names_opened_here_and_no_key_material()
         .collect();
     assert_eq!(
         links,
-        [(TRIP, "Invented trip", true, true), (THEIRS, SHARED_ITEM, false, false)]
+        [(TRIP, "Invented trip", true, true), (THEIRS, "Linked only.txt", false, false)]
     );
 
     assert_eq!(overview.requests.len(), 2);
@@ -442,4 +445,57 @@ fn declining_uses_the_decline_route_and_hiding_a_request_never_deletes_it() {
     };
     assert_eq!(engine.share_change(session, &bad), Err(ShareChangeError::NotFound));
     assert_eq!(share_routes(&fake).len(), count);
+}
+
+#[test]
+fn a_request_expiry_and_leaving_are_sent_as_the_server_takes_them() {
+    let fake = fake("expiry-leave", false);
+    let engine = engine(&fake, true);
+    let session = engine.session_turn();
+    let change = |c: ShareChange| engine.share_change(session, &c);
+    change(ShareChange::RequestExpiry { request_id: INV_A.into(), expires_in_secs: Some(3600) }).expect("expiry");
+    change(ShareChange::RequestExpiry { request_id: INV_A.into(), expires_in_secs: None }).expect("never");
+    change(ShareChange::Leave { invite_id: INV_MINE.into() }).expect("left");
+    assert_eq!(
+        share_routes(&fake),
+        [
+            format!("PATCH /api/v1/file-requests/{INV_A}"),
+            format!("PATCH /api/v1/file-requests/{INV_A}"),
+            format!("POST /api/v1/shares/invites/{INV_MINE}/leave"),
+        ]
+    );
+    let bodies: Vec<Value> = fake.api.requests().iter().filter(|r| r.method == "PATCH").map(|r| r.json()).collect();
+    assert_eq!(bodies, [json!({ "expires_in_secs": 3600 }), json!({ "expires_in_secs": null })]);
+    // Not an id: nothing more is sent.
+    assert_eq!(
+        change(ShareChange::Leave { invite_id: "x".into() }),
+        Err(ShareChangeError::NotFound)
+    );
+    assert_eq!(share_routes(&fake).len(), 3);
+}
+
+#[test]
+fn leaving_an_invite_that_is_already_gone_is_done_and_a_closed_request_keeps_its_expiry() {
+    let fake = fake("leave-gone", false);
+    let engine = engine(&fake, true);
+    let session = engine.session_turn();
+    fake.status.store(404, Ordering::SeqCst);
+    assert_eq!(engine.share_change(session, &ShareChange::Leave { invite_id: INV_MINE.into() }), Ok(()));
+    assert_eq!(
+        engine.share_change(session, &ShareChange::RequestExpiry { request_id: INV_A.into(), expires_in_secs: Some(5) }),
+        Err(ShareChangeError::NotFound)
+    );
+    fake.status.store(409, Ordering::SeqCst);
+    assert_eq!(
+        engine.share_change(session, &ShareChange::RequestExpiry { request_id: INV_B.into(), expires_in_secs: Some(5) }),
+        Err(ShareChangeError::Refused)
+    );
+}
+
+#[test]
+fn a_request_row_carries_its_target_folder() {
+    let with = request_row(&json!({ "id": INV_A, "title": "t", "target_folder_id": TRIP })).unwrap();
+    assert_eq!(with.target_folder_id.as_deref(), Some(TRIP));
+    let without = request_row(&json!({ "id": INV_A, "title": "t", "target_folder_id": null })).unwrap();
+    assert_eq!(without.target_folder_id, None);
 }

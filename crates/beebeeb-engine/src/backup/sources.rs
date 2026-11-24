@@ -54,11 +54,10 @@ fn keys(path: &Path) -> Vec<String> {
 fn spellings(path: &Path) -> Option<Vec<Vec<String>>> {
     let clean = |p: &Path| p.is_absolute() && !p.components().any(|c| c == Component::ParentDir);
     let mut found = Vec::new();
-    if let Ok(given) = std::path::absolute(path) {
-        if clean(&given) {
+    if let Ok(given) = std::path::absolute(path)
+        && clean(&given) {
             found.push(keys(&given));
         }
-    }
     if let Ok(real) = std::fs::canonicalize(path) {
         let real = keys(&real);
         if !found.contains(&real) {
@@ -97,17 +96,31 @@ pub fn check_source(source: &Path, sync_root: &Path) -> Result<(), SourceRefusal
 pub fn pass_excludes(sync_root: &Path) -> Option<Vec<PathBuf>> {
     let clean = |p: &Path| p.is_absolute() && !p.components().any(|c| c == Component::ParentDir);
     let mut excludes = Vec::new();
-    if let Ok(given) = std::path::absolute(sync_root) {
-        if clean(&given) {
+    if let Ok(given) = std::path::absolute(sync_root)
+        && clean(&given) {
             excludes.push(given);
         }
-    }
-    if let Ok(real) = std::fs::canonicalize(sync_root) {
-        if clean(&real) && !excludes.contains(&real) {
+    if let Ok(real) = std::fs::canonicalize(sync_root)
+        && clean(&real) && !excludes.contains(&real) {
             excludes.push(real);
         }
+    if excludes.is_empty() {
+        return None;
     }
-    (!excludes.is_empty()).then_some(excludes)
+    // Container layers (Windows Sandbox, Docker) hold wcifs placeholders; wcifs.sys keeps a kernel handle per entry
+    // opened, so the walk is never their first opener.
+    let containers = containers_folder();
+    if clean(&containers) && !excludes.contains(&containers) {
+        excludes.push(containers);
+    }
+    Some(excludes)
+}
+
+/// `%ProgramData%\Microsoft\Windows\Containers` (`C:\ProgramData` when the variable is unset). Not absolute off
+/// Windows, so [`pass_excludes`] drops it there.
+fn containers_folder() -> PathBuf {
+    let base = std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    base.join("Microsoft").join("Windows").join("Containers")
 }
 
 /// Whether `a` and `b` name the same folder: compared as [`check_source`] compares (component by component, without
@@ -130,10 +143,12 @@ pub struct ChosenFolder {
     pub name: String,
     /// The folder on this PC, absolute. Read in place, never written.
     pub path: PathBuf,
-    /// Whose it is: the account that chose it, as a digest of its local state's owner (never an email or an id in
-    /// clear; `app::bindings::backup_folders::owner_tag`). Only that account backs it up, lists it or removes it.
-    /// Missing: written by a test build before folders were per account; nobody's (passed, listed and removable for no
-    /// account), so the person adds the folder again.
+    /// Whose it is: the account that chose it, as a digest of that account's id (never an email or an id in clear,
+    /// never made from an address; `app::bindings::backup_folders::owner_tag`, its one maker). Only that account backs
+    /// it up, lists it or removes it. Missing: written by a test build before folders were per account; nobody's
+    /// (passed, listed and removable for no account), so the person adds the folder again. A digest of an address
+    /// (written by an earlier build while the id was not known) is nobody's too, until its own account's next start
+    /// replaces it with that account's id tag (`backup_folders::retag_by_id`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     /// The server id of its backup's folder (`Backups/<device>/<name>`), recorded by the pass before it creates that
@@ -375,5 +390,19 @@ mod tests {
         assert_eq!(keys, ["letter.txt"], "nothing of the sync root is listed");
         assert_eq!(walk.skipped, vec![("Beebeeb".to_string(), SkipReason::Excluded)]);
         assert!(pass_excludes(Path::new("")).is_none(), "no clean spelling, no pass");
+    }
+
+    /// A source holding the containers folder (C:\ProgramData, a whole drive) has it left out of the walk.
+    #[cfg(windows)]
+    #[test]
+    fn the_containers_folder_is_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let excludes = pass_excludes(&dir.path().join("Beebeeb")).unwrap();
+        assert!(excludes.contains(&containers_folder()), "{excludes:?}");
+    }
+
+    #[test]
+    fn the_containers_folder_ends_in_the_containers_path() {
+        assert!(containers_folder().ends_with(Path::new("Microsoft").join("Windows").join("Containers")));
     }
 }

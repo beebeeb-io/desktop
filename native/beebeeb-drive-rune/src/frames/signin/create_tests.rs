@@ -760,3 +760,34 @@ fn only_the_password_and_phrase_steps_are_named_secret_bearing() {
     .collect();
     assert_eq!(secret, [Step::Password, Step::Phrase, Step::Confirm]);
 }
+
+#[test]
+fn back_from_create_account_returns_to_welcome_and_keeps_nothing_typed() {
+    let (mut rt, calls) = started(SignUpScript::default());
+    assert_eq!(at(&mut rt), Step::Email);
+    type_(&mut rt, "me@example.org");
+    assert_eq!(ui(&mut rt).email.text, "me@example.org");
+    click(&mut rt, "back-link");
+    assert_eq!(ui(&mut rt).screen, Screen::Welcome, "Back returns to Welcome");
+    assert_eq!(*calls.borrow(), ["cancel_sign_up"]);
+    assert!(ui(&mut rt).email.text.is_empty(), "the typed email is not kept");
+    assert!(ui(&mut rt).password.text.is_empty());
+    assert_eq!(said(&rt, "title").as_deref(), Some("Welcome to Beebeeb Drive"));
+}
+
+#[test]
+fn each_shown_word_says_its_place_of_twelve_and_never_the_word() {
+    let (mut rt, _) = walked_to(Step::Phrase, SignUpScript::default());
+    assert_eq!(at(&mut rt), Step::Phrase);
+    for i in 0..12 {
+        let nodes = super::steps_tests::a11y_nodes(&rt, &format!("word-{i}"));
+        assert_eq!(nodes.len(), 1, "word-{i}");
+        assert_eq!(nodes[0]["name"], format!("Word {}", i + 1));
+        assert_eq!(nodes[0]["position"], i + 1, "{} of 12", i + 1);
+        assert_eq!(super::steps_tests::a11y_set_size_of(&rt, &format!("word-{i}")), Some(12));
+    }
+    let tree = rt.accessibility_json().to_string();
+    for word in board::WORDS {
+        assert!(!tree.contains(&format!("\"{word}\"")), "a recovery word in the tree");
+    }
+}

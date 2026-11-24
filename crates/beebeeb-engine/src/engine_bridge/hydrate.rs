@@ -151,7 +151,7 @@ impl EngineBridge {
         // decrypt-oracle + arbitrary-write primitive (e.g. writing decrypted
         // vault plaintext over ~/.ssh/authorized_keys).
         if !hydrate_dest_is_allowed(dest_path, allowed_roots) {
-            return Err(anyhow::anyhow!("hydrate destination is not within an allowed root").into());
+            return Err(anyhow::anyhow!("hydrate destination is not within an allowed root"));
         }
         // Task 2407 (core 2404): a destination whose name reaches a different entry (a Windows 8.3 short name) is
         // refused before anything is downloaded; the Windows writer checks again right before it writes.
@@ -194,7 +194,7 @@ impl EngineBridge {
         };
         if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution, keep_there)? {
             tracing::warn!(file_id = %file_id, "hydrate refused: the local file holds a change that is not sent");
-            return Err(anyhow::Error::new(UnsentLocalChange).into());
+            return Err(anyhow::Error::new(UnsentLocalChange));
         }
         // Spec §7.4.2: a hydrate never changes the status of a row with a live upload of its
         // own (a Finder upload that has not parked): no `Downloading`, `Local` or `Error`.
@@ -251,14 +251,14 @@ impl EngineBridge {
                     && let Err(e) = std::fs::create_dir_all(parent)
                 {
                     buf.zeroize();
-                    // Task 1670 round 2: this used to `?` straight out of the
+                    // this used to `?` straight out of the
                     // match arm below, which skipped the `Err(e) =>` arm's
                     // `FileStatus::Error` flip entirely — a directory-create
                     // failure left the row stuck on `Downloading` forever.
                     // Route it through the same status flip as every other
                     // failure in this function.
                     set_failed();
-                    return Err(anyhow::anyhow!("create dest dir {}: {e}", parent.display()).into());
+                    return Err(anyhow::anyhow!("create dest dir {}: {e}", parent.display()));
                 }
                 // Write via an O_NOFOLLOW handle (task 1247): the containment
                 // guard at the top of this fn is a check-then-use, and there is
@@ -270,7 +270,7 @@ impl EngineBridge {
                 // `write_hydrated_plaintext` fails closed if the final component
                 // is (or race-becomes) a symlink, closing the race atomically at
                 // open() time rather than re-checking-then-hoping. Since task
-                // 1670 round 2 it also stages the write under a temp name and
+                // it also stages the write under a temp name and
                 // publishes with one atomic rename, so a failure anywhere in
                 // that sequence is guaranteed to leave NOTHING new at
                 // `dest_path` — there is no separate "delete the half-written
@@ -293,7 +293,7 @@ impl EngineBridge {
                 if in_sync_folder
                     && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution, keep_there)?
                 {
-                    return Err(refuse_changed(&mut buf, "the local file was changed during the download").into());
+                    return Err(refuse_changed(&mut buf, "the local file was changed during the download"));
                 }
                 // Review P2-1, S6 (R8): the place (its size, times and inode) compared with the start look once the copy
                 // is written, right before it replaces the place: a save after the start look is never replaced.
@@ -307,7 +307,7 @@ impl EngineBridge {
                     write_hydrated_plaintext_checked(dest_path, allowed_roots, &buf, &mut place_unchanged);
                 if write_result.as_ref().is_err_and(place_changed_before_replace) {
                     return Err(
-                        refuse_changed(&mut buf, "the local file was changed while the download was written").into(),
+                        refuse_changed(&mut buf, "the local file was changed while the download was written"),
                     );
                 }
                 let hydrated_hash = in_sync_folder.then(|| sha256_hex(&buf));
@@ -316,7 +316,7 @@ impl EngineBridge {
                 buf.zeroize();
                 if let Err(e) = write_result {
                     set_failed();
-                    return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()).into());
+                    return Err(anyhow::anyhow!("write {}: {e}", dest_path.display()));
                 }
                 // Task 1640: the bytes just written (one atomic rename: the whole file) are the
                 // content this device agrees with the server on, at the version the download
@@ -335,10 +335,10 @@ impl EngineBridge {
                     }
                 }
 
-                // Task 1698: a Trashing row keeps its marker (viewing a file
+                // a Trashing row keeps its marker (viewing a file
                 // from the macOS Trash view must not un-trash it in the
                 // replica); everything else completes as `Local`.
-                // PR #100 review (Codex P1): the pre-hydrate status is the
+                // the pre-hydrate status is the
                 // row's status BEFORE the flip to `Downloading` — re-reading
                 // the DB here always saw `Downloading`, so a Trashing row
                 // completed as `Local` and reparented itself out of the trash
@@ -356,8 +356,7 @@ impl EngineBridge {
                 transfer.finish();
                 self.record_transfer_done(crate::transfer_progress::Direction::Down, file_id, downloaded_bytes);
 
-                // Task 1670 round 4 (Codex P2 on PR #75, review thread on
-                // `runner.rs:1044`): see [`record_hydration_cache_state`]'s
+                // See [`record_hydration_cache_state`]'s
                 // doc comment for the full "why" — in short, a macOS Finder
                 // `fetchContents` hydration writes here as a HANDOFF, not a
                 // durable local cache copy, and registering it via
@@ -373,7 +372,7 @@ impl EngineBridge {
             Err(e) => {
                 let e = self.owned_open_failure(file_id, land_error_to_anyhow(e)).await;
                 set_failed(); // only writes over Downloading; the recoverable item already left it.
-                Err(e.into())
+                Err(e)
             }
         }
     }
@@ -546,7 +545,155 @@ impl EngineBridge {
                 let _ = self
                     .db
                     .set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
-                Err(e.into())
+                Err(e)
+            }
+        }
+    }
+
+    /// Drive-complete 169: the whole-file fetch, streamed. Chunk by chunk in file order, each chunk is
+    /// downloaded, decrypted through core's sequential reader (order, last frame and `finish` checked)
+    /// and handed to `sink(offset, plaintext)`, then wiped before the next one is fetched. At most one
+    /// chunk of plaintext (and, for a legacy file, one more chunk's wire bytes) is held at a time, so a
+    /// multi-GB file costs a few chunks of memory, not its size.
+    ///
+    /// The file's real size is known before any byte reaches the sink: a pinned version's manifest says
+    /// it; a legacy file's last chunk is fetched (and opened) first, its wire bytes kept for the stream's
+    /// end. When it is not `file_size` (the placeholder's), nothing is handed over: `Some(Err(true_size))`,
+    /// the authenticated length the caller resizes the placeholder to (task 0783).
+    ///
+    /// `None`: no layout to stream by (no chunk count, no stride, or a stride that is not a multiple of
+    /// the 4 KiB page Cloud Files requires of every transfer but the last): the caller takes the
+    /// buffered path. `Some(Ok(fetched))`: every byte went to the sink; `fetched.bytes` is empty and
+    /// `fetched.version` carries the hash of all of them, for [`Self::record_whole_fetch`].
+    ///
+    /// Task 1640: a fetch is recorded before its first byte is transferred. Its hash is not known then,
+    /// so the version joins the candidate with [`STREAMING_HASH`], which no content ever hashes to: a
+    /// stream cut off midway leaves a candidate never promoted, at a version never too high.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub async fn stream_whole_file<S>(
+        &self,
+        file_id: &str,
+        file_size: u64,
+        meter: Option<&crate::transfer_progress::ReceiveMeter>,
+        mut sink: S,
+    ) -> anyhow::Result<Option<Result<FetchedBytes, u64>>>
+    where
+        S: FnMut(u64, &[u8]) -> anyhow::Result<()>,
+    {
+        let _file_uuid: uuid::Uuid = file_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid file_id (not a UUID): {e}"))?;
+        let meta = self.api.get_file(file_id).await?;
+        let pin = crate::download_pin::PinnedVersion::from_metadata(&meta).map_err(EngineError::from)?;
+        let (chunk_count, stride) = match &pin {
+            Some(pin) => (pin.chunk_count, pin.chunk_size_bytes),
+            None => (
+                meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                meta.get("chunk_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+            ),
+        };
+        if chunk_count == 0 || stride == 0 || stride % STREAM_PAGE != 0 {
+            return Ok(None);
+        }
+        let (file_key, name_key) = self.file_keys_for_download(file_id).await?;
+        let record = recorded_content_format(&name_key, &meta)?;
+        let download_kbps_limit = crate::config::DesktopConfig::load_for(self.identity)
+            .map(|c| c.download_kbps_limit)
+            .unwrap_or(0);
+        let last = chunk_count - 1;
+
+        // The real size before anything is handed over.
+        let (true_size, mut last_wire) = match &pin {
+            Some(pin) => (pin.plaintext_size_bytes, None),
+            None => {
+                let wire = self.download_content_frame(file_id, last, None, meter, None).await?;
+                let mut plain = record.open_chunk(&file_key, file_id, last, true, &content_frame(&wire)?)?;
+                let last_len = plain.len() as u64;
+                plain.zeroize();
+                if last_len > stride || (last_len == 0 && chunk_count > 1) {
+                    return Ok(None);
+                }
+                (u64::from(last) * stride + last_len, Some(wire))
+            }
+        };
+        if true_size != file_size {
+            return Ok(Some(Err(true_size)));
+        }
+
+        let ticket = self.begin_fetch(file_id);
+        let legacy_version = self.legacy_download_version(file_id)?;
+        let version = meta["download_version"]["version_number"].as_i64().or(legacy_version);
+        self.db.set_status(file_id, FileStatus::Downloading)?;
+        let recorded = match version {
+            Some(version) => self.db.record_fetched_version(file_id, version, STREAMING_HASH),
+            None => self.db.mark_content_unknown(file_id),
+        };
+        if let Err(e) = recorded {
+            let _ = self.db.set_status(file_id, FileStatus::Error);
+            return Err(e.into());
+        }
+
+        let streamed: Result<String, EngineError> = async {
+            use sha2::Digest;
+            let mut hash = sha2::Sha256::new();
+            let mut reader = record.decryptor(beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()), file_id);
+            let mut offset: u64 = 0;
+            for i in 0..chunk_count {
+                let started = std::time::Instant::now();
+                let wire = match if i == last { last_wire.take() } else { None } {
+                    Some(wire) => wire,
+                    None => {
+                        self.download_content_frame(file_id, i, pin.as_ref(), meter, None)
+                            .await?
+                    }
+                };
+                let wire_len = wire.len() as u64;
+                let mut plain = reader.push_frame(&content_frame(&wire)?)?.data;
+                drop(wire);
+                let want = if i == last { true_size - offset } else { stride };
+                if plain.len() as u64 != want {
+                    plain.zeroize();
+                    return Err(
+                        anyhow::anyhow!("chunk {i} is {} bytes, the file's layout says {want}", plain.len()).into(),
+                    );
+                }
+                hash.update(&plain);
+                let handed = sink(offset, &plain);
+                plain.zeroize();
+                handed?;
+                offset += want;
+                self.wire.download_bytes.fetch_add(wire_len, Ordering::Relaxed);
+                if download_kbps_limit > 0 {
+                    let budget = wire_len as f64 / (download_kbps_limit as f64 * 1024.0);
+                    let spent = started.elapsed().as_secs_f64();
+                    if budget > spent {
+                        tokio::time::sleep(Duration::from_secs_f64(budget - spent)).await;
+                    }
+                }
+            }
+            reader.finish()?;
+            Ok(format!("{:x}", hash.finalize()))
+        }
+        .await;
+        match streamed {
+            Ok(hash) => {
+                // The whole version is in the placeholder; its candidate gets its real hash only through
+                // `record_whole_fetch` (alone) or stays unpromotable (overlapped), never too high.
+                self.db.set_status(file_id, FileStatus::Local)?;
+                self.db.mark_cached(file_id, "", true_size as i64, now_secs())?;
+                let _ = self.enforce_configured_cache_limit();
+                Ok(Some(Ok(FetchedBytes {
+                    bytes: Zeroizing::new(Vec::new()),
+                    version: version.map(|version| FetchedVersion { version, hash }),
+                    ticket,
+                })))
+            }
+            Err(e) => {
+                let e = self.owned_open_failure(file_id, land_error_to_anyhow(e)).await;
+                let _ = self
+                    .db
+                    .set_status_if(file_id, FileStatus::Downloading, FileStatus::Error);
+                Err(e)
             }
         }
     }
@@ -696,6 +843,9 @@ impl EngineBridge {
             .ok_or_else(|| anyhow::anyhow!("shared invite {share_id} was not returned by the server"))?;
         let mapping = shared_root_from_invite(invite)
             .ok_or_else(|| anyhow::anyhow!("shared invite {share_id} is not approved or is malformed"))?;
+        if mapping.claimed {
+            return Err(anyhow::anyhow!("shared invite {share_id} is still opening: its key has not arrived").into());
+        }
         let sender_public_key = mapping
             .sender_public_key
             .as_deref()
@@ -790,7 +940,7 @@ impl EngineBridge {
     }
 
     /// Shared core of [`Self::do_hydrate`] and [`Self::remote_content_preview`]
-    /// (task 1546 Codex round 2, finding 1): downloads + decrypts every chunk
+    /// downloads + decrypts every chunk
     /// for `file_id` given ALREADY-FETCHED metadata. `remote_content_preview`
     /// needs the metadata anyway to check the remote size before deciding
     /// whether to download at all — routing through this shared helper
@@ -1050,7 +1200,7 @@ impl EngineBridge {
             .await;
         let read = match read {
             Ok(value) => Ok(value),
-            Err(e) => Err(self.owned_open_failure(file_id, land_error_to_anyhow(e)).await.into()),
+            Err(e) => Err(self.owned_open_failure(file_id, land_error_to_anyhow(e)).await),
         };
         if read.is_err() {
             // Every failing exit (a second pass's own error too) ends with the row in Error, never left on
@@ -1145,11 +1295,11 @@ impl EngineBridge {
                 // Task 1643: exactly the pinned version's plaintext for those chunks.
                 match pin.as_ref().map(|pin| pin.plaintext_size_of(chunks.clone())) {
                     Some(want) if want != Some(data.len() as u64) => {
-                        return Err(anyhow::anyhow!(
+                        Err(anyhow::anyhow!(
                             "the range read is {} bytes, the pinned version's manifest says {want:?}",
                             data.len()
                         )
-                        .into());
+                        .into())
                     }
                     _ => Ok(data),
                 }
@@ -1186,4 +1336,187 @@ enum HydrateStart {
 /// and something there now is a change too.
 fn place_fingerprint(place: &Path) -> Option<ContentFingerprint> {
     ContentFingerprint::of(place).ok()
+}
+
+/// Drive-complete 169: the page Cloud Files requires every transfer but the last to be a multiple of.
+/// A stride that is not one cannot be streamed chunk by chunk (each chunk is one transfer's offset).
+const STREAM_PAGE: u64 = 4096;
+
+/// Drive-complete 169 (task 1640): the candidate hash a streamed fetch records before its first byte,
+/// when the real hash is not known yet. Not hex, so no content ever hashes to it: never promoted.
+const STREAMING_HASH: &str = "streaming:not-hashed-yet";
+
+/// Drive-complete 169: the streamed whole-file refetch holds a chunk at a time, never the file.
+#[cfg(test)]
+mod refetch_streaming_tests {
+    use super::*;
+    use sha2::Digest;
+    use std::io::Write as _;
+    use std::sync::Mutex;
+
+    const KEY: [u8; 32] = [69; 32];
+    const ID: &str = "169a6c1e-0000-4000-8000-000000000169";
+    const VERSION: &str = "169b0000-0000-4000-8000-000000000169";
+    const STRIDE: usize = 64 * 1024;
+
+    struct Server {
+        base: String,
+        chunk_requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    /// A loopback API: the file's metadata (pinned or legacy) and its chunks, one connection each.
+    #[allow(deprecated)] // the name sealer the other download fixtures use
+    fn serve(plain: &[u8], pinned: bool) -> Server {
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(KEY);
+        let key = beebeeb_core::kdf::derive_file_key(&mk, ID.as_bytes());
+        let frames: Vec<Vec<u8>> = plain
+            .chunks(STRIDE)
+            .map(|c| {
+                let blob = beebeeb_core::encrypt::encrypt_chunk(&key, c).unwrap();
+                let mut wire = blob.nonce.clone();
+                wire.extend_from_slice(&blob.ciphertext);
+                wire
+            })
+            .collect();
+        let manifest = serde_json::json!({
+            "object_version_id": VERSION, "version_number": 3, "chunk_count": frames.len(),
+            "chunk_size_bytes": STRIDE, "plaintext_size_bytes": plain.len(),
+            "ciphertext_size_bytes": frames.iter().map(Vec::len).sum::<usize>(),
+            "chunks": frames.iter().enumerate().map(|(i, f)| serde_json::json!({"index": i, "size_bytes": f.len()})).collect::<Vec<_>>(),
+        });
+        let meta = serde_json::json!({
+            "id": ID, "size_bytes": plain.len(), "chunk_count": frames.len(), "chunk_size_bytes": STRIDE,
+            "name_encrypted": beebeeb_core::encrypt::encrypt_name(&mk, ID, "big.bin", None).unwrap(),
+            "download_version": if pinned { manifest } else { serde_json::Value::Null },
+        })
+        .to_string();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let chunk_requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = chunk_requests.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut head = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match std::io::Read::read(&mut stream, &mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let target = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                let path = target.split('?').next().unwrap_or("").to_string();
+                let (kind, body) = match path.strip_prefix(&format!("/api/v1/files/{ID}/chunks/")) {
+                    Some(i) => {
+                        seen.lock().unwrap().push(target.clone());
+                        ("application/octet-stream", frames[i.parse::<usize>().unwrap()].clone())
+                    }
+                    None => ("application/json", meta.clone().into_bytes()),
+                };
+                let mut reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                reply.extend_from_slice(&body);
+                let _ = stream.write_all(&reply);
+            }
+        });
+        Server { base, chunk_requests }
+    }
+
+    fn bridge(dir: &Path, server: &Server) -> EngineBridge {
+        let db = Arc::new(StateDb::open(dir.join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new(server.base.clone(), "token".into(), KEY));
+        EngineBridge::new(&crate::identity::TEST, db, api)
+    }
+
+    fn content(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i as u8) ^ ((i >> 8) as u8) ^ 0x69).collect()
+    }
+
+    /// What the sink saw: the most plaintext handed over at once, the bytes in order, and their hash.
+    #[derive(Default)]
+    struct Seen {
+        most_at_once: usize,
+        pieces: usize,
+        next_offset: u64,
+        hash: sha2::Sha256,
+    }
+
+    fn stream(
+        bridge: &EngineBridge,
+        file_size: u64,
+        seen: &mut Seen,
+    ) -> anyhow::Result<Option<Result<FetchedBytes, u64>>> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(bridge.stream_whole_file(ID, file_size, None, |offset, piece| {
+            assert_eq!(offset, seen.next_offset, "pieces arrive in file order, back to back");
+            seen.next_offset += piece.len() as u64;
+            seen.most_at_once = seen.most_at_once.max(piece.len());
+            seen.pieces += 1;
+            seen.hash.update(piece);
+            Ok(())
+        }))
+    }
+
+    /// The red test: a file many times the bound is handed over a chunk at a time (the buffered path
+    /// held all of it), every byte once and in order, and the hash it records is the whole file's.
+    #[test]
+    fn a_refetch_hands_over_a_chunk_at_a_time_never_the_whole_file() {
+        for pinned in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let plain = content(40 * STRIDE + 1234);
+            let server = serve(&plain, pinned);
+            let bridge = bridge(dir.path(), &server);
+            let mut seen = Seen::default();
+            let fetched = stream(&bridge, plain.len() as u64, &mut seen)
+                .unwrap()
+                .expect("a chunked file streams")
+                .expect("the sizes agree");
+            assert!(
+                seen.most_at_once <= STRIDE,
+                "at most one chunk held: {} bytes",
+                seen.most_at_once
+            );
+            assert_eq!(seen.pieces, 41);
+            assert_eq!(seen.next_offset, plain.len() as u64);
+            assert!(fetched.bytes.is_empty(), "nothing of the file is returned in memory");
+            let whole = format!("{:x}", seen.hash.finalize());
+            assert_eq!(whole, sha256_hex(&plain));
+            if pinned {
+                let version = fetched.version.expect("a pinned version is named");
+                assert_eq!((version.version, version.hash.as_str()), (3, whole.as_str()));
+            }
+            // One download: every chunk fetched once (a legacy file's last chunk first, then reused).
+            assert_eq!(server.chunk_requests.lock().unwrap().len(), 41, "pinned: {pinned}");
+        }
+    }
+
+    /// A placeholder whose size is not the file's: nothing is handed over, the real size comes back,
+    /// and a pinned file costs no chunk download at all.
+    #[test]
+    fn a_size_mismatch_is_found_before_any_byte_is_handed_over() {
+        for pinned in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let plain = content(5 * STRIDE + 77);
+            let server = serve(&plain, pinned);
+            let bridge = bridge(dir.path(), &server);
+            let mut seen = Seen::default();
+            let encrypted_size = plain.len() as u64 + 6 * 28;
+            let outcome = stream(&bridge, encrypted_size, &mut seen)
+                .unwrap()
+                .expect("a chunked file streams");
+            assert!(matches!(outcome, Err(n) if n == plain.len() as u64), "pinned: {pinned}");
+            assert_eq!(seen.pieces, 0);
+            let chunks = server.chunk_requests.lock().unwrap().len();
+            assert_eq!(
+                chunks,
+                usize::from(!pinned),
+                "pinned: no chunk; legacy: the last one only"
+            );
+        }
+    }
 }

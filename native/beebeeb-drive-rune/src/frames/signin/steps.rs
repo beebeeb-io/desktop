@@ -322,14 +322,6 @@ impl Ui {
         self.source.in_app_doors_available()
     }
 
-    /// "Open the recovery page" on "Trouble signing in?": recovery replaces the password and
-    /// re-wraps the keys, so the web does it (the shell opens the page).
-    pub fn open_recovery_page(&mut self) {
-        if self.screen == Screen::Forgot {
-            self.go(Intent::OpenRecoveryPage);
-        }
-    }
-
     /// The doors the engine does not bind in the app (another device, the 12 words): they open the web's page.
     pub(super) fn open_recovery_page_from_any(&mut self) {
         if !self.busy && !self.passkey_waiting {

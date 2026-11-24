@@ -743,7 +743,7 @@ fn a_trashed_text_file_shows_its_lines_in_the_running_apps_preview() {
         rt.find("pv-share").is_none() && rt.find("pv-open").is_none(),
         "read-only"
     );
-    let db = beebeeb_engine::state_db::StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = beebeeb_engine::state_db::StateDb::open(dir.path().join("state.db")).unwrap();
     assert!(
         db.get_file(NOTES).unwrap().is_none(),
         "nothing about it was written here"

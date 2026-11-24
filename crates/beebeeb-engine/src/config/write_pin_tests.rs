@@ -90,6 +90,11 @@ const SAVE_CALLS_ALLOWED: &[(&str, &str, usize)] = &[
         1,
     ),
     ("native/beebeeb-drive-rune/src/frames/viewers/text.rs", "ui.save();", 1),
+    (
+        "native/beebeeb-drive-rune/src/frames/viewers/unsaved_guard.rs",
+        "ui.save();",
+        1,
+    ),
 ];
 
 /// No load-modify-save span outside the one helper: nothing outside `config/store.rs` writes the file, and the store

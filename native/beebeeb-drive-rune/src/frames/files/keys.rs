@@ -5,6 +5,9 @@
 //! | --- | --- |
 //! | Up, Down (+Shift) | select the next row (extend the range), and scroll it into view |
 //! | Home, End | the first, the last row |
+//! | PageUp, PageDown (+Shift) | a page of rows up, down |
+//! | Alt+Up | the parent folder |
+//! | F6, Shift+F6 | the next, previous pane (`ui::focus::pane`: toolbar, list, details) |
 //! | Ctrl+A | select every row |
 //! | Enter | open: a folder in place, a file in its app |
 //! | Space | Preview (DW-0408) of a file; nothing on a folder |
@@ -13,7 +16,7 @@
 //! | Ctrl+Z, Ctrl+D | Undo the move to Trash; Duplicate |
 //! | Menu, Shift+F10 | the file menu, at the selected row |
 //! | Ctrl+Shift+N, Ctrl+N, Ctrl+O | New folder, New file, Upload files (nothing in a folder that takes no additions) |
-//! | Ctrl+1..5 | Files, Shared, Photos, Backups, Trash; Ctrl+6, Ctrl+7 Sync history (DW-1301), Available offline (DW-0715); Ctrl+, Settings (DW-0701) |
+//! | Ctrl+, | Settings (DW-0701); Ctrl+1..7 are the window's (`shell::host::shell_keys`, RC2-8) |
 //! | Alt+Shift+P | the details panel |
 //! | Alt+Left, Backspace; Alt+Right | back; forward |
 //! | Ctrl+F | Search names |
@@ -25,7 +28,6 @@ use crate::State;
 use crate::ui::file_list::ROW_H;
 use crate::ui::keys::SEARCH_KEY;
 use crate::ui::menu;
-use crate::ui::sidebar::SidebarSection;
 use rune::{Key, KeyEvent, Tx};
 
 fn menu_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
@@ -78,6 +80,11 @@ fn menu_point(s: &State) -> (f32, f32) {
     (430.0, 110.0 + 4.0 + row * ROW_H + 22.0)
 }
 
+/// Rows in one page: what the window's height holds under the toolbar and headers.
+fn page_rows(s: &State) -> usize {
+    (((s.actions.window.1 - 200.0) / ROW_H) as usize).max(1)
+}
+
 fn reveal(row: Option<usize>, tx: &mut Tx) -> bool {
     if let Some(row) = row {
         // Also a row outside the realised window of a 5,000-row folder.
@@ -116,6 +123,20 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return true;
     }
+    // Enter on New or Sort opens (closes) its menu, as Space does: Rune leaves Return on a button to the app (RC2-8).
+    if ev.key == Key::Enter && ev.mods == rune::Mods::default() {
+        let kind = match tx.focused() {
+            Some("new-btn") if s.can_add() => Some(super::MenuKind::New),
+            Some("sort-btn") => Some(super::MenuKind::Sort),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            if !tx.key_repeat() {
+                s.toggle_menu(kind);
+            }
+            return true;
+        }
+    }
     if s.actions.menu.is_some() {
         return menu_key(s, ev, tx);
     }
@@ -135,12 +156,6 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             }
             'n' => s.intent(Intent::Frame("DW-1521")),
             'o' => s.intent(Intent::Frame("DW-0415")),
-            '1'..='5' => match SidebarSection::all().get(c as usize - '1' as usize) {
-                Some(&section) => s.sidebar_section = section,
-                None => return false,
-            },
-            '6' => s.intent(Intent::Frame("DW-1301")),
-            '7' => s.intent(Intent::Frame("DW-0715")),
             ',' => s.intent(Intent::Frame("DW-0701")),
             _ => return list_key(s, ev, tx),
         }
@@ -154,6 +169,14 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             focus_list(s, tx);
         }
         return moved;
+    }
+    if m.alt && !in_field && ev.key == Key::Up {
+        let up = s.listing.path.len().checked_sub(2);
+        if let Some(index) = up {
+            s.open_crumb(index);
+            focus_list(s, tx);
+        }
+        return up.is_some();
     }
     if m.alt && m.shift && matches!(&ev.key, Key::Text(p) if p.eq_ignore_ascii_case("p")) {
         s.show_detail_pane = !s.show_detail_pane;
@@ -175,6 +198,10 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Down => reveal(s.arrow(1, m.shift), tx),
         Key::Up => reveal(s.arrow(-1, m.shift), tx),
+        Key::PageDown | Key::PageUp if count > 0 && !m.alt => {
+            let page = page_rows(s) as isize;
+            reveal(s.arrow(if ev.key == Key::PageDown { page } else { -page }, m.shift), tx)
+        }
         Key::Home if count > 0 => {
             if m.shift {
                 s.extend_to(0);
@@ -233,5 +260,19 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         // Letters jump to the first name that starts with them (DW-0420b).
         Key::Text(ref typed) if !m.cmd && !m.ctrl && !m.alt => s.type_to(typed, tx),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    #[test]
+    fn a_page_is_at_least_one_row() {
+        let mut s = crate::init();
+        s.actions.window = (800.0, 0.0);
+        assert_eq!(page_rows(&s), 1);
+        s.actions.window = (800.0, 200.0 + ROW_H * 10.0 + 1.0);
+        assert_eq!(page_rows(&s), 10);
     }
 }

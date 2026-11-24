@@ -40,10 +40,9 @@ pub(super) fn filter_token(token: &str) -> Filtered {
 pub(super) fn summarise_url(core: &str) -> Option<(String, bool)> {
     let (scheme, rest) = if let Some(rest) = core.strip_prefix("https://") {
         ("https://", rest)
-    } else if let Some(rest) = core.strip_prefix("http://") {
-        ("http://", rest)
     } else {
-        return None;
+        let rest = core.strip_prefix("http://")?;
+        ("http://", rest)
     };
     let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host = &rest[..host_end];

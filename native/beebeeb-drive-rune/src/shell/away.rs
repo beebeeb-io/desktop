@@ -4,7 +4,7 @@
 //! the engine's `lock.after`) and locks through core's `lock_after_away`. No rule lives here.
 //!
 //! - **Idle.** While the engine's lock is open ([`ShellActions::screen_open`]: whatever the window shows, the first-run
-//!   steps and the no-plan screen too; review of #452), the main window's poll asks the engine with how long this PC
+//!   steps and the no-plan screen too), the main window's poll asks the engine with how long this PC
 //!   has had no input ([`Platform::idle_for`]; a platform that cannot say gives this app's own windows' last input),
 //!   counted from no earlier than the lock last opened (an unlock by face is no input). The engine answers when an idle
 //!   time could lock next; the poll arms ONE wake for then (`Tx::wake_after`, which polls a hidden window too), never
@@ -15,7 +15,7 @@
 //!   ([`TrayEvent::Resumed`]), as idle time: the PC's time without input before it slept plus the sleep, measured by
 //!   the tray at the suspend and the resume, so the wake's own key press cannot hide it.
 //! - **A gap.** Windows may not send the suspend broadcast (a Modern Standby PC sends it only to a window that
-//!   registered for it: the tray registers, `RegisterSuspendResumeNotification`; review of #452, P2-A). So the poll also
+//!   registered for it: the tray registers, `RegisterSuspendResumeNotification`). So the poll also
 //!   notes when it last ran, on two clocks, and the idle it measured then. A gap between two polls far past the look
 //!   interval ([`AWAY_GAP`]) means the app did not run: the idle seen last plus the gap is held as idle time and said
 //!   to the engine without waiting for the next look (the wake's own key press cannot hide it), as the tray's resume
@@ -32,11 +32,18 @@
 //!   locked leaves the cover until a later poll sees the session open again, so no frame shows the content between
 //!   the engine's lock and the window's next read of the gate. A look that failed (it panicked) decided nothing: the
 //!   cover holds and the wake is said again as the longest time away, so the engine locks unless nothing can lock
-//!   (fail closed, as a resume with no idle reading: P3-2). Where nothing an idle time says could lock (app lock off:
+//!   (fail closed, as a resume with no idle reading: P3-2). A retry that fails too does NOT lift the cover (the owner's
+//!   ruling, fail closed): [`Cover::Failed`] stays, asks again each [`LOOK_AT_MOST_EVERY`], and offers the sign-in path
+//!   ([`AwayLock::sign_in_offered`]), never an Unlock that asks nothing. Where nothing an idle time says could lock (app lock off:
 //!   the engine's last idle answer; an engine without the automatic lock), nothing is covered: app lock off never
 //!   locks, so it never shows the lock screen either.
 //! - The engine's look reads the credential store and waits for the lock's write hold: it runs on a worker, one idle
 //!   look at a time. The job is made on the window's thread, so it holds the session it was measured for.
+//! - **Off the window's thread.** The OS's media keys reach the player's worker, not the window. The away lock tells a
+//!   [`WakeCover`] what it knows of the cover at the end of every poll and at every event, and
+//!   [`WakeCover::covers_now`] adds a gap the poll has not found yet (also one a click on the b covered) by the same
+//!   rule as [`AwayLock::cover_a_gap_not_yet_found`]. `media::os_controls` asks it, so a key does not start a file's
+//!   audio behind the cover.
 //!
 //! Must not: lock by itself (only the engine does); keep a look for a session that closed; arm a wake per poll.
 //!
@@ -45,7 +52,7 @@
 //! [`TrayEvent::Resumed`]: super::platform::TrayEvent::Resumed
 //! [`ShellActions::screen_open`]: super::actions::ShellActions::screen_open
 
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 use rune::{AppHandle, Tx};
@@ -92,6 +99,71 @@ impl Seen {
     }
 }
 
+/// What the away lock last told of the wake cover, for what acts off the window's thread (the module doc). Clones
+/// share it.
+#[derive(Clone, Default)]
+pub struct WakeCover {
+    told: Arc<Mutex<Told>>,
+}
+
+/// The away lock's state as [`WakeCover`] holds it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Told {
+    /// The cover is on ([`AwayLock::covers`]).
+    covers: bool,
+    resumed: bool,
+    /// [`AwayLock::wake_covers`].
+    wake_covers: bool,
+    seen: Option<Seen>,
+}
+
+impl Told {
+    /// P3-15's rule: no cover yet, no resume said since the poll's last run, a wake covers here, and a gap since that
+    /// run far past the look interval (the app did not run).
+    fn gap_not_yet_found(&self, now: Instant, wall: SystemTime) -> bool {
+        !self.covers
+            && !self.resumed
+            && self.wake_covers
+            && self.seen.is_some_and(|seen| seen.gap(now, wall) > AWAY_GAP)
+    }
+}
+
+impl WakeCover {
+    /// The process's one: the shell's away lock tells it ([`AwayLock::default`]), and the shell's media controls ask
+    /// it (`media::os_controls::shell_controls`).
+    pub fn shell() -> WakeCover {
+        static SHELL: OnceLock<WakeCover> = OnceLock::new();
+        SHELL.get_or_init(WakeCover::default).clone()
+    }
+
+    /// Whether what comes from outside the window waits now: the cover is on, or a gap the poll has not found yet would
+    /// put it on (`host::under_the_wake_cover` asks the same for the window's inputs). On any thread; it never waits on
+    /// the window.
+    pub fn covers_now(&self) -> bool {
+        let told = *self.lock();
+        told.covers || told.gap_not_yet_found(Instant::now(), SystemTime::now())
+    }
+
+    /// Whether both are the same one.
+    #[cfg(test)]
+    pub fn same_as(&self, other: &WakeCover) -> bool {
+        Arc::ptr_eq(&self.told, &other.told)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Told> {
+        self.told.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A test of what asks it (`media::os_controls`): the cover on or off, as the away lock would tell it.
+    #[cfg(test)]
+    pub(crate) fn tell_for_test(&self, covers: bool) {
+        *self.lock() = Told {
+            covers,
+            ..Told::default()
+        };
+    }
+}
+
 /// A wake counts from the frame's clock, read before this poll measures: it can come this much before the time it was
 /// armed for. A poll within it takes the wake as spent and arms again (never a look left waiting for no poll).
 const WAKE_SLACK: Duration = Duration::from_millis(250);
@@ -116,6 +188,9 @@ enum Cover {
     Held,
     /// The look with this number says the wake: its answer lifts the cover, unless it locked.
     Asked(usize),
+    /// The look that says the wake failed twice: the engine decided nothing, so the cover STAYS (fail closed; the
+    /// cover offers the sign-in path, [`AwayLock::sign_in_offered`]) and the wake is said again at the next due look.
+    Failed,
     /// A look locked, or the poll saw the session closed, under the cover: it lifts at a LATER poll that sees the
     /// session open (the window read the gate again before it, in the same frame).
     Locked,
@@ -144,12 +219,18 @@ pub struct AwayLock {
     resumed: bool,
     /// The window's content is covered (D-B2-3).
     cover: Cover,
+    /// The look that says the wake failed once already: a second failure holds the cover as [`Cover::Failed`].
+    failed_wake: bool,
+    /// No look has passed since the cover went up and one failed twice: the cover offers the sign-in path.
+    no_check: bool,
     /// Whether the cover was on when the last poll ended: a cover turned on between two polls (the tray's resume, a
     /// click on the b) still gets the instant commit of the poll that follows.
     polled_cover: bool,
     /// The engine's last idle answer said an idle time could lock (app lock on). `true` until it answered: a gap
     /// found before is covered.
     could_lock: bool,
+    /// Told what the away lock knows at the end of every poll and every event ([`WakeCover`]): the process's one.
+    tells: WakeCover,
     /// Looks made, answers taken in (idle and events) and wakes armed, for a test.
     pub(crate) looks: usize,
     pub(crate) answered: usize,
@@ -172,8 +253,11 @@ impl Default for AwayLock {
             gap_found_at: None,
             resumed: false,
             cover: Cover::Off,
+            failed_wake: false,
+            no_check: false,
             polled_cover: false,
             could_lock: true,
+            tells: WakeCover::shell(),
             looks: 0,
             answered: 0,
             arms: 0,
@@ -187,6 +271,12 @@ impl AwayLock {
     /// The window's content is covered: drawn as the lock screen while a wake may lock (D-B2-3; the module doc).
     pub fn covers(&self) -> bool {
         self.cover != Cover::Off
+    }
+
+    /// The cover stays because the engine's look failed and nothing passed: it offers the sign-in path (a button that
+    /// closes the engine's lock, so the engine's own password screen checks), never an Unlock that asks nothing.
+    pub fn sign_in_offered(&self) -> bool {
+        self.no_check && self.covers()
     }
 
     /// Whether a wake covers here: something an idle time says could lock (app lock on, as the engine last answered;
@@ -208,13 +298,25 @@ impl AwayLock {
     /// left as it was: that poll finds the gap, holds it and says it, as without the click. A resume already said is
     /// that wake, and covered by [`AwayLock::event`].
     pub fn cover_a_gap_not_yet_found(&mut self) {
-        if self.cover == Cover::Off
-            && !self.resumed
-            && self.wake_covers()
-            && self.gap_since_seen(Instant::now(), SystemTime::now()).is_some()
-        {
+        if self.told().gap_not_yet_found(Instant::now(), SystemTime::now()) {
             self.cover = Cover::Held;
         }
+    }
+
+    /// What [`WakeCover`] holds of this away lock.
+    fn told(&self) -> Told {
+        Told {
+            covers: self.covers(),
+            resumed: self.resumed,
+            wake_covers: self.wake_covers(),
+            seen: self.seen,
+        }
+    }
+
+    /// Tells [`WakeCover`] what the away lock knows now: at the end of every poll and every event (the cover, the poll's
+    /// last run, a resume).
+    fn tell(&self) {
+        *self.tells.lock() = self.told();
     }
 
     /// The main window's poll. `open`: the engine's lock is open ([`ShellActions::screen_open`]).
@@ -229,6 +331,7 @@ impl AwayLock {
         tx: &mut Tx,
     ) -> bool {
         let came = self.measure(open, pc_idle, actions, wake, tx);
+        self.tell();
         let covers = self.covers();
         // Compared with the last poll's end, not this poll's start: a cover turned on between two polls (an event)
         // is new to this frame too.
@@ -270,16 +373,30 @@ impl AwayLock {
             if self.cover != Cover::Off && answer.locked {
                 // The engine locked: this frame's gate may have been read before it.
                 self.cover = Cover::Locked;
+                self.no_check = false;
                 lift_if_open = false;
             } else if self.cover == Cover::Asked(looked.number) && looked.answer.is_none() {
                 // The look that says the wake failed: the engine decided nothing (P3-2, fail closed). The cover holds,
                 // and after the grace the wake is said again as the longest time away (unknown, as a resume with no
                 // idle reading), which locks unless nothing an idle time says can lock.
-                self.cover = Cover::Held;
-                self.away = Some(Duration::MAX);
-                self.gap_found_at = Some(now);
+                // A retry that fails too does NOT lift it (the cover fails closed): it stays, offers the sign-in path
+                // and tries again at the next due look.
+                if std::mem::replace(&mut self.failed_wake, true) {
+                    self.failed_wake = false;
+                    self.no_check = true;
+                    self.cover = Cover::Failed;
+                    self.away = None;
+                    self.gap_found_at = None;
+                    self.due = Some(now + LOOK_AT_MOST_EVERY);
+                } else {
+                    self.cover = Cover::Held;
+                    self.away = Some(Duration::MAX);
+                    self.gap_found_at = Some(now);
+                }
             } else if self.cover == Cover::Asked(looked.number) {
                 // The look that says the wake locked nothing.
+                self.failed_wake = false;
+                self.no_check = false;
                 self.cover = Cover::Off;
             }
         }
@@ -295,6 +412,8 @@ impl AwayLock {
             self.gap_found_at = None;
             self.resumed = false;
             self.could_lock = true;
+            self.failed_wake = false;
+            self.no_check = false;
             if self.cover != Cover::Off {
                 self.cover = Cover::Locked;
             }
@@ -303,6 +422,7 @@ impl AwayLock {
         if lift_if_open {
             // Open again after the lock (an unlock, or another session): the lock screen was the window's.
             self.cover = Cover::Off;
+            self.no_check = false;
         }
         let opened_at = *self.opened_at.get_or_insert(now);
         let pc_idle = pc_idle.or_else(|| rune::last_input().map(|at| now.saturating_duration_since(at)));
@@ -345,12 +465,17 @@ impl AwayLock {
             self.arm(due, now, tx);
             return came;
         }
-        let idle = idle.max(self.away.unwrap_or_default());
+        // A cover that failed closed asks again as the longest time away (unknown: it locks unless nothing can).
+        let idle = if self.cover == Cover::Failed {
+            Duration::MAX
+        } else {
+            idle.max(self.away.unwrap_or_default())
+        };
         if let Some(number) = self.ask(Away::Idle(idle), true, actions, wake) {
             self.looking = true;
             self.away = None;
             self.gap_found_at = None;
-            if self.cover == Cover::Held {
+            if matches!(self.cover, Cover::Held | Cover::Failed) {
                 self.cover = Cover::Asked(number);
             }
         } else if !self.without {
@@ -365,6 +490,11 @@ impl AwayLock {
     /// An event the engine is told at once: Windows' session lock, the main window closing to the tray, a wake from
     /// sleep (as idle time).
     pub fn event(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) {
+        self.take_event(seen, actions, wake);
+        self.tell();
+    }
+
+    fn take_event(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) {
         let resumed = match seen {
             Away::Idle(away) => Some(away),
             Away::LeftTheApp | Away::SessionLocked => None,

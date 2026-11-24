@@ -952,3 +952,93 @@ fn keep_several_is_one_job_and_one_message_with_a_count() {
     // The window turns those three answers into ONE message with the count: the session test
     // `keep_several_failures_are_one_message_with_the_count`.
 }
+
+/// Pumps until `done` says so of what the original's download answered.
+fn originals_until(source: &mut Source, mut done: impl FnMut(&[OriginalAnswer]) -> bool) -> Vec<OriginalAnswer> {
+    let deadline = Instant::now() + WAIT;
+    let mut got = Vec::new();
+    loop {
+        got.extend(source.pump().originals);
+        if done(&got) {
+            return got;
+        }
+        assert!(Instant::now() < deadline, "it never came");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn png() -> Vec<u8> {
+    include_bytes!("../frames/photos/assets/photo-1-preview.png").to_vec()
+}
+
+#[test]
+fn the_original_reports_its_progress_then_swaps_the_picture_in_and_stop_keeps_nothing_of_it() {
+    let fake = fake("original");
+    let (_engine, mut source, _store, _dir) = signed_in(&fake);
+    open(&mut source);
+    let harbour = shown(&source)[0][0];
+    assert!(source.original(harbour).is_none());
+
+    // Progress moves, the picture is only there once decoded.
+    let (go_on_tx, go_on_rx) = mpsc::channel::<()>();
+    source.fetch_says = Some(Box::new(move |progress, _cancel| {
+        progress(1_000, 4_000);
+        let _ = go_on_rx.recv();
+        progress(4_000, 4_000);
+        Ok(png())
+    }));
+    assert!(source.download_original(harbour));
+    let answered = originals_until(&mut source, |answered| {
+        answered.iter().any(|a| matches!(a, OriginalAnswer::Progress { done: 1_000, total: 4_000, .. }))
+    });
+    assert!(answered.iter().all(|a| !matches!(a, OriginalAnswer::Done(_))));
+    assert!(source.original(harbour).is_none(), "nothing before the end");
+    go_on_tx.send(()).unwrap();
+    let answered = originals_until(&mut source, |answered| answered.contains(&OriginalAnswer::Done(harbour)));
+    assert!(answered.contains(&OriginalAnswer::Done(harbour)));
+    assert!(source.original(harbour).is_some());
+
+    // Stop: the preview stays, nothing of the original is held.
+    source.stop_original(harbour);
+    assert!(source.original(harbour).is_none());
+
+    // Stopped while it downloads: its later answers are dropped and nothing arrives.
+    let (go_on_tx, go_on_rx) = mpsc::channel::<()>();
+    source.fetch_says = Some(Box::new(move |progress, cancel| {
+        progress(500, 4_000);
+        let _ = go_on_rx.recv();
+        if cancel.load(Ordering::SeqCst) {
+            return Err(());
+        }
+        Ok(png())
+    }));
+    assert!(source.download_original(harbour));
+    source.stop_original(harbour);
+    go_on_tx.send(()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let late = source.pump();
+    assert!(late.answered.is_empty(), "{:?}", late.answered);
+    assert_eq!(late.originals, [], "nothing of a stopped download arrives");
+    assert!(source.original(harbour).is_none());
+
+    // Bytes that are not a picture: said as failed, nothing held.
+    source.fetch_says = Some(Box::new(|_, _| Ok(b"not a picture".to_vec())));
+    assert!(source.download_original(harbour));
+    let answered = originals_until(&mut source, |answered| !answered.is_empty());
+    assert_eq!(answered, [OriginalAnswer::Failed(harbour)]);
+    assert!(source.original(harbour).is_none());
+}
+
+/// w31 (the Windows test machine, 2026-11-20): the Original tab of a HEIC or a RAW downloaded the whole file and then refused it
+/// (the decoder here opens PNG, JPEG, GIF and WebP only). Such a format is refused by its name, before any download,
+/// with words to say; the formats that open are asked for as before.
+#[test]
+fn w31_an_original_no_decoder_here_opens_is_refused_by_name_before_any_download() {
+    for name in ["IMG_0001.HEIC", "a.heic", "b.heif", "c.dng", "d.cr2", "e.arw"] {
+        assert!(original_refused_for(name).is_some(), "{name}");
+    }
+    assert!(original_refused_for("a.heic").unwrap().starts_with("HEIC photos can"));
+    for name in ["a.jpg", "b.JPEG", "c.png", "d.gif", "e.webp"] {
+        assert_eq!(original_refused_for(name), None, "{name}");
+    }
+}

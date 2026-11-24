@@ -163,26 +163,21 @@ fn settings_is_dw_0701_and_available_offline_is_dw_0715_and_the_shell_goes_there
     use crate::shell::registry::FrameGroup;
     let mut rt = runtime();
     click(&mut rt, "Sync history-row");
-    assert_eq!(rt.state.actions.intents, [Intent::Frame("DW-1301")]);
+    // The sidebar goes through the route machine (`host::dispatch`), not a Files intent.
+    assert!(rt.state.actions.intents.is_empty());
     assert_eq!(group(&rt), FrameGroup::Section(Section::SyncHistory));
 
-    let mut rt = runtime();
-    press(&mut rt, Key::Command('6'), CTRL);
-    assert_eq!(group(&rt), FrameGroup::Section(Section::SyncHistory));
-
+    // Ctrl+6 and Ctrl+7 are the window's keys since RC2-8 (`shell/host_tests_rc2_keys.rs`), not the Files frame's.
     let mut rt = runtime();
     click(&mut rt, "Available offline-row");
-    assert_eq!(rt.state.actions.intents, [Intent::Frame("DW-0715")]);
-    assert_eq!(group(&rt), FrameGroup::Section(Section::AvailableOffline));
-
-    let mut rt = runtime();
-    press(&mut rt, Key::Command('7'), CTRL);
-    assert_eq!(rt.state.actions.intents, [Intent::Frame("DW-0715")]);
+    // The sidebar goes through the route machine (`host::dispatch`), not a Files intent.
+    assert!(rt.state.actions.intents.is_empty());
     assert_eq!(group(&rt), FrameGroup::Section(Section::AvailableOffline));
 
     let mut rt = runtime();
     click(&mut rt, "settings-btn");
-    assert_eq!(rt.state.actions.intents, [Intent::Frame("DW-0701")]);
+    // The sidebar goes through the route machine (`host::dispatch`), not a Files intent.
+    assert!(rt.state.actions.intents.is_empty());
     assert_eq!(group(&rt), FrameGroup::Settings(SettingsPane::General));
 
     let mut rt = runtime();
@@ -296,7 +291,10 @@ fn duplicate_keep_offline_copy_link_and_open_act_on_every_selected_item() {
     let (first, second) = (names(&rt)[6].clone(), names(&rt)[8].clone());
 
     press(&mut rt, Key::Enter, NONE);
-    assert_eq!(asked(&calls), [Call::Open(both.clone())]);
+    // Several files: the first opens in the viewer, none in another app (w29).
+    assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
+    rt.update(|s, _| crate::frames::viewers::close(s));
+    settle(&mut rt);
 
     right_click(&mut rt, "row-6-date");
     let pick = |rt: &mut Runtime<State>, label: &str| {
@@ -600,7 +598,7 @@ fn a_window_with_no_engine_shows_no_sample_and_claims_no_change() {
         "Trash-badge",
         "Shared-badge",
         "Available offline-badge",
-        "account-name",
+        "Sync history-pill",
         "account-email",
         "avatar",
         "status-text",
@@ -609,6 +607,8 @@ fn a_window_with_no_engine_shows_no_sample_and_claims_no_change() {
     ] {
         assert!(find(&rt, key).is_none(), "{key} would be a sample");
     }
+    // The account row keeps its height with an empty name (the one Drive sidebar): no one is named.
+    assert!(find(&rt, "account-name").is_none_or(|e| e.text.as_deref().unwrap_or("").is_empty()));
     assert!(find(&rt, "settings-btn").is_some());
     assert!(!info(&rt, "new-btn").focusable);
     click(&mut rt, "row-6-date");

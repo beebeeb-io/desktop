@@ -17,15 +17,15 @@ use super::{Intent, style};
 use crate::State;
 use crate::frames::files::names::{self, NameError};
 use crate::shell::app::{Screen, Section};
+use crate::theme::scale;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::dialog::{self, Sub};
 use crate::ui::settings_dialog::{Weight, button};
-use crate::ui::{field, kit};
+use crate::ui::{field, kit, pill};
 
 /// Whether this build offers the Office editor's way to make a file: "New document…" (DW-1520) and the
-/// Word, Excel and PowerPoint tiles (DW-1521). Off in 0.9.0 (decision D-OV-3: the Office viewer ships,
-/// the editor is 0.9.1); the [`Kind`] variants and the code behind them stay for 0.9.1.
-pub const OFFICE_EDITOR: bool = false;
+/// Word, Excel and PowerPoint tiles (DW-1521). On since the editor landed (lock 4 of D-OV-3 is off).
+pub const OFFICE_EDITOR: bool = true;
 
 /// What a new file can be (DW-1521), in the board's order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +103,8 @@ pub enum Step {
     Pick,
     /// DW-1522: its name, and its extension as a field of its own.
     Name,
+    /// DW-1558: New document (`frames::office::edit::new_document`): Docs, Sheets or Slides, a template, a name.
+    Document,
 }
 
 /// The New file dialog while it is open (`State::viewer`).
@@ -119,10 +121,24 @@ pub struct NewFile {
     /// file was pressed can't be given. Typing in either field takes it away.
     pub error: Option<(String, NameError)>,
     /// The control that takes the keyboard once this change is on screen.
-    focus: Option<&'static str>,
+    pub(crate) focus: Option<&'static str>,
+    /// New document's own state (`Step::Document`).
+    pub(crate) doc: Option<crate::frames::office::edit::new_document::Doc>,
 }
 
 impl NewFile {
+    /// The dialog on New document (DW-1558): `kind` is an office type, the name its default.
+    pub(crate) fn document(folder: Option<String>, kind: Kind, doc: crate::frames::office::edit::new_document::Doc) -> NewFile {
+        let mut nf = NewFile::new(folder);
+        nf.step = Step::Document;
+        nf.kind = kind;
+        nf.name = TextEdit::new(crate::frames::office::edit::new_document::default_name(kind));
+        nf.name.set_selection(0, crate::frames::office::edit::new_document::UNTITLED.len());
+        nf.focus = Some(NAME_INPUT);
+        nf.doc = Some(doc);
+        nf
+    }
+
     fn new(folder: Option<String>) -> NewFile {
         NewFile {
             step: Step::Pick,
@@ -132,6 +148,7 @@ impl NewFile {
             ext: TextEdit::new(""),
             error: None,
             focus: Some(type_key(0)),
+            doc: None,
         }
     }
 
@@ -162,7 +179,7 @@ fn chip_key(i: usize) -> &'static str {
         .unwrap_or("chip-0")
 }
 
-fn ui(s: &mut State) -> Option<&mut NewFile> {
+pub(crate) fn ui(s: &mut State) -> Option<&mut NewFile> {
     s.viewer.new_file.as_mut()
 }
 
@@ -181,6 +198,26 @@ pub fn begin(s: &mut State) -> bool {
     s.actions.menu = None;
     s.viewer.new_file = Some(NewFile::new(s.listing.folder.id.clone()));
     true
+}
+
+/// New document (DW-1558): the dialog over the Files window on `kind`. `false`: not here (Files is not shown, the
+/// folder takes no new files, or a dialog is open already). The source that makes the document is the window's own.
+pub(crate) fn begin_document(s: &mut State, kind: Kind, folder: Option<String>) -> bool {
+    if s.viewer.new_file.is_some() || !in_files(s) || !s.can_add() {
+        return false;
+    }
+    s.actions.menu = None;
+    let source = super::route_source(s);
+    let doc = crate::frames::office::edit::new_document::Doc::new(source);
+    s.viewer.new_file = Some(NewFile::document(folder, kind, doc));
+    true
+}
+
+/// A New document the engine answered: the new file `id` opens in the editor from the source that made it.
+pub(crate) fn open_made(s: &mut State, source: Box<dyn super::ViewerSource>, id: &str) -> bool {
+    s.viewer.new_file = None;
+    s.viewer.refocus_list = false;
+    super::open_from(s, source, id)
 }
 
 /// Cancel, Esc, a press on the scrim, and after Create file or an office type's Continue: the
@@ -285,6 +322,7 @@ pub fn take_focus(s: &mut State) -> Option<&'static str> {
 
 /// The route left Files (another section, settings, a file): the dialog goes with it.
 pub fn sync(s: &mut State) {
+    crate::frames::office::edit::new_document::poll(s);
     if s.viewer.new_file.is_some() && !in_files(s) {
         s.viewer.new_file = None;
     }
@@ -303,6 +341,12 @@ fn dialog_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Escape => {
             close(s);
             return true;
+        }
+        Key::Left | Key::Up if step == Step::Document => {
+            return crate::frames::office::edit::new_document::arrow(s, ev, tx, -1);
+        }
+        Key::Right | Key::Down if step == Step::Document => {
+            return crate::frames::office::edit::new_document::arrow(s, ev, tx, 1);
         }
         Key::Left | Key::Up => -1,
         Key::Right | Key::Down => 1,
@@ -328,7 +372,7 @@ fn dialog_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 }
             }
         }
-        Step::Pick => {}
+        Step::Pick | Step::Document => {}
     }
     if let Some(key) = take_focus(s) {
         tx.focus(key, true);
@@ -339,7 +383,7 @@ fn dialog_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// A field's keys before the field edits (Rune gives a focused field's keys to no ancestor): Esc
 /// closes; what a one-line field edits, Tab and Enter (Create file, the default button) go on;
 /// anything else (F2, Ctrl+N, Up, Page Down …) stops here, so it never reaches the list behind.
-fn field_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+pub(crate) fn field_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     match &ev.key {
         Key::Escape => {
             close(s);
@@ -361,7 +405,7 @@ fn field_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
 
 /// The name's field. An edit that arrives after the dialog closed (two keys in one frame) goes to a
 /// field nobody shows, never to the Files window's search.
-fn name_edit(s: &mut State) -> &mut TextEdit {
+pub(crate) fn name_edit(s: &mut State) -> &mut TextEdit {
     match s.viewer.new_file.as_mut() {
         Some(nf) => &mut nf.name,
         None => &mut s.viewer.stray,
@@ -382,9 +426,9 @@ fn ext_edit(s: &mut State) -> &mut TextEdit {
 /// The extension inside a type's document outline: mono 10px on a 17px line.
 const DOC_EXT: TextStyle = TextStyle::new(10.0, 400.0).family(rune::tok::Family::Mono).lh(17.0);
 /// The extension's field (`.kit-field-value.font-mono`): mono 11.5px on a 17px line.
-const EXT_VALUE: TextStyle = TextStyle::new(11.5, 400.0).family(rune::tok::Family::Mono).lh(17.0);
+const EXT_VALUE: TextStyle = scale::text::META_MONO_LOOSE;
 /// A suggested extension (`.kit-chip`): 12px/600 on a 17px line.
-const CHIP: TextStyle = TextStyle::new(12.0, 600.0).lh(17.0);
+const CHIP: TextStyle = scale::text::BODY_SEMI_LOOSE;
 /// A type's tile: the dialog's 512 across five, 12 apart.
 const TILE_W: f32 = (512.0 - 4.0 * 12.0) / 5.0;
 /// The outline of a document in a type's tile.
@@ -469,7 +513,7 @@ fn type_tile(kind: Kind, on: bool, x: f32, t: &Theme) -> El {
         .key(format!("{key}-doc"))
         .size(DOC_W, 54.0)
         .ml(doc_left - tile_left)
-        .radius(4.0)
+        .radius(tokens::radius::SM)
         .center()
         .child(ring_under_clip(format!("{key}-doc-ring"), 1.5, 4.0, t.text_tertiary))
         .child(kit::label(format!("{key}-ext"), kind.ext(), DOC_EXT, t.text_secondary).offset(doc_x - doc_left, 0.0));
@@ -480,10 +524,10 @@ fn type_tile(kind: Kind, on: bool, x: f32, t: &Theme) -> El {
         .label(format!("{}, {}", kind.word(), kind.ext()))
         .checked(on)
         .h(101.0)
-        .py(12.0)
-        .gap(8.0)
+        .py(scale::space::S12)
+        .gap(scale::space::S8)
         .items_start()
-        .radius(10.0)
+        .radius(tokens::radius::LG)
         .focusable(true)
         .focus_ring(2.0, 2.0, t.accent_deep)
         .cursor(rune::Cursor::Pointer)
@@ -584,9 +628,9 @@ fn ext_field(nf: &NewFile, t: &Theme) -> El {
         .key("field-1")
         .w(90.0)
         .h(28.0)
-        .px(8.0)
+        .px(scale::space::S8)
         .center_y()
-        .radius(6.0)
+        .radius(tokens::radius::MD)
         .fill(if focused { t.card } else { t.field })
         .border(1.0, if focused { t.accent_deep } else { Color::TRANSPARENT })
         .border_layout()
@@ -600,29 +644,15 @@ fn ext_field(nf: &NewFile, t: &Theme) -> El {
 
 /// A suggested extension (`.kit-chip.tone-neutral`); the chosen one is ink with paper words. `x`, `w`:
 /// where the board lays it out (its words' width and 10 on each side).
-fn chip(i: usize, ext: &'static str, on: bool, x: f32, w: f32, t: &Theme) -> El {
-    let key = chip_key(i);
-    row()
-        .key(key)
+fn chip(i: usize, ext: &'static str, on: bool, _x: f32, _w: f32, t: &Theme) -> El {
+    let tone = if on { pill::Tone::Accent } else { pill::Tone::Neutral };
+    pill::pill(chip_key(i), ext, tone, false, t)
         .role("radio")
-        .label(ext)
-        .checked(on)
         .h(26.0)
-        .center()
-        .radius(13.0)
-        .fill(if on { t.text } else { t.tile })
+        .checked(on)
         .focusable(true)
         .focus_ring(2.0, 2.0, t.accent_deep)
         .cursor(rune::Cursor::Pointer)
-        .child(
-            style::fitted(
-                format!("{key}-label"),
-                ext,
-                CHIP,
-                if on { t.paper } else { t.text_secondary },
-            )
-            .offset(drift(x, w), 0.0),
-        )
         .on_press(move |s: &mut State| choose_ext(s, ext))
 }
 
@@ -649,7 +679,7 @@ fn name(nf: &NewFile, t: &Theme) -> El {
     let fields = row()
         .key("name-row")
         .w_full()
-        .gap(8.0)
+        .gap(scale::space::S8)
         .items_start()
         .child(el().key("name-cell").grow(1.0).min_w(0.0).child(name_field))
         .child(ext_field(nf, t));
@@ -698,6 +728,7 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
     let card = match nf.step {
         Step::Pick => pick(nf, &t),
         Step::Name => name(nf, &t),
+        Step::Document => crate::frames::office::edit::new_document::card(nf, &t),
     };
     // Under the caption: the window can still be moved and closed (`.mk-scrim`).
     let layer = el()
@@ -705,6 +736,9 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .child(dialog::scrim(crate::TITLEBAR_H, card, &t))
         .on_key(dialog_key)
-        .modal_tx(false, |s: &mut State, _tx: &mut Tx| close(s));
+        .modal_tx(false, |s: &mut State, _tx: &mut Tx| close(s))
+        // Its opener (the New menu's row, Ctrl+N in the list) is gone or is the list: the keyboard goes back to the
+        // list, as after Files' own dialogs (`ui::dialog::modal_back`'s fallback).
+        .focus_return(list_key(s));
     window.child(layer)
 }

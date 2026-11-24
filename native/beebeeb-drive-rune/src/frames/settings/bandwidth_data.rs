@@ -48,6 +48,53 @@ pub struct Flow {
     pub says: String,
 }
 
+/// A rate as the pane's figure: "3.2" "MB/s", "410" "KB/s", "90" "B/s". `None` for no movement (a dash, never "0 B/s").
+pub fn speed_figure(bytes_per_s: u64) -> Option<(String, String)> {
+    match bytes_per_s {
+        0 => None,
+        b if b >= 1_000_000 => Some((format!("{:.1}", b as f64 / 1e6), "MB/s".into())),
+        b if b >= 1_000 => Some((format!("{}", (b as f64 / 1e3).round()), "KB/s".into())),
+        b => Some((b.to_string(), "B/s".into())),
+    }
+}
+
+/// "Right now" from the engine's newest transfer rate (`rate`: up, down bytes per second; `None`: no recent sample)
+/// and whether sync is held on a metered network. Returns the card's line and the two directions.
+pub fn live_flows(rate: Option<(u64, u64)>, waiting_metered: bool) -> (String, Flow, Flow) {
+    let (up, down) = rate.unwrap_or((0, 0));
+    let flow = |bytes, busy: &str, idle: &str| {
+        let speed = speed_figure(bytes);
+        let says = if speed.is_some() { busy } else { idle };
+        Flow {
+            speed,
+            says: says.into(),
+        }
+    };
+    if waiting_metered {
+        return (
+            "Waiting for another network".into(),
+            Flow {
+                speed: None,
+                says: "Waiting: this PC is on a metered connection".into(),
+            },
+            Flow {
+                speed: None,
+                says: "Files you open still download".into(),
+            },
+        );
+    }
+    let now = if up > 0 || down > 0 {
+        "Syncing"
+    } else {
+        "Nothing is moving"
+    };
+    (
+        now.into(),
+        flow(up, "Encrypting and uploading", "Nothing is uploading"),
+        flow(down, "Downloading", "Files download when you open them"),
+    )
+}
+
 /// The last 20 hours: data moved per 20 minutes, oldest first.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct History {
@@ -411,7 +458,7 @@ impl BoardBandwidth {
     /// 125 KB/s.
     fn upload_speed(&self) -> (String, String) {
         match self.upload_limit {
-            Some(mbps) if mbps * 125 < 3200 && mbps * 125 < 1000 => ((mbps * 125).to_string(), "KB/s".into()),
+            Some(mbps) if mbps * 125 < 1000 => ((mbps * 125).to_string(), "KB/s".into()),
             Some(mbps) if mbps * 125 < 3200 => (format!("{:.1}", mbps as f32 * 0.125), "MB/s".into()),
             _ => ("3.2".into(), "MB/s".into()),
         }
@@ -560,5 +607,28 @@ impl BoardBandwidth {
             waiting_metered: waiting,
             test: self.test.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod upload_speed_tests {
+    use super::BoardBandwidth;
+
+    fn speed(limit: Option<u32>) -> (String, String) {
+        let board = BoardBandwidth {
+            upload_limit: limit,
+            ..BoardBandwidth::default()
+        };
+        board.upload_speed()
+    }
+
+    #[test]
+    fn a_limit_under_a_megabyte_a_second_is_shown_in_kilobytes_above_it_in_megabytes() {
+        assert_eq!(speed(Some(4)), ("500".into(), "KB/s".into()));
+        assert_eq!(speed(Some(7)), ("875".into(), "KB/s".into()));
+        assert_eq!(speed(Some(8)), ("1.0".into(), "MB/s".into()));
+        assert_eq!(speed(Some(16)), ("2.0".into(), "MB/s".into()));
+        assert_eq!(speed(Some(26)), ("3.2".into(), "MB/s".into()));
+        assert_eq!(speed(None), ("3.2".into(), "MB/s".into()));
     }
 }

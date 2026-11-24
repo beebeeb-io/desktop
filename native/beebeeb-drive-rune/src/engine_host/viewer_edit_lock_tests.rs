@@ -13,7 +13,7 @@ const TYPED: &str = "An invented line typed before the lock.";
 
 impl Window {
     fn db(&self) -> StateDb {
-        StateDb::open(&self._state.path().join("state.db")).expect("the local state opens")
+        StateDb::open(self._state.path().join("state.db")).expect("the local state opens")
     }
 
     /// The note is the account's to change, at `version` (as another device's save leaves it).

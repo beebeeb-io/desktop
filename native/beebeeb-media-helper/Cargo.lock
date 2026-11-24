@@ -25,6 +25,7 @@ name = "beebeeb-media-helper"
 version = "0.0.1"
 dependencies = [
  "beebeeb-media-protocol",
+ "beebeeb-office-sandbox",
  "filmcraft-codecs",
  "filmcraft-media",
  "symphonia",
@@ -35,6 +36,13 @@ dependencies = [
 [[package]]
 name = "beebeeb-media-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "beebeeb-office-sandbox"
+version = "0.1.0"
+dependencies = [
+ "windows-sys",
+]
 
 [[package]]
 name = "bitflags"
@@ -168,7 +176,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-aac"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-bitstream",
  "thiserror",
@@ -177,7 +185,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-ac3"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "thiserror",
 ]
@@ -185,7 +193,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-av1"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -195,17 +203,17 @@ dependencies = [
 [[package]]
 name = "filmcraft-avi"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 
 [[package]]
 name = "filmcraft-bitstream"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 
 [[package]]
 name = "filmcraft-codecs"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-aac",
  "filmcraft-ac3",
@@ -239,7 +247,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-color"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "serde",
 ]
@@ -247,7 +255,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-dnx"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -257,7 +265,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-frame"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-color",
  "filmcraft-time",
@@ -268,7 +276,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-h264"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -278,7 +286,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-isobmff"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-bitstream",
  "thiserror",
@@ -287,12 +295,12 @@ dependencies = [
 [[package]]
 name = "filmcraft-matroska"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 
 [[package]]
 name = "filmcraft-media"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-color",
  "filmcraft-frame",
@@ -306,7 +314,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-mpa"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-bitstream",
  "thiserror",
@@ -315,7 +323,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-mpeg2v"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "rayon",
  "thiserror",
@@ -324,7 +332,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-mpegts"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "thiserror",
 ]
@@ -332,17 +340,17 @@ dependencies = [
 [[package]]
 name = "filmcraft-ogg"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 
 [[package]]
 name = "filmcraft-opus"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 
 [[package]]
 name = "filmcraft-prores"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -352,7 +360,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-time"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "serde",
 ]
@@ -360,7 +368,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-vp8"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "thiserror",
 ]
@@ -368,7 +376,7 @@ dependencies = [
 [[package]]
 name = "filmcraft-vp9"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 dependencies = [
  "filmcraft-bitstream",
  "rayon",
@@ -1039,6 +1047,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
 name = "windows-threading"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1091,19 +1108,19 @@ dependencies = [
 [[patch.unused]]
 name = "filmcraft-apv"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 
 [[patch.unused]]
 name = "filmcraft-dng"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 
 [[patch.unused]]
 name = "filmcraft-hevc"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"
 
 [[patch.unused]]
 name = "filmcraft-mxf"
 version = "0.9.0"
-source = "git+https://github.com/beebeeb-io/desktop-office?rev=0d7a58368f3af07b918eedb42e81ed22dc117f86#0d7a58368f3af07b918eedb42e81ed22dc117f86"
+source = "git+https://github.com/beebeeb-io/desktop-office?rev=ae093962503d1a654199ae551fb42498ed2f613f#ae093962503d1a654199ae551fb42498ed2f613f"

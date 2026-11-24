@@ -13,6 +13,7 @@ use super::instance::ProfileHolder;
 use super::platform::{Platform, PlatformError};
 use super::tray::{EngineState, TrayInputs};
 use crate::frames::global::sync_off::SyncOff;
+use crate::frames::signin::discard_switch::Ask as DiscardAsk;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionError {
@@ -68,6 +69,11 @@ pub trait EngineActions: Send + Sync {
     fn tray_inputs(&self) -> TrayInputs;
     fn pause_sync(&self) -> Result<(), ActionError>;
     fn resume_sync(&self) -> Result<(), ActionError>;
+    /// Sync anyway (DW-1222, DW-0746e): lift the metered or battery-saver hold that stands, until the connection
+    /// changes (`beebeeb_engine::power::sync_anyway`), and run a tick now.
+    fn sync_anyway(&self) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("sync anyway"))
+    }
     /// Opens File Explorer at the Beebeeb location (DW-1180).
     fn open_in_file_explorer(&self) -> Result<(), ActionError>;
     /// Another agent holding this profile's sync lock (`lockfile.rs`), if one is alive: a
@@ -89,10 +95,27 @@ pub trait EngineActions: Send + Sync {
     /// Sign in (DW-1109): the engine asks for the password, by closing its gate to the sign-in
     /// screen. The default does nothing: an engine that does not know the state keeps its gate.
     fn sign_in_again(&self) {}
+    /// The wake cover's sign-in path (the engine's look failed, nothing passed): the engine closes its lock at the
+    /// vault, so the window shows the engine's own password screen. The default does nothing.
+    fn lock_vault_now(&self) {}
     /// The last start's refusal while it stands, with the attempt it was (the refusal modal, Q3). Cheap: asked on
     /// every frame.
     fn sync_refusal(&self) -> Option<SyncOff> {
         None
+    }
+    /// dc-111: what "Discard and switch" would lose (the previous account's unsent files). Only reads. BLOCKS briefly
+    /// (the local state is read).
+    fn discard_ask(&self) -> Result<DiscardAsk, ActionError> {
+        Err(ActionError::NotBuilt("discard and switch"))
+    }
+    /// dc-111: discard exactly `ask` (each file kept first) and switch, on a worker. `Ok` means "asked".
+    fn discard_and_switch(&self, _ask: DiscardAsk) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("discard and switch"))
+    }
+    /// dc-RC-b: move the files the previous account left into a dated folder beside the sync folder, then start, on
+    /// a worker. `Ok` means "asked".
+    fn keep_aside_and_switch(&self) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("keep aside"))
     }
     /// The away lock's look at `seen`, as a job for a worker ([`AwayJob`]). `None`: this engine has no automatic
     /// lock (the fixture), and the shell asks nothing more.
@@ -100,8 +123,7 @@ pub trait EngineActions: Send + Sync {
         None
     }
     /// The engine's lock is open (core's `Open`: the key in memory, the screen not locked), whatever the window shows
-    /// (the first-run steps, the no-plan screen too): the away lock counts idle time then (review of #452, the lead's
-    /// ruling). Asked on every poll: cheap, never a wait on a worker.
+    /// (the first-run steps, the no-plan screen too): the away lock counts idle time then. Asked on every poll: cheap, never a wait on a worker.
     fn screen_open(&self) -> bool {
         false
     }
@@ -119,6 +141,10 @@ pub trait ShellActions: Send + Sync {
     fn tray_inputs(&self) -> TrayInputs;
     fn pause_sync(&self) -> Result<(), ActionError>;
     fn resume_sync(&self) -> Result<(), ActionError>;
+    /// See [`EngineActions::sync_anyway`].
+    fn sync_anyway(&self) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("sync anyway"))
+    }
     fn open_in_file_explorer(&self) -> Result<(), ActionError>;
     /// "Open Beebeeb when you log in" (DW-0281, Settings).
     fn autostart_enabled(&self) -> bool;
@@ -127,8 +153,23 @@ pub trait ShellActions: Send + Sync {
     fn set_gate_for_scene(&self, gate: GateState);
     /// See [`EngineActions::sign_in_again`].
     fn sign_in_again(&self) {}
+    /// The wake cover's sign-in path (the engine's look failed, nothing passed): the engine closes its lock at the
+    /// vault, so the window shows the engine's own password screen. The default does nothing.
+    fn lock_vault_now(&self) {}
     /// See [`EngineActions::sync_refusal`].
     fn sync_refusal(&self) -> Option<SyncOff>;
+    /// See [`EngineActions::discard_ask`].
+    fn discard_ask(&self) -> Result<DiscardAsk, ActionError> {
+        Err(ActionError::NotBuilt("discard and switch"))
+    }
+    /// See [`EngineActions::discard_and_switch`].
+    fn discard_and_switch(&self, _ask: DiscardAsk) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("discard and switch"))
+    }
+    /// See [`EngineActions::keep_aside_and_switch`].
+    fn keep_aside_and_switch(&self) -> Result<(), ActionError> {
+        Err(ActionError::NotBuilt("keep aside"))
+    }
     /// See [`EngineActions::away_job`].
     fn away_job(&self, _seen: Away) -> Option<AwayJob> {
         None
@@ -178,6 +219,9 @@ impl ShellActions for HostActions {
     fn resume_sync(&self) -> Result<(), ActionError> {
         self.engine.resume_sync()
     }
+    fn sync_anyway(&self) -> Result<(), ActionError> {
+        self.engine.sync_anyway()
+    }
     fn open_in_file_explorer(&self) -> Result<(), ActionError> {
         self.engine.open_in_file_explorer()
     }
@@ -194,8 +238,20 @@ impl ShellActions for HostActions {
     fn sign_in_again(&self) {
         self.engine.sign_in_again();
     }
+    fn lock_vault_now(&self) {
+        self.engine.lock_vault_now();
+    }
     fn sync_refusal(&self) -> Option<SyncOff> {
         self.engine.sync_refusal()
+    }
+    fn discard_ask(&self) -> Result<DiscardAsk, ActionError> {
+        self.engine.discard_ask()
+    }
+    fn discard_and_switch(&self, ask: DiscardAsk) -> Result<(), ActionError> {
+        self.engine.discard_and_switch(ask)
+    }
+    fn keep_aside_and_switch(&self) -> Result<(), ActionError> {
+        self.engine.keep_aside_and_switch()
     }
     fn away_job(&self, seen: Away) -> Option<AwayJob> {
         self.engine.away_job(seen)
@@ -213,6 +269,7 @@ pub enum FixtureCall {
     Resume,
     OpenInFileExplorer,
     StartSync,
+    KeepAside,
     StopForQuit,
     ResumeAfterCancelledQuit,
 }
@@ -370,6 +427,10 @@ impl EngineActions for FixtureEngine {
     }
     fn sync_refusal(&self) -> Option<SyncOff> {
         self.lock().refusal.clone()
+    }
+    fn keep_aside_and_switch(&self) -> Result<(), ActionError> {
+        self.lock().calls.push(FixtureCall::KeepAside);
+        Ok(())
     }
 }
 

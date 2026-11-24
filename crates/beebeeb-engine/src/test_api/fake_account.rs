@@ -55,7 +55,7 @@ pub struct VaultItem {
 }
 
 impl VaultItem {
-    fn to_node(&self) -> Value {
+    pub(super) fn to_node(&self) -> Value {
         let mut node = json!({
             "id": self.id,
             "parent_id": self.parent_id,
@@ -118,6 +118,14 @@ pub struct FakeAccount {
     pub(super) versions: Mutex<HashMap<String, FakeVersions>>,
     /// Whole uploads, the change log and stored pictures ([`super::fake_uploads`]).
     pub(super) uploads: super::fake_uploads::UploadState,
+    /// The stored search-index shards ([`super::fake_search_shards`]).
+    pub(super) search_shards: super::fake_search_shards::SearchShardState,
+    /// The step-up tokens and permanent deletes ([`super::fake_purge`]).
+    pub(super) purge: super::fake_purge::PurgeState,
+    /// The account's sign-in sessions ([`super::fake_sessions`]).
+    pub(super) sessions_state: super::fake_sessions::SessionState,
+    /// Invites, file requests and shared-folder custody ([`super::fake_sharing`]).
+    pub(super) sharing: super::fake_sharing::SharingState,
     /// How many version restores reached this account (a request with its token), whatever the answer.
     restores: AtomicUsize,
     /// The status the next version restore is answered with, without being made.
@@ -129,13 +137,40 @@ pub struct FakeAccount {
     /// [`Self::serve_security_routes`]; the `bb-fake-server` fixture turns it on.
     security_routes: AtomicBool,
     /// What `me/two-factor` says ([`Self::set_two_factor`]); off at the start.
-    two_factor_on: AtomicBool,
+    pub(super) two_factor_on: AtomicBool,
+    /// The `plan_state` the subscription says ([`Self::set_plan_state`]); `active` at the start.
+    plan_state: Mutex<String>,
+    /// The subscription route hangs up ([`Self::set_plan_unreachable`]).
+    plan_unreachable: AtomicBool,
+    /// How long the subscription route waits before it answers, in ms ([`Self::set_plan_delay_ms`]).
+    plan_delay_ms: std::sync::atomic::AtomicU64,
+    /// Two-factor, region, deletion, email resend, health and speedtest ([`super::fake_rest`]).
+    pub(super) rest: super::fake_rest::RestState,
 }
 
 impl FakeAccount {
+    pub(super) fn security_routes_on(&self) -> bool {
+        self.security_routes.load(Ordering::SeqCst)
+    }
+
     /// Answer the Security page's four routes (see the field); the fixture of `bb-fake-server` does.
     pub fn serve_security_routes(&self, on: bool) {
         self.security_routes.store(on, Ordering::SeqCst);
+    }
+
+    /// What `billing/subscription` says as `plan_state`: `none`, `trial`, `free`, `active` or `lapsed`.
+    pub fn set_plan_state(&self, state: &str) {
+        *self.plan_state.lock().unwrap() = state.to_string();
+    }
+
+    /// `billing/subscription` hangs up without an answer (the server cannot be reached for the plan).
+    pub fn set_plan_unreachable(&self, unreachable: bool) {
+        self.plan_unreachable.store(unreachable, Ordering::SeqCst);
+    }
+
+    /// `billing/subscription` answers only after `ms` milliseconds (a slow plan answer).
+    pub fn set_plan_delay_ms(&self, ms: u64) {
+        self.plan_delay_ms.store(ms, Ordering::SeqCst);
     }
 
     /// Whether `me/two-factor` says two-factor is on.
@@ -152,7 +187,7 @@ impl FakeAccount {
         let recovery_check = {
             use base64::Engine as _;
             let check = beebeeb_core::opaque::compute_recovery_check(&master_key_struct);
-            base64::engine::general_purpose::STANDARD.encode(&*check)
+            base64::engine::general_purpose::STANDARD.encode(*check)
         };
         let master_key = *master_key_struct.to_bytes();
         let session_token = format!("fake-session-{}", uuid::Uuid::new_v4());
@@ -175,11 +210,19 @@ impl FakeAccount {
             links_listed_as: Mutex::new(None),
             versions: Mutex::new(HashMap::new()),
             uploads: Default::default(),
+            search_shards: Default::default(),
+            purge: Default::default(),
+            sessions_state: Default::default(),
+            sharing: Default::default(),
             restores: AtomicUsize::new(0),
             restore_refusal: Mutex::new(None),
             restore_hangs_up: AtomicBool::new(false),
             security_routes: AtomicBool::new(false),
             two_factor_on: AtomicBool::new(false),
+            plan_state: Mutex::new("active".to_string()),
+            plan_unreachable: AtomicBool::new(false),
+            plan_delay_ms: std::sync::atomic::AtomicU64::new(0),
+            rest: Default::default(),
         };
         (account, recovery_phrase.to_string())
     }
@@ -270,7 +313,7 @@ impl FakeAccount {
     }
 
     /// The non-trashed items as sync-snapshot nodes.
-    fn snapshot_nodes(&self) -> Vec<Value> {
+    pub(super) fn snapshot_nodes(&self) -> Vec<Value> {
         self.items
             .lock()
             .expect("vault items")
@@ -382,13 +425,13 @@ impl FakeAccount {
     /// Trash an item by id. Returns true if found and not already trashed.
     pub fn trash_item(&self, id: &str) -> bool {
         let mut items = self.items.lock().expect("vault items");
-        if let Some(item) = items.get_mut(id) {
-            if !item.is_trashed {
-                item.is_trashed = true;
-                item.version_number += 1;
-                self.seq.fetch_add(1, Ordering::SeqCst);
-                return true;
-            }
+        if let Some(item) = items.get_mut(id)
+            && !item.is_trashed
+        {
+            item.is_trashed = true;
+            item.version_number += 1;
+            self.seq.fetch_add(1, Ordering::SeqCst);
+            return true;
         }
         false
     }
@@ -414,13 +457,13 @@ impl FakeAccount {
     /// Restore a trashed item. Returns true if found and was trashed.
     pub fn restore_item(&self, id: &str) -> bool {
         let mut items = self.items.lock().expect("vault items");
-        if let Some(item) = items.get_mut(id) {
-            if item.is_trashed {
-                item.is_trashed = false;
-                item.version_number += 1;
-                self.seq.fetch_add(1, Ordering::SeqCst);
-                return true;
-            }
+        if let Some(item) = items.get_mut(id)
+            && item.is_trashed
+        {
+            item.is_trashed = false;
+            item.version_number += 1;
+            self.seq.fetch_add(1, Ordering::SeqCst);
+            return true;
         }
         false
     }
@@ -466,6 +509,59 @@ impl FakeAccount {
         for link in self.links.lock().expect("links").iter_mut() {
             link["revoked"] = json!(true);
         }
+    }
+
+    /// `DELETE /api/v1/shares/{id}`: the link is revoked (`GET /api/v1/shares/mine` still lists it, marked revoked).
+    pub(super) fn revoke_link(&self, id: &str) -> Reply {
+        let mut links = self.links.lock().expect("links");
+        match links.iter_mut().find(|link| link["id"].as_str() == Some(id)) {
+            Some(link) => {
+                link["revoked"] = json!(true);
+                Reply::ok(json!({ "success": true }))
+            }
+            None => Reply::json(404, json!({ "error": "not_found" })),
+        }
+    }
+
+    /// `PATCH /api/v1/shares/{id}`: an owner's live link's expiry and password. A field that is absent is
+    /// unchanged, `null` clears; limits as create (1..=87600 hours, a password of at least 4 after trim).
+    pub(super) fn patch_link(&self, id: &str, body: &Value) -> Reply {
+        let mut links = self.links.lock().expect("links");
+        let Some(link) = links
+            .iter_mut()
+            .find(|link| link["id"].as_str() == Some(id) && link["revoked"] != true)
+        else {
+            return Reply::json(404, json!({ "error": "not_found" }));
+        };
+        let hours = match body.get("expires_in_hours") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(h) => match h.as_i64().filter(|h| (1..=87_600).contains(h)) {
+                Some(h) => Some(Some(h)),
+                None => return Reply::json(400, json!({ "error": "bad_expiry" })),
+            },
+        };
+        let passphrase = match body.get("passphrase") {
+            None => None,
+            Some(Value::Null) => Some(false),
+            Some(p) => match p.as_str().filter(|p| p.trim().chars().count() >= 4) {
+                Some(_) => Some(true),
+                None => return Reply::json(400, json!({ "error": "bad_passphrase" })),
+            },
+        };
+        match hours {
+            Some(Some(h)) => link["expires_at"] = json!((chrono::Utc::now() + chrono::Duration::hours(h)).to_rfc3339()),
+            Some(None) => link["expires_at"] = Value::Null,
+            None => {}
+        }
+        if let Some(set) = passphrase {
+            link["has_passphrase"] = json!(set);
+        }
+        Reply::ok(json!({
+            "id": id,
+            "expires_at": link.get("expires_at").cloned().unwrap_or(Value::Null),
+            "has_passphrase": link.get("has_passphrase").and_then(Value::as_bool).unwrap_or(false),
+        }))
     }
 
     /// `POST /api/v1/shares`: a link to a live item of this account; another id is not found.
@@ -566,6 +662,15 @@ impl FakeAccount {
 pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
     Arc::new(move |req: &Request| {
         let route = req.route();
+        // The stateful routes of their own files, before the broad `/api/v1/files/` arms below.
+        if let Some(reply) = account
+            .purge_route(req)
+            .or_else(|| account.sessions_route(req))
+            .or_else(|| account.rest_route(req))
+            .or_else(|| account.sharing_route(req))
+        {
+            return reply;
+        }
         match route.as_str() {
             // ── OPAQUE sign-in ──────────────────────────────────────────
             "POST /api/v1/opaque/login-start" => account.opaque.login_start(&req.json()),
@@ -614,20 +719,6 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
             }
 
             // ── What the Security page reads: invented rows, in the client's shapes ──
-            "GET /api/v1/account/sessions" if account.security_routes.load(Ordering::SeqCst) => {
-                if req.bearer() != Some(&account.session_token) {
-                    return Reply::error(401, "unauthorized");
-                }
-                Reply::ok(json!({ "sessions": [{
-                    "id": "fixture-session-1",
-                    "device_name": "Fixture PC",
-                    "device_kind": "desktop",
-                    "country_code": "DE",
-                    "last_active_at": "2026-11-15T05:00:00Z",
-                    "is_current": true,
-                }] }))
-            }
-
             "GET /api/v1/me/activity" if account.security_routes.load(Ordering::SeqCst) => {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
@@ -674,12 +765,32 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
+                let delay = account.plan_delay_ms.load(Ordering::SeqCst);
+                if delay > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
+                if account.plan_unreachable.load(Ordering::SeqCst) {
+                    return Reply::hang_up();
+                }
+                let state = account.plan_state.lock().unwrap().clone();
+                let (plan, status) = match state.as_str() {
+                    "none" => ("none", "none"),
+                    "lapsed" => ("personal", "canceled"),
+                    "trial" => ("personal", "trialing"),
+                    "free" => ("free", "active"),
+                    _ => ("personal", "active"),
+                };
                 Reply::ok(json!({
-                    "plan_name": "Pro",
-                    "status": "active",
-                    "storage_limit_bytes": account.quota_bytes,
+                    "plan": plan,
+                    "billing_cycle": "monthly",
+                    "status": status,
+                    "seats": 1,
+                    "region": "eu",
                     "created_at": "2025-01-01T00:00:00Z",
                     "current_period_end": "2026-01-01T00:00:00Z",
+                    "quota_bytes": account.quota_bytes,
+                    "used_bytes": account.used_bytes,
+                    "plan_state": state,
                 }))
             }
 
@@ -729,6 +840,14 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                     })),
                     None => Reply::ok(json!({ "ops": [], "since": seq, "head_seq": seq })),
                 }
+            }
+
+            // ── The counter row (the Trash badge); before the single-file arm below, which would answer 404 ──
+            "GET /api/v1/files/count" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.files_count()
             }
 
             // ── Files listing ───────────────────────────────────────────
@@ -918,14 +1037,16 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 if req.bearer() != Some(&account.session_token) {
                     return Reply::error(401, "unauthorized");
                 }
-                account.upload_route(&req)
+                account.upload_route(req)
             }
 
             // ── Search shards ───────────────────────────────────────────
-            "GET /api/v1/search-index/shards" => Reply::ok(json!({ "shards": [] })),
-
-            // ── Shares invites ──────────────────────────────────────────
-            "GET /api/v1/shares/invites/incoming" => Reply::ok(json!({ "invites": [] })),
+            _ if FakeAccount::is_search_shard_route(req) => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.search_shard_route(req)
+            }
 
             // ── Share links: make one, list the account's ───────────────
             "POST /api/v1/shares" => {

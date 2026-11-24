@@ -133,11 +133,14 @@ async fn next_wake(
     cancel: &mut oneshot::Receiver<()>,
     tick: &mut tokio::time::Interval,
     send_phase: &SendPhaseLink,
+    transfers: &crate::transfer_progress::TransferBoard,
 ) -> Wake {
     tokio::select! {
         biased;
         _ = cancel => Wake::Cancel,
         _ = tick.tick() => Wake::Tick,
+        // w31: Try again on a first file list that failed: the whole tick now, not up to 30 s later.
+        _ = transfers.pull_asked() => Wake::Tick,
         _ = send_phase.wake.notified() => Wake::Phase,
         _ = send_phase.nudge.notified() => Wake::Nudge,
     }
@@ -147,6 +150,17 @@ async fn next_wake(
 /// builds the API client + engine bridge, ticks every
 /// [`TICK_INTERVAL`] running [`sync_tick`], exits when the cancel
 /// channel fires.
+/// One INFO line for a finished phase of engine start or the first tick: its name, the milliseconds it took and a row
+/// count. No name or path (spec §11).
+fn phase_timing(phase: &'static str, started: std::time::Instant, rows: usize) {
+    tracing::info!(
+        phase,
+        ms = started.elapsed().as_millis() as u64,
+        rows,
+        "engine phase timing"
+    );
+}
+
 async fn run(
     identity: &'static crate::identity::EngineIdentity,
     app: Host,
@@ -179,6 +193,7 @@ async fn run(
     // However this task ends (a return below, the loop's end, an abort that drops it), the host hears that it
     // ended: a handle's view then never says sync runs when it does not (`crate::sync_view`).
     let _ended = EndedGuard(app.clone());
+    let gate_started = std::time::Instant::now();
 
     #[cfg(target_os = "windows")]
     if let Err(error) = crate::windows_cf::wait_for_credential_release().await {
@@ -244,6 +259,8 @@ async fn run(
             return;
         }
     };
+    phase_timing("gate", gate_started, 0);
+    let open_started = std::time::Instant::now();
     let db = match StateDb::open(state_dir.join(state_paths::STATE_DB_FILENAME)) {
         Ok(d) => Arc::new(d),
         Err(e) => {
@@ -253,6 +270,7 @@ async fn run(
             return;
         }
     };
+    phase_timing("state-open", open_started, 0);
     // LD-0113 §6.3: what this device backs up now (the device folder from the state DB's resolved layout), before
     // the engine bridge is registered for the delete and rename callbacks to ask.
     crate::backup_protect::refresh_own_backups(identity, &db);
@@ -348,6 +366,7 @@ async fn run(
 
     // The token's buffer MOVES into the client (nothing is copied); the key is copied into it once. Both
     // wrappers are dropped right here, so the wiped originals do not live as long as this task.
+    let binding_started = std::time::Instant::now();
     let mut session_token = session_token;
     let api = Arc::new(ApiClient::new(
         api_base,
@@ -366,8 +385,8 @@ async fn run(
     // or a private one when this runner has no app state (tests).
     let transfers = app
         .transfer_board()
-        .unwrap_or_else(crate::transfer_progress::TransferBoard::new);
-    // Spec D11 (review P2): the bridge's queue reads the account's pass requests, so it sends nothing while a release
+        .unwrap_or_default();
+    // Spec D11: the bridge's queue reads the account's pass requests, so it sends nothing while a release
     // waits for a pass.
     let bridge = Arc::new(
         EngineBridge::new_with_stop_flag(identity, db.clone(), api.clone(), stopping)
@@ -401,6 +420,8 @@ async fn run(
     // teardown below (after the loop breaks) fires the cancel so the producer
     // stops — and drops its session token — on logout/lock/shutdown alongside
     // the rest of the engine.
+    phase_timing("account-binding", binding_started, 0);
+    let plan_started = std::time::Instant::now();
     let telemetry = Arc::new(Mutex::new(TelemetryState {
         engine_state: "running".to_string(),
         current_file: None,
@@ -427,6 +448,7 @@ async fn run(
             None => None,
         };
 
+    phase_timing("plan-ask", plan_started, usize::from(heartbeat.is_some()));
     // Windows forced runner abort must also abort the separately spawned
     // heartbeat future; dropping a JoinHandle alone would detach its API owner.
     #[cfg(target_os = "windows")]
@@ -434,6 +456,7 @@ async fn run(
         .as_ref()
         .map(|(_, task, _)| AbortWorkerOnDrop(task.abort_handle()));
 
+    let scaffold_started = std::time::Instant::now();
     // Task 1670 round 2: purge the macOS hydrate-cache staging dir on every
     // (re)start of this runner — this IS "daemon startup" in this
     // single-process architecture (there is no separate boot phase distinct
@@ -531,16 +554,19 @@ async fn run(
     #[cfg(target_os = "windows")]
     let _upload_watcher = crate::watcher::spawn(bridge.clone(), sync_root.clone());
 
+    phase_timing("driver-scaffold", scaffold_started, 0);
     emit_payload(&app, tracker.running());
 
     let mut tick = tokio::time::interval(TICK_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut sync_complete_notifications = SyncCompleteNotificationState::default();
     let mut quota_warning_notifications = QuotaWarningNotificationState::default();
-    // Working-set signals a busy bridge gate dropped (Task 9 fix round 1, item B): owed to the next tick.
+    // Working-set signals a busy bridge gate dropped: owed to the next tick.
     // It opens with the rows the startup reconcile reset, which no signal has carried yet.
+    let mut first_tick_logged = false;
     let mut owed_working_set_signal = OwedWorkingSetSignal::owing(reset_item_ids);
-    let mut last_search_index_signature: Option<u64> = None;
+    let mut search_index = crate::desktop_search::IncrementalLocalIndex::new();
+    let mut last_synced_search_generation: Option<u64> = None;
 
     // LD-0113: the backup passes (they replaced the known-folder mirror of task 0797). The scheduler keeps its own
     // cadence (a full pass every 10 minutes, a debounced one after a change in a backed-up folder).
@@ -566,9 +592,42 @@ async fn run(
     // S6: the kept files' step, for this engine run (one batch at a time, each failing file's backoff).
     #[cfg(not(target_os = "macos"))]
     let kept_refetch = Arc::new(crate::engine_bridge::KeptRefetch::default());
+    // RC2-6b: the placeholder passes' gate and its own change-journal feed (opened on the first tick, off the async
+    // workers; a second reader beside the scan's, with its own position).
+    #[cfg(target_os = "windows")]
+    let mut pass_gate = Some((PassGate::default(), None::<Box<dyn crate::watcher::ChangeFeed>>));
+
+    // w31: the account's file list has never arrived on this PC (no cursor). Until it has, the pull goes first: the
+    // backup passes wait (on a large backup they took minutes, and the windows showed no file all that time), and the
+    // board says so, so a window draws "getting your files" and not a finished, empty list.
+    let mut awaiting_first_list = first_list_owed(&db);
+    transfers.set_first_list(if awaiting_first_list {
+        crate::transfer_progress::FirstList::Awaited
+    } else {
+        crate::transfer_progress::FirstList::Here
+    });
+
+    // w36: a nudge (a save, a New file, Try again) that arrives while the loop is inside a tick is sent beside that
+    // tick, not after it: the sync changes only, the backup's uploads stay the tick's.
+    let loop_state = Arc::new(LoopState::default());
+    loop_state.set_reconciled(cfg!(target_os = "macos"));
+    let mid_tick_sender = tokio::spawn(send_nudges_mid_tick(
+        Arc::clone(&send_phase),
+        Arc::clone(&loop_state),
+        Arc::clone(&sync_paused),
+        {
+            let (bridge, sync_root, send_phase) = (bridge.clone(), sync_root.clone(), Arc::clone(&send_phase));
+            move || mid_tick_step(bridge.clone(), sync_root.clone(), Arc::clone(&send_phase))
+        },
+    ));
+    // A forced abort of this task ends the sender too: it holds the bridge.
+    let _mid_tick_abort = AbortWorkerOnDrop(mid_tick_sender.abort_handle());
 
     loop {
-        match next_wake(&mut cancel, &mut tick, &send_phase).await {
+        loop_state.set_busy(false);
+        let wake = next_wake(&mut cancel, &mut tick, &send_phase, &transfers).await;
+        loop_state.set_busy(true);
+        match wake {
             Wake::Cancel => break,
             Wake::Tick => {
                 // Task 1670 round 3: run BEFORE the `sync_paused` check below
@@ -626,15 +685,11 @@ async fn run(
                 }
 
                 // Task 2191 (D2, review-157 F2): the "not in sync" marks still to be made are local
-                // work, so they run on every tick: paused, offline or not.
-                #[cfg(target_os = "windows")]
-                {
-                    let mark_root = sync_root.clone();
-                    if let Err(e) =
-                        tokio::task::spawn_blocking(move || crate::windows_cf::retry_pending_marks(&mark_root)).await
-                    {
-                        tracing::warn!(error = %e, "pending-mark retry panicked; continuing");
-                    }
+                // work, so they run on every tick: paused, offline or not. R3: while the account's first
+                // list is owed the pull goes first (the mark retry follows it, below), so the first
+                // `/sync/snapshot` request never waits behind a walk of the old folder's placeholders.
+                if !awaiting_first_list {
+                    retry_marks_step(&sync_root).await;
                 }
                 // LD-0105 S6: empty the placeholders a failed fetch wrote into, on every tick (so at engine
                 // start too: a poison outlives a restart, and no close event comes after one).
@@ -652,14 +707,19 @@ async fn run(
                 // Skip all sync work while the user has paused sync.
                 // The loop keeps running so it can receive the cancel
                 // signal and so it wakes up promptly when resumed.
-                let mode = RunMode::of_flag(sync_paused.load(Ordering::Relaxed));
+                let user_paused = sync_paused.load(Ordering::Relaxed);
+                let hold = power_hold(identity, user_paused);
+                let mode = RunMode::of_flag(user_paused || hold.is_some());
                 if mode.is_paused() {
-                    emit_payload(&app, tracker.paused());
+                    if awaiting_first_list {
+                        retry_marks_step(&sync_root).await;
+                    }
+                    emit_payload(&app, paused_payload(&tracker, hold));
                     set_telemetry_state(&telemetry, "paused");
                     // Windows breadcrumb flyout: reflect the paused state.
                     #[cfg(target_os = "windows")]
                     refresh_status_ui_snapshot(&db, mode, false);
-                    // Task 2521 (review P1-2): a paused tick pulls nothing, so with no heartbeat running (its
+                    // Task 2521: a paused tick pulls nothing, so with no heartbeat running (its
                     // registration failed, or its task ended) nothing would count an ended session's refusals. One
                     // small check of the session stands in for the pull: a 401 adds one to the run, an answer clears
                     // it. Bounded well under the stop's graceful wait, so a stop is never held up by it; a check
@@ -696,18 +756,33 @@ async fn run(
                         // LD-0113 §6.2: a moved original (a Known Folder Move) or a newly resolved device folder
                         // changes what is protected; the folder switch refreshes at once (`set_known_folder_backup`).
                         crate::backup_protect::set_own_backups(crate::backup::own_backups_for(&db, &sources));
-                        backup_scheduler
-                            .tick(&bridge, &sync_root, sources, std::time::Instant::now())
-                            .await;
+                        // w31: the passes themselves wait until the account's first file list is here (see
+                        // `first_list_owed`); what is protected is still said, as on every tick.
+                        let scheduler_started = std::time::Instant::now();
+                        let source_count = sources.len();
+                        if !awaiting_first_list {
+                            backup_scheduler
+                                .tick(&bridge, &sync_root, sources, std::time::Instant::now())
+                                .await;
+                        }
+                        if !first_tick_logged {
+                            phase_timing("backup-scheduler", scheduler_started, source_count);
+                        }
                     }
                     Err(error) => tracing::debug!(%error, "backup: config unreadable; no pass this tick"),
                 }
 
                 let syncing_before_tick = sync_in_flight_count(&db);
-                let tick_started_at = now_secs() as i64;
+                let tick_started_at = now_secs();
 
+                // w36: from the pull to the end of the passes no mid-tick step sends (they read the rows a landing
+                // writes), and these wait for one that is being sent.
+                let pull_and_passes = loop_state.pull.lock().await;
+
+                let mut shared_roots_changed = false;
                 match bridge.refresh_shared_roots().await {
                     Ok(outcome) if !outcome.removed_shared_file_ids.is_empty() => {
+                        shared_roots_changed = true;
                         tracing::info!(
                             removed = outcome.removed_shared_file_ids.len(),
                             "revoked shared content removed from local Finder state"
@@ -724,7 +799,35 @@ async fn run(
                         tracing::warn!(error = %e, "shared root refresh failed");
                     }
                 }
-                match sync_tick_outcome(&*bridge, &sync_root).await {
+                let pull_started = std::time::Instant::now();
+                // dc-164: while the first list comes in, placeholders appear folder by folder (top level first), not
+                // only after the whole list; stopped before anything below reads the pulled rows.
+                #[cfg(target_os = "windows")]
+                let early_placeholders = awaiting_first_list.then(|| crate::windows_cf::EarlyPasses::start(&sync_root));
+                let pulled = sync_tick_outcome(&bridge, &sync_root).await;
+                #[cfg(target_os = "windows")]
+                if let Some(early) = early_placeholders {
+                    early.stop().await;
+                }
+                if !first_tick_logged {
+                    phase_timing(
+                        "first-pull",
+                        pull_started,
+                        pulled.as_ref().map_or(0, |tick| tick.applied_item_ids.len()),
+                    );
+                }
+                // R3: the marks the tick's start held back while the first list was owed.
+                if awaiting_first_list {
+                    retry_marks_step(&sync_root).await;
+                }
+                if awaiting_first_list {
+                    awaiting_first_list = first_list_owed(&db);
+                    transfers.set_first_list(first_list_after_pull(
+                        awaiting_first_list,
+                        pulled.as_ref().is_ok_and(|tick| tick.reached_server),
+                    ));
+                }
+                match pulled {
                     Ok(tick) => {
                         // `Ok` is not proof the session works: a refused pull also returns `Ok` (task 2521). Only a
                         // pull that came back clears the auth-failure streak (task 1546 finding 5); a 401 pull adds
@@ -749,8 +852,9 @@ async fn run(
                         // a refused session paused, before this tick's queue step sends anything. A pass that fails
                         // resumes nothing and is tried again next tick; the queue step still runs (the parent-first
                         // gate keeps a ghost's children waiting), as before this pass existed. Only at a tick whose
-                        // pull came back (review P1): `Ok` alone is also a swallowed `/sync/ops` failure (offline, a
+                        // pull came back: `Ok` alone is also a swallowed `/sync/ops` failure (offline, a
                         // 5xx, a 401), which proves no token and leaves the rows the pass plans against stale.
+                        let reconcile_started = std::time::Instant::now();
                         #[cfg(not(target_os = "macos"))]
                         if tick.reached_server
                             && let Err(error) = bridge
@@ -761,6 +865,11 @@ async fn run(
                                 %error,
                                 "the reconcile pass did not complete; held changes stay paused, next tick retries"
                             );
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        loop_state.set_reconciled(reconciled_this_run);
+                        if !first_tick_logged {
+                            phase_timing("reconcile", reconcile_started, tick.applied_item_ids.len());
                         }
                         // Task 2523 (F1): another device's version reaches the copy on this PC. Only at a tick whose
                         // pull came back (the rows the pass reads are fresh), before the queue step (on Linux that
@@ -803,6 +912,7 @@ async fn run(
                         if tick.reached_server && !send_phase.is_armed() {
                             crate::engine_bridge::queue_kept_step(&bridge, &sync_root, &kept_refetch).await;
                         }
+                        drop(pull_and_passes);
                         let completed_sync_work = queue_step(
                             &bridge,
                             &sync_root,
@@ -812,24 +922,65 @@ async fn run(
                             &send_phase,
                         )
                         .await;
+                        // RC2-6b: whether this tick changed what the windows list (they read their lists again only
+                        // then, not after every check): items applied, a queued operation finished, a conflict, a
+                        // shared root removed, or (below) a native pin or "Free up space" reconciled.
+                        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+                        let mut tick_changed = !tick.applied_item_ids.is_empty()
+                            || completed_sync_work > 0
+                            || !tick.conflicts.is_empty()
+                            || tick.rebuilt_agreed > 0
+                            || shared_roots_changed;
                         enforce_cache_budget(&app, &bridge, &mut quota_warning_notifications);
 
-                        // Windows Cloud Files: the one-shot `seed_placeholders`
-                        // at engine spawn ran against a (usually empty) DB, so
-                        // rows discovered by this and later ticks need a
-                        // placeholder minted now. Idempotent — existing
-                        // placeholders are a no-op (ERROR_ALREADY_EXISTS → Ok).
+                        // Windows Cloud Files: rows discovered by this and later ticks need a placeholder minted
+                        // (`refresh_placeholders`), and a native Explorer pin / "Free up space" (which never touches
+                        // our DB) is reconciled back into state_db (`reconcile_placeholder_state`, after the refresh
+                        // so new placeholders are there). RC2-6b: both list every folder of the sync root, so they
+                        // run only when something can have changed (`pass_gate`): an idle tick lists no folder.
+                        // dc-164 / RC2-6b: off the async workers (file system calls for every folder).
+                        let placeholders_started = std::time::Instant::now();
                         #[cfg(target_os = "windows")]
-                        crate::windows_cf::refresh_placeholders(&sync_root);
-
-                        // Reconcile native Explorer pin / "Free up space" changes
-                        // (which never touch our DB) back into state_db so the app
-                        // view matches and `free_up_space` respects native pins.
-                        // Delta-only + idempotent — no-op when nothing changed
-                        // natively. Runs after refresh so newly minted placeholders
-                        // are present before we read their attributes.
-                        #[cfg(target_os = "windows")]
-                        crate::windows_cf::reconcile_placeholder_state(&sync_root);
+                        {
+                            let work = TickWork {
+                                applied_items: tick.applied_item_ids.len(),
+                                finished_ops: completed_sync_work as usize,
+                            };
+                            let (mut gate, feed) = pass_gate.take().unwrap_or_default();
+                            let pass_root = sync_root.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                let mut feed = feed.unwrap_or_else(|| crate::watcher::change_feed::open(&pass_root));
+                                let mut changed = 0usize;
+                                let ran = gate.step(
+                                    feed.as_mut(),
+                                    work,
+                                    std::time::Instant::now(),
+                                    SystemTime::now(),
+                                    || {
+                                        let (outcome, deltas) = crate::windows_cf::placeholder_passes(&pass_root);
+                                        changed = deltas;
+                                        outcome
+                                    },
+                                );
+                                (gate, feed, ran, changed)
+                            })
+                            .await
+                            {
+                                Ok((gate, feed, ran, changed)) => {
+                                    pass_gate = Some((gate, Some(feed)));
+                                    tick_changed |= changed > 0;
+                                    if let Some((why, _)) = ran {
+                                        tracing::debug!(why = ?why, "placeholder passes ran");
+                                    }
+                                }
+                                // The gate and the feed are lost: the next tick's fresh gate runs the passes in full.
+                                Err(e) => tracing::warn!(error = %e, "placeholder pass panicked; next tick retries"),
+                            }
+                        }
+                        if !first_tick_logged {
+                            phase_timing("placeholders", placeholders_started, 0);
+                            first_tick_logged = true;
+                        }
 
                         // Stamp every DB-Local file's placeholder in-sync so
                         // Explorer shows the green ✓ overlay. Runs after
@@ -838,7 +989,7 @@ async fn run(
                         // on disk). Idempotent — CfSetInSyncState on an already-
                         // in-sync placeholder is a Windows no-op. Bounded at
                         // MAX_IN_SYNC_STAMPS_PER_PASS files per tick.
-                        // Task 1640 (review P2-5): the pass may hash a file; off the async workers.
+                        // Task 1640: the pass may hash a file; off the async workers.
                         // Desktop 0.8.15: freeing work, so it waits until the start-up guard's pass
                         // has walked every file of unknown content (spec U4).
                         #[cfg(target_os = "windows")]
@@ -866,6 +1017,9 @@ async fn run(
                         // `Ok` is not the whole story: `sync_tick` swallows a failed
                         // `GET /sync/ops`, so the link monitor decides whether this
                         // was really a check that reached the server.
+                        if tick_changed {
+                            tracker.note_change();
+                        }
                         emit_payload(
                             &app,
                             finish_tick_payload(&tracker, Ok(()), &link, tick_started_at, &db, &transfers),
@@ -881,29 +1035,32 @@ async fn run(
                         #[cfg(target_os = "windows")]
                         refresh_status_ui_snapshot(&db, RunMode::Running, false);
 
-                        match crate::desktop_search::local_index_signature(&db) {
-                            Ok(signature) if last_search_index_signature != Some(signature) => {
-                                match crate::desktop_search::sync_local_index_to_remote(&db, &api).await {
-                                    Ok(summary) => {
-                                        last_search_index_signature = Some(signature);
-                                        tracing::debug!(
-                                            indexed_file_count = summary.indexed_file_count,
-                                            put_count = summary.put_count,
-                                            delete_count = summary.delete_count,
-                                            "desktop search index shards synced"
-                                        );
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            error = %error,
-                                            "desktop search index shard sync failed; will retry after the next local mirror change"
-                                        );
+                        match search_index.refresh(&db) {
+                            Ok(_) if last_synced_search_generation != Some(search_index.generation()) => {
+                                let generation = search_index.generation();
+                                if let Some(local) = search_index.local() {
+                                    match crate::desktop_search::sync_local_index_to_remote(&db, local, &api).await {
+                                        Ok(summary) => {
+                                            last_synced_search_generation = Some(generation);
+                                            tracing::debug!(
+                                                indexed_file_count = summary.indexed_file_count,
+                                                put_count = summary.put_count,
+                                                delete_count = summary.delete_count,
+                                                "desktop search index shards synced"
+                                            );
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                error = %error,
+                                                "desktop search index shard sync failed; will retry after the next local mirror change"
+                                            );
+                                        }
                                     }
                                 }
                             }
                             Ok(_) => {}
                             Err(error) => {
-                                tracing::warn!(error = %error, "desktop search index signature failed");
+                                tracing::warn!(error = %error, "desktop search index refresh failed");
                             }
                         }
 
@@ -915,6 +1072,7 @@ async fn run(
                         // Network blips and 401s during token rotation
                         // are normal — log and continue, surface the
                         // error to the WebView so the tray reflects it.
+                        drop(pull_and_passes);
                         tracing::warn!(error = %e, "sync tick failed");
                         // Task 1546 finding 5: a run of these that classify as
                         // auth failures (not network blips) is what flips
@@ -989,6 +1147,10 @@ async fn run(
         }
     }
 
+    // w36: the sender holds the bridge (the database, the key): it ends before the teardown below.
+    mid_tick_sender.abort();
+    let _ = mid_tick_sender.await;
+
     emit_payload(&app, tracker.stopped());
 
     // Stop the heartbeat producer, then post ONE final best-effort "stopped"
@@ -1023,7 +1185,7 @@ async fn run(
             tracing::debug!("heartbeat producer did not stop within 1s; abandoning");
         }
 
-        // Task 2521 (review P3-1): no last beat for a session Beebeeb no longer accepts. The stop that closes the
+        // Task 2521: no last beat for a session Beebeeb no longer accepts. The stop that closes the
         // vault after its refusals sends nothing more with the refused token.
         if auth_health.is_expired() {
             tracing::debug!("no final 'stopped' heartbeat: the server no longer accepts this session");
@@ -1140,6 +1302,28 @@ async fn queue_step(
     }
 }
 
+/// w36: the queue step a nudge gets while the loop is inside a tick ([`send_nudges_mid_tick`]): the due sync changes,
+/// never the backup's uploads (a long backup queue must not stand before a save; the tick sends those). On a Mac the
+/// items it changed are owed to the tick's one working-set signal; elsewhere that signal is a no-op.
+async fn mid_tick_step(bridge: Arc<EngineBridge>, sync_root: PathBuf, send_phase: Arc<SendPhaseLink>) {
+    match bridge.process_due_changes(&sync_root, now_secs()).await {
+        Ok(outcome) => {
+            if send_phase.is_armed() {
+                send_phase.note(&outcome);
+            }
+            #[cfg(target_os = "macos")]
+            owe_working_set_signal(&outcome.invalidated_item_ids);
+            tracing::debug!(
+                completed = outcome.completed_op_ids.len(),
+                paused = outcome.paused_op_ids.len(),
+                retried = outcome.retried_op_ids.len(),
+                "queue step beside a running tick"
+            );
+        }
+        Err(error) => tracing::warn!(%error, "queue step beside a running tick failed; the tick's own step retries"),
+    }
+}
+
 /// Aborts a spawned task when dropped. On Windows it also covers the forced-abort
 /// path of the heartbeat producer; the status pulse uses it on every platform so a
 /// force-aborted `run` cannot leave the pulse running with the DB handle.
@@ -1155,12 +1339,41 @@ impl Drop for AbortWorkerOnDrop {
 
 // ── Task 13: 24-hour auto-resolution timer ────────────────────────────────────
 
+/// The tick's pending-mark retry (task 2191 D2): Windows only, off the async thread.
+async fn retry_marks_step(sync_root: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let mark_root = sync_root.to_path_buf();
+        if let Err(e) = tokio::task::spawn_blocking(move || crate::windows_cf::retry_pending_marks(&mark_root)).await {
+            tracing::warn!(error = %e, "pending-mark retry panicked; continuing");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = sync_root;
+}
+
 #[cfg(test)]
 mod tests {
+    /// R3: with no cursor the pull comes before the mark retry in the tick (the retry itself lives in
+    /// `retry_marks_step`, defined after the loop), and the start-of-tick call waits while the first list is owed.
+    #[test]
+    fn r3_with_no_cursor_the_pull_comes_before_the_mark_retry() {
+        let src = include_str!("runner.rs");
+        let src = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        let pull = src.find("sync_tick_outcome(").expect("the pull");
+        let retry = src.find("retry_pending_marks(").expect("the retry");
+        assert!(pull < retry, "sync_tick_outcome( must come before retry_pending_marks(");
+        assert!(
+            src.contains("if !awaiting_first_list {\n                    retry_marks_step"),
+            "the start-of-tick retry waits while the first list is owed"
+        );
+    }
+
     use super::*;
 
     mod abort;
     mod heartbeat;
+    mod mid_tick;
     mod tick;
     mod working_set;
 }
@@ -1182,6 +1395,11 @@ pub use lifecycle::{Wake, nudge_wait, phase_step_due};
 mod tick_loop;
 pub use tick_loop::RunMode;
 use tick_loop::*;
+
+// RC2-6b: the tick's placeholder passes run only when something can have changed.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod pass_gate;
+pub use pass_gate::{PassGate, PassOutcome, RunWhy, TickWork};
 
 mod working_set_signal;
 #[cfg(any(target_os = "macos", any(test, feature = "test-support")))]

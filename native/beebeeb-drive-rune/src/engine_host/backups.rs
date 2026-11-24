@@ -19,7 +19,7 @@
 //! - Other devices and Delete this backup: `engine_host::backups_devices` (`DeviceCalls`: the engine's session-bound
 //!   read of the device manifests, and the delete behind the account password).
 //! - A folder the person chose (DW-0737 "chosen by you"): listed after the six from the same read; Add a folder…
-//!   (DW-0738) and Stop backing up (DW-1410) are slice A7's (`engine_host/backup_folders.rs`).
+//!   (DW-0738) and Stop backing up (DW-1410) are in `engine_host/backup_folders.rs`.
 //! - Not bound (`wired(part)` is `false`): Mail Backup (a proposal), and a device page's "Open in Photos" / "Open in
 //!   Files" (the shell takes Backups' folder picker only).
 //!
@@ -58,7 +58,7 @@ use crate::frames::backups::source::{
 #[cfg(test)]
 #[path = "backups_tests.rs"]
 mod tests;
-// plan40 batch 1: Add a folder and Stop backing up (slice A7).
+// Add a folder and Stop backing up.
 #[path = "backup_folders.rs"]
 mod backup_folders;
 
@@ -105,7 +105,13 @@ pub trait BackupsEngine: DevicesEngine + Send + Sync + 'static {
     fn sync_running(&self) -> bool {
         true
     }
-    /// Add a chosen folder for `session` (`Engine::add_backup_folder_for`, slice A7). BLOCKS: a worker's. The default
+    /// The engine's words for a switch refused because it would back a folder up twice (`BackupsError::Nested`), naming
+    /// the other folder (`Engine::switch_on_refused`, P3-3). `None`: nothing nests with it now. BLOCKS: a worker's. The
+    /// default has none.
+    fn nested_words(&self, _key: &str) -> Option<String> {
+        None
+    }
+    /// Add a chosen folder for `session` (`Engine::add_backup_folder_for`). BLOCKS: a worker's. The default
     /// adds nothing.
     fn add_folder_for(
         &self,
@@ -117,7 +123,7 @@ pub trait BackupsEngine: DevicesEngine + Send + Sync + 'static {
         ))
     }
     /// Stop backing up a chosen folder for `session`, its backup to Trash after the password is proven when one is
-    /// given (`Engine::remove_backup_folder_for`, slice A7). BLOCKS: a worker's. The default stops nothing.
+    /// given (`Engine::remove_backup_folder_for`). BLOCKS: a worker's. The default stops nothing.
     fn remove_folder_for(
         &self,
         _session: beebeeb_engine::account::SessionGeneration,
@@ -156,6 +162,9 @@ impl<C: CredentialStores> BackupsEngine for Engine<C> {
     }
     fn sync_running(&self) -> bool {
         self.view().start == beebeeb_engine::sync_view::Start::Running
+    }
+    fn nested_words(&self, key: &str) -> Option<String> {
+        self.switch_on_refused(key).map(|refused| refused.words())
     }
     fn add_folder_for(
         &self,
@@ -198,8 +207,9 @@ enum Answer {
         /// The folder whose switch this read follows (every switch job ends with exactly one read).
         switched: Option<String>,
     },
-    /// A switch that did not happen.
-    Refused { generation: u64 },
+    /// A switch that did not happen, and what the window says: [`NOT_SWITCHED`], or the engine's words naming the
+    /// folder it would back up twice (P3-3).
+    Refused { generation: u64, words: &'static str },
 }
 
 /// Backups on the real engine. See the module's doc.
@@ -230,7 +240,7 @@ pub struct EngineBackupsSource<E: BackupsEngine> {
     run_out: bool,
     /// Other devices and Delete this backup (`engine_host::backups_devices`).
     devices: DeviceCalls<E>,
-    /// Slice A7 (`backup_folders.rs`): what it keeps between a press and its answer. Empty until it binds.
+    /// `backup_folders.rs`: what it keeps between a press and its answer. Empty until it binds.
     backup_folders: backup_folders::BackupFolderCalls,
 }
 
@@ -357,6 +367,20 @@ fn still_for<E: BackupsEngine>(engine: &E, account: &str) -> bool {
 
 /// One job, on the worker. A switch runs only for the account it was asked for; every job ends with a read, so
 /// the list shows what the engine has after it.
+/// `words` as the window's `&'static str` (its refusals are fixed sentences): each distinct sentence is kept once for the
+/// life of the process, so what is kept is bounded by the folder names the engine's refusals name (P3-3; never a path).
+fn kept(words: String) -> &'static str {
+    static KEPT: std::sync::Mutex<std::collections::BTreeSet<&'static str>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut held = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(found) = held.get(words.as_str()) {
+        return found;
+    }
+    let words: &'static str = Box::leak(words.into_boxed_str());
+    held.insert(words);
+    words
+}
+
 fn run<E: BackupsEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
     let Job {
         ask,
@@ -380,7 +404,14 @@ fn run<E: BackupsEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
         };
         if let Err(error) = switched {
             log(format!("backups: a folder was not switched ({})", error.kind()));
-            let _ = answers.send(Answer::Refused { generation });
+            // P3-3: a switch that would back a folder up twice names that folder, in the engine's words, while the
+            // account is still the one asked for.
+            let named = match error {
+                BackupsError::Nested => engine.nested_words(&key).filter(|_| still_for(engine, &account)),
+                _ => None,
+            };
+            let words = named.map_or(NOT_SWITCHED, kept);
+            let _ = answers.send(Answer::Refused { generation, words });
         }
     }
     let read = if still_for(engine, &account) {
@@ -490,12 +521,12 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
                     self.run_out = false;
                     pumped.changed = true;
                     // The switch this read follows is read back: what it asked for is now what the engine has.
-                    if let Some(key) = switched {
-                        if let Some((_, out)) = self.switching.get_mut(&key) {
-                            *out = out.saturating_sub(1);
-                            if *out == 0 {
-                                self.switching.remove(&key);
-                            }
+                    if let Some(key) = switched
+                        && let Some((_, out)) = self.switching.get_mut(&key)
+                    {
+                        *out = out.saturating_sub(1);
+                        if *out == 0 {
+                            self.switching.remove(&key);
                         }
                     }
                     let mine = self.seen.0 && whose.is_some() && whose == self.seen.1;
@@ -521,9 +552,9 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
                         }
                     }
                 }
-                Answer::Refused { generation } => {
+                Answer::Refused { generation, words } => {
                     if generation == self.generation {
-                        pumped.refusal = Some(NOT_SWITCHED);
+                        pumped.refusal = Some(words);
                         pumped.changed = true;
                     }
                 }
@@ -544,6 +575,12 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
         if !fresh {
             self.ask_read();
         }
+        self.devices.opened();
+    }
+
+    fn read_again(&mut self) {
+        self.refused = None;
+        self.ask_read();
         self.devices.opened();
     }
 
@@ -675,7 +712,7 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
             .collect()
     }
 
-    /// Not bound: Mail Backup is another lane's.
+    /// Not bound: Mail Backup is not bound here.
     fn mail_backup_on(&self) -> bool {
         false
     }
@@ -704,17 +741,17 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
         }
     }
 
-    /// Slice A7 (`backup_folders.rs`): the folder picker's answer, asked of the engine.
+    /// `backup_folders.rs`: the folder picker's answer, asked of the engine.
     fn add_folder(&mut self, path: &str) -> bool {
         self.backup_folders_add_folder(path)
     }
 
-    /// Slice A7 (`backup_folders.rs`): "Stop and keep the backup"; a move to Trash needs the password.
+    /// `backup_folders.rs`: "Stop and keep the backup"; a move to Trash needs the password.
     fn remove_folder(&mut self, id: &str, move_copy_to_trash: bool) {
         self.backup_folders_remove_folder(id, move_copy_to_trash)
     }
 
-    /// Slice A7: the move to Trash proves the account password (DW-1410's second step).
+    /// The move to Trash proves the account password (DW-1410's second step).
     fn trash_needs_password(&self) -> bool {
         true
     }

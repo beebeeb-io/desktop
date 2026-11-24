@@ -19,14 +19,21 @@
 //! - [`Engine::choose_backup_source_for`] (S11): the answer to "which folder do you want to back up?" for a moved
 //!   known folder, written to `known_folder_source`; its question is settled and the protection follows.
 //!
-//! Per account (review of #463, P3-8): the settings file is the PC's, so each chosen folder carries its owner's tag
-//! ([`owner_tag`], a digest, never an email or an id in clear). Only that account backs it up ([`chosen_for`]: the
-//! runner, [`runner_chosen`], and the protection read the folders of the account the local data is bound to), lists it
-//! and removes it; nothing is written for another account. A folder without a tag (written by a test build before
-//! folders were per account; no released build wrote one) is nobody's: passed, listed and removable for no account,
-//! the local data's owner included (lead ruling 2026-11-16 01:04: fail closed, the person adds the folder again). Names
-//! stay unique across every folder in the file, untagged ones included (their `custom:<name>` switch keys share the one
+//! Per account: the settings file is the PC's, so each chosen folder carries its owner's tag
+//! ([`owner_tag`], a digest of the account's id, never an email or an id in clear; never made from an address, P3-5).
+//! Only that account backs it up ([`chosen_for`]: the runner, [`runner_chosen`], and the protection read the folders of
+//! the account the local data is bound to), lists it and removes it; nothing is written for another account. A folder
+//! without a tag (written by a test build before folders were per account; no released build wrote one) is nobody's:
+//! passed, listed and removable for no account, the local data's owner included : fail
+//! closed, the person adds the folder again). One an earlier build tagged by its address is nobody's too, until its own
+//! account's next start tags it by that account's id ([`retag_at_start`]). Names stay
+//! unique across every folder in the file, untagged ones included (their `custom:<name>` switch keys share the one
 //! backup set).
+//!
+//! Never backed up twice (ruling 5.1, review of #464 P3-3): a chosen folder may not be, hold or lie inside another of
+//! the account's chosen folders, nor a known folder whose switch is on. The rule follows the known folder's switch:
+//! while Documents is off, a folder inside it may be chosen, and Documents is then not switched on while that folder is
+//! backed up ([`switch_on_refusal`], which names it). [`nesting`] is the rule's one comparison (P3-6).
 //!
 //! Session-bound like its neighbours (`*_for(session)`): every call is asked for the session the host read at its
 //! press, and refused, with nothing written, once that session is no longer the one in memory.
@@ -43,7 +50,7 @@ use crate::account::SessionGeneration;
 use crate::account_binding::{Identity, canonical_email};
 use crate::app::backups_api::BackupsError;
 use crate::app::{CredentialStores, Engine, LocalStateRefused, OwnedState};
-use crate::backup::kfm;
+use crate::backup::kfm::{self, KnownFolderPaths};
 use crate::backup::sources::{self, ChosenFolder, SourceRefusal};
 use crate::backup_delete::DeleteBackupError;
 use crate::config::{DesktopConfig, KnownFolderSource};
@@ -69,6 +76,9 @@ pub enum AddRefused {
     InsideBackedUp,
     /// Holds a folder backed up already: that folder's files would be backed up twice.
     HoldsBackedUp,
+    /// Where one of the known folders is (Documents, ...) while its switch is off: a known folder is switched on in the
+    /// list, never added (P3-3).
+    KnownFolderOff,
     /// Not a folder on this PC (a file, a folder that is gone, a path that is not absolute).
     NotAFolder,
     /// The local state or the settings file refused (signed out, another session, unreadable, ...).
@@ -90,6 +100,7 @@ impl AddRefused {
             Self::HoldsBackedUp => {
                 "This folder holds a folder that is backed up already. Choose one of them, not both."
             }
+            Self::KnownFolderOff => "This folder is in the list already. Switch it on there to back it up.",
             Self::NotAFolder => "This isn't a folder on this PC.",
             Self::Backups(_) => "Couldn't add this folder. Try again in a moment.",
         }
@@ -103,6 +114,7 @@ impl AddRefused {
             Self::AlreadyBackedUp => "already_backed_up",
             Self::InsideBackedUp => "inside_backed_up",
             Self::HoldsBackedUp => "holds_backed_up",
+            Self::KnownFolderOff => "known_folder",
             Self::NotAFolder => "not_a_folder",
             Self::Backups(error) => error.kind(),
         }
@@ -195,55 +207,150 @@ pub fn check_chosen(path: &Path, sync_root: &Path, taken: &[PathBuf]) -> Result<
     if holds {
         return Err(AddRefused::HoldsSyncFolder);
     }
-    if taken.iter().any(|folder| sources::same_folder(folder, path)) {
-        return Err(AddRefused::AlreadyBackedUp);
+    match nested_with(path, taken, |folder| folder.as_path()) {
+        Some((how, _)) => Err(add_refusal(how)),
+        None => Ok(()),
     }
-    // Nested either way: a folder inside a backed-up one, or one that holds a backed-up one, is backed up twice.
-    for folder in taken.iter().filter(|folder| folder.is_absolute()) {
-        let inside = matches!(sources::check_source(path, folder), Err(SourceRefusal::InsideSyncRoot));
-        if inside {
-            return Err(AddRefused::InsideBackedUp);
-        }
-        let holds = matches!(sources::check_source(folder, path), Err(SourceRefusal::InsideSyncRoot));
-        if holds {
-            return Err(AddRefused::HoldsBackedUp);
-        }
+}
+
+/// How a folder lies against another, for the rule that nothing is backed up twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nesting {
+    /// The same folder.
+    Same,
+    /// Inside the other, at any depth.
+    Inside,
+    /// Holds the other, at any depth.
+    Holds,
+}
+
+/// How `path` lies against `other` (P3-6: the double-backup rule's one comparison, for the add, its re-check under the
+/// settings lock, a switch turned on and the re-tag): compared as the backup's own rule compares (`backup::sources`:
+/// component by component, without case on Windows and macOS, as given and as resolved). A sibling whose name only
+/// starts the same way is not nested. `None`: apart.
+pub fn nesting(path: &Path, other: &Path) -> Option<Nesting> {
+    let under = |inner: &Path, outer: &Path| {
+        outer.is_absolute() && matches!(sources::check_source(inner, outer), Err(SourceRefusal::InsideSyncRoot))
+    };
+    if sources::same_folder(other, path) {
+        Some(Nesting::Same)
+    } else if under(path, other) {
+        Some(Nesting::Inside)
+    } else if under(other, path) {
+        Some(Nesting::Holds)
+    } else {
+        None
     }
-    Ok(())
+}
+
+/// The first of `others` that `path` nests with ([`nesting`]), and how; the same folder before any other.
+pub fn nested_with<'a, T>(path: &Path, others: &'a [T], at: impl Fn(&T) -> &Path) -> Option<(Nesting, &'a T)> {
+    let same = others
+        .iter()
+        .find(|other| nesting(path, at(other)) == Some(Nesting::Same));
+    same.map(|other| (Nesting::Same, other)).or_else(|| {
+        others
+            .iter()
+            .find_map(|other| nesting(path, at(other)).map(|how| (how, other)))
+    })
+}
+
+/// An add's refusal for a folder that nests `how` with one backed up already.
+fn add_refusal(how: Nesting) -> AddRefused {
+    match how {
+        Nesting::Same => AddRefused::AlreadyBackedUp,
+        Nesting::Inside => AddRefused::InsideBackedUp,
+        Nesting::Holds => AddRefused::HoldsBackedUp,
+    }
 }
 
 fn digest(key: &str) -> String {
     crate::hexfmt::encode(&Sha256::digest(key.as_bytes()))
 }
 
-/// The tag a chosen folder carries for `owner` (P3-8): a SHA-256 digest of the owner key the backup's own rows use
-/// (`user:<id>` when the user id is known, else `email:<canonical email>`), so the PC's settings file never holds an
-/// email or an id in clear. `None`: an owner with neither.
-pub fn owner_tag(owner: &Identity) -> Option<String> {
-    owner
-        .user_id
-        .as_deref()
-        .map(|id| digest(&format!("user:{id}")))
-        .or_else(|| {
-            owner
-                .email
-                .as_deref()
-                .map(|email| digest(&format!("email:{}", canonical_email(email))))
-        })
+/// The one place a chosen folder's tag is made from an owner key (P3-6): [`owner_tag`] makes a tag here and
+/// [`is_owners`] matches through [`owner_tag`], so the two never disagree. A plain SHA-256 digest today; a keyed digest
+/// (a secret of this PC's or of the account's) slots in here alone (P3-5 (a)/(b): an open decision).
+fn tag_of(owner_key: &str) -> String {
+    digest(owner_key)
 }
 
-/// Whether `folder` is `owner`'s: its tag is the digest of the owner's user id or of its email (a tag made while only
-/// one of the two was known still matches). Untagged, or no owner: never.
+/// The tag a chosen folder carries for `owner` (P3-8): the digest of `user:<id>` (the owner key the backup's own rows
+/// use), so the PC's settings file never holds an id in clear. Never made from an address (an address can be guessed and checked against its digest). `None`: the id is not known (nothing
+/// is added then).
+pub fn owner_tag(owner: &Identity) -> Option<String> {
+    owner.user_id.as_deref().map(|id| tag_of(&format!("user:{id}")))
+}
+
+/// The tag an earlier build made for a folder added while its owner's id was not known: the digest of
+/// `email:<canonical email>`. Read once, by [`retag_by_id`] for that address's own account; never matched by a read.
+fn address_tag(email: &str) -> Option<String> {
+    let canonical = canonical_email(email);
+    (!canonical.is_empty()).then(|| tag_of(&format!("email:{canonical}")))
+}
+
+/// Whether `folder` is `owner`'s: its tag is `owner`'s ([`owner_tag`], by the id alone). Untagged, tagged by an
+/// address (until [`retag_by_id`]), or no owner: never.
 pub fn is_owners(folder: &ChosenFolder, owner: Option<&Identity>) -> bool {
-    let (Some(tag), Some(owner)) = (folder.owner.as_deref(), owner) else {
-        return false;
+    match (folder.owner.as_deref(), owner.and_then(owner_tag)) {
+        (Some(tag), Some(owners)) => tag == owners,
+        _ => false,
+    }
+}
+
+/// The folders an earlier build tagged by `owner`'s OWN address carry `owner`'s
+/// id tag from now on, so a re-tagged entry no longer holds a digest of an address. Only an entry whose tag is the
+/// digest of `owner`'s canonical address is changed, once: another account's (by id or by its own address), an
+/// untagged one and one tagged by id stay as they are. One that would back `owner`'s folder up twice (it is, holds or
+/// lies inside a folder `owner`'s id tag holds already) stays as it was: nobody's (fail closed; the person sees the one
+/// folder). An entry left as it was (that one, or one whose account has not started since, or started with another
+/// address) keeps its address digest and stays nobody's. Nothing without both the id and the address. How many were
+/// re-tagged.
+pub fn retag_by_id(config: &mut DesktopConfig, owner: &Identity) -> usize {
+    let (Some(by_id), Some(by_address)) = (owner_tag(owner), owner.email.as_deref().and_then(address_tag)) else {
+        return 0;
     };
-    let by_id = owner.user_id.as_deref().map(|id| digest(&format!("user:{id}")));
-    let by_email = owner
-        .email
-        .as_deref()
-        .map(|email| digest(&format!("email:{}", canonical_email(email))));
-    by_id.as_deref() == Some(tag) || by_email.as_deref() == Some(tag)
+    let mut retagged = 0;
+    for at in 0..config.backup_chosen_folders.len() {
+        if config.backup_chosen_folders[at].owner.as_deref() != Some(by_address.as_str()) {
+            continue;
+        }
+        let owners: Vec<PathBuf> = config
+            .backup_chosen_folders
+            .iter()
+            .filter(|folder| folder.owner.as_deref() == Some(by_id.as_str()))
+            .map(|folder| folder.path.clone())
+            .collect();
+        if nested_with(&config.backup_chosen_folders[at].path, &owners, PathBuf::as_path).is_some() {
+            continue;
+        }
+        config.backup_chosen_folders[at].owner = Some(by_id.clone());
+        retagged += 1;
+    }
+    retagged
+}
+
+/// [`retag_by_id`] on the settings file at `path`, under its lock (written only when something changed).
+pub fn retag_in(path: &Path, owner: &Identity) -> Result<usize, String> {
+    DesktopConfig::update_at(path, |config| {
+        let retagged = retag_by_id(config, owner);
+        (retagged > 0, retagged)
+    })
+}
+
+/// The sync start's part of P3-5, right after the local data was bound to `owner` (the session's account): its
+/// address-tagged folders take its id tag ([`retag_by_id`]). Best effort: a settings file that cannot be read or written
+/// keeps them nobody's until a later start. Logs a count alone.
+pub fn retag_at_start(identity: &'static EngineIdentity, owner: &Identity) {
+    if owner.user_id.is_none() || owner.email.is_none() {
+        return;
+    }
+    let retagged = DesktopConfig::path_for(identity).and_then(|path| retag_in(&path, owner));
+    match retagged {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "backups: chosen folders were marked with the account id"),
+        Err(_) => tracing::warn!("backups: chosen folders could not be marked with the account id"),
+    }
 }
 
 /// `owner`'s chosen folders alone, in the file's order. An untagged folder is nobody's here; no owner: none.
@@ -261,20 +368,132 @@ pub fn runner_chosen(db: &StateDb, config: &DesktopConfig) -> Vec<ChosenFolder> 
     chosen_for(&config.backup_chosen_folders, db.owner().ok().flatten().as_ref())
 }
 
-/// Where the folders `owner` backs up already are: its chosen ones (an untagged one is nobody's, so its folder can be
-/// added again), and each known folder's default and current location (whether its switch is on or not: a known folder
-/// is switched, never added).
-pub fn taken_paths(config: &DesktopConfig, owner: &Identity) -> Vec<PathBuf> {
-    let mut taken: Vec<PathBuf> = chosen_for(&config.backup_chosen_folders, Some(owner))
+/// A folder of an account's list, as the double-backup rule reads it.
+#[derive(Debug, Clone)]
+struct Place {
+    /// Its key in the backup set (`custom:<name>`, or the known folder's).
+    key: String,
+    /// The name the list shows for it.
+    name: String,
+    path: PathBuf,
+    /// A known folder (switched in the list, never added), not a chosen one.
+    known: bool,
+    /// Its switch is on: it is backed up now.
+    on: bool,
+}
+
+/// The folders in `owner`'s list: its chosen ones (an untagged one, or another account's, is not; no owner: none),
+/// then each known folder at its default and at its current location (`paths`: `kfm::known_folder_paths`, or a test's
+/// pairs), each with its switch.
+fn places(config: &DesktopConfig, owner: Option<&Identity>, paths: impl Fn(&str) -> KnownFolderPaths) -> Vec<Place> {
+    let mut found: Vec<Place> = chosen_for(&config.backup_chosen_folders, owner)
         .into_iter()
-        .map(|folder| folder.path)
+        .map(|folder| Place {
+            key: folder.key(),
+            on: config.known_folder_enabled(&folder.key()),
+            name: folder.name,
+            path: folder.path,
+            known: false,
+        })
         .collect();
     for folder in KNOWN_FOLDERS {
-        let both = kfm::known_folder_paths(folder.key);
-        taken.extend(both.default);
-        taken.extend(both.current);
+        let both = paths(folder.key);
+        for path in both.default.into_iter().chain(both.current) {
+            found.push(Place {
+                key: folder.key.to_string(),
+                name: folder.display_name.to_string(),
+                path,
+                known: true,
+                on: config.known_folder_enabled(folder.key),
+            });
+        }
     }
-    taken
+    found
+}
+
+/// Whether a new folder is compared with `place` (P3-3): every chosen folder of the account's (on or stopped: it stays
+/// in the list and may be backed up again) and each known folder whose switch is on. A known folder that is off backs
+/// nothing up, so a folder inside it may be chosen.
+fn takes(place: &Place) -> bool {
+    !place.known || place.on
+}
+
+/// Where the folders `owner` backs up already are ([`takes`]): its chosen ones (an untagged one is nobody's, so
+/// its folder can be added again) and each known folder whose switch is on, at its default and current location.
+pub fn taken_paths(config: &DesktopConfig, owner: &Identity) -> Vec<PathBuf> {
+    taken_paths_with(config, owner, kfm::known_folder_paths)
+}
+
+/// [`taken_paths`] with the known folders' locations from `paths` (the tests' folder pairs).
+pub fn taken_paths_with(
+    config: &DesktopConfig,
+    owner: &Identity,
+    paths: impl Fn(&str) -> KnownFolderPaths,
+) -> Vec<PathBuf> {
+    places(config, Some(owner), paths)
+        .into_iter()
+        .filter(takes)
+        .map(|place| place.path)
+        .collect()
+}
+
+/// Why a folder's switch was not turned on (P3-3): it nests with another folder of the account's that is backed up
+/// now. Nothing was changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchRefused {
+    /// The name the list shows for the other folder.
+    pub other: String,
+    /// How the folder being switched on lies against it.
+    pub how: Nesting,
+}
+
+impl SwitchRefused {
+    /// What the window says, naming the other folder (its name in the list; never a path). The window adds that
+    /// nothing was changed.
+    pub fn words(&self) -> String {
+        let other = &self.other;
+        match self.how {
+            Nesting::Same => format!("This folder is backed up already, as {other}."),
+            Nesting::Inside => {
+                format!("This folder is inside {other}, which is backed up already, so its files are in that backup.")
+            }
+            Nesting::Holds => format!(
+                "This folder holds {other}, which is backed up already. Stop backing up {other} first, so nothing is backed up twice."
+            ),
+        }
+    }
+}
+
+/// Whether `owner`'s folder `key` (a known folder, or a chosen one of `owner`'s: "Back up again") may be switched on
+/// (P3-3): refused while it is, holds or lies inside another folder of `owner`'s whose switch is on, naming that folder.
+/// A known folder is compared with the chosen folders alone (two known folders are not compared, as before); a chosen
+/// one with the known folders and the other chosen ones. Another account's chosen folders, and untagged ones, are never
+/// compared nor named. `None`: allowed, also for a key that is not in `owner`'s list (the switch refuses an unknown key
+/// itself).
+pub fn switch_on_refusal(config: &DesktopConfig, key: &str, owner: Option<&Identity>) -> Option<SwitchRefused> {
+    switch_on_refusal_with(config, key, owner, kfm::known_folder_paths)
+}
+
+/// [`switch_on_refusal`] with the known folders' locations from `paths` (the tests' folder pairs).
+pub fn switch_on_refusal_with(
+    config: &DesktopConfig,
+    key: &str,
+    owner: Option<&Identity>,
+    paths: impl Fn(&str) -> KnownFolderPaths,
+) -> Option<SwitchRefused> {
+    let all = places(config, owner, paths);
+    let known = all.iter().any(|place| place.key == key && place.known);
+    let backed_up: Vec<&Place> = all
+        .iter()
+        .filter(|place| place.key != key && place.on && !(known && place.known))
+        .collect();
+    all.iter()
+        .filter(|place| place.key == key)
+        .find_map(|place| nested_with(&place.path, &backed_up, |other| other.path.as_path()))
+        .map(|(how, other)| SwitchRefused {
+            other: other.name.clone(),
+            how,
+        })
 }
 
 /// The names of the folders in this device's backup (`Backups/<device>/*`) the local state knows, so a new custom
@@ -317,35 +536,40 @@ pub fn backup_folder_names(db: &StateDb) -> Result<Vec<String>, BackupsError> {
 /// The settings' part of an add for `owner`: `path` joins the chosen folders under core's custom name (unique among
 /// EVERY account's chosen names, their switch keys share the backup set, and `in_backup`, the names already in this
 /// device's backup), tagged as `owner`'s, and its key joins the backup set. Its key back. Refused, with nothing
-/// changed, when the file already holds the same folder for `owner` (another add landed first; an untagged one is
-/// nobody's, so its folder may be added again, under a name of its own), or `owner` has no tag.
+/// changed, when the file now holds a folder of `owner`'s it is, holds or lies inside, or a known folder whose switch
+/// is on (another add or a switch landed since the rule ran: read from the file this call holds; an untagged folder is
+/// nobody's, so its folder may be added again, under a name of its own), when it is where a known folder is while that
+/// one is off (switched, never added), or when `owner` has no tag.
 pub fn add_to(
     config: &mut DesktopConfig,
     path: &Path,
     in_backup: &[String],
     owner: &Identity,
 ) -> Result<String, AddRefused> {
+    add_to_with(config, path, in_backup, owner, kfm::known_folder_paths)
+}
+
+/// [`add_to`] with the known folders' locations from `paths` (the tests' folder pairs).
+pub fn add_to_with(
+    config: &mut DesktopConfig,
+    path: &Path,
+    in_backup: &[String],
+    owner: &Identity,
+    paths: impl Fn(&str) -> KnownFolderPaths,
+) -> Result<String, AddRefused> {
     let tag = owner_tag(owner).ok_or(AddRefused::Backups(BackupsError::Refused(
         LocalStateRefused::IdentityUnknown,
     )))?;
-    let owners = chosen_for(&config.backup_chosen_folders, Some(owner));
-    if owners.iter().any(|folder| sources::same_folder(&folder.path, path)) {
-        return Err(AddRefused::AlreadyBackedUp);
+    let all = places(config, Some(owner), paths);
+    let taken: Vec<&Place> = all.iter().filter(|place| takes(place)).collect();
+    if let Some((how, _)) = nested_with(path, &taken, |place| place.path.as_path()) {
+        return Err(add_refusal(how));
     }
-    // Another add may have landed since the rule ran: the nesting is refused here too.
-    for folder in &owners {
-        if matches!(
-            sources::check_source(path, &folder.path),
-            Err(SourceRefusal::InsideSyncRoot)
-        ) {
-            return Err(AddRefused::InsideBackedUp);
-        }
-        if matches!(
-            sources::check_source(&folder.path, path),
-            Err(SourceRefusal::InsideSyncRoot)
-        ) {
-            return Err(AddRefused::HoldsBackedUp);
-        }
+    if all
+        .iter()
+        .any(|place| !takes(place) && nesting(path, &place.path) == Some(Nesting::Same))
+    {
+        return Err(AddRefused::KnownFolderOff);
     }
     let mut taken: Vec<&str> = config
         .backup_chosen_folders
@@ -594,6 +818,26 @@ impl<C: CredentialStores> Engine<C> {
             Err(_) => config.backup_chosen_folders,
         };
         seen.iter().any(|folder| folder.key() == key)
+    }
+
+    /// Whose folders a switch under `handle` compares with (P3-3, [`switch_on_refusal`]): the local data's owner, or
+    /// the session's account while nothing has synced. `None` when that cannot be told: then no chosen folder is
+    /// compared (none is passed for an owner that cannot be told either).
+    pub(crate) fn switch_asker(&self, handle: Option<&OwnedState<'_>>) -> Option<Identity> {
+        self.chosen_asker(handle).ok()
+    }
+
+    /// The words for a switch of `key` that was refused with `BackupsError::Nested` (P3-3): the folder it nests with,
+    /// named as the settings file and the local state hold it now. `None`: nothing nests with it now (it may be
+    /// switched on again), or whose folders they are cannot be told. Reads only. BLOCKS: a worker's.
+    pub fn switch_on_refused(&self, key: &str) -> Option<SwitchRefused> {
+        let config = DesktopConfig::load_for(self.identity).ok()?;
+        let asker = match self.local_state() {
+            Ok(handle) => self.switch_asker(Some(&handle)),
+            Err(LocalStateRefused::NothingSynced) => self.switch_asker(None),
+            Err(_) => None,
+        }?;
+        switch_on_refusal(&config, key, Some(&asker))
     }
 
     /// WRITES: add `path` (DW-0738's picker's answer) to the folders this PC backs up, for the session a person

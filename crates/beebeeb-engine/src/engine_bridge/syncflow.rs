@@ -207,8 +207,23 @@ pub async fn sync_tick(
 }
 
 /// The real tick body — same behavior as [`sync_tick`], plus the applied item
-/// ids for the working-set signal (T3).
+/// ids for the working-set signal. RC2-4: after a pull that reached the server, a rebuilt
+/// `state.db`'s check of the files on disk runs, bounded ([`EngineBridge::check_after_rebuild`]);
+/// it never fails the tick.
 pub async fn sync_tick_outcome(
+    bridge: &EngineBridge,
+    sync_root: &Path,
+) -> anyhow::Result<SyncTickOutcome> {
+    let mut outcome = sync_tick_pull(bridge, sync_root).await?;
+    if outcome.reached_server {
+        // RC3-4: files agreed here leave the "not checked yet" row; the runner counts the tick as a change so the
+        // windows read their lists again (not only at the next slow refresh).
+        outcome.rebuilt_agreed = bridge.check_after_rebuild(sync_root).await.agreed;
+    }
+    Ok(outcome)
+}
+
+async fn sync_tick_pull(
     bridge: &EngineBridge,
     // The on-disk vault root. Needed on Windows so the deletion-reconcile paths
     // (`apply_sync_op` / `apply_snapshot`) can locate and remove the on-disk Cloud
@@ -318,6 +333,7 @@ pub async fn sync_tick_outcome(
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: true,
                 pull_failure: None,
+                rebuilt_agreed: 0,
             });
         }
         Some(c) if needs_resnapshot => {
@@ -341,6 +357,7 @@ pub async fn sync_tick_outcome(
                         applied_item_ids: dedupe(applied_item_ids),
                         reached_server: true,
                         pull_failure: None,
+                        rebuilt_agreed: 0,
                     });
                 }
                 Err(e) => after_failed_snapshot(bridge, c, e.into())?,
@@ -364,6 +381,7 @@ pub async fn sync_tick_outcome(
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: false,
                 pull_failure: Some(e),
+                rebuilt_agreed: 0,
             });
         }
     };
@@ -379,6 +397,7 @@ pub async fn sync_tick_outcome(
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: true,
                 pull_failure: None,
+                rebuilt_agreed: 0,
             });
         }
         // `now_secs` (captured at tick start) is the prune freshness cutoff: it
@@ -411,35 +430,239 @@ pub async fn sync_tick_outcome(
             applied_item_ids: dedupe(applied_item_ids),
             reached_server: true,
             pull_failure: None,
+            rebuilt_agreed: 0,
         });
     }
 
-    // Apply the delta ops in order, advancing the cursor to the max seq_id.
+    // Apply the delta ops in order, advancing the cursor to the last op that
+    // landed. Task 2272: an op that fails to apply holds the cursor just before
+    // it (the ops after it wait too, so order is kept) and is tried again after a
+    // back-off; one that keeps failing is parked with words and a re-snapshot
+    // brings its item level. It is never stepped over silently.
     let mut max_seq = cursor;
     for original in &ops.ops {
+        if let Some(retry_at) = op_retry_pending(sync_root, original.seq_id, now_secs) {
+            tracing::info!(
+                seq_id = original.seq_id,
+                retry_in_secs = retry_at - now_secs,
+                "sync_tick: an op that failed to apply is waiting for its retry; the cursor stays before it"
+            );
+            break;
+        }
         let prepared = prepare_owned_sync_op(bridge, original).await?;
         bridge.owner_key_scope().check()?;
-        max_seq = max_seq.max(original.seq_id);
         let Some(op) = prepared else {
+            max_seq = max_seq.max(original.seq_id);
             continue;
         };
-        match apply_sync_op(bridge, sync_root, &op, now_secs, &mut conflicts) {
-            Ok(applied) => applied_item_ids.extend(applied),
-            Err(e) => {
-                // A failed op applied nothing: it contributes no ids.
-                tracing::warn!(error = %e, op_type = %op.op_type, seq_id = op.seq_id, "sync_tick: op apply error; skipping op");
+        match apply_sync_op_once(bridge, sync_root, &op, now_secs, &mut conflicts) {
+            Ok(applied) => {
+                // A failed op applied nothing, so only a landed one contributes ids.
+                applied_item_ids.extend(applied);
+                max_seq = max_seq.max(original.seq_id);
             }
+            Err(e) => match note_op_apply_failure(sync_root, &op, &e, now_secs) {
+                OpFailure::Retry { attempts, retry_at } => {
+                    tracing::warn!(
+                        error = %e,
+                        op_type = %op.op_type,
+                        seq_id = op.seq_id,
+                        attempts,
+                        retry_in_secs = retry_at - now_secs,
+                        "sync_tick: op apply error; the cursor stays before it and it is tried again"
+                    );
+                    break;
+                }
+                OpFailure::Parked(parked) => {
+                    tracing::error!(
+                        op_type = %parked.op_type,
+                        seq_id = parked.seq_id,
+                        item_id = %parked.item_id,
+                        attempts = parked.attempts,
+                        "sync_tick: {}",
+                        parked.words
+                    );
+                    // The snapshot is authoritative: it carries the item's state, so the
+                    // change the op described still reaches this PC.
+                    bridge.db().request_resnapshot()?;
+                    max_seq = max_seq.max(original.seq_id);
+                }
+            },
         }
     }
     if max_seq > cursor {
         bridge.db().set_sync_cursor(max_seq)?;
+        forget_op_failures_through(sync_root, max_seq);
     }
     Ok(SyncTickOutcome {
         conflicts,
         applied_item_ids: dedupe(applied_item_ids),
         reached_server: true,
         pull_failure: None,
+        rebuilt_agreed: 0,
     })
+}
+
+// ── Task 2272: an op that fails to apply ─────────────────────────────────────
+
+/// How many times one op may fail to apply before it is parked.
+pub const SYNC_OP_MAX_ATTEMPTS: u32 = 5;
+
+/// The wait after the `attempts`-th failure: 30 s, doubling, at most 10 minutes.
+pub(super) fn sync_op_backoff_secs(attempts: u32) -> i64 {
+    (30i64 << attempts.saturating_sub(1).min(5)).min(600)
+}
+
+/// An op this PC could not apply after [`SYNC_OP_MAX_ATTEMPTS`] tries, for the review list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedSyncOp {
+    pub seq_id: i64,
+    pub op_type: String,
+    pub item_id: String,
+    pub attempts: u32,
+    /// The last apply error.
+    pub error: String,
+    /// What the person reads.
+    pub words: String,
+    pub parked_at: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FailingOp {
+    attempts: u32,
+    retry_at: i64,
+}
+
+#[derive(Debug, Default)]
+struct OpRetryState {
+    failing: HashMap<i64, FailingOp>,
+    parked: Vec<ParkedSyncOp>,
+}
+
+/// The parked list keeps the newest this many.
+const PARKED_SYNC_OPS_KEPT: usize = 100;
+
+/// Per sync root (one per account), the ops that failed to apply. Held in memory: after a restart
+/// the cursor still stands before a failing op, so it is simply tried again from its first attempt.
+static OP_RETRY: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, OpRetryState>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn op_retry<R>(f: impl FnOnce(&mut HashMap<PathBuf, OpRetryState>) -> R) -> R {
+    let mut guard = OP_RETRY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
+}
+
+pub(super) enum OpFailure {
+    Retry { attempts: u32, retry_at: i64 },
+    Parked(ParkedSyncOp),
+}
+
+/// `Some(retry_at)` while the op at `seq_id` failed before and its back-off has not passed.
+pub(super) fn op_retry_pending(sync_root: &Path, seq_id: i64, now: i64) -> Option<i64> {
+    op_retry(|all| {
+        all.get(sync_root)
+            .and_then(|state| state.failing.get(&seq_id))
+            .map(|f| f.retry_at)
+            .filter(|at| *at > now)
+    })
+}
+
+/// Count one more failure of `op`; at [`SYNC_OP_MAX_ATTEMPTS`] it is parked.
+pub(super) fn note_op_apply_failure(
+    sync_root: &Path,
+    op: &crate::api_client::SyncOp,
+    error: &EngineError,
+    now: i64,
+) -> OpFailure {
+    op_retry(|all| {
+        let state = all.entry(sync_root.to_path_buf()).or_default();
+        let attempts = state.failing.get(&op.seq_id).map_or(0, |f| f.attempts) + 1;
+        if attempts < SYNC_OP_MAX_ATTEMPTS {
+            let retry_at = now + sync_op_backoff_secs(attempts);
+            state.failing.insert(op.seq_id, FailingOp { attempts, retry_at });
+            return OpFailure::Retry { attempts, retry_at };
+        }
+        state.failing.remove(&op.seq_id);
+        let item_id = op.payload["id"].as_str().unwrap_or_default().to_string();
+        let parked = ParkedSyncOp {
+            seq_id: op.seq_id,
+            op_type: op.op_type.clone(),
+            item_id: item_id.clone(),
+            attempts,
+            error: error.to_string(),
+            words: format!(
+                "A change from your vault (a {} of item {item_id}) could not be applied on this PC after {attempts} tries. \
+                 It is set aside for review, and this PC reads the full vault list again so the item still ends up right.",
+                op.op_type.replace('_', " ")
+            ),
+            parked_at: now,
+        };
+        state.parked.push(parked.clone());
+        let excess = state.parked.len().saturating_sub(PARKED_SYNC_OPS_KEPT);
+        state.parked.drain(..excess);
+        OpFailure::Parked(parked)
+    })
+}
+
+/// The cursor moved to `seq_id`: no op at or before it is waiting for a retry any more.
+pub(super) fn forget_op_failures_through(sync_root: &Path, seq_id: i64) {
+    op_retry(|all| {
+        if let Some(state) = all.get_mut(sync_root) {
+            state.failing.retain(|seq, _| *seq > seq_id);
+        }
+    });
+}
+
+/// The ops parked on this sync root, oldest first: the review list's entries for sync.
+pub fn parked_sync_ops(sync_root: &Path) -> Vec<ParkedSyncOp> {
+    op_retry(|all| all.get(sync_root).map(|state| state.parked.clone()).unwrap_or_default())
+}
+
+/// How many times the op at `seq_id` has failed so far (0: not failing).
+pub fn sync_op_failed_attempts(sync_root: &Path, seq_id: i64) -> u32 {
+    op_retry(|all| {
+        all.get(sync_root)
+            .and_then(|state| state.failing.get(&seq_id))
+            .map_or(0, |f| f.attempts)
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Task 2272: the seq ids whose apply fails, for the cursor tests.
+    static FAIL_APPLY_SEQS: std::cell::RefCell<HashSet<i64>> = std::cell::RefCell::new(HashSet::new());
+}
+
+/// Task 2272 tests: make the apply of these seq ids fail (empty: none fails).
+#[cfg(test)]
+pub(super) fn fail_sync_op_apply_for_test(seqs: &[i64]) {
+    FAIL_APPLY_SEQS.with(|s| *s.borrow_mut() = seqs.iter().copied().collect());
+}
+
+/// Task 2272 tests: let every waiting op on this root be retried now.
+#[cfg(test)]
+pub(super) fn expire_sync_op_backoff_for_test(sync_root: &Path) {
+    op_retry(|all| {
+        if let Some(state) = all.get_mut(sync_root) {
+            for f in state.failing.values_mut() {
+                f.retry_at = 0;
+            }
+        }
+    });
+}
+
+fn apply_sync_op_once(
+    bridge: &EngineBridge,
+    sync_root: &Path,
+    op: &crate::api_client::SyncOp,
+    now_secs: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> Result<Vec<String>, EngineError> {
+    #[cfg(test)]
+    if FAIL_APPLY_SEQS.with(|s| s.borrow().contains(&op.seq_id)) {
+        return Err(anyhow::anyhow!("test: the apply of op {} fails", op.seq_id).into());
+    }
+    apply_sync_op(bridge, sync_root, op, now_secs, conflicts)
 }
 
 /// Enrich actual sparse events before entering the synchronous reconciler.
@@ -542,7 +765,7 @@ pub fn apply_snapshot(
     snapshot_fetched_at: i64,
     conflicts: &mut Vec<ConflictDetected>,
 ) -> Result<Vec<String>, EngineError> {
-    // Task 1697 review fix (T3): every ingested and pruned item id flows back
+    // every ingested and pruned item id flows back
     // to the tick, which signals the File Provider working set with the union.
     let mut applied: Vec<String> = Vec::new();
     // Resolve each node's PARENT relative path. The snapshot is a flat node list
@@ -559,7 +782,30 @@ pub fn apply_snapshot(
     // Their children are skipped instead of being placed at the root.
     let mut unplaced: HashSet<String> = HashSet::new();
 
-    for f in order {
+    // DW-0802b: Search says how far the first listing is while this runs.
+    let total = order.len() as u64;
+    let board = bridge.transfers().clone();
+    board.set_first_listing(0, total);
+    let ended = ListingEnd(board.clone());
+    let mut reported = std::time::Instant::now();
+
+    // dc-163: the rows commit PULL_BATCH_ROWS at a time (they committed one by one: 2.1 M write calls
+    // at 41,510 rows); dc-170: or every BATCH_MAX_TIME (250 ms), whichever comes first. Each batch holds whole rows only; a failure or a crash mid-pull leaves the
+    // batches before it, no cursor, and the next tick pulls again over them (every write here is
+    // an upsert). The count is reported between batches, at most every LISTING_REPORT_EVERY, so
+    // the board's wake never runs under the database lock.
+    let mut batch = bridge.db().write_batch(crate::state_db::PULL_BATCH_ROWS)?;
+    for (listed, f) in order.into_iter().enumerate() {
+        if listed > 0 {
+            batch.row_done(|listed| {
+                if reported.elapsed() >= crate::transfer_progress::LISTING_REPORT_EVERY {
+                    board.set_first_listing(listed as u64, total);
+                    reported = std::time::Instant::now();
+                }
+            })?;
+        }
+        #[cfg(test)]
+        first_pull_batch_tests::crash_point(listed);
         let file_id = f["id"].as_str().unwrap_or_default();
         if file_id.is_empty() {
             continue;
@@ -604,6 +850,7 @@ pub fn apply_snapshot(
         if let Some((rel_path, _kind)) =
             process_metadata_row(bridge, f, &parent_rel_path, now_secs, RowSource::Snapshot, conflicts)?
         {
+            store_has_thumbnail(bridge.db(), file_id, f)?;
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
                 applied.push(file_id.to_string());
@@ -620,6 +867,7 @@ pub fn apply_snapshot(
             unplaced.insert(file_id.to_string());
         }
     }
+    batch.finish()?;
 
     // Deletion reconciliation: anything in the local own-tree the snapshot did
     // NOT mention was deleted/trashed server-side. `prune_absent` excludes shared
@@ -635,13 +883,42 @@ pub fn apply_snapshot(
         // placeholder. `prune_absent` returns rows CHILDREN-BEFORE-PARENTS (orphan
         // descendants of a pruned folder precede the folder), which is exactly the
         // order placeholder removal needs (leaf files before their directory).
-        remove_pruned_placeholders(bridge.db(), sync_root, &pruned);
-        // A pruned row is a REMOTE deletion Finder must see (T3).
+        // Never the entry of a row still here whose name differs only by case: on
+        // Windows that entry is reached by the pruned row's path too (`case_place`).
+        // Nor, for two server items with one name, an entry whose placeholder names
+        // the other row (or nothing). Only Windows removes entries here; elsewhere
+        // nothing is read for it.
+        #[cfg(target_os = "windows")]
+        let removable = crate::drive_v2::case_place::removable_by_identity(
+            bridge.db(),
+            sync_root,
+            crate::drive_v2::case_place::removable_places(
+                bridge.db(),
+                sync_root,
+                &pruned,
+                crate::drive_v2::case_place::CaseRule::host(),
+            ),
+            &crate::windows_cf::identity_at::identity_at,
+        );
+        #[cfg(not(target_os = "windows"))]
+        let removable = pruned.clone();
+        remove_pruned_placeholders(bridge.db(), sync_root, &removable);
+        // A pruned row is a REMOTE deletion Finder must see.
         applied.extend(pruned.iter().map(|row| row.file_id.clone()));
     }
 
     bridge.db().set_sync_cursor(snapshot.seq_id)?;
+    drop(ended);
     Ok(applied)
+}
+
+/// Ends the board's first-listing report when the ingest ends, by return or by an error.
+struct ListingEnd(Arc<crate::transfer_progress::TransferBoard>);
+
+impl Drop for ListingEnd {
+    fn drop(&mut self) {
+        self.0.end_first_listing();
+    }
 }
 
 /// Order snapshot nodes so every node appears AFTER its parent (parents-first),
@@ -681,11 +958,10 @@ pub(super) fn order_snapshot_nodes(nodes: &[serde_json::Value]) -> Vec<&serde_js
     }
     // Defensive: emit any node not reached (a parent_id cycle) so nothing is lost.
     for n in nodes {
-        if let Some(id) = n["id"].as_str() {
-            if emitted.insert(id) {
+        if let Some(id) = n["id"].as_str()
+            && emitted.insert(id) {
                 ordered.push(n);
             }
-        }
     }
     ordered
 }
@@ -718,7 +994,7 @@ pub(super) fn apply_sync_op(
     now_secs: i64,
     conflicts: &mut Vec<ConflictDetected>,
 ) -> Result<Vec<String>, EngineError> {
-    // Task 1697 review fix (T3): the ids of items this op actually changed on
+    // the ids of items this op actually changed on
     // the local mirror — what the runner's working-set signal must carry.
     let mut applied: Vec<String> = Vec::new();
     let payload = &op.payload;
@@ -727,8 +1003,21 @@ pub(super) fn apply_sync_op(
         return Ok(applied);
     }
 
+    // Trash, delete and a move change what the shared-folder index of the roots involved must list: collect
+    // the roots before the op rewrites the rows, mark them dirty after it applied.
+    let mut dirty_roots: Vec<String> = Vec::new();
+    if matches!(
+        op.op_type.as_str(),
+        "file_trash" | "file_delete" | "file_move" | "folder_move"
+    ) {
+        dirty_roots = bridge.db().shared_roots_in_subtree(id)?;
+        if let Some(new_parent) = payload["new_parent_id"].as_str() {
+            dirty_roots.extend(bridge.db().shared_roots_in_subtree_root_only(new_parent)?);
+        }
+    }
+
     match op.op_type.as_str() {
-        // Task 1698 (trash ruling — full sync): the two server-side deletion
+        // the two server-side deletion
         // kinds now mean different things locally.
         //
         // `file_trash` — the server TRASH (is_trashed=TRUE, recoverable): the
@@ -745,7 +1034,7 @@ pub(super) fn apply_sync_op(
         // 0802 sweep (flipped by task 1698).
         "file_trash" => match bridge.db().get_file(id)? {
             Some(entry) if entry.status == crate::state_db::FileStatus::Trashing => {
-                // PR #100 review (Codex P1): the root may already be parked
+                // the root may already be parked
                 // `Trashing` by the LOCAL trash flow — `queue_finder_delete`
                 // parks ONLY the folder row, its descendants stay unmarked
                 // until this server echo arrives. This echo IS that arrival:
@@ -779,7 +1068,7 @@ pub(super) fn apply_sync_op(
                         orphans.len()
                     );
                     remove_pruned_placeholders(bridge.db(), sync_root, &orphans);
-                    // The orphaned children left the mirror (T3); the folder
+                    // The orphaned children left the mirror; the folder
                     // itself never existed locally, so it contributes nothing.
                     applied.extend(orphans.iter().map(|row| row.file_id.clone()));
                 }
@@ -814,7 +1103,7 @@ pub(super) fn apply_sync_op(
             // on the next tick: the authoritative snapshot re-materialises the
             // restored row. Cheap and matches the existing gap-recovery design.
             //
-            // Task 1698 (trash ruling): when we still HOLD the row — it stayed
+            // when we still HOLD the row — it stayed
             // in the mirror as `Trashing` (the trash view) instead of being
             // pruned — the restore flips it back OUT of the trash view
             // directly: `CloudOnly` (placeholder re-mints; content
@@ -823,7 +1112,7 @@ pub(super) fn apply_sync_op(
             if let Some(row) = bridge.db().get_file(id)?
                 && row.status == crate::state_db::FileStatus::Trashing
             {
-                // PR #100 review (Codex P1): the restore must take the ENTIRE
+                // the restore must take the ENTIRE
                 // held subtree out of the trash view, not just the root row —
                 // the authoritative re-snapshot preserves `Trashing` rows by
                 // design, so it can never repair the descendants (they would
@@ -905,6 +1194,9 @@ pub(super) fn apply_sync_op(
             if process_metadata_row(bridge, &row, &parent_rel, now_secs, RowSource::Op, conflicts)?.is_some() {
                 applied.push(id.to_string());
             }
+            // dc-168: after the row's version is written, so the flag is stored at the version it speaks of. A
+            // thumbnail-flag op (`{id, has_thumbnail}`) changes no row field and is stored all the same.
+            store_has_thumbnail(bridge.db(), id, payload)?;
             #[cfg(target_os = "macos")]
             {
                 if touches_existing_row {
@@ -932,6 +1224,12 @@ pub(super) fn apply_sync_op(
             tracing::debug!(op_type = other, "sync_tick: ignoring unknown op_type");
         }
     }
+    if matches!(op.op_type.as_str(), "file_move" | "folder_move") {
+        dirty_roots.extend(bridge.db().shared_roots_in_subtree(id)?);
+    }
+    for root in dirty_roots {
+        bridge.db().mark_shared_index_dirty(&root)?;
+    }
     // A sparse folder rename/move has no descendant events. Reuse the same
     // metadata write for their new parent paths, then signal those identities
     // with the folder. This preserves content baselines and queued rename holds.
@@ -944,6 +1242,15 @@ pub(super) fn apply_sync_op(
         rebase_folder_descendants(bridge, id, now_secs, &mut applied)?;
     }
     Ok(applied)
+}
+
+/// dc-168: a server row's or op's `has_thumbnail` into `files.has_thumbnail`, at the row's current version. A row or
+/// op without the field (an older server, a rename, a move) leaves the stored flag as it is.
+fn store_has_thumbnail(db: &StateDb, file_id: &str, f: &serde_json::Value) -> Result<(), EngineError> {
+    if let Some(has) = f.get("has_thumbnail").and_then(serde_json::Value::as_bool) {
+        db.set_server_has_thumbnail(file_id, has)?;
+    }
+    Ok(())
 }
 
 pub(super) fn rebase_folder_descendants(
@@ -1099,4 +1406,254 @@ pub(super) fn synthesize_op_row(
     };
     row["updated_at"] = serde_json::json!(kept_server_time.unwrap_or_else(now_secs));
     row
+}
+
+/// Trash, delete and a move between shared roots mark the shared-folder index of each root involved dirty.
+#[cfg(test)]
+mod shared_folder_index_dirty_tests {
+    use super::*;
+
+    const KEY: [u8; 32] = [39u8; 32];
+    const ROOT_A: &str = "06600000-0000-4000-8000-0000000000a0";
+    const ROOT_B: &str = "06600000-0000-4000-8000-0000000000b0";
+    const FILE: &str = "06600000-0000-4000-8000-0000000000f1";
+
+    fn bridge_in(dir: &Path) -> EngineBridge {
+        let db = Arc::new(StateDb::open(dir.join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new("http://127.0.0.1:9".into(), "token".into(), KEY));
+        EngineBridge::new(&crate::identity::TEST, db, api)
+    }
+
+    fn seed(bridge: &EngineBridge, id: &str, parent: Option<&str>, folder: bool, root: &str) {
+        #[allow(deprecated)]
+        let name = {
+            let master = beebeeb_core::kdf::MasterKey::from_bytes(KEY);
+            beebeeb_core::encrypt::encrypt_name(&master, id, "n", None).unwrap()
+        };
+        let row = serde_json::json!({
+            "id": id, "parent_id": parent, "name_encrypted": name, "size_bytes": 1,
+            "is_folder": folder, "content_hash": null, "version_number": 1,
+            "is_trashed": false, "is_starred": false, "updated_at": 1_000,
+        });
+        apply_metadata_file_row(
+            bridge.db(),
+            &row,
+            Namespace::SharedWithMe,
+            Some(root.into()),
+            None,
+            PERMISSION_READ | PERMISSION_WRITE,
+            1_000,
+            &KEY,
+            "",
+        )
+        .unwrap()
+        .expect("row written");
+    }
+
+    fn setup() -> (tempfile::TempDir, std::path::PathBuf, EngineBridge) {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let bridge = bridge_in(dir.path());
+        seed(&bridge, ROOT_A, None, true, ROOT_A);
+        seed(&bridge, ROOT_B, None, true, ROOT_B);
+        seed(&bridge, FILE, Some(ROOT_A), false, ROOT_A);
+        for root in [ROOT_A, ROOT_B] {
+            bridge.db().clear_shared_index_dirty(root).unwrap();
+        }
+        (dir, sync_root, bridge)
+    }
+
+    fn run(bridge: &EngineBridge, sync_root: &Path, op_type: &str, payload: serde_json::Value) {
+        let op = crate::api_client::SyncOp { seq_id: 1, op_type: op_type.into(), payload };
+        apply_sync_op(bridge, sync_root, &op, now_secs(), &mut Vec::new()).unwrap();
+    }
+
+    /// dc-168: a thumbnail-flag op and a content op carrying the field store it at the row's version; an op
+    /// without it leaves it.
+    #[test]
+    fn has_thumbnail_is_stored_from_file_update_ops() {
+        let (_dir, sync_root, bridge) = setup();
+        assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), None);
+        run(&bridge, &sync_root, "file_update", serde_json::json!({ "id": FILE, "has_thumbnail": true }));
+        assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), Some(true));
+        run(&bridge, &sync_root, "file_update", serde_json::json!({ "id": FILE, "has_large_thumbnail": true }));
+        assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), Some(true), "no field, kept");
+        run(&bridge, &sync_root, "file_update", serde_json::json!({ "id": FILE, "has_thumbnail": false }));
+        assert_eq!(bridge.db().server_has_thumbnail(FILE, 1).unwrap(), Some(false));
+    }
+
+    #[test]
+    fn shared_folder_index_is_dirty_after_a_trash() {
+        let (_d, root, bridge) = setup();
+        run(&bridge, &root, "file_trash", serde_json::json!({ "id": FILE }));
+        assert_eq!(bridge.db().dirty_shared_index_roots().unwrap(), vec![ROOT_A.to_string()]);
+    }
+
+    #[test]
+    fn shared_folder_index_is_dirty_after_a_delete() {
+        let (_d, root, bridge) = setup();
+        run(&bridge, &root, "file_delete", serde_json::json!({ "id": FILE }));
+        assert_eq!(bridge.db().dirty_shared_index_roots().unwrap(), vec![ROOT_A.to_string()]);
+    }
+
+    #[test]
+    fn shared_folder_index_is_dirty_for_both_roots_after_a_move() {
+        let (_d, root, bridge) = setup();
+        run(&bridge, &root, "file_move", serde_json::json!({ "id": FILE, "new_parent_id": ROOT_B }));
+        let mut dirty = bridge.db().dirty_shared_index_roots().unwrap();
+        dirty.sort();
+        assert_eq!(dirty, vec![ROOT_A.to_string(), ROOT_B.to_string()]);
+    }
+}
+
+/// dc-163: the first pull commits in batches, not row by row, and a crash mid-pull leaves a
+/// database the next pull finishes.
+#[cfg(test)]
+mod first_pull_batch_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const KEY: [u8; 32] = [63u8; 32];
+    /// LargeAccount::REFERENCE's size (dc-086): 41,510 items, 2,739 of them folders.
+    const ITEMS: usize = 41_510;
+    const FOLDERS: usize = 2_739;
+    const CHILD: &str = "BB_DC163_FIRST_PULL_CHILD";
+
+    static CRASH_AT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    /// The pull dies here (no unwinding, no rollback, as a killed process) at the row the test chose.
+    pub(super) fn crash_point(listed: usize) {
+        if listed == CRASH_AT.load(Ordering::Relaxed) {
+            std::process::abort();
+        }
+    }
+
+    fn id(i: usize) -> String {
+        format!("{:08x}-0000-4000-8000-{:012x}", 0x0dc1_6300 + (i >> 24), i)
+    }
+
+    /// Folders under each other ten wide, files spread over the folders and the root.
+    fn nodes() -> Vec<serde_json::Value> {
+        let master = beebeeb_core::kdf::MasterKey::from_bytes(KEY);
+        (0..ITEMS)
+            .map(|i| {
+                let folder = i < FOLDERS;
+                let parent = if folder {
+                    (i >= 10).then(|| id(i / 10))
+                } else {
+                    (i % 7 != 0).then(|| id(i % FOLDERS))
+                };
+                let item = id(i);
+                #[allow(deprecated)]
+                let name = beebeeb_core::encrypt::encrypt_name(&master, &item, &format!("n{i}"), None).unwrap();
+                serde_json::json!({
+                    "id": item, "parent_id": parent, "name_encrypted": name, "size_bytes": 10,
+                    "is_folder": folder, "content_hash": null, "version_number": 1,
+                    "is_trashed": false, "is_starred": false, "updated_at": 1_000,
+                })
+            })
+            .collect()
+    }
+
+    fn bridge_at(db: &Path) -> EngineBridge {
+        let db = Arc::new(StateDb::open(db).unwrap());
+        let api = Arc::new(ApiClient::new("http://127.0.0.1:9".into(), "token".into(), KEY));
+        EngineBridge::new(&crate::identity::TEST, db, api)
+    }
+
+    /// `bootstrap_from_snapshot` after its fetch: the prepare pass, then the ingest.
+    async fn first_pull(bridge: &EngineBridge, sync_root: &Path, nodes: &[serde_json::Value]) {
+        let nodes = bridge
+            .prepare_owned_rows(nodes)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.row)
+            .collect();
+        let snapshot = crate::api_client::SyncSnapshot { seq_id: 41, nodes };
+        apply_snapshot(bridge, sync_root, &snapshot, 2_000, 2_000, &mut Vec::new()).unwrap();
+    }
+
+    fn rows(db: &Path, sql: &str) -> i64 {
+        rusqlite::Connection::open(db).unwrap().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn first_pull_of_41k_items_commits_in_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let db = dir.path().join("state.db");
+        let bridge = bridge_at(&db);
+        bridge.db().keep_wal_for_test();
+        let before = bridge.db().wal_commits_for_test();
+        let nodes = nodes();
+        let started = std::time::Instant::now();
+        first_pull(&bridge, &sync_root, &nodes).await;
+        let commits = bridge.db().wal_commits_for_test() - before;
+        println!("first pull of {ITEMS} items: {commits} commits, {:?}", started.elapsed());
+        // dc-170: batches also commit every BATCH_MAX_TIME, so a slow (debug) build commits more often than
+        // ITEMS / PULL_BATCH_ROWS; one commit per row (the dc-086 bug) is still 100x over this bound.
+        assert!(commits <= ITEMS / 100, "{commits} commits for {ITEMS} items");
+        assert_eq!(rows(&db, "SELECT COUNT(*) FROM files"), ITEMS as i64);
+        assert_eq!(rows(&db, "SELECT COUNT(*) FROM owned_key_records"), ITEMS as i64);
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(41));
+    }
+
+    /// The child run of `first_pull_killed_halfway_leaves_a_db_the_next_pull_finishes`: dies at half.
+    async fn child_pull(db: &Path) {
+        let sync_root = db.parent().unwrap().join("Beebeeb");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        CRASH_AT.store(ITEMS / 2, Ordering::Relaxed);
+        first_pull(&bridge_at(db), &sync_root, &nodes()).await;
+        unreachable!("the pull did not reach its crash point");
+    }
+
+    #[tokio::test]
+    async fn first_pull_killed_halfway_leaves_a_db_the_next_pull_finishes() {
+        if let Some(db) = std::env::var_os(CHILD) {
+            child_pull(Path::new(&db)).await;
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "engine_bridge::syncflow::first_pull_batch_tests::first_pull_killed_halfway_leaves_a_db_the_next_pull_finishes",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD, &db)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "the child pull was not killed");
+        assert!(db.exists(), "the child never opened the database");
+
+        // What the crash left: a sound database, whole batches of rows only, no cursor.
+        let check: String = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(check, "ok");
+        let landed = rows(&db, "SELECT COUNT(*) FROM files");
+        assert!(landed > 0 && landed < (ITEMS / 2) as i64, "{landed} rows after a crash at half");
+        // dc-170: a batch also commits by time (BATCH_MAX_TIME), so the count need not be a multiple of
+        // PULL_BATCH_ROWS; whole rows only is what the folder check below proves.
+        assert_eq!(
+            rows(&db, "SELECT COUNT(*) FROM files f WHERE f.parent_id IS NOT NULL
+                        AND NOT EXISTS(SELECT 1 FROM files p WHERE p.file_id = f.parent_id)"),
+            0,
+            "a row landed without its folder"
+        );
+        let bridge = bridge_at(&db);
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), None, "a cursor after half a pull");
+
+        // The next pull goes over it and finishes.
+        let sync_root = dir.path().join("Beebeeb");
+        first_pull(&bridge, &sync_root, &nodes()).await;
+        assert_eq!(rows(&db, "SELECT COUNT(*) FROM files"), ITEMS as i64);
+        assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(41));
+    }
 }

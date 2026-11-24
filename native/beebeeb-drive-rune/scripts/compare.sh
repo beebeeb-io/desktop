@@ -68,7 +68,7 @@ fi
 [ -x "$BIN" ] || die "no binary at $BIN"
 
 # Software Vulkan for a headless render where there is no GPU (WSL).
-LAVAPIPE_ENV="${LAVAPIPE_ENV:-$HOME/code/bb-legion-native/lavapipe/env.sh}"
+LAVAPIPE_ENV="${LAVAPIPE_ENV:-$HOME/code/the Windows test machine/lavapipe/env.sh}"
 # shellcheck source=/dev/null
 [ -f "$LAVAPIPE_ENV" ] && source "$LAVAPIPE_ENV"
 

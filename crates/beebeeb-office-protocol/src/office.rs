@@ -23,6 +23,9 @@
 
 use std::fmt;
 
+mod edit;
+pub use edit::*;
+
 use crate::wire::{In, Out};
 
 /// The app asks the helper to open the document in a granted section.
@@ -73,6 +76,8 @@ pub enum DecodeError {
     NotFinite,
     /// Bytes left over after the message.
     TrailingBytes,
+    /// An edit's text over [`crate::check::MAX_OP_TEXT_BYTES`].
+    TextTooLong,
 }
 
 impl fmt::Display for DecodeError {
@@ -86,6 +91,7 @@ impl fmt::Display for DecodeError {
             DecodeError::BadUtf8 => "text that is not UTF-8",
             DecodeError::NotFinite => "a number that is not finite",
             DecodeError::TrailingBytes => "bytes after the message",
+            DecodeError::TextTooLong => "an edit's text over the limit",
         };
         f.write_str(text)
     }
@@ -99,12 +105,15 @@ pub enum EncodeError {
     /// The payload would be over [`crate::frame::MAX_PAYLOAD`]: it cannot travel in one frame
     /// ([`crate::frame::fits_one_frame`], the check `write_frame` holds).
     OverFrame,
+    /// An edit's text is over [`crate::check::MAX_OP_TEXT_BYTES`] (a paste that is too large does not encode).
+    TextTooLong,
 }
 
 impl fmt::Display for EncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
             EncodeError::OverFrame => "a message larger than one frame",
+            EncodeError::TextTooLong => "an edit's text over the limit",
         };
         f.write_str(text)
     }
@@ -112,7 +121,8 @@ impl fmt::Display for EncodeError {
 
 impl std::error::Error for EncodeError {}
 
-/// The Office formats the helper may be asked to open. `.ppt` is not on the list: it has no preview (2482 Q5).
+/// The formats the helper may be asked to open. `.ppt` is not on the list: it has no preview (2482 Q5). `Pdf` is
+/// rendered by the helper too (2501), so a hostile PDF ends the helper, never the app; it opens as pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocKind {
     Docx,
@@ -120,6 +130,7 @@ pub enum DocKind {
     Xlsx,
     Xls,
     Pptx,
+    Pdf,
 }
 
 impl DocKind {
@@ -130,6 +141,7 @@ impl DocKind {
             DocKind::Xlsx => 3,
             DocKind::Xls => 4,
             DocKind::Pptx => 5,
+            DocKind::Pdf => 6,
         }
     }
 
@@ -140,6 +152,7 @@ impl DocKind {
             3 => Ok(DocKind::Xlsx),
             4 => Ok(DocKind::Xls),
             5 => Ok(DocKind::Pptx),
+            6 => Ok(DocKind::Pdf),
             _ => Err(DecodeError::BadTag),
         }
     }
@@ -205,19 +218,16 @@ pub struct Opened {
 }
 
 impl Opened {
-    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
-        let mut o = Out::new();
+    fn put(&self, o: &mut Out) {
         o.u32(self.pages);
         let n = o.count(self.sizes.len());
         for size in self.sizes.iter().take(n) {
             o.f32(size.w_pt);
             o.f32(size.h_pt);
         }
-        o.finish()
     }
 
-    pub fn decode(payload: &[u8]) -> Result<Opened, DecodeError> {
-        let mut i = In::new(payload);
+    fn get(i: &mut In<'_>) -> Result<Opened, DecodeError> {
         let pages = i.u32()?;
         let n = i.count(8)?;
         let mut sizes = Vec::with_capacity(n);
@@ -227,8 +237,20 @@ impl Opened {
                 h_pt: i.f32()?,
             });
         }
-        i.finish()?;
         Ok(Opened { pages, sizes })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+        let mut o = Out::new();
+        self.put(&mut o);
+        o.finish()
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Opened, DecodeError> {
+        let mut i = In::new(payload);
+        let got = Opened::get(&mut i)?;
+        i.finish()?;
+        Ok(got)
     }
 }
 
@@ -1031,6 +1053,21 @@ pub enum Message {
     StatsData(StatsData),
     Cancel(Cancel),
     Error(Error),
+    OpenEdit(OpenEdit),
+    NewDoc(NewDoc),
+    Edit(Edit),
+    Hit(Hit),
+    SaveSize(SaveSize),
+    SaveInto(SaveInto),
+    Copy(Copy),
+    Layouts(Layouts),
+    InsertImage(InsertImage),
+    Edited(Edited),
+    SaveReady(SaveReady),
+    SavedInto(SavedInto),
+    Clip(Clip),
+    LayoutList(LayoutList),
+    EditGuarded(EditGuarded),
 }
 
 impl Message {
@@ -1051,6 +1088,21 @@ impl Message {
             Message::StatsData(_) => KIND_STATS_DATA,
             Message::Cancel(_) => KIND_CANCEL,
             Message::Error(_) => KIND_ERROR,
+            Message::OpenEdit(_) => KIND_OPEN_EDIT,
+            Message::NewDoc(_) => KIND_NEW_DOC,
+            Message::Edit(_) => KIND_EDIT,
+            Message::Hit(_) => KIND_HIT,
+            Message::SaveSize(_) => KIND_SAVE_SIZE,
+            Message::SaveInto(_) => KIND_SAVE_INTO,
+            Message::Copy(_) => KIND_COPY,
+            Message::Layouts(_) => KIND_LAYOUTS,
+            Message::InsertImage(_) => KIND_INSERT_IMAGE,
+            Message::Edited(_) => KIND_EDITED,
+            Message::SaveReady(_) => KIND_SAVE_READY,
+            Message::SavedInto(_) => KIND_SAVED_INTO,
+            Message::Clip(_) => KIND_CLIP,
+            Message::LayoutList(_) => KIND_LAYOUT_LIST,
+            Message::EditGuarded(_) => KIND_EDIT_GUARDED,
         }
     }
 
@@ -1071,6 +1123,21 @@ impl Message {
             Message::StatsData(m) => m.encode(),
             Message::Cancel(m) => m.encode(),
             Message::Error(m) => m.encode(),
+            Message::OpenEdit(m) => m.encode(),
+            Message::NewDoc(m) => m.encode(),
+            Message::Edit(m) => m.encode(),
+            Message::Hit(m) => m.encode(),
+            Message::SaveSize(m) => m.encode(),
+            Message::SaveInto(m) => m.encode(),
+            Message::Copy(m) => m.encode(),
+            Message::Layouts(m) => m.encode(),
+            Message::InsertImage(m) => m.encode(),
+            Message::Edited(m) => m.encode(),
+            Message::SaveReady(m) => m.encode(),
+            Message::SavedInto(m) => m.encode(),
+            Message::Clip(m) => m.encode(),
+            Message::LayoutList(m) => m.encode(),
+            Message::EditGuarded(m) => m.encode(),
         }
     }
 
@@ -1091,6 +1158,21 @@ impl Message {
             KIND_STATS_DATA => Message::StatsData(StatsData::decode(payload)?),
             KIND_CANCEL => Message::Cancel(Cancel::decode(payload)?),
             KIND_ERROR => Message::Error(Error::decode(payload)?),
+            KIND_OPEN_EDIT => Message::OpenEdit(OpenEdit::decode(payload)?),
+            KIND_NEW_DOC => Message::NewDoc(NewDoc::decode(payload)?),
+            KIND_EDIT => Message::Edit(Edit::decode(payload)?),
+            KIND_HIT => Message::Hit(Hit::decode(payload)?),
+            KIND_SAVE_SIZE => Message::SaveSize(SaveSize::decode(payload)?),
+            KIND_SAVE_INTO => Message::SaveInto(SaveInto::decode(payload)?),
+            KIND_COPY => Message::Copy(Copy::decode(payload)?),
+            KIND_LAYOUTS => Message::Layouts(Layouts::decode(payload)?),
+            KIND_INSERT_IMAGE => Message::InsertImage(InsertImage::decode(payload)?),
+            KIND_EDITED => Message::Edited(Edited::decode(payload)?),
+            KIND_SAVE_READY => Message::SaveReady(SaveReady::decode(payload)?),
+            KIND_SAVED_INTO => Message::SavedInto(SavedInto::decode(payload)?),
+            KIND_CLIP => Message::Clip(Clip::decode(payload)?),
+            KIND_LAYOUT_LIST => Message::LayoutList(LayoutList::decode(payload)?),
+            KIND_EDIT_GUARDED => Message::EditGuarded(EditGuarded::decode(payload)?),
             _ => return Err(DecodeError::UnknownKind),
         })
     }

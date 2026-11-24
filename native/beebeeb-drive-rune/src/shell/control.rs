@@ -17,7 +17,7 @@
 //! any process of this user can write to the pipe, so no verb does more than a click on the b's
 //! menu could, and a link can only ever SHOW a place.
 //!
-//! **A File Explorer verb carries an id, never a path** (slice B6, the lead's ruling of 2026-11-15 16:45): the
+//! **A File Explorer verb carries an id, never a path**: the
 //! launch Explorer started reads the item's id from its placeholder (`platform::windows_verbs`) and sends only the
 //! verb and that id, short and ASCII. The running instance checks everything again (the account, the lock, the
 //! verb), and Share and Copy link only OPEN the window's own Share dialog: nothing is shared from the pipe.
@@ -43,6 +43,10 @@ pub enum Request {
     /// A link that parsed against the allow-list when this value was made.
     Open(String),
     QuitForUpdate,
+    /// A later launch that named `--api-base <origin>`: show the window if the running instance was started on that
+    /// same server, else answer [`Reply::OtherServer`] and show nothing. The origin is the checked one
+    /// (`engine_host::open::api_base`), ASCII, no space.
+    ShowOn(String),
     /// A verb of Beebeeb's items in File Explorer's menu (DW-1183), on the item with this id (`deeplink::is_item_id`
     /// held when this value was made). Never a path.
     Explorer {
@@ -114,6 +118,7 @@ impl Request {
             Request::Show => format!("{MAGIC} show\n"),
             Request::Open(link) => format!("{MAGIC} open {link}\n"),
             Request::QuitForUpdate => format!("{MAGIC} quit-for-update\n"),
+            Request::ShowOn(origin) => format!("{MAGIC} show-on {origin}\n"),
             Request::Explorer { verb, item } => format!("{MAGIC} explorer {} {item}\n", verb.word()),
         }
         .into_bytes()
@@ -148,6 +153,7 @@ impl Request {
         match (verb, argument) {
             ("show", None) => Some(Request::Show),
             ("quit-for-update", None) => Some(Request::QuitForUpdate),
+            ("show-on", Some(origin)) if !origin.is_empty() => Some(Request::ShowOn(origin.to_owned())),
             ("open", Some(link)) => deeplink::parse_for(link, identity)
                 .is_ok()
                 .then(|| Request::Open(link.to_owned())),
@@ -226,6 +232,8 @@ pub enum Reply {
     Ok,
     /// The window thread did not take it in time.
     Busy,
+    /// The running instance was started on another server than the request named (`Request::ShowOn`).
+    OtherServer,
 }
 
 impl Reply {
@@ -233,6 +241,7 @@ impl Reply {
         match self {
             Reply::Ok => b"ok\n",
             Reply::Busy => b"busy\n",
+            Reply::OtherServer => b"other-server\n",
         }
     }
 
@@ -240,6 +249,7 @@ impl Reply {
         match bytes {
             b"ok\n" => Some(Reply::Ok),
             b"busy\n" => Some(Reply::Busy),
+            b"other-server\n" => Some(Reply::OtherServer),
             _ => None,
         }
     }
@@ -568,6 +578,9 @@ mod tests {
     #[test]
     fn replies() {
         assert_eq!(Reply::decode(Reply::Ok.encode()), Some(Reply::Ok));
+        assert_eq!(Reply::decode(Reply::OtherServer.encode()), Some(Reply::OtherServer));
+        let on = Request::ShowOn("http://127.0.0.1:9".to_owned());
+        assert_eq!(Request::decode(&on.encode(), AppIdentity::Test), Some(on));
         assert_eq!(Reply::decode(Reply::Busy.encode()), Some(Reply::Busy));
         for bytes in [&b""[..], b"ok", b"OK\n", b"ok\nok\n", b"yes\n"] {
             assert_eq!(Reply::decode(bytes), None);

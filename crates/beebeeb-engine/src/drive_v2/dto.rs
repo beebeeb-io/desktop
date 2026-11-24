@@ -15,6 +15,12 @@ pub enum LocalState {
     AvailableOffline,
     Syncing,
     Failed,
+    /// The entry at its place on this computer is another server item's with the very same name
+    /// (`case_place::Clash::SameName`): its presses on disk are refused.
+    NameShared,
+    /// The entry at its place on this computer is another item's whose name differs only by letter case
+    /// (`case_place::Clash::Case`): its presses on disk are refused.
+    NameSharedButCase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -52,6 +58,10 @@ pub struct DriveItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
     pub has_thumbnail: bool,
+    /// dc-136b: the newest name the server sent for this item could not be decrypted; `name` is the last readable
+    /// one. Filled where the listing reads the state DB; `None` (left out of the JSON) otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_unreadable: Option<bool>,
     /// The row's place in the Backups tree (LD-0113), for the native window. Not part of the JSON the web view
     /// reads. Filled by `model::children_of`; `Outside` from every other constructor.
     #[serde(skip)]

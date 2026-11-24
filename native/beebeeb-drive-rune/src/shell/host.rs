@@ -19,9 +19,11 @@ use super::instance::{self, Forwarded};
 use super::platform::{self, Platform, PlatformError, TrayEvent, TrayHandler, TrayIcon};
 use super::surfaces::WindowKind;
 use super::tray::{EngineState, LeftClick, MenuAction, TrayInputs, TrayModel, tray_model};
+use super::tray_tip_window::{self, TipState};
 use super::window_state::{self, Observed, SavedWindows};
 use super::{registry, surfaces};
 use crate::State;
+use crate::frames::files::reread::ReadFor;
 use crate::frames::global::sync_off::SyncOff;
 use crate::ui::sidebar::SidebarSection;
 
@@ -42,9 +44,18 @@ pub struct Wiring {
     /// The main window's native handle, filled by `App::on_window`.
     pub window: Arc<Mutex<Option<WindowHandle>>>,
     pub flyout_hidden_at: Arc<Mutex<Option<Instant>>>,
+    /// The first-run tray tip's window (DW-0380, `tray_tip_window`).
+    pub tray_tip: Option<AppHandle<TipState>>,
+    /// The display the b is on: the primary display's at start (`shell::run`), then the one a click on the b
+    /// reported. The tray tip opens by it.
+    pub tray_anchor: Arc<Mutex<Option<flyout::Anchor>>>,
     pub saved: SavedWindows,
     /// Where window places are saved; None: nowhere (tooling runs, tests).
     pub state_file: Option<PathBuf>,
+    /// Where the "hide from capture" switch is stored; None: nowhere (tooling runs, tests).
+    pub capture_file: Option<PathBuf>,
+    /// The stored switch at start (`shell::capture_setting`). Off unless the person turned it on.
+    pub hide_from_capture: bool,
 }
 
 pub struct Shell {
@@ -65,23 +76,30 @@ pub struct Shell {
     /// What the platform was last **successfully** told about capture exclusion. `false` at
     /// startup: the platform has not been told anything until the first `poll` calls it.
     capture_excluded: bool,
+    /// The person's switch: hide every window from capture and remote desktop. Off by default.
+    hide_from_capture: bool,
     /// The gate and the account the last poll saw (`poll` ends the account lane's flows when
     /// the session ends under them).
     session_seen: Option<(super::app::GateState, Option<String>)>,
     /// The last poll saw the session gate open (`session_gate::open`).
     gate_open_seen: bool,
-    /// The last poll saw a screen with a secret (`poll_capture` drops exclusion one poll late).
-    secret_seen: bool,
     /// Consecutive failures of the capture-exclusion platform call. Reset on success or when
     /// the desired state changes. Capped at 3: after 3 failures the call is not retried until
     /// the desired state changes (a navigation away and back resets it).
     capture_exclusion_retries: u8,
+    /// The platform is taking Unicode packets' text for the main window (`Platform::watch_packet_text`).
+    packets_watched: bool,
     /// The b's inputs changed since the flyout last read them. A hidden flyout is not read
     /// ([`Shell::refresh`]); this says it reads them once it shows.
     flyout_behind: bool,
     /// How many reads the shell asked of the flyout ([`Shell::read_flyout`]), for the tests.
     #[cfg(test)]
     flyout_reads: u32,
+    /// The tray tip's window was opened and not hidden since ([`Shell::show_tray_tip`]).
+    tray_tip_open: bool,
+    /// How often the tray tip was opened and hidden, for the tests.
+    #[cfg(test)]
+    pub(crate) tray_tip_counts: (u32, u32),
     /// The refused start the refusal modal shows ([`open_sync_refusal`]).
     sync_off: Option<SyncOff>,
     /// The attempt the refusal modal was last opened for, or seen without a gate to open over: once per attempt.
@@ -93,13 +111,24 @@ pub struct Shell {
     pub(crate) away: super::away::AwayLock,
     /// What the flyout was last told of the away lock's cover (`registry::covered`): `Some(sync runs)` while covered.
     pub(crate) flyout_covered: Option<bool>,
-    /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle): a list that showed
-    /// an error or nothing is read again then ([`read_again_after_a_check`]).
+    /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle, or it reported a new
+    /// `TrayInputs::changes`: a check that changed something): Photos reads its library again, and the Files window the folder it shows
+    /// ([`read_again_after_a_check`]).
     check_finished: bool,
+    /// w31: the last [`poll`] saw the account's first file list still on its way (or failed). When it is no longer,
+    /// the list landed: the windows read again at once, not at the end of the (long) tick that brought it.
+    first_list_awaited: bool,
+    /// A finished check whose read of the folder shown waits for what is open over the rows to close
+    /// (`State::reread_waits`).
+    files_reread_due: bool,
     /// Carries out what the player asked of the OS's media controls (`media::os_controls::UiControls::pump`), on
     /// the UI thread, at the end of every poll. Held so a test counts the calls; the real one reads the main
     /// window's handle from the slot and does nothing while there is none.
     media_pump: Arc<dyn Fn() + Send + Sync>,
+    /// Stops what plays when the session closes under the window (`media::stop_all`). Held so a test sees the stop.
+    media_stop: Arc<dyn Fn(crate::media::StopReason) + Send + Sync>,
+    /// what the views read from the engine as the last ring left it (`redraw::follow_engine`).
+    pub(super) seen: Option<super::redraw::Seen>,
 }
 
 impl Shell {
@@ -113,6 +142,7 @@ impl Shell {
         let window_kind = surfaces::kind_for(&app.screen());
         let tray_inputs = actions.tray_inputs();
         let tray_model = tray_model(&tray_inputs);
+        let hide_from_capture = wiring.hide_from_capture;
         let window_slot = wiring.window.clone();
         let media_pump: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             let window = window_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -122,6 +152,7 @@ impl Shell {
         });
         Shell {
             media_pump,
+            media_stop: Arc::new(crate::media::stop_all),
             app,
             actions,
             platform,
@@ -135,20 +166,27 @@ impl Shell {
             // The platform has not been told anything yet. The first poll that sees a secret
             // route (or any route, if a window handle exists) will apply it.
             capture_excluded: false,
+            hide_from_capture,
             session_seen: None,
             gate_open_seen: false,
-            secret_seen: false,
             capture_exclusion_retries: 0,
+            packets_watched: false,
             flyout_behind: false,
             #[cfg(test)]
             flyout_reads: 0,
+            tray_tip_open: false,
+            #[cfg(test)]
+            tray_tip_counts: (0, 0),
             sync_off: None,
             refusal_seen: None,
             #[cfg(test)]
             sync_off_opened: 0,
             check_finished: false,
+            first_list_awaited: false,
+            files_reread_due: false,
             away: super::away::AwayLock::default(),
             flyout_covered: None,
+            seen: None,
         }
     }
 
@@ -198,6 +236,12 @@ impl Shell {
         self.media_pump = pump;
     }
 
+    /// Replaces what the poll calls to stop playback when the session closes (a test's recording fake).
+    #[cfg(test)]
+    pub(crate) fn set_media_stop_for_test(&mut self, stop: Arc<dyn Fn(crate::media::StopReason) + Send + Sync>) {
+        self.media_stop = stop;
+    }
+
     /// The slot the main window's native handle is put in once it exists: the lock screen's Windows Hello
     /// prompt is owned by that window (`engine_host::hello`).
     pub(crate) fn main_window_slot(&self) -> Arc<Mutex<Option<WindowHandle>>> {
@@ -214,11 +258,22 @@ impl Shell {
     /// Reads the session and the engine again and brings the gate, the b and the flyout in
     /// line. The engine lane calls this (through `AppHandle::update`) on every status event.
     /// True when the window's screen changed.
+    /// The folder the Files window shows is read again at the next [`poll`], as after a finished check (w36: a file
+    /// made here is listed by the source at once, and no check announces it).
+    pub(crate) fn reread_files(&mut self) {
+        self.files_reread_due = true;
+    }
+
     pub fn refresh(&mut self) -> bool {
         let changed = self.app.apply(Event::Session(self.actions.session())) == Outcome::Changed;
         let inputs = self.actions.tray_inputs();
         if inputs != self.tray_inputs {
-            self.check_finished |= inputs.engine == EngineState::Idle && self.tray_inputs.engine != EngineState::Idle;
+            // A finished check: the engine's state turned Idle, or it reported a check that changed something (one
+            // that moved no file stays Idle throughout; what another device changed comes in that way). RC2-6b: not
+            // every check: on a large idle account the lists read after each one were 16 MB of state.db every 30 s.
+            let another_check = inputs.changes.is_some() && inputs.changes != self.tray_inputs.changes;
+            let turned_idle = inputs.engine == EngineState::Idle && self.tray_inputs.engine != EngineState::Idle;
+            self.check_finished |= another_check || turned_idle;
             // The flyout reads the inputs themselves (counts), not only what the b shows.
             self.tray_inputs = inputs;
             self.flyout_behind = true;
@@ -244,8 +299,23 @@ impl Shell {
         changed
     }
 
-    /// Applies capture exclusion to the window. `desired`: whether the current route shows a
-    /// secret. Called from the ONE choke point at the end of `poll`.
+    /// The person's "Hide Beebeeb from screen capture and remote desktop" switch.
+    pub fn hide_from_capture(&self) -> bool {
+        self.hide_from_capture
+    }
+
+    /// Turns the switch on or off and stores it for this PC. The next poll tells the platform.
+    pub fn set_hide_from_capture(&mut self, hide: bool) {
+        self.hide_from_capture = hide;
+        self.capture_exclusion_retries = 0;
+        if let Some(path) = self.wiring.capture_file.clone()
+            && let Err(error) = super::capture_setting::save(&path, hide)
+        {
+            log(format!("the capture setting was not saved ({})", error.kind()));
+        }
+    }
+
+    /// Applies capture exclusion to the window. `desired`: the person's switch. Called from the ONE choke point at the end of `poll`.
     ///
     /// `self.capture_excluded` tracks what the platform was last **successfully** told, not what
     /// the route wants. When `desired != capture_excluded`, the platform is called. On failure
@@ -294,7 +364,7 @@ impl Shell {
         !self.has_tray()
     }
 
-    fn attach_tray(&mut self, handler: TrayHandler) {
+    pub(crate) fn attach_tray(&mut self, handler: TrayHandler) {
         match self.platform.create_tray(&self.tray_model, handler) {
             Ok(tray) => {
                 let present = tray.present();
@@ -318,7 +388,7 @@ impl Shell {
         }
     }
 
-    fn open_main(&self) {
+    pub(crate) fn open_main(&self) {
         if let Some(main) = &self.wiring.main {
             main.open();
         }
@@ -358,7 +428,37 @@ impl Shell {
         }
     }
 
+    /// Opens the tray tip by the b (`wanted`) or hides it; once per change. Opening sets its `dismissed` back, so the
+    /// guide started again from Settings shows it again.
+    pub(crate) fn show_tray_tip(&mut self, wanted: bool) {
+        let Some(tip) = self.wiring.tray_tip.clone() else {
+            return;
+        };
+        if wanted == self.tray_tip_open {
+            return;
+        }
+        self.tray_tip_open = wanted;
+        if wanted {
+            if let Some(anchor) = *unpoisoned(&self.wiring.tray_anchor) {
+                tip.set_position(tray_tip_window::position(&anchor));
+            }
+            tip.update(|t, _| t.dismissed = false);
+            tip.open();
+        } else {
+            tip.hide();
+        }
+        #[cfg(test)]
+        if wanted {
+            self.tray_tip_counts.0 += 1;
+        } else {
+            self.tray_tip_counts.1 += 1;
+        }
+    }
+
     pub(crate) fn toggle_flyout(&mut self, anchor: Option<flyout::Anchor>) {
+        if let Some(anchor) = anchor {
+            *unpoisoned(&self.wiring.tray_anchor) = Some(anchor);
+        }
         let Some(flyout) = self.wiring.flyout.clone() else {
             return;
         };
@@ -384,12 +484,8 @@ impl Shell {
 
     /// The window is covered by the away lock's cover over an open engine's gate: the same predicate as
     /// `registry::covered`, read where only the shell is at hand (a click on the b).
-    fn covered(&self) -> bool {
-        self.away.covers()
-            && matches!(
-                self.app.gate(),
-                super::app::GateState::Ready | super::app::GateState::FirstRun | super::app::GateState::NoPlan
-            )
+    pub(crate) fn covered(&self) -> bool {
+        registry::covered_over(&self.away, &self.app)
     }
 
     /// Remembers where the main window is, for the next start. Called before it closes.
@@ -482,9 +578,31 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     outcome
 }
 
+/// Something from outside the window comes under the wake cover (`registry::covered`): the engine has not said whether
+/// the wake locks. A gap the main window's poll has not found yet (an unannounced wake) is covered first, as for a click
+/// on the b (P3-15), so what comes between the wake and that poll waits too. Asked where such an input acts: a picked
+/// folder (`intents`), an ask to show a place ([`request`]), File Explorer's verbs (`windows_verbs`).
+pub(crate) fn under_the_wake_cover(s: &mut State) -> bool {
+    s.shell.away.cover_a_gap_not_yet_found();
+    registry::covered(s)
+}
+
 /// Something outside the main window asks it to show a place. It is kept while the gate is
-/// closed; the window comes forward either way.
+/// closed; the window comes forward either way. Under the wake cover it waits for the cover's end
+/// (`intents::after_the_cover`): nothing is navigated, read or closed behind it (review of #464, P3-1).
 pub fn request(s: &mut State, intent: Intent) -> Outcome {
+    request_as(s, intent, false)
+}
+
+/// [`request`] for a `beebeeb://` link (`link`): held under the wake cover the same way, but kept across a lock of the
+/// same account (`intents::after_the_cover`: a link only opens a view).
+fn request_as(s: &mut State, intent: Intent, link: bool) -> Outcome {
+    if under_the_wake_cover(s) {
+        super::intents::hold_under_the_cover(s, intent, link);
+        s.shell.open_main();
+        return Outcome::Deferred;
+    }
+    super::intents::a_later_ask_came();
     let outcome = dispatch(s, Event::Request(intent));
     s.shell.open_main();
     outcome
@@ -494,23 +612,30 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 /// section by writing `State::sidebar_section`; this turns that write into a navigation, so
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
+    crate::log_file::crash::panic_if_test_crash_due(); // test builds with BEEBEEB_TEST_CRASH only
+    poll_packet_text(s, tx);
     let mut changed = poll_screen(s, _seconds, tx);
     changed |= poll_capture(s, tx);
     // Last, so a clear that `media::stop_all` posted above (a lock, a sign-out) reaches Windows in this same poll.
     // The poll also runs for a hidden window whenever it is woken (rune's `poll_hidden`), so the tray case is covered.
     (s.shell.media_pump)();
+    // what the views read from the engine while they draw (the status line's words), after a ring only.
+    changed |= super::redraw::follow_engine(s, changed);
     changed
 }
 
 /// Everything a poll does but the capture decision.
 fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
-    // The open file: the engine's answers, and a route that left it (lane f-viewers).
+    // The open file: the engine's answers, and a route that left it.
     let mut changed = crate::frames::viewers::poll(s, tx);
+    // The unsaved-changes question of a quit or the gate's sign-out: Save's follow-up.
+    changed |= crate::frames::viewers::unsaved_guard::poll(s, tx);
     // What the New file dialog asked for: the file made in the folder it was opened on (`frames::files::create_file`).
     changed |= crate::frames::files::create_file::poll(s, tx);
     // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
     changed |= crate::frames::signin::poll(s, tx);
     changed |= crate::frames::settings::poll(s, tx);
+    changed |= super::crash_notice::poll(s);
     // The account sections: the pane that shows is read when it opens; answers come in (`engine_host::account`).
     changed |= crate::frames::account::poll(s, tx);
     // Trash: a gate or account change drops its names; the section opening reads the list; answers come in.
@@ -536,6 +661,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::item::poll(s, tx);
     // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
     changed |= crate::frames::signin::setup::guide::poll(s, tx);
+    // Its first step (DW-0380) is a window of its own by the b: open while the guide is on it.
+    sync_tray_tip(s);
     // The first run's answers (File Explorer finished, a switch was set, the first run ended).
     changed |= crate::frames::signin::setup::poll(s, tx);
     // The session and the tray: the engine may have changed since the last frame.
@@ -565,12 +692,25 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     }
     // A refused sync start says so, once per attempt (the refusal modal, Q3).
     changed |= open_sync_refusal(s);
-    // The first sync's files, once a check finished (R1.1).
+    // w31: the first file list landed since the last poll (the loading card or the failure banner goes): the lists
+    // are read as after a finished check, now. The tick that brought the list goes on for minutes on a large account
+    // (the reconcile pass, the queue), and until its end the rows would still be the ones from before the list.
+    let first_list = s.global.source.status();
+    let awaited = first_list.loading.is_some() || first_list.list_failed;
+    if std::mem::replace(&mut s.shell.first_list_awaited, awaited) && !awaited {
+        s.shell.check_finished = true;
+    }
     // Photos reads its library again once a check finished (`frames::photos::after_a_check`).
     if s.shell.check_finished {
         crate::frames::photos::after_a_check(s);
+        // Shared, This PC and Trash read their lists again too, each on the first poll with nothing open over it.
+        crate::frames::shared::after_a_check(s);
+        crate::frames::this_pc::after_a_check(s);
+        crate::frames::trash::after_a_check(s);
     }
-    changed |= read_again_after_a_check(s);
+    // The folder shown, read again once a check finished: the first sync's files (R1.1), and what arrived since.
+    changed |= take_folder_read(s, tx);
+    changed |= read_again_after_a_check(s, tx);
     // A lock, a sign-out or another account ends what was open inside the account sections: a
     // review of another device's sign-in, a typed code or password, a Windows Hello that is up.
     // Compared with what this poll saw last, not with this poll's own refresh: the engine's
@@ -592,6 +732,10 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         if left_open || other_account {
             tx.instant();
         }
+        // The storage figure is the account's: gone at a sign-out or another account, read again for the next.
+        if (gate, &account) != (now.0, &now.1) {
+            changed |= super::storage_view::session_moved(s, (gate, account.as_deref()), (now.0, now.1.as_deref()));
+        }
         if left_ready || other_account {
             crate::frames::account::end_flows(s);
             // The same for the Files window: its dialogs (a link's password among them), what
@@ -600,7 +744,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             // An open file: its decrypted content goes with the account that leaves.
             crate::frames::viewers::end_session(s, now.1 != account);
             // Playback stops, on a lock too: the helper, the sound, Windows' media controls (`media::stop_all`).
-            crate::media::stop_all(crate::media::StopReason::at_session_end(now.0, other_account));
+            (s.shell.media_stop)(crate::media::StopReason::at_session_end(now.0, other_account));
             // An open Office document: its confined renderer is killed and what it rendered is wiped.
             crate::engine_host::office_host::end_session(now.0 == super::app::GateState::Locked);
             // An item's Details or Preview: the page and what its read decrypted go too.
@@ -625,12 +769,14 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         crate::frames::item::end_session(s);
         changed = true;
     }
+    // The storage figure of the account that signed in, once its read answered.
+    changed |= super::storage_view::poll(s);
     // Windows Hello's answer to an approval of another device's sign-in (DW-A14). Read after the
     // session: an answer that comes with a lock or a sign-out finds its wait already ended.
     changed |= crate::frames::account::approve::poll(s);
     // The away lock: how long this PC had no input, to the engine, while the engine's lock is open
-    // (`away.rs`), whatever the window shows: the first-run steps and the no-plan screen too (review
-    // of #452, the lead's ruling: no exception).
+    // (`away.rs`), whatever the window shows: the first-run steps and the no-plan screen too (a review
+    // finding: no exception).
     let shell = &mut s.shell;
     changed |= shell.away.poll(
         shell.actions.screen_open(),
@@ -647,12 +793,26 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     {
         changed |= super::platform::windows_verbs::after_the_cover(s, tx);
     }
+    // The same for a picked folder and an ask to show a place (`intents`, review of #464, P3-1).
+    changed |= super::intents::after_the_cover(s);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
         let saved_main = s.shell.wiring.saved.get(surfaces::MAIN_KEY);
         if let Some(size) = surfaces::size_on_change(s.shell.window_kind, kind, saved_main) {
-            tx.resize_window_instant(size);
+            // Cut to the work area (the taskbar's room) and moved inside it: the plain resize keeps the
+            // top edge, so a taller window ran under the taskbar. The handle's own queue keeps the two in order.
+            let window = unpoisoned(&s.shell.wiring.window).clone();
+            let fit = window.as_ref().and_then(WindowHandle::placement).and_then(|p| {
+                super::work_area::fit_on_change(size, p.scale, p.position, &super::work_area::os_work_areas())
+            });
+            match (fit, window) {
+                (Some((size, at)), Some(window)) => {
+                    window.resize_instant(size);
+                    window.set_position(at);
+                }
+                _ => tx.resize_window_instant(size),
+            }
         }
         s.shell.window_kind = kind;
         changed = true;
@@ -671,6 +831,9 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         // The sidebar's route event does not go through `dispatch`: the Files window still
         // closes what was open in it (a name being typed in a row is not modal).
         crate::frames::files::reset::sync(s);
+        // A section press is the person going somewhere else: Search over the window ends (its typed word is in the
+        // box of Photos and the viewer too). A result opened from Search keeps it, so Back shows the results again.
+        crate::frames::files::reset::end_search(s);
         changed |= outcome == Outcome::Changed;
     }
     // A message that went takes what its Try again held with it.
@@ -682,38 +845,36 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed
 }
 
-/// The ONE place capture exclusion is decided: every path of the poll (gate change, sign-in
-/// intents, sidebar navigation, viewer, an answer of Windows Hello) that may change what is on
-/// screen has run. A new path cannot forget this: it runs unconditionally at the end of every poll.
-/// The decision combines the route-level check (SignIn, Locked, RecoveryPhrase, FirstRun) with
-/// the account pane's per-screen check (change password, 2FA setup, backup codes, the approval code).
-///
-/// Leaving a secret screen, exclusion drops ONE POLL LATE. The poll runs before the frame it
-/// belongs to is built and shown, and a press animates what it removes: on the poll that first
-/// sees "no secret" the last shown frame still holds it, and the leaving elements would go on
-/// painting it for the length of their animation. So that poll keeps the window excluded and
-/// lands every running animation (the leaving elements are gone from the frame it builds); the
-/// next poll, which it asks for, tells the platform.
-fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
-    let secret = registry::route_shows_secret(&s.shell.app) || {
-        let group = registry::group_for(&s.shell.app);
-        matches!(
-            group,
-            registry::FrameGroup::Settings(pane) if crate::frames::account::Pane::root(pane).is_some()
-        ) && s.account.shows_secret()
+/// The ONE place capture exclusion is decided, at the end of every poll: the person's switch "Hide Beebeeb from
+/// screen capture and remote desktop" (`Shell::hide_from_capture`, off by default, on every identity). Off, nothing
+/// asks the platform for exclusion and the windows show in captures, screen shares and remote desktop (RustDesk).
+/// On, every window is excluded, on every screen. the owner, 2026-11-20: this replaces "the real build always hides its
+/// secret screens" (a signed-in remote session could not see the sign-in screen).
+fn poll_capture(s: &mut State, _tx: &mut Tx) -> bool {
+    s.shell.apply_capture_exclusion(s.shell.hide_from_capture);
+    false
+}
+
+/// Text typed as Unicode packets (a remote desktop such as RustDesk, an on-screen keyboard, a password manager's
+/// auto-type): Rune drops it, so the platform takes it (`platform::packet_text`) and it is typed here, to the
+/// field that has the keyboard and then the key handlers, as a key is.
+fn poll_packet_text(s: &mut State, tx: &mut Tx) {
+    let shell = &mut s.shell;
+    if !shell.packets_watched {
+        let wake: super::platform::PacketWake = match shell.wiring.main.clone() {
+            Some(main) => Arc::new(move || main.wake()),
+            None => Arc::new(|| {}),
+        };
+        shell.packets_watched = shell.platform.watch_packet_text(wake);
     }
-    // A link's password being typed in the Files window's Share dialog (DW-0407).
-    || (matches!(registry::group_for(&s.shell.app), registry::FrameGroup::Section(_))
-        && crate::frames::files::share::shows_secret(s))
-    // A deck in Present (the viewer contract §5.4): its slides stay out of captures and screen shares.
-    || crate::frames::office::slides::presenting(s);
-    let leaving = std::mem::replace(&mut s.shell.secret_seen, secret) && !secret;
-    if leaving {
-        tx.settle();
-        tx.wake_after(std::time::Duration::from_millis(1));
+    for text in shell.platform.take_packet_text() {
+        if let Some(key) = super::platform::packet_text::key_of(&text) {
+            tx.send_key(KeyEvent {
+                key,
+                mods: rune::Mods::default(),
+            });
+        }
     }
-    s.shell.apply_capture_exclusion(secret || leaving);
-    leaving
 }
 
 fn open_web_page(url: &str) {
@@ -760,9 +921,15 @@ pub fn drain_signin_intents(s: &mut State) -> bool {
 /// logged, while another agent holds the profile).
 fn on_gate_change(s: &mut State) {
     // A gate that closed reads nothing: the window holds the empty root until it opens again.
-    let (listing, list_error) = if s.shell.app.gate() == super::app::GateState::Ready {
+    // A read still out was asked under the old gate: its answer is dropped.
+    s.folder_reads.drop_pending();
+    let ready = s.shell.app.gate() == super::app::GateState::Ready;
+    let account = s.shell.app.account().map(str::to_owned);
+    let (listing, list_error) = if ready && !s.folder_reads.ask(None, account, ReadFor::Gate) {
         super::state::load(s.source.as_ref(), None)
     } else {
+        // A gate that opened in the running app: its root is read on the worker ([`take_folder_read`]); until it
+        // answers the window holds the empty root, never the earlier session's rows.
         let root = crate::source::Crumb {
             id: None,
             name: "Files".into(),
@@ -777,6 +944,8 @@ fn on_gate_change(s: &mut State) {
     s.listing = listing;
     s.list_error = list_error;
     s.selected = None;
+    // The root was just read: a read a finished check still owed is done.
+    s.shell.files_reread_due = false;
     let gate = s.shell.app.gate();
     start_first_run(s);
     // The first run's File Explorer step is about the sync folder: a start is asked for with it, as when the main
@@ -830,19 +999,87 @@ fn open_sync_refusal(s: &mut State) -> bool {
     dispatch(s, Event::OpenDialog(Dialog::SyncOff)) == Outcome::Changed
 }
 
-/// The first sync on this PC, as the window sees it (R1.1 of the sync-start contract): the gate opened before anything
-/// had synced, so the folder could not be read, or read as empty, and the window said so. Each check the running engine
-/// finishes (the b's engine state turns Idle) reads that folder again, so the account's files appear without a click.
-/// Only a list that shows an error or nothing is read: a list with rows, a selection and the folder shown are never
-/// changed from here. `true`: it was read.
-fn read_again_after_a_check(s: &mut State) -> bool {
-    let finished = std::mem::take(&mut s.shell.check_finished);
-    let shows_nothing = s.list_error.is_some() || s.listing.items.is_empty();
-    if !finished || !shows_nothing || s.shell.app.gate() != super::app::GateState::Ready {
+/// Each check the running engine finishes (the b's engine state turns Idle) reads the folder the Files window shows
+/// again, so what arrived since (synced from this PC's folder, or from another device), was renamed or left shows
+/// without a click, and so do the first sync's files (R1.1 of the sync-start contract: the gate opened before anything
+/// had synced, and the window said so). A finished check is the engine's state turning Idle, or a new time of its last
+/// finished check (a check that moved no file never leaves Idle). The engine gives the window no other sign that a
+/// folder changed: its status is the one event the window reads (`engine_host::fold`). The read is merged into the
+/// view (`frames::files::reread`):
+/// the selection, the focused row, the sort and the rows in view stay with their items; an item that left goes from
+/// the selection. While something is open over the rows (a name typed in a row, a menu, a drag, a dialog) the read
+/// waits, and runs on the first poll after it closed. Nothing is read while the session gate is closed: a gate that
+/// opens reads the root itself ([`on_gate_change`]). `true`: it was read.
+fn read_again_after_a_check(s: &mut State, tx: &mut Tx) -> bool {
+    s.shell.files_reread_due |= std::mem::take(&mut s.shell.check_finished);
+    if !s.shell.files_reread_due {
         return false;
     }
+    if !super::session_gate::open(s) {
+        s.shell.files_reread_due = false;
+        return false;
+    }
+    if s.reread_waits() {
+        return false;
+    }
+    // A read out already (an open, or the last re-read): this one is asked once it answered.
+    if s.folder_reads.pending.is_some() {
+        return false;
+    }
+    s.shell.files_reread_due = false;
     let folder = s.listing.folder.id.clone();
-    (s.listing, s.list_error) = super::state::load(s.source.as_ref(), folder.as_deref());
+    let account = s.shell.app.account().map(str::to_owned);
+    // The running app reads on a worker: the rows shown stay until [`take_folder_read`] merges its answer.
+    if s.folder_reads.ask(folder.clone(), account, ReadFor::Reread) {
+        return false;
+    }
+    let (read, error) = super::state::load(s.source.as_ref(), folder.as_deref());
+    let scroll = s.take_reread(read, error);
+    scroll_files_to(s, tx, scroll);
+    true
+}
+
+/// Only while the Files list shows: the lists of other sections use the same key.
+fn scroll_files_to(s: &State, tx: &mut Tx, scroll: Option<f32>) {
+    let files_shown =
+        matches!(s.shell.app.screen(), super::app::Screen::Drive(route) if route.section == Section::Files);
+    if let Some(y) = scroll.filter(|_| files_shown) {
+        tx.scroll_to_y("rows", y);
+    }
+}
+
+/// The answer of a folder read made on the worker (task 050), taken on the first poll after it came. Taken only while
+/// the session that asked is still open, for the same account. A re-read is merged by id, and only into the folder
+/// it read (a folder no longer shown drops it); one that came while something opened over the rows is asked again
+/// once that closed. An open or a gate's root replaces the rows. `true`: the window changed.
+fn take_folder_read(s: &mut State, tx: &mut Tx) -> bool {
+    let Some((asked, read, error)) = s.folder_reads.take() else {
+        return false;
+    };
+    if !super::session_gate::open(s) || asked.account.as_deref() != s.shell.app.account() {
+        return false;
+    }
+    match asked.kind {
+        ReadFor::Reread => {
+            if asked.folder != s.listing.folder.id {
+                return false;
+            }
+            if s.reread_waits() {
+                s.shell.files_reread_due = true;
+                return false;
+            }
+            let scroll = s.take_reread(read, error);
+            scroll_files_to(s, tx, scroll);
+        }
+        ReadFor::Open => {
+            let scroll = s.take_opened(read, error);
+            scroll_files_to(s, tx, scroll);
+        }
+        ReadFor::Gate => {
+            (s.listing, s.list_error) = (read, error);
+            s.selected = None;
+        }
+    }
     true
 }
 
@@ -856,7 +1093,7 @@ pub fn try_sync_again(s: &mut State) {
 
 /// The shell's own keys, then the current frame's (DW-1232, DW-1233: Windows' words).
 ///
-/// Alt+Left / Alt+Right: back and forward. Ctrl+,: Settings. Ctrl+/: the shortcuts list.
+/// Alt+Left / Alt+Right: back and forward. Ctrl+,: Settings. Ctrl+/: the shortcuts list. Ctrl+1…7: the sections.
 /// Esc: closes the front-most thing. Everything else goes to the frame.
 ///
 /// A build with the `feedback` feature gives the live feedback mode the key first: its two
@@ -888,8 +1125,14 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if crate::frames::signin::setup::guide::on_key(s, ev, tx) {
         return true;
     }
+    // The account switcher at the sidebar's foot: Enter on its pill, the arrows into it, Esc out (RC2-8).
+    if crate::frames::account::switcher::key(ev, tx) {
+        return true;
+    }
     // Esc on a presentation that is on leaves Present, not the file.
-    if matches!(ev.key, Key::Escape) && crate::frames::viewers::leave_present(s) {
+    if matches!(ev.key, Key::Escape)
+        && (crate::frames::viewers::leave_present(s) || crate::frames::viewers::close_find(s))
+    {
         return true;
     }
     let event = match ev.key {
@@ -897,16 +1140,32 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Right if plain_alt && !searching => Some(Event::Forward),
         Key::Command(',') if plain_cmd => Some(Event::OpenSettings(SettingsPane::General)),
         Key::Command('/') if slash_cmd => Some(Event::OpenDialog(Dialog::Shortcuts)),
+        // Ctrl+1…7: the sidebar's sections, from every section, Settings and Account included (RC2-8).
+        // A dialog, a name being typed in a row, an open menu or a message in front keeps them (they are modal).
+        Key::Command(c @ '1'..='7') if plain_cmd && !files_modal(s) => {
+            Some(Event::Navigate(Route::section(Section::ALL[c as usize - '1' as usize])))
+        }
         Key::Escape => Some(Event::Escape),
         _ => None,
     };
     if let Some(event) = event {
         let escape = event == Event::Escape;
+        let section = matches!(event, Event::Navigate(_));
         match dispatch(s, event) {
             // Esc with nothing of the shell's to close belongs to the frame (a selection, a menu).
             Outcome::Unchanged | Outcome::Refused if escape => {}
-            _ => return true,
+            outcome => {
+                // A section press is the person going somewhere else: Search over the window ends, as for the sidebar.
+                if section && outcome == Outcome::Changed {
+                    crate::frames::files::reset::end_search(s);
+                }
+                return true;
+            }
         }
+    }
+    // F6 / Shift+F6 from outside every pane: the first / last pane (a pane moves on itself).
+    if registry::dialog_group_for(&s.shell.app).is_none() && crate::ui::focus::cycle(ev, tx) {
+        return true;
     }
     // A dialog in front takes the keys; the frame behind it gets none.
     let keys = match registry::dialog_group_for(&s.shell.app) {
@@ -917,6 +1176,27 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Some(keys) => keys(s, ev, tx),
         None => false,
     }
+}
+
+/// Something modal of the Files window is in front: its dialog, a name typed in a row, an open menu, a message.
+fn files_modal(s: &State) -> bool {
+    let a = &s.actions;
+    a.dialog.is_some() || a.rename.is_some() || a.menu.is_some() || a.protected.alert.is_some()
+}
+
+/// The tray tip's window shows while the guide is on its first step, and only then.
+fn sync_tray_tip(s: &mut State) {
+    let wanted = s.guide.step == Some(crate::frames::signin::setup::guide::Step::Tray);
+    s.shell.show_tray_tip(wanted);
+}
+
+/// "Got it" or Esc in the tray tip's window (`tray_tip_window`), on the main window's turn: the tip hides and the
+/// guide goes on to its first tip, as "Got it" did in the main window.
+pub fn on_tray_tip_dismissed(s: &mut State, tx: &mut Tx) {
+    if s.guide.step == Some(crate::frames::signin::setup::guide::Step::Tray) {
+        crate::frames::signin::setup::guide::go_on(s, tx);
+    }
+    sync_tray_tip(s);
 }
 
 /// A click or a menu pick on the b, delivered on the UI thread.
@@ -953,7 +1233,7 @@ pub fn on_tray(s: &mut State, event: TrayEvent, tx: &mut Tx) {
                 .event(Away::SessionLocked, &shell.actions, shell.wiring.main.as_ref());
         }
         // The PC woke: how long it was away goes to the engine as idle time, before the wake's own
-        // key press can count as input (review of #452, P2-1).
+        // key press can count as input (a review finding).
         TrayEvent::Resumed { away } => {
             let shell = &mut s.shell;
             shell
@@ -968,7 +1248,8 @@ pub fn on_tray(s: &mut State, event: TrayEvent, tx: &mut Tx) {
 /// opens the window's own surface on an item of the account it shows (`platform::windows_verbs`).
 pub fn on_control(s: &mut State, request: Request, tx: &mut Tx) {
     match request {
-        Request::Show => s.shell.open_main(),
+        // `ShowOn` is answered (and turned into `Show`) by the control handler before it gets here.
+        Request::Show | Request::ShowOn(_) => s.shell.open_main(),
         Request::Open(link) => on_open_url(s, &link, tx),
         // Slice B6: the window comes forward (a locked one to its lock screen); the verb is checked again there.
         Request::Explorer { verb, item } => {
@@ -1003,7 +1284,9 @@ pub fn on_menu(s: &mut State, action: MenuAction, tx: &mut Tx) {
             Ok(())
         }
         MenuAction::Quit => {
-            tx.quit();
+            if !crate::frames::viewers::unsaved_guard::ask(s, crate::frames::viewers::unsaved_guard::Then::Quit) {
+                tx.quit();
+            }
             Ok(())
         }
     };
@@ -1015,15 +1298,23 @@ pub fn on_menu(s: &mut State, action: MenuAction, tx: &mut Tx) {
     }
 }
 
+/// How long a quit waits for a Windows Hello prompt's thread to ask Windows to close the prompt.
+const QUIT_HELLO_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The window is closing. It keeps running in the notification area (DW-1231: "closing the
 /// window leaves the b running"); with no b to come back through, closing quits.
 pub fn on_close(s: &mut State, tx: &mut Tx) {
     s.shell.save_window_place();
     if s.shell.close_quits() {
-        tx.quit();
+        // Unsaved changes in an open editor: the window stays and asks first.
+        if !crate::frames::viewers::unsaved_guard::ask(s, crate::frames::viewers::unsaved_guard::Then::Quit) {
+            tx.quit();
+        }
         return;
     }
-    // The window went to the tray: the person left Beebeeb ("Locks again after: Immediately" locks).
+    // The window went to the tray: nothing typed into sign-in waits in it, nor a half-done step's proof.
+    crate::frames::signin::wipe::on_window_closed(s);
+    // The person left Beebeeb ("Locks again after: Immediately" locks).
     let shell = &mut s.shell;
     shell
         .away
@@ -1041,6 +1332,11 @@ pub fn on_close(s: &mut State, tx: &mut Tx) {
 /// when the shell is dropped with the root state.
 pub fn on_quit(s: &mut State, _tx: &mut Tx) {
     s.shell.save_window_place();
+    // A Windows Hello prompt that is up goes with the app: the lock screen stops waiting for it (a shutdown Windows
+    // then cancels leaves its Unlock working), and Windows is asked to close every prompt before the process ends. A
+    // prompt whose owner is gone stays on screen with nobody to answer.
+    crate::frames::signin::on_quit(s);
+    super::platform::windows_hello::take_away_for_quit(QUIT_HELLO_WAIT);
     s.shell.actions.stop_for_quit();
     s.shell.stopped_for_quit = true;
     if let Some(tray) = &s.shell.tray {
@@ -1061,7 +1357,7 @@ pub fn on_reopen(s: &mut State, _has_visible: bool, _tx: &mut Tx) -> bool {
 pub fn on_open_url(s: &mut State, url: &str, _tx: &mut Tx) {
     match instance::forwarded(url) {
         Forwarded::Show(intent) => {
-            request(s, intent);
+            request_as(s, intent, true);
         }
         Forwarded::ShowOnly(error) => {
             log(format!("a link was not followed: {}", error.reason()));
@@ -1073,3 +1369,7 @@ pub fn on_open_url(s: &mut State, url: &str, _tx: &mut Tx) {
 #[cfg(test)]
 #[path = "host_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "host_tests_rc2_keys.rs"]
+mod rc2_keys_tests;

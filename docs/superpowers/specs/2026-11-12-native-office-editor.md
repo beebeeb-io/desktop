@@ -468,6 +468,17 @@ stale base version; recovery; macOS; accessibility.
 
 ## 10. Open questions for the owner (recommendation first)
 
+**Status, 2026-11-18** (the editor is built and merged; the questions below keep their original text):
+- Q1 carried: the helper is pinned to `desktop-office` branch `editor-integ` at `fa5af7d34`. Q2 not acted on (the owner's).
+- Q3 built: the recovery blobs are sealed by the engine under the account's key and stored locally
+  (`engine_host::viewer_office::recovery`); the crypto review is the epic's.
+- Q4 accepted on 2026-11-18: the `symphonia` crates are unmodified and listed in `THIRD-PARTY-NOTICES.md`.
+- Q5 decided as recommended (read-only with "Save a copy" when the loss check finds anything); the loss check is the
+  engine side's, not re-checked in the app's frames for this status.
+- Q6 done: the editor frames' design text names the Rust engines (`design/desktop-v2/frames.json`, `FRAMES.md`).
+- Q7 as recommended: Blank only; the four named templates stay hidden until they exist.
+- Q8 the owner's (the corpus files).
+
 - **Q1. The patch inside our subtree.** Recommended: carry it. It is 13 insertions and 10 deletions in 2 files of
   `wordcraft/crates/engine`, it changes nothing with default features, and it buys the engine's commands and undo.
   It would be the first commit of ours inside a subtree, and the repository is public now. It is **not pushed**: it

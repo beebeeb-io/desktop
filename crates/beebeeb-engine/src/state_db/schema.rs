@@ -32,7 +32,7 @@ impl StateDb {
             Self::migrate_schema(&migration)?;
             migration.commit()?;
         }
-        Ok(Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0)))
+        Ok(Self(conn_lock::ConnLock::new(conn), std::sync::atomic::AtomicU64::new(0)))
     }
     /// Open an existing state database for reading only: no table is created or migrated, no row is written and
     /// the journal mode is left as it is, so a viewer can look at a database the engine owns. (SQLite itself may
@@ -79,7 +79,7 @@ impl StateDb {
         }
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| ReadOnlyOpenError::classify(&e))?;
-        let db = Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0));
+        let db = Self(conn_lock::ConnLock::new(conn), std::sync::atomic::AtomicU64::new(0));
         // The listing statement itself, for no rows: it names every column a listing reads.
         db.children_paged(None, 0, 0)
             .map_err(|e| ReadOnlyOpenError::classify(&e))?;
@@ -234,6 +234,12 @@ impl StateDb {
         // no ALTER can change; that column is left unused.
         ensure_column(conn, "files", "fetched_min_version", "INTEGER NOT NULL DEFAULT -1")?;
         ensure_column(conn, "files", "fetched_hash", "TEXT")?;
+        // Task 2199 (dc-103b): a counter of every change to what the row says is on disk (the agreed content, the
+        // fetch candidate) and of every fetch recorded, whether or not it changed a column. A wipe of the candidate
+        // after a dehydrate is made only while it still reads the value from before the dehydrate
+        // (`wipe_fetched_content_if_unchanged`), so a fetch that started since is never forgotten. Forward only:
+        // 0 on every row of an older database; the trigger below and the fetch records bump it.
+        ensure_column(conn, "files", "content_seq", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(conn, "files", "cache_path", "TEXT")?;
         ensure_column(conn, "files", "cache_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(conn, "files", "pin_state", "TEXT NOT NULL DEFAULT 'inherit'")?;
@@ -264,6 +270,13 @@ impl StateDb {
         // LD-0113 (spec §5.4): the server's `system_role` of a row (`backups_root` or NULL). Additive and
         // nullable; only `set_system_role` writes it, from the listing's field or the `folder_system_role` op.
         ensure_column(conn, "files", "system_role", "TEXT")?;
+        // dc-168: the server's `has_thumbnail` of a row (1/0) and the `current_version` it was stored at; NULL on
+        // every row of an older database and on a row no listing or op has flagged yet (not known). Forward only.
+        ensure_column(conn, "files", "has_thumbnail", "INTEGER")?;
+        ensure_column(conn, "files", "has_thumbnail_version", "INTEGER")?;
+        // dc-136b: 1 while the last name the server sent for a row did not decrypt (the row keeps its last good
+        // path); NULL/0 otherwise. Only `set_name_unreadable` writes it.
+        ensure_column(conn, "files", "name_unreadable", "INTEGER")?;
         conn.execute_batch(
             "
             -- LD-0113: the Windows delete/rename callbacks ask for the Backups root on every delete; a
@@ -469,6 +482,19 @@ impl StateDb {
                  UPDATE files SET {FOLD_AGREED_INTO_CANDIDATE} WHERE file_id = NEW.file_id;
              END;"
         ))?;
+        // Task 2199 (dc-103b): any write that changes the row's content columns moves `content_seq` on. The inner
+        // UPDATE writes only `content_seq`, so it does not fire this trigger again.
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS files_content_seq_follows_content
+             AFTER UPDATE OF local_hash, local_base_version, fetched_min_version, fetched_hash ON files
+             WHEN NEW.local_hash IS NOT OLD.local_hash
+               OR NEW.local_base_version IS NOT OLD.local_base_version
+               OR NEW.fetched_min_version IS NOT OLD.fetched_min_version
+               OR NEW.fetched_hash IS NOT OLD.fetched_hash
+             BEGIN
+                 UPDATE files SET content_seq = content_seq + 1 WHERE file_id = NEW.file_id;
+             END;",
+        )?;
         // Task 2191 (review-114 R2-P2-3): a row that joins the guarded set during the session (a
         // pull inserting a row whose 0.8.12 placeholder already exists, or a row losing its
         // agreed content) gets its "not in sync" mark at the next tick, not at the next start.
@@ -481,8 +507,7 @@ impl StateDb {
                  DROP TRIGGER IF EXISTS files_unknown_marks_after_update;",
             )?;
         } else {
-            conn.execute_batch(&format!(
-                "CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert_any_status
+            conn.execute_batch("CREATE TRIGGER IF NOT EXISTS files_unknown_marks_after_insert_any_status
              AFTER INSERT ON files
              WHEN NEW.local_hash IS NULL AND NEW.fetched_min_version < 0
              BEGIN
@@ -504,8 +529,7 @@ impl StateDb {
              BEGIN
                  DELETE FROM unknown_checks WHERE file_id = OLD.file_id;
              END;
-             DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;"
-            ))?;
+             DROP TRIGGER IF EXISTS files_unknown_marks_after_insert;")?;
         }
         // LD-0105 / task 2180: the version a Windows placeholder was minted from (`cf_streaming.rs`).
         // NULL on every row from before it: no identity, so bytes on disk for it are never trusted.
@@ -525,7 +549,7 @@ impl StateDb {
         ensure_column(conn, "cf_poison", "write_ticks", "INTEGER")?;
         ensure_column(conn, "cf_poison", "key_size", "INTEGER")?;
         ensure_column(conn, "cf_poison", "needs_attention", "INTEGER NOT NULL DEFAULT 0")?;
-        // Amendment 4 (desktop #225 review P2): a pin the empty step could put back neither through its
+        // Amendment 4: a pin the empty step could put back neither through its
         // handle nor by path. Its own table, so it outlives the poison row it came from; every sweep retries it.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS cf_pin_restore (

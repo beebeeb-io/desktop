@@ -12,7 +12,7 @@ fn task_2240_every_scan_pass_fits_the_page_cache_first() {
     use crate::source_pin::body_between;
     use crate::source_pin::squeeze;
     let source = include_str!("../../watcher.rs").replace("\r\n", "\n");
-    let body = squeeze(body_between(&source, "pub fn run_one_scan_with(", "\n}\n"));
+    let body = squeeze(body_between(&source, "pub(crate) fn run_scan(", "\n}\n"));
     let fit = body
         .find("ifletErr(e)=bridge.db().fit_page_cache(){")
         .expect("the pass fits the page cache");
@@ -28,7 +28,7 @@ fn test_bridge(db_path: &std::path::Path) -> (Arc<StateDb>, EngineBridge) {
         "token".into(),
         [17u8; 32],
     ));
-    let bridge = EngineBridge::new(&crate::identity::REAL, db.clone(), api);
+    let bridge = EngineBridge::new(&crate::identity::TEST, db.clone(), api);
     (db, bridge)
 }
 

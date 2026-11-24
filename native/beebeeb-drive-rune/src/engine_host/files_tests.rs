@@ -713,7 +713,7 @@ fn the_backups_id_is_read_per_session_and_handed_out_for_the_account_it_was_read
 fn the_mark_of_a_row_is_read_the_way_a_listing_reads_it() {
     use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, PinState, StateDb};
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let put = |id: &str, status: FileStatus, kind: ItemKind, kept: bool| {
         let entry = FileEntry {
             file_id: id.into(),
@@ -756,7 +756,7 @@ fn the_mark_of_a_row_is_read_the_way_a_listing_reads_it() {
     .collect();
     let mark = |mark: &str| Some(Some(mark.to_string()));
     assert_eq!(
-        marks_in(&db, &ids),
+        marks_in(&db, None, &ids),
         [
             mark("on_this_pc"),
             mark("available_offline"),
@@ -807,7 +807,7 @@ fn the_engines_own_glue_hands_out_nothing_with_no_one_signed_in() {
 fn kept_file_with_unsent_change_reads_its_unsent_mark() {
     use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, PinState, StateDb};
     let dir = tempfile::tempdir().unwrap();
-    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
     let put = |id: &str, status: FileStatus| {
         let entry = FileEntry {
             file_id: id.into(),
@@ -851,7 +851,7 @@ fn kept_file_with_unsent_change_reads_its_unsent_mark() {
             Some(crate::source_engine::item(row).pc_status)
         })
         .collect();
-    let marks = marks_in(&db, &ids);
+    let marks = marks_in(&db, None, &ids);
     let kept = Some(Some("available_offline".to_string()));
     assert_eq!(
         marks[..3],

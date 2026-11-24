@@ -1,4 +1,4 @@
-//! Slice M7 (`media-bind-viewer`): the viewer plays. A list's Open of an audio or a video file shows it through the
+//! The viewer plays. A list's Open of an audio or a video file shows it through the
 //! shell's one `PlayerHandle` (`media::shell_player`): audio with the file's folder as the queue (DW-1503), a video as
 //! `Body::Video`. Part of [`EngineViewerSource`] (`viewer.rs`), which hands `can_play`, `play`, `player`, `previews`,
 //! `opens_here_when_kept` and the poll's media branch here.
@@ -52,6 +52,32 @@ struct Shown {
     folder: String,
     /// The last audio body handed to the view, so the poll answers only a change.
     drawn: Option<AudioDoc>,
+    /// What the view last drew of a video's player, so the poll answers only a change.
+    drawn_video: Option<VideoDrawn>,
+}
+
+/// What a video's view draws of the player's state: the place in quarter seconds (the scrubber moves; the text says
+/// seconds), the length, the button, the lines under the stage, and whether there is a frame to put on the stage.
+#[derive(Clone, PartialEq, Eq)]
+struct VideoDrawn {
+    quarter: u64,
+    length_ms: u64,
+    playing: bool,
+    no_sound: Option<crate::media::player::NoSound>,
+    refused: Option<crate::media::player::Refusal>,
+    framed: bool,
+}
+
+/// [`VideoDrawn`] of what the player says of the view's file (`None`: it holds nothing of it).
+fn video_drawn(state: Option<&crate::media::player::PlayState>, framed: bool) -> Option<VideoDrawn> {
+    state.map(|state| VideoDrawn {
+        quarter: state.at_ms / 250,
+        length_ms: state.length_ms,
+        playing: state.playing,
+        no_sound: state.no_sound,
+        refused: state.refused.clone(),
+        framed,
+    })
 }
 
 /// Whether the platform has a sandbox for the helper and the helper is next to the app's exe.
@@ -151,6 +177,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             queue,
             folder,
             drawn: None,
+            drawn_video: None,
         };
         let body = match kind {
             KindHint::Audio => Body::Audio(audio_doc(&shown, None)),
@@ -243,7 +270,18 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             return had.then_some(Body::Stopped(Stopped::SessionChanged));
         }
         if shown.kind != KindHint::Audio {
-            return None;
+            // A video's view reads the player itself (`viewers::video::view`); the poll says when to run it again:
+            // the file opened, its first frame came (the stage has no picture before it), the place moved, it
+            // paused, ended or was refused. Without this the view is run only by a press.
+            let player = self.engine.media_player()?;
+            let drawn = video_drawn(player.state_of(&shown.file_id).as_ref(), player.has_frame());
+            let shown = self.media.on.as_mut()?;
+            if shown.drawn_video == drawn {
+                return None;
+            }
+            let length = drawn.as_ref().map_or(0, |drawn| seconds(drawn.length_ms));
+            shown.drawn_video = drawn;
+            return Some(Body::Video(VideoDoc { length }));
         }
         let state = self.engine.media_player()?.state_of(&shown.file_id);
         let doc = audio_doc(shown, state.as_ref());
@@ -262,10 +300,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// The view is closed (the source is dropped): a video stops with its view; audio keeps playing (Back leaves it).
     pub(super) fn media_closed(&mut self) {
-        if let (Some(shown), Some(player)) = (self.media.on.take(), self.engine.media_player()) {
-            if shown.kind == KindHint::Video && player.state().is_some_and(|state| state.file_id == shown.file_id) {
-                player.stop(StopReason::Closed);
-            }
+        if let (Some(shown), Some(player)) = (self.media.on.take(), self.engine.media_player())
+            && shown.kind == KindHint::Video
+            && player.state().is_some_and(|state| state.file_id == shown.file_id)
+        {
+            player.stop(StopReason::Closed);
         }
     }
 

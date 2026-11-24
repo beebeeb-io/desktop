@@ -5,16 +5,17 @@
 
 use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::space as sp;
 use crate::theme::tokens::Theme;
-use crate::ui::kit;
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 use crate::ui::settings_list::{self as lists, FOOT, Item, Role, Trailing};
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell as shell;
+use crate::ui::{dialog, kit};
 use rune::{El, Link, Span, col, el, rich};
 
-use super::drive::{Control, Kept, Repair, SyncStatus};
+use super::drive::{Kept, Repair, SyncStatus};
 use super::{Dialog, Intent, SettingsUi};
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
@@ -54,26 +55,12 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         place = place.trailing(Trailing::Value("Turned off".into()));
     }
     explorer.push(lists::item_with(0, 0, &place, show.into_iter().collect(), t));
-    let on = sy.status_on_files;
-    let status_row = ui.drive.shows(Control::StatusOnFiles);
-    if status_row {
-        explorer.push(lists::item_with(
-            0,
-            1,
-            &Item::new(Some(&ic::SYNC_BADGE), "Show sync status on files").ruled(),
-            vec![
-                lists::switch("item-0-1", "Show sync status on files", on, t)
-                    .on_press(move |s: &mut State| s.settings.drive.set_status_on_files(!on)),
-            ],
-            t,
-        ));
-    }
     let repairing = sy.repair == Repair::Running;
     let repair =
         (!repairing).then(|| button("Repair…").on_press(|s: &mut State| s.settings.dialog = Some(Dialog::Repair)));
     explorer.push(lists::item_with(
         0,
-        if status_row { 2 } else { 1 },
+        1,
         &Item::new(Some(&ic::REBUILD), "Repair Beebeeb in File Explorer")
             .sub(if repairing {
                 "Repairing…"
@@ -118,8 +105,16 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             1,
             &Item::new(Some(&ic::POWER), "Open Beebeeb when you log in").ruled(),
             vec![
-                lists::switch("item-1-1", "Open Beebeeb when you log in", login, t)
-                    .on_press(move |s: &mut State| s.settings.drive.set_open_at_login(!login)),
+                crate::ui::switch::switch_sized(
+                    &format!("{}-switch", "item-1-1"),
+                    "",
+                    login,
+                    true,
+                    crate::ui::button::Size::Md,
+                    t,
+                )
+                .label("Open Beebeeb when you log in")
+                .on_press(move |s: &mut State| s.settings.drive.set_open_at_login(!login)),
             ],
             t,
         ),
@@ -187,7 +182,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     ));
 
     if sy.in_explorer {
-        children.push(lists::list(
+        children.push(lists::roving_list(
             3,
             None,
             vec![
@@ -233,7 +228,7 @@ fn metered_foot(t: &Theme) -> El {
         .key("list-1-foot-box")
         .w_full()
         .items_start()
-        .px(16.0)
+        .px(sp::S16)
         .child(
             el().key("list-1-foot-mark")
                 .pin(Some(16.0), Some(0.5), None, None)
@@ -264,17 +259,34 @@ fn turn_off(not_uploaded: Option<&(u32, String)>, first: usize, t: &Theme) -> El
         }),
         dialogs::button(first + 1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
     ];
-    dialogs::alert(
-        "Turn off Beebeeb in File Explorer",
-        380.0,
-        notices::tile(0, Tone::Red, &ic::FOLDER_TAB, t),
-        "Turn off Beebeeb in File Explorer?",
-        &says,
-        foot,
+    let card = dialog::dialog(
+        dialog::Dialog {
+            alert: true,
+            head: dialog::Head::Alert {
+                tile: notices::tile(0, Tone::Red, &ic::FOLDER_TAB, t),
+                title: "Turn off Beebeeb in File Explorer?",
+                sub: &says,
+            },
+            foot: dialog::Foot::Even(foot),
+            ..dialog::Dialog::new("dlg", "Turn off Beebeeb in File Explorer", 380.0)
+        },
+        t,
+    );
+    // Turned off, the row that opened this is gone: focus goes to the list above it.
+    dialog::modal_back(
+        0.0,
+        card,
+        TURN_OFF_ROW,
+        SPACE_LIST,
+        |s: &mut State| s.settings.dialog = None,
         t,
     )
-    .modal(false, |s: &mut State| s.settings.dialog = None)
 }
+
+/// The row that opens the turn-off question, gone once Beebeeb leaves File Explorer.
+pub const TURN_OFF_ROW: &str = "item-3-0";
+/// Where focus goes when that row is gone: the list above it (Space on this PC).
+pub const SPACE_LIST: &str = "list-2";
 
 /// Repair Beebeeb in File Explorer (DW-0746c): what the repair does, before it does it.
 fn repair_question(first: usize, t: &Theme) -> El {

@@ -10,11 +10,15 @@
 //! The lock is taken around the start itself, never across an enumeration or a wait for an answer. It is NOT
 //! re-entrant: nothing that holds it starts another process.
 //!
-//! The window's thread never waits for it (ruling R-OW1): Windows' app chooser holds it for as long as it is open (it
+//! The window's thread never waits for it: Windows' app chooser holds it for as long as it is open (it
 //! starts the app picked inside its own call), so the starts the window asks for go to one worker, [`Later`].
 
+#[cfg(any(test, windows))]
 use std::io;
-use std::process::{Child, Command};
+#[cfg(windows)]
+use std::process::Child;
+#[cfg(any(test, windows))]
+use std::process::Command;
 use std::sync::mpsc;
 
 /// The lock every start of the app holds: the one `Sandbox::spawn` takes before it starts a helper (H1-S).
@@ -23,11 +27,13 @@ fn hold() -> beebeeb_office_sandbox::LaunchGuard {
 }
 
 /// Start `cmd`, holding the launch lock while it starts.
+#[cfg(windows)]
 pub(crate) fn spawn(cmd: &mut Command) -> io::Result<Child> {
     spawn_by(cmd, |cmd| cmd.spawn())
 }
 
-/// [`spawn`] with the start itself handed in, so a test can look at the lock from inside it.
+/// Start `cmd` with `start`, holding the launch lock while it starts; handed in so a test can look at the lock from inside it.
+#[cfg(any(test, windows))]
 pub(crate) fn spawn_by<T>(cmd: &mut Command, start: impl FnOnce(&mut Command) -> io::Result<T>) -> io::Result<T> {
     let _held = hold();
     start(cmd)

@@ -21,6 +21,20 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const WDA_NONE: u32 = 0x00;
 const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
 
+/// The flyout's window and what every window was last told, so the switch reaches the flyout too, and a flyout
+/// that appears after it is set starts out the same.
+static FLYOUT_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static EXCLUDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The flyout's window (0: none yet), for `windows_packet.rs`.
+pub(super) fn flyout_hwnd() -> isize {
+    FLYOUT_HWND.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn affinity_of(exclude: bool) -> u32 {
+    if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE }
+}
+
 use super::{
     ControlHandler, ControlServer, Platform, PlatformError, ServeError, TrayHandler, TrayIcon, windows_control,
     windows_tray,
@@ -105,8 +119,10 @@ fn reg_read_string(key: &str, name: &str) -> Result<Option<String>, PlatformErro
         return Ok(None);
     };
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .take_while(|unit| *unit != 0)
         .collect();
     Ok(Some(String::from_utf16_lossy(&units)))
@@ -209,6 +225,14 @@ impl Platform for WindowsPlatform {
         super::windows_photo::pick_photo(title, start)
     }
 
+    fn pick_save_path(&self, suggested_name: &str, start: std::path::PathBuf) -> super::SaveAnswer {
+        super::windows_save::pick_save_path(suggested_name, &start)
+    }
+
+    fn share_file(&self, window: Option<&rune::WindowHandle>, path: &std::path::Path) -> Result<(), PlatformError> {
+        super::windows_share::share_file(window, path)
+    }
+
     fn autostart_enabled(&self) -> Result<bool, PlatformError> {
         let run = reg_read_string(autostart::RUN_KEY, run_value_name())?;
         let approved = reg_read(autostart::STARTUP_APPROVED_KEY, run_value_name(), RRF_RT_REG_BINARY).unwrap_or(None);
@@ -253,6 +277,11 @@ impl Platform for WindowsPlatform {
             SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW as isize);
         }
         round_corners(hwnd as HWND);
+        FLYOUT_HWND.store(hwnd, std::sync::atomic::Ordering::SeqCst);
+        if EXCLUDED.load(std::sync::atomic::Ordering::SeqCst) {
+            // SAFETY: as above; a failure leaves the flyout visible to captures, which the main window's call reports.
+            unsafe { SetWindowDisplayAffinity(hwnd as HWND, WDA_EXCLUDEFROMCAPTURE) };
+        }
     }
 
     fn show_start_refusal(&self, title: &str, message: &str) {
@@ -290,6 +319,14 @@ impl Platform for WindowsPlatform {
         pc_idle()
     }
 
+    fn watch_packet_text(&self, wake: super::PacketWake) -> bool {
+        super::windows_packet::watch(wake)
+    }
+
+    fn take_packet_text(&self) -> Vec<String> {
+        super::windows_packet::take()
+    }
+
     fn set_capture_exclusion(&self, window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {
         let Some(window) = window else {
             return Err(PlatformError::Os("no window handle yet".into()));
@@ -301,11 +338,17 @@ impl Platform for WindowsPlatform {
         let Ok(Some(hwnd)) = hwnd else {
             return Err(PlatformError::Os("no Win32 window handle".into()));
         };
-        let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+        let affinity = affinity_of(exclude);
         // SAFETY: `hwnd` is this process's own live window, obtained from `WindowHandle::with_raw_handle`.
         // `SetWindowDisplayAffinity` reads the u32 and returns; no callback, no message dispatch.
         let ok = unsafe { SetWindowDisplayAffinity(hwnd as HWND, affinity) };
         if ok != 0 {
+            EXCLUDED.store(exclude, std::sync::atomic::Ordering::SeqCst);
+            let flyout = FLYOUT_HWND.load(std::sync::atomic::Ordering::SeqCst);
+            if flyout != 0 {
+                // SAFETY: the flyout's own window, stored when it was adopted; same call, same contract.
+                unsafe { SetWindowDisplayAffinity(flyout as HWND, affinity) };
+            }
             Ok(())
         } else {
             Err(os_error("SetWindowDisplayAffinity"))
@@ -348,4 +391,10 @@ pub(super) fn pc_idle() -> Option<Duration> {
     // SAFETY: takes nothing, returns the tick count.
     let now = unsafe { GetTickCount() };
     Some(Duration::from_millis(u64::from(now.wrapping_sub(info.dwTime))))
+}
+
+/// `WM_SETTINGCHANGE` (the tray window's procedure): re-read the Windows contrast theme. True if it changed, so
+/// the app redraws.
+pub(super) fn on_setting_change() -> bool {
+    crate::theme::contrast::system_changed(super::windows_contrast::read())
 }

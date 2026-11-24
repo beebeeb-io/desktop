@@ -333,10 +333,11 @@ fn the_list_is_a_read() {
     assert_eq!((before, after), (1, 1));
 }
 
-// ── Try again (Guus, 13:39: "Add in the try again directly if it failed") ─────────────────────────────────────────
+// ── Try again (owner, 13:39: "Add in the try again directly if it failed") ─────────────────────────────────────────
 
 /// Every column Try again may write, for one row: a refusal must leave them all as they were.
-fn row_state(db: &StateDb, op_id: &str) -> Option<(i64, i64, Option<String>, Option<String>, Option<String>, i64)> {
+type RowState = (i64, i64, Option<String>, Option<String>, Option<String>, i64);
+fn row_state(db: &StateDb, op_id: &str) -> Option<RowState> {
     db.0.lock()
         .unwrap()
         .query_row(
@@ -705,7 +706,7 @@ fn try_again_leaves_a_backup_and_a_recorded_completion_to_their_own_paths() {
 }
 
 /// A change that gave up but still holds a claim is being sent (`retry_unsent_change` answers "already queued"): the
-/// list offers no Try again for it either (2409 review P3).
+/// list offers no Try again for it either.
 #[test]
 fn a_claimed_change_that_gave_up_offers_no_try_again() {
     let (_dir, db) = db();
@@ -776,4 +777,26 @@ fn failed_and_paused_pin_downloads_are_counted_and_listed_as_not_downloaded() {
         "Not sent counts the upload only: {hold:?}"
     );
     assert_eq!(db.unsent_changes(0, 100, NOW).unwrap().total, 1);
+}
+
+/// Review e2-keys-sync 1: a save made in the app (a queued change with a write id) has its bytes only in its staged
+/// copy outside the folder, so it is other work: an account switch neither counts it as folder work nor forgets it.
+#[test]
+fn a_queued_save_from_the_app_is_not_work_in_the_folder() {
+    let (_dir, db) = db();
+    queue(&db, "save", ("upload_version", None), (None, 0, 0), None, 1);
+    assert_eq!(
+        db.work_in_the_folder().unwrap(),
+        Some(vec!["docs/save.txt".to_string()])
+    );
+    sql(&db, "UPDATE operation_queue SET write_id = 'w-save'", []);
+
+    assert_eq!(db.work_in_the_folder().unwrap(), None);
+    assert_eq!(db.forget_work_in_the_folder().unwrap(), None);
+    let queued: i64 =
+        db.0.lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM operation_queue", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(queued, 1, "the save is still queued");
 }

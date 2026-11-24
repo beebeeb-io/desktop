@@ -121,6 +121,12 @@ pub struct BackupScheduler {
     reconciled: bool,
 }
 
+impl Default for BackupScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BackupScheduler {
     pub fn new() -> Self {
         Self::with_debounce(DEBOUNCE)
@@ -157,11 +163,10 @@ impl BackupScheduler {
         }
         let changed = Arc::clone(&self.changed);
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if event.is_ok_and(|e| !e.kind.is_access()) {
-                if let Ok(mut at) = changed.lock() {
+            if event.is_ok_and(|e| !e.kind.is_access())
+                && let Ok(mut at) = changed.lock() {
                     *at = Some(Instant::now());
                 }
-            }
         });
         let Ok(mut watcher) = watcher else {
             tracing::warn!("backup: no file watcher; passes run on the 10-minute cadence only");
@@ -456,7 +461,7 @@ pub async fn run_passes(
 }
 
 /// Spec §4.2 rule 10: a folder with no records yet (a first backup into an adopted folder, the old mirror's
-/// `GLegion/Pictures`, or a reinstall) gets its records rebuilt from what the server already holds, so a copy made
+/// `TestPC/Pictures`, or a reinstall) gets its records rebuilt from what the server already holds, so a copy made
 /// after the file last changed is not uploaded a second time. Core's `records_from_remote_with_clock` decides, with
 /// the clock the listing measured from the server's `Date` header (LD-0123): a copy counts when the server stamped it
 /// later than the file's last change plus the device's offset and the measurement's margin. With no clock measured

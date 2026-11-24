@@ -21,6 +21,8 @@ mod before_files_tests;
 pub mod create;
 mod create_kit;
 pub mod create_source;
+// dc-111: "Discard and switch", the refusal modal's confirmation.
+pub mod discard_switch;
 pub mod icons;
 // The two lock levels in the window: the lock screen's Windows Hello and the password in front of it.
 pub mod lock;
@@ -34,6 +36,7 @@ mod view_create_phrase;
 mod view_recover;
 mod view_recovery;
 mod view_steps;
+pub mod wipe;
 
 #[cfg(test)]
 mod create_tests;
@@ -49,6 +52,8 @@ mod recovery_tests;
 mod steps_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wipe_tests;
 
 use std::time::Duration;
 
@@ -529,7 +534,7 @@ impl Ui {
             }
             // DW-A08 is seen over the gate the approval opened; "Open Drive" leaves it.
             // The gate opens before the answer reaches the window, so a request still waiting is held too.
-            GateState::Ready if self.holds_open_gate() => false,
+            GateState::Ready | GateState::FirstRun if self.holds_open_gate() => false,
             _ => {
                 let changed = self.screen != Screen::SignIn;
                 self.forget_steps();
@@ -785,6 +790,13 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     ui.settle(tx);
     changed |= s.shell.app.hold_sign_in(hold);
     changed
+}
+
+/// The app is quitting (`shell::host::on_quit`): a Windows Hello prompt the lock screen waits for is taken away.
+pub fn on_quit(s: &mut State) {
+    if let Some(ui) = ui(s) {
+        ui.lock_end_hello();
+    }
 }
 
 /// The window lost or got focus. Leaving it hides a password that was shown, so the app
@@ -1050,9 +1062,12 @@ fn phrase(words: &[&str]) -> Ui {
     ui
 }
 
+/// One board frame or scene: its id, and what shows it on a fresh state.
+pub type Scene<S> = (&'static str, fn(&mut S));
+
 /// The frames of this group whose scenes live here (`frames::scenes`); DW-A01 to DW-A22 are
 /// named in `shell::SCENES`.
-pub const FRAMES: &[(&str, fn(&mut State))] = &[
+pub const FRAMES: &[Scene<State>] = &[
     ("DW-A23", |s| set_scene(s, "DW-A23")),
     ("DW-A24", |s| set_scene(s, "DW-A24")),
     ("DW-A25", |s| set_scene(s, "DW-A25")),

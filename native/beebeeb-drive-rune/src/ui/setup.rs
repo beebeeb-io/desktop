@@ -18,7 +18,8 @@ use rune::tok::Family;
 use rune::{Color, Cx, El, Icon, TextStyle, col, el, row};
 
 use super::au::{self, Keys, type_au};
-use super::{caption, kit, settings_dialog};
+use super::dialog::{Dialog, Head, Surface, dialog};
+use super::{button, caption, kit, settings_dialog};
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
 
@@ -286,6 +287,7 @@ pub struct SegInk {
 /// A segmented choice (`.kit-seg`): one of `labels` is chosen. A radio group: the arrow keys
 /// are the caller's (`on_key`), each segment is pressable. Returns the track and the segments
 /// keyed `<key>-<J>-tab`, to which the caller adds `.on_press_tx`.
+#[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
 pub fn segmented(
     key: &str,
     name: &str,
@@ -351,33 +353,21 @@ pub fn segmented(
 
 /// A small outline button (`.kit-btn-sm`: 22 high, as wide as its label).
 pub fn small_button(key: &str, label: &str, t: &Theme) -> El {
-    row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .center()
-        .radius(6.0)
-        .fill(t.paper)
-        .border(1.0, t.card_border)
-        .border_layout()
-        .hover(t.paper2)
-        .press(t.paper3)
-        .focusable(true)
-        .focus_ring(2.0, 2.0, t.accent_deep)
-        .cursor(rune::Cursor::Pointer)
-        .child(kit::label(
-            format!("{key}-label"),
-            label,
-            type_::BUTTON_SM.lh(17.1429),
-            t.text,
-        ))
+    button::button(
+        button::keys(key),
+        label,
+        None,
+        button::Variant::Secondary,
+        button::Size::Sm,
+        button::ButtonState::Enabled,
+        t,
+    )
 }
 
 /// One row of a list (`.kit-item` at the desktop density): 28 high, 40 with a second line (or
 /// `min_h`). `trailing` sits at its end (a switch, a value, a segmented choice). `ruled`: a hairline
 /// above it (the board rules a row off from the one above where the two are siblings in its markup).
+#[allow(clippy::too_many_arguments)] // one slot per board element; the callers are outside these files
 pub fn item(
     keys: &mut Keys,
     icon: Option<&'static Icon>,
@@ -465,14 +455,13 @@ pub fn note(keys: &mut Keys, words: &str, style: TextStyle, inset: f32, t: &Them
 /// A sheet over the setup window (`.mk-sheet`): hangs from the caption, `w` by `h`, its lower
 /// corners rounded. A dialog: it holds the keyboard while it is up.
 pub fn sheet(name: &str, w: f32, h: f32, content: El, t: &Theme) -> El {
-    col()
-        .key("sheet")
-        .role("dialog")
-        .label(name)
-        .size(w, h)
-        .corners([0.0, 0.0, 14.0, 14.0])
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.3)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(content)
+    dialog(
+        Dialog {
+            surface: Surface::Sheet,
+            head: Head::Raw(content),
+            ..Dialog::new("sheet", name, w)
+        },
+        t,
+    )
+    .h(h)
 }

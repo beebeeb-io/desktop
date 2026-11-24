@@ -46,6 +46,8 @@ use crate::frames::settings::source::{
 
 mod notifications;
 #[cfg(test)]
+mod report_tests;
+#[cfg(test)]
 mod tests;
 pub(crate) mod updates;
 
@@ -467,12 +469,11 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
         Self::answers_for(pane)
     }
 
-    /// Report a problem (DW-0782) is a dialog over General with no support bundle behind it yet. The channel menu
-    /// (DW-0789) needs an updater; the release notes (DW-0789b) need a newer version on offer (an older one is never
+    /// Report a problem (DW-0782) opens: the engine writes the support bundle (`export_bundle`) and the person sends
+    /// the email themselves. The channel menu (DW-0789) needs an updater; the release notes (DW-0789b) need a newer version on offer (an older one is never
     /// offered, and the updater has no other notes).
     fn opens(&self, frame: &str) -> bool {
         match frame {
-            "DW-0782" => false,
             "DW-0789" => self.updates.is_some(),
             "DW-0789b" => self.updates.as_ref().is_some_and(updates::UpdatesPart::has_notes),
             _ => true,
@@ -602,14 +603,14 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
         }
         // Words for the account that pressed: said once its session is in memory (after an unlock the engine wakes
         // the window, which polls); never to another account.
-        if let Some((account, words)) = self.told_later.take() {
-            if account == account_of(&self.engine) {
-                if self.engine.has_session() && pumped.toast.is_none() {
-                    pumped.toast = Some(words);
-                    pumped.changed = true;
-                } else {
-                    self.told_later = Some((account, words));
-                }
+        if let Some((account, words)) = self.told_later.take()
+            && account == account_of(&self.engine)
+        {
+            if self.engine.has_session() && pumped.toast.is_none() {
+                pumped.toast = Some(words);
+                pumped.changed = true;
+            } else {
+                self.told_later = Some((account, words));
             }
         }
         if self.read_wanted && !self.reading && self.engine.has_session() {

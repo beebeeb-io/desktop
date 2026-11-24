@@ -1,4 +1,4 @@
-//! LD-0113 Amendment 9 (Guus, 2026-11-06, decision 2338: "Ask once"): known folders that OneDrive's Known Folder Move
+//! LD-0113 Amendment 9 (owner, 2026-11-06, decision 2338: "Ask once"): known folders that OneDrive's Known Folder Move
 //! has moved.
 //!
 //! Desktop resolves both locations of each known folder: the default one (`KF_FLAG_DEFAULT_PATH`) and the current one

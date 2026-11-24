@@ -57,13 +57,14 @@ pub(super) fn says_most(reasons: impl Iterator<Item = ActionError>) -> Option<Ac
     // what the person can fix, then a plain failure. A reason not named here says least.
     fn rank(why: ActionError) -> u8 {
         match why {
-            ActionError::Protected => 12,
-            ActionError::NotSent => 11,
-            ActionError::HoldsKept => 10,
+            ActionError::Protected => 13,
+            ActionError::NotSent => 12,
+            ActionError::HoldsKept => 11,
+            ActionError::NameShared | ActionError::NameSharedButCase => 10,
             ActionError::NotToRecycleBin => 9,
             ActionError::HasLink => 8,
             ActionError::NotOnThisSystem => 7,
-            ActionError::NotYet => 6,
+            ActionError::NotYet | ActionError::NotAFile => 6,
             ActionError::Offline => 5,
             ActionError::InFlight => 4,
             ActionError::NameTaken => 3,

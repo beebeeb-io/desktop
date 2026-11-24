@@ -441,11 +441,15 @@ fn dehydrate_these(
     let allowed_roots = free_up_space_allowed_roots(identity, sync_root);
     let mut bytes_freed: u64 = 0;
     let mut dehydrated_ids: Vec<String> = Vec::new();
+    // One pass over the places: each folder on the way is read once.
+    let mut places =
+        crate::drive_v2::case_place::PlaceCheck::new(db, sync_root, crate::drive_v2::case_place::CaseRule::host());
 
     let finished = each_while(candidates, go_on, |(file_id, rel_path, _size_bytes)| {
         // Task 2407 (core 2404): never another file this name reaches (an 8.3 short name; `canonicalize` below would
-        // follow it to that file's long name). A check that cannot finish keeps the file local.
-        let Some(local_path) = crate::name_alias::reclaim_place(sync_root, &rel_path) else {
+        // follow it to that file's long name), nor the entry of another row at this place (two server items with one
+        // name, or one name but for case). A check that cannot finish keeps the file local.
+        let Some(local_path) = crate::name_alias::reclaim_place_of(&mut places, &file_id, &rel_path) else {
             return;
         };
         // Path-safety: only dehydrate placeholders that actually resolve under
@@ -470,11 +474,11 @@ fn dehydrate_these(
         // never reclaim a pinned file's bytes in the first place. A read error
         // here is non-fatal: fall through to the existing dehydrate + the
         // post-dehydrate predicate guard.
-        if let Ok(Some(contract)) = db.get_file_contract_state(&file_id) {
-            if contract.effective_pin_state() == crate::state_db::PinState::Pinned {
-                tracing::debug!(file_id = %file_id, "free_up_space: file pinned after enumeration; keeping local");
-                return;
-            }
+        if let Ok(Some(contract)) = db.get_file_contract_state(&file_id)
+            && contract.effective_pin_state() == crate::state_db::PinState::Pinned
+        {
+            tracing::debug!(file_id = %file_id, "free_up_space: file pinned after enumeration; keeping local");
+            return;
         }
         // Task 2240 (spec D2, the lead's ruling on self-review #1): confirm before evict. A pin made in Explorer
         // reaches the DB only when the tick's folder listing shows it, and a listing can lag while another process
@@ -507,9 +511,28 @@ fn dehydrate_these(
         if let Err(error) = crate::windows_cf::placeholders::set_pin_state(&canonical, false, false) {
             tracing::warn!(file_id = %file_id, error = %error, "free_up_space: OS unpin before dehydrate failed; attempting dehydrate anyway");
         }
+        // Task 2199 (dc-103b): read before the dehydrate, so a fetch recorded after it keeps its candidate.
+        let seq_before = crate::engine_bridge::content_seq_for_wipe(db, &file_id);
         match crate::windows_cf::placeholders::dehydrate_placeholder(&canonical) {
             Ok(freed) => {
                 bytes_freed = bytes_freed.saturating_add(freed);
+                // Task 2199 (dc-103b; design 1640 "Not done" (a)): the dehydrate removed every byte (it reported
+                // bytes freed and the platform now shows nothing on disk), so the record of what was fetched is
+                // wiped to empty, unless a fetch was recorded since `seq_before`. The next range fetch then names
+                // one version instead of mixing in versions whose bytes are gone.
+                let nothing_left = freed > 0
+                    && matches!(
+                        crate::windows_cf::placeholders::platform_view(&canonical),
+                        crate::unknown_check::PlatformView::Placeholder {
+                            on_disk: crate::unknown_check::OnDisk::Nothing,
+                            ..
+                        }
+                    );
+                if let Some(seq_before) = seq_before.filter(|_| nothing_left)
+                    && let Err(error) = db.wipe_fetched_content_if_unchanged(&file_id, seq_before)
+                {
+                    tracing::warn!(file_id = %file_id, error = %error, "free_up_space: could not wipe the fetch record");
+                }
                 // Only NOW is this file genuinely cloud-only on disk — record
                 // it so the DB flip below applies ONLY to files we actually
                 // dehydrated. (`freed == 0` still means "successfully cloud-only
@@ -555,7 +578,7 @@ fn now_unix_seconds() -> i64 {
 mod unix;
 #[cfg(not(target_os = "windows"))]
 pub use unix::free_up_space_unix;
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(test, unix))]
 pub(crate) use unix::{Seams, reclaim_unix};
 #[cfg(all(test, unix))]
 mod unix_tests;

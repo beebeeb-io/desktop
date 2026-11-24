@@ -2,11 +2,11 @@
 //! window's own toolbar with the file's path, the ribbon (tabs, command search, Share, Save, the
 //! tab's tools), the outline, the page on its stage, and the status line.
 //!
-//! What is here is the editor's FRAME. No editing engine stands behind it yet: the page is drawn
-//! from what [`super::source::ViewerSource::open`] hands over ([`WordDoc`]: the board's sample in
-//! a development build), and every command a control stands for is asked of the app around it as
-//! [`super::Intent::Office`], which says "Not built yet" until the editor takes it. Nothing is
-//! typed, saved or changed by this file.
+//! What is here is the editor's FRAME. The page is drawn from what [`super::source::ViewerSource::open`]
+//! hands over ([`WordDoc`]: the board's sample in a development build), and every command a control stands for is
+//! asked of the live editor (`frames::office::edit`) when one runs on the document, else of the app around it as
+//! [`super::Intent::Office`], which says "Not built yet" for the board's sample. Nothing is typed, saved or changed by
+//! this file.
 //!
 //! Keys: the window's caption, sidebar and toolbar keep the keys every window has. The editor's
 //! own are `rib*` (the ribbon), `rt-<N>` / `rp-<N>` / `rsep-<N>` (its tools, pop-up buttons and
@@ -23,40 +23,43 @@ use super::office_icons as oi;
 use super::source::OpenFile;
 use super::{Intent, Ui, style};
 use crate::State;
+use crate::frames::office::docs::DocBody;
 use crate::theme::icons;
+use crate::theme::scale;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::toolbar::{self as tb, Bar, Details, New, Sort, View, press};
-use crate::ui::{caption, kit, sidebar};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
+use crate::ui::{caption, kit, sidebar, status_bar};
 
 /// 12px/600 on 15px: the ribbon's tab that is open.
-const TAB_ON: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
+const TAB_ON: TextStyle = type_::BODY_SEMI;
 /// 12px/500 on 15px: the other tabs.
 const TAB: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
 /// 11px/500 on 14px (`.t-cap`): the command search's words.
-const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
+const CAP: TextStyle = type_::CAPTION;
 /// 12.5px/400 on 17px: a pop-up button's choice.
-const POP: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
+const POP: TextStyle = type_::SEARCH;
 /// 10px mono, 500: a shortcut inside a button.
 const HINT: TextStyle = TextStyle::new(10.0, 500.0)
     .family(Family::Mono)
     .lh(14.2857)
     .tracking(-0.06);
 /// 10px/600 on 13px, tracked 0.7px, capitals (`.t-label`).
-const PANE_LABEL: TextStyle = TextStyle::new(10.0, 600.0).lh(13.0).tracking(0.7);
+const PANE_LABEL: TextStyle = type_::SECTION_LABEL;
 /// 12px on 15px: an outline line.
-const OUTLINE: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-const OUTLINE_TOP: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
+const OUTLINE: TextStyle = scale::text::SUB;
+const OUTLINE_TOP: TextStyle = type_::BODY_SEMI;
 /// The page's own type: the document's, not the app's.
 const DOC_TITLE: TextStyle = TextStyle::new(20.0, 650.0).lh(26.0);
 const DOC_BYLINE: TextStyle = TextStyle::new(11.0, 400.0).lh(17.0);
 const DOC_HEADING: TextStyle = TextStyle::new(14.0, 650.0).lh(17.0);
 const DOC_BODY: TextStyle = TextStyle::new(12.5, 400.0).lh(20.0);
 /// 11.5px/600 on 17px: "Encrypted" in the status line.
-const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
-const STATUS_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0);
+const STATUS_ENC: TextStyle = scale::text::STATUS_SEMI;
+const STATUS_MONO: TextStyle = scale::text::META_MONO_LOOSE;
 /// The letters of Bold, Italic, Underline and Strikethrough.
-const LETTER_HEAVY: TextStyle = TextStyle::new(13.5, 800.0).lh(17.0);
-const LETTER: TextStyle = TextStyle::new(13.5, 700.0).lh(17.0);
+pub(crate) const LETTER_HEAVY: TextStyle = TextStyle::new(13.5, 800.0).lh(17.0);
+pub(crate) const LETTER: TextStyle = TextStyle::new(13.5, 700.0).lh(17.0);
 
 /// The page's ink: a document is near-black on white in both themes.
 fn ink() -> Color {
@@ -146,16 +149,36 @@ pub enum Tab {
     Insert,
     Layout,
     Review,
+    /// A live workbook's third tab (DW-1559).
+    Data,
+    /// A live workbook's fourth tab (DW-1559).
+    Formulas,
 }
 
 impl Tab {
+    /// A text document's row (and a deck's, under its own words: `edit::slide::tab_label`).
     pub const ALL: [Tab; 4] = [Tab::Home, Tab::Insert, Tab::Layout, Tab::Review];
+    /// A live workbook's row.
+    pub const SHEET: [Tab; 4] = [Tab::Home, Tab::Insert, Tab::Data, Tab::Formulas];
     pub fn label(self) -> &'static str {
         match self {
             Tab::Home => "Home",
             Tab::Insert => "Insert",
             Tab::Layout => "Layout",
             Tab::Review => "Review",
+            Tab::Data => "Data",
+            Tab::Formulas => "Formulas",
+        }
+    }
+
+    /// The row and its words for what is open: a live workbook has Data and Formulas, a live deck Design and
+    /// Transitions.
+    pub fn row_of(kind: Option<beebeeb_office_protocol::office::EditKind>) -> [(Tab, &'static str); 4] {
+        use beebeeb_office_protocol::office::EditKind;
+        match kind {
+            Some(EditKind::Xlsx) => Tab::SHEET.map(|tab| (tab, tab.label())),
+            Some(EditKind::Pptx) => Tab::ALL.map(|tab| (tab, crate::frames::office::edit::slide::tab_label(tab))),
+            _ => Tab::ALL.map(|tab| (tab, tab.label())),
         }
     }
 }
@@ -167,6 +190,16 @@ pub struct OfficeUi {
     pub outline: bool,
     /// The question after a save, or the command search (`office_over.rs`).
     pub over: Option<super::office_over::Over>,
+    /// The live editor's state (`frames/office/edit`); `None` while the file is only viewed.
+    pub edit: Option<crate::frames::office::edit::EditUi>,
+    /// The live word ribbon's open pop-up and link field (`frames/office/edit/word_ribbon.rs`).
+    pub ribbon: crate::frames::office::edit::word_ribbon::Pops,
+    /// The save asked and not yet answered (`frames/office/edit/save.rs`).
+    pub save: Option<crate::frames::office::edit::save::Sent>,
+    /// An unsaved editing of the open file that this PC kept, read when the editor started (`edit/recovery.rs`).
+    pub recovery: Option<super::source::RecoveryOffer>,
+    /// The sheet cell editor's grid state (`frames/office/edit/sheet.rs`).
+    pub grid: crate::frames::office::edit::sheet::SheetGrid,
 }
 
 impl Default for OfficeUi {
@@ -175,13 +208,23 @@ impl Default for OfficeUi {
             tab: Tab::Home,
             outline: true,
             over: None,
+            edit: None,
+            ribbon: Default::default(),
+            save: None,
+            recovery: None,
+            grid: Default::default(),
         }
     }
 }
 
+/// The editor's icons, for the live ribbon (`frames/office/edit`), which is outside `viewers`.
+pub(crate) mod ico {
+    pub use super::super::office_icons::*;
+}
+
 /// A command a control of the editor stands for. The editor takes it; until it does the press says
 /// "Not built yet" ([`Ui::intent`]).
-pub(super) fn ask(command: &'static str) -> impl Fn(&mut State) + 'static {
+pub(crate) fn ask(command: &'static str) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
         if let Some(ui) = super::ui(s) {
             ui.intent(Intent::Office(command));
@@ -206,6 +249,33 @@ pub(crate) enum Face {
 
 /// A tool button (`.mk-tbtn`): 28 square, its glyph or its letter. Keys: `<key>`, `-icon` or `-letter`.
 pub(crate) fn tool(key: &str, name: &'static str, face: Face, state: Tool, command: &'static str, t: &Theme) -> El {
+    let ask = ask(command);
+    tool_with(key, name, face, state, move |s: &mut State, _: &mut rune::Tx| ask(s), t)
+}
+
+/// [`tool`] whose press is `act`. A press leaves the keyboard where it was (the page keeps typing).
+pub(crate) fn tool_with(
+    key: &str,
+    name: &'static str,
+    face: Face,
+    state: Tool,
+    act: impl Fn(&mut State, &mut rune::Tx) + 'static,
+    t: &Theme,
+) -> El {
+    if let Face::Glyph(icon, size) = face {
+        let shown = match state {
+            Tool::Idle => tb::ToolState::Idle,
+            Tool::On => tb::ToolState::On,
+            Tool::Off => tb::ToolState::Off,
+        };
+        let b = tb::tool_button(key, name, icon, size, shown, t);
+        // A press leaves the keyboard where it was (the page keeps typing).
+        return match state {
+            Tool::Off => b,
+            Tool::On => b.checked(true).preserve_focus_on_press(true).on_press_tx(act),
+            Tool::Idle => b.preserve_focus_on_press(true).on_press_tx(act),
+        };
+    }
     let ink = match state {
         Tool::Idle => t.text_secondary,
         Tool::On => t.text,
@@ -217,7 +287,7 @@ pub(crate) fn tool(key: &str, name: &'static str, face: Face, state: Tool, comma
         .label(name)
         .size(28.0, 28.0)
         .center()
-        .radius(7.0)
+        .radius(tokens::radius::CONTROL)
         .fill(if state == Tool::On {
             t.selection
         } else {
@@ -226,13 +296,17 @@ pub(crate) fn tool(key: &str, name: &'static str, face: Face, state: Tool, comma
     b = if state == Tool::Off {
         b.disabled(true)
     } else {
-        b.hover(t.hover).press(t.press).focusable(true).on_press(ask(command))
+        b.hover(t.hover)
+            .press(t.press)
+            .focusable(true)
+            .preserve_focus_on_press(true)
+            .on_press_tx(act)
     };
     if state == Tool::On {
         b = b.checked(true);
     }
     b.child(match face {
-        Face::Glyph(icon, size) => kit::glyph(format!("{key}-icon"), icon, size, ink),
+        Face::Glyph(..) => unreachable!("a glyph tool is ui::toolbar::tool_button"),
         Face::Letter(letter, text_style) => {
             // Underline is drawn underlined and Italic slanted, as the board's letters are.
             let key = format!("{key}-letter");
@@ -253,7 +327,7 @@ pub(crate) fn tool(key: &str, name: &'static str, face: Face, state: Tool, comma
 }
 
 /// A hairline between groups of tools (`.mk-sep`). Key: `<key>`.
-pub(super) fn hairline(key: String, t: &Theme) -> El {
+pub(crate) fn hairline(key: String, t: &Theme) -> El {
     el().key(key).w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator)
 }
 
@@ -266,6 +340,19 @@ pub(crate) fn raised(e: El, t: &Theme) -> El {
 
 /// A pop-up button of the ribbon (`.mk-pop2`): the choice, a caret. Keys: `<key>`, `-label`, `-caret`.
 pub(crate) fn pop(key: &str, name: &'static str, choice: &str, w: f32, command: &'static str, t: &Theme) -> El {
+    let ask = ask(command);
+    pop_with(key, name, choice, w, move |s: &mut State, _: &mut rune::Tx| ask(s), t)
+}
+
+/// [`pop`] whose press is `act`.
+pub(crate) fn pop_with(
+    key: &str,
+    name: &'static str,
+    choice: &str,
+    w: f32,
+    act: impl Fn(&mut State, &mut rune::Tx) + 'static,
+    t: &Theme,
+) -> El {
     raised(
         row()
             .key(key.to_string())
@@ -275,19 +362,20 @@ pub(crate) fn pop(key: &str, name: &'static str, choice: &str, w: f32, command: 
             .h(24.0)
             .pl(9.0)
             .pr(6.0)
-            .gap(4.0)
+            .gap(scale::space::S4)
             .center_y()
-            .radius(6.0),
+            .radius(tokens::radius::MD),
         t,
     )
     .focusable(true)
-    .on_press(ask(command))
+    .on_press_tx(act)
     .child(style::fitted(format!("{key}-label"), choice, POP, t.text).a11y_hidden())
     .child(el().key(format!("{key}-gap")).grow(1.0))
     .child(kit::glyph(format!("{key}-caret"), &oi::CARET, 11.0, t.text_tertiary))
 }
 
-/// A small button of the ribbon's first row (`.kit-btn-sm`). Keys: `<key>`, `-icon`, `-label`, `-hint`.
+/// A small button of the ribbon's first row: the Secondary Sm button, with the shortcut's hint after its words.
+/// Keys: `<key>`, `-icon`, `-label`, `-hint`.
 pub(crate) fn small_button(
     key: &str,
     label: &'static str,
@@ -295,20 +383,7 @@ pub(crate) fn small_button(
     hint: Option<&'static str>,
     t: &Theme,
 ) -> El {
-    let mut b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .gap(7.0)
-        .center()
-        .radius(6.0)
-        .fill(t.paper)
-        .border(1.0, t.card_border)
-        .border_layout()
-        .child(kit::glyph(format!("{key}-icon"), icon, 14.0, t.text))
-        .child(style::fitted(format!("{key}-label"), label, style::BUTTON_SM, t.text));
+    let mut b = button(keys(key), label, Some(icon), Variant::Secondary, Size::Sm, ButtonState::Enabled, t);
     if let Some(hint) = hint {
         b = b.shortcut_hint(hint).child(
             el().key(format!("{key}-hint-box"))
@@ -322,16 +397,16 @@ pub(crate) fn small_button(
 
 /// The ribbon's first row: the tabs, the command search, Share, Save.
 pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
-    let mut r = row().key("rib-tabs").w_full().h(32.0).px(12.0).gap(4.0).center_y();
-    for (i, tab) in Tab::ALL.into_iter().enumerate() {
+    let mut r = row().key("rib-tabs").w_full().h(32.0).px(scale::space::S12).gap(scale::space::S4).center_y();
+    for (i, (tab, word)) in Tab::row_of(ui.office.edit.as_ref().map(|e| e.kind)).into_iter().enumerate() {
         let on = ui.office.tab == tab;
         let mut cell = el()
             .key(format!("rib-tab-{i}-cell"))
             .role("tab")
-            .label(tab.label())
+            .label(word)
             .checked(on)
             .h_full()
-            .px(10.0)
+            .px(scale::space::S10)
             .center()
             .focusable(true)
             .on_press(move |s: &mut State| {
@@ -342,7 +417,7 @@ pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .child(
                 style::fitted(
                     format!("rib-tab-{i}"),
-                    tab.label(),
+                    word,
                     if on { TAB_ON } else { TAB },
                     if on { t.text } else { t.text_tertiary },
                 )
@@ -369,9 +444,9 @@ pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .h(24.0)
             .pl(9.0)
             .pr(6.0)
-            .gap(6.0)
+            .gap(scale::space::S6)
             .center_y()
-            .radius(12.0),
+            .radius(scale::radius::DIALOG),
         t,
     )
     .focusable(true)
@@ -391,8 +466,8 @@ pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     .child(
         el().key("rib-find-kbd-box")
             .h(20.0)
-            .px(6.0)
-            .radius(6.0)
+            .px(scale::space::S6)
+            .radius(tokens::radius::MD)
             .fill(t.card)
             .box_shadow(kit::ring_inset(t.separator))
             .box_shadow(kit::drop(1.0, 0.0, t.separator))
@@ -475,9 +550,14 @@ pub(crate) fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     let tools = match ui.office.tab {
         Tab::Home => home_tools(t),
         Tab::Insert => super::office_over::insert_tools(t),
-        // Layout's and Review's tools are on no board frame: not drawn.
-        Tab::Layout | Tab::Review => Vec::new(),
+        // Layout's and Review's tools are on no board frame: not drawn. Data and Formulas are a live workbook's.
+        Tab::Layout | Tab::Review | Tab::Data | Tab::Formulas => Vec::new(),
     };
+    ribbon_of(ui, unsaved, tools, t)
+}
+
+/// The ribbon's frame around `tools` (the live word ribbon brings its own).
+pub(crate) fn ribbon_of(ui: &Ui, unsaved: bool, tools: Vec<El>, t: &Theme) -> El {
     col()
         .key("rib")
         .role("toolbar")
@@ -492,8 +572,8 @@ pub(crate) fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
                 .key("rib-tools")
                 .w_full()
                 .h(38.0)
-                .px(8.0)
-                .gap(2.0)
+                .px(scale::space::S8)
+                .gap(scale::space::S2)
                 .center_y()
                 .fill(t.card)
                 .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
@@ -501,6 +581,8 @@ pub(crate) fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
                 .clip_rounded(0.0)
                 .children(tools),
         )
+        // A kept editing, or what a stopped editor says (`edit/recovery.rs`): under the tools of every live ribbon.
+        .children(crate::frames::office::edit::recovery::row_of(ui, t))
 }
 
 /// The outline pane: the document's headings, the one the caret is in marked.
@@ -521,9 +603,9 @@ fn outline(doc: &WordDoc, t: &Theme) -> El {
         .label("Outline")
         .w(210.0)
         .h_full()
-        .py(12.0)
-        .px(8.0)
-        .gap(4.0)
+        .py(scale::space::S12)
+        .px(scale::space::S8)
+        .gap(scale::space::S4)
         .fill(t.surface)
         .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
         .border_layout()
@@ -532,7 +614,7 @@ fn outline(doc: &WordDoc, t: &Theme) -> El {
             row()
                 .key("ol-head")
                 .w_full()
-                .px(8.0)
+                .px(scale::space::S8)
                 .pb(4.0)
                 .center_y()
                 .child(kit::label("ol-title", "OUTLINE", PANE_LABEL, t.text_tertiary))
@@ -555,7 +637,7 @@ fn outline(doc: &WordDoc, t: &Theme) -> El {
                 .h(23.0)
                 .pl(indent)
                 .center_y()
-                .radius(6.0)
+                .radius(tokens::radius::MD)
                 .fill(if here { t.selection } else { Color::TRANSPARENT })
                 .hover(t.hover)
                 .press(t.press)
@@ -581,7 +663,7 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
         .min_h(700.0)
         .px(48.0)
         .py(44.0)
-        .gap(10.0)
+        .gap(scale::space::S10)
         .radius(2.0)
         .fill(Color::WHITE)
         .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)))
@@ -652,10 +734,10 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
                             .label("Selection")
                             .absolute(selection.tools_at.0, selection.tools_at.1)
                             .h(34.0)
-                            .px(4.0)
-                            .gap(2.0)
+                            .px(scale::space::S4)
+                            .gap(scale::space::S2)
                             .center_y()
-                            .radius(10.0)
+                            .radius(tokens::radius::LG)
                             .fill(t.card.alpha(if t.dark { 0.68 } else { 0.72 }))
                             .border(kit::HAIR, t.separator)
                             .border_layout()
@@ -692,6 +774,10 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
 pub(crate) enum Keeping {
     Saved,
     Unsaved,
+    /// A save is on its way: the status stays on the old version until it lands (DW-1553).
+    Saving,
+    /// The last save is kept on this PC only: it uploads when Beebeeb can be reached.
+    Queued,
     /// The last save found a newer version; the question is open (DW-1554).
     Conflict,
     /// The editor did not start: the file is shown by nothing here (DW-1556).
@@ -699,14 +785,31 @@ pub(crate) enum Keeping {
 }
 
 /// 11.5px/500 on 17px: a state's words at the start of the status line.
-const STATUS_STATE: TextStyle = TextStyle::new(11.5, 500.0).lh(17.0);
+const STATUS_STATE: TextStyle = type_::STATUS_STRONG;
 /// The board's words in the status line of DW-1556.
 pub const PREPARING: &str = "Preparing the editor on this PC\u{2026}";
 pub const OLDER_FORMAT: &str = "An older Word file (.doc). It opens and saves in the same format.";
 
 /// The status line: what the document is, how it is kept, the zoom, About. Its parts are keyed
-/// `st-<N>` in order.
+/// `st-<N>` in order. With no `doc` and a live Word document as the file's body, it says that document's
+/// page, words and language and its version (the editor's `chrome` calls it so); the saved time comes with
+/// [`status_live`], which has the window's [`Ui`].
 pub(crate) fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t: &Theme) -> El {
+    status_at(file, doc, keeping, None, t)
+}
+
+/// [`status`] of a live document, with the time of the last save this session made.
+#[allow(dead_code)]
+pub(crate) fn status_live(ui: &Ui, keeping: Keeping, t: &Theme) -> El {
+    status_at(&ui.file, None, keeping, ui.saved_at.as_deref(), t)
+}
+
+fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at: Option<&str>, t: &Theme) -> El {
+    // A live document the editor holds: its numbers, never "Preparing".
+    let live = match (&file.body, doc, keeping) {
+        (super::source::Body::Doc(d), None, Keeping::Saved | Keeping::Queued | Keeping::Unsaved | Keeping::Saving | Keeping::Conflict) => Some(d),
+        _ => None,
+    };
     let plain = |key: String, words: &str| style::fitted(key, words, type_::STATUS, t.text_tertiary);
     let sep = |key: &str| el().key(key.to_string()).w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
     let mut n = 0;
@@ -714,109 +817,147 @@ pub(crate) fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t
         n += 1;
         format!("st-{}", n - 1)
     };
-    let mut bar = row()
-        .key("status-bar")
-        .role("status")
-        .w_full()
-        .h(28.0)
-        .px(16.0)
-        .gap(7.0)
-        .center_y()
-        .fill(t.status_bar_bg)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
-    let what = match doc {
-        Some(doc) => {
-            let pages = format!("Page 1 of {}", doc.pages.max(1));
-            let words = format!("{} words", thousands(doc.words));
-            bar = bar
-                .child(plain(next(), &pages))
-                .child(plain(next(), "\u{00B7}"))
-                .child(plain(next(), &words))
-                .child(plain(next(), "\u{00B7}"))
-                .child(plain(next(), &doc.language));
-            format!("{pages}, {words}, {}", doc.language)
-        }
-        None => {
-            bar = bar
-                .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(style::warn(t)))
-                .child(kit::label("status-text", PREPARING, STATUS_STATE, t.text_secondary));
+    let mut bar: Vec<El> = Vec::new();
+    let counts = |bar: &mut Vec<El>, next: &mut dyn FnMut() -> String, pages: String, words: String, language: &str| {
+        let what = format!("{pages}, {words}, {language}");
+        bar.push(plain(next(), &pages));
+        bar.push(plain(next(), "\u{00B7}"));
+        bar.push(plain(next(), &words));
+        bar.push(plain(next(), "\u{00B7}"));
+        bar.push(plain(next(), language));
+        what
+    };
+    let what = match (doc, live) {
+        (Some(doc), _) => counts(
+            &mut bar,
+            &mut next,
+            format!("Page 1 of {}", doc.pages.max(1)),
+            format!("{} words", thousands(doc.words)),
+            &doc.language,
+        ),
+        (None, Some(d)) => counts(
+            &mut bar,
+            &mut next,
+            format!("Page {} of {}", d.page, d.view.pages.max(1)),
+            format!("{} words", thousands(d.view.words)),
+            &d.language,
+        ),
+        (None, None) => {
+            bar.push(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(style::warn(t)));
+            bar.push(kit::label("status-text", PREPARING, STATUS_STATE, t.text_secondary));
             PREPARING.to_string()
         }
     };
-    let kept = match (keeping, doc) {
-        (Keeping::Saved, Some(doc)) => format!("saved as version {} \u{00B7} {}", file.version, doc.saved_at),
+    // The time of the save, when it is known: a figure, so mono.
+    let stamp = match (doc, live) {
+        (Some(doc), _) => Some(doc.saved_at.as_str()),
+        (None, Some(_)) => saved_at,
+        (None, None) => None,
+    };
+    let kept = match (keeping, stamp) {
+        (Keeping::Saved, Some(at)) => format!("saved as version {} \u{00B7} {at}", file.version),
+        (Keeping::Saved, None) if live.is_some() => format!("saved as version {}", file.version),
         (Keeping::Unsaved, _) => "unsaved changes".to_string(),
+        (Keeping::Saving, _) => "saving\u{2026}".to_string(),
+        (Keeping::Queued, _) => crate::frames::office::edit::save::QUEUED_STATUS.to_string(),
         (Keeping::Conflict, _) => "not saved \u{00B7} conflict".to_string(),
         (Keeping::NoEditor, _) | (Keeping::Saved, None) => "read-only for now".to_string(),
     };
     let enc = next();
     let dot = next();
     let kept_key = next();
-    let kept_el = match (keeping, doc) {
-        // The time is a figure: mono.
-        (Keeping::Saved, Some(doc)) => {
-            let at = kept.len() - doc.saved_at.len();
+    let kept_el = match (keeping, stamp) {
+        (Keeping::Saved, Some(at)) => {
+            let from = kept.len() - at.len();
             kit::note_text(&kept_key, &kept_key, &kept, type_::STATUS, t.text_tertiary);
-            rich(&kept, vec![Span::new(at, kept.len()).mono()])
+            rich(&kept, vec![Span::new(from, kept.len()).mono()])
                 .key(kept_key)
                 .font(type_::STATUS)
                 .color(t.text_tertiary)
-                .w(rune::text::advance(&kept[..at], type_::STATUS) + rune::text::advance(&doc.saved_at, STATUS_MONO))
+                .w(rune::text::advance(&kept[..from], type_::STATUS) + rune::text::advance(at, STATUS_MONO))
         }
         _ => plain(kept_key, &kept),
     };
     let zoom = next();
     let about = next();
-    bar.label(format!("{what}. Encrypted, {kept}"))
-        .child(el().key("st-gap").grow(1.0))
-        .child(
-            row()
-                .key(format!("{enc}-box"))
-                .gap(4.0)
-                .center_y()
-                .child(kit::glyph(format!("{enc}-icon"), &oi::PADLOCK, 11.0, t.accent_deep))
-                .child(style::fitted(enc, "Encrypted", STATUS_ENC, t.accent_deep)),
-        )
-        .child(plain(dot, "\u{00B7}"))
-        .child(kept_el)
-        .child(sep("st-sep-0"))
-        .child(
-            row()
-                .key(zoom.clone())
-                .role("group")
-                .label("Zoom, 100 per cent")
-                .gap(4.0)
-                .center_y()
-                .child(kit::glyph(format!("{zoom}-less"), &oi::LESS, 12.0, t.text_tertiary))
-                .child(style::fitted(
-                    format!("{zoom}-zoom"),
-                    "100%",
-                    STATUS_MONO,
-                    t.text_tertiary,
-                ))
-                .child(kit::glyph(format!("{zoom}-more"), &oi::MORE, 12.0, t.text_tertiary)),
-        )
-        .child(sep("st-sep-1"))
-        .child(
-            el().key(format!("{about}-box"))
-                .role("link")
-                .label("About this editor")
+    let per_cent = live.map_or(100, |d| d.view.zoom);
+    // The zoom's two steps move the live document's stage; the board's own (no engine) have no press.
+    let step = |key: String, icon: &'static Icon, name: &'static str, act: Option<fn(&mut DocBody)>| {
+        let g = kit::glyph(key.clone(), icon, 12.0, t.text_tertiary);
+        match act {
+            Some(act) => row()
+                .key(format!("{key}-btn"))
+                .role("button")
+                .label(name)
+                .size(18.0, 18.0)
+                .center()
+                .radius(5.0)
+                .hover(t.hover)
+                .press(t.press)
                 .focusable(true)
-                .on_press(|s: &mut State| {
-                    if let Some(ui) = super::ui(s) {
-                        ui.office_about();
-                    }
-                })
-                .child({
-                    kit::note_text(&about, &about, "About", type_::STATUS, t.text_tertiary);
-                    rich("About", vec![Span::new(0, 5).underline(t.text_tertiary)])
-                        .key(about)
-                        .font(type_::STATUS)
-                        .color(t.text_tertiary)
-                        .w(rune::text::advance("About", type_::STATUS))
-                }),
+                .preserve_focus_on_press(true)
+                .on_press_tx(crate::frames::office::docs::scroll::with_doc_tx(act))
+                .child(g),
+            None => g,
+        }
+    };
+    let (less, more) = if live.is_some() {
+        (
+            Some(DocBody::zoom_out as fn(&mut DocBody)),
+            Some(DocBody::zoom_in as fn(&mut DocBody)),
         )
+    } else {
+        (None, None)
+    };
+    bar.push(el().key("st-gap").grow(1.0));
+    bar.push(
+        row()
+            .key(format!("{enc}-box"))
+            .gap(scale::space::S4)
+            .center_y()
+            .child(kit::glyph(format!("{enc}-icon"), &oi::PADLOCK, 11.0, t.accent_deep))
+            .child(style::fitted(enc, "Encrypted", STATUS_ENC, t.accent_deep)),
+    );
+    bar.push(plain(dot, "\u{00B7}"));
+    bar.push(kept_el);
+    bar.push(sep("st-sep-0"));
+    bar.push(
+        row()
+            .key(zoom.clone())
+            .role("group")
+            .label(format!("Zoom, {per_cent} per cent"))
+            .gap(scale::space::S4)
+            .center_y()
+            .child(step(format!("{zoom}-less"), &oi::LESS, "Zoom out", less))
+            .child(style::fitted(
+                format!("{zoom}-zoom"),
+                &format!("{per_cent}%"),
+                STATUS_MONO,
+                t.text_tertiary,
+            ))
+            .child(step(format!("{zoom}-more"), &oi::MORE, "Zoom in", more)),
+    );
+    bar.push(sep("st-sep-1"));
+    bar.push(
+        el().key(format!("{about}-box"))
+            .role("link")
+            .label("About this editor")
+            .focusable(true)
+            .on_press(|s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.office_about();
+                }
+            })
+            .child({
+                kit::note_text(&about, &about, "About", type_::STATUS, t.text_tertiary);
+                rich("About", vec![Span::new(0, 5).underline(t.text_tertiary)])
+                    .key(about)
+                    .font(type_::STATUS)
+                    .color(t.text_tertiary)
+                    .w(rune::text::advance("About", type_::STATUS))
+            }),
+    );
+    status_bar::frame(bar, t).label(format!("{what}. Encrypted, {kept}"))
 }
 
 /// `1284` as "1,284".
@@ -840,7 +981,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
         .role("navigation")
         .label("Path")
         .center_y()
-        .gap(4.0)
+        .gap(scale::space::S4)
         .min_w(0.0);
     for (i, folder) in file.path.iter().enumerate() {
         crumbs = crumbs
@@ -876,7 +1017,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
         );
         row()
             .key("crumb-here-row")
-            .gap(6.0)
+            .gap(scale::space::S6)
             .center_y()
             .min_w(0.0)
             .child(name)
@@ -895,7 +1036,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
         .key("folder-info")
         .role("group")
         .label(format!("{}, {}", file.name, file.facts))
-        .px(4.0)
+        .px(scale::space::S4)
         .min_w(0.0)
         .child(crumbs)
         .child(kit::label(
@@ -919,7 +1060,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .grow(1.0),
         t,
     );
-    tb::bar(
+    let bar = tb::file_bar(
         Bar {
             name: file.name.clone(),
             back: (true, press(|s, _| super::close(s))),
@@ -943,7 +1084,17 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
                 }
             }),
             inert: false,
-            on_explorer: Box::new(tb::open_beebeeb_location),
+            gate_closed: false,
+            // The file's folder, this file selected (file_bar draws it as Show in File Explorer).
+            on_explorer: Box::new(|s, _| {
+                let Some((id, name)) = super::ui(s).map(|ui| (ui.file.id.clone(), ui.file.name.clone())) else {
+                    return;
+                };
+                let answer = super::super::show_in_folder::show(s, &id, &name);
+                if let Some(ui) = super::ui(s) {
+                    ui.toast = answer.err().map(str::to_string);
+                }
+            }),
             new: New::Idle,
             on_new: press(|s, _| {
                 if let Some(ui) = super::ui(s) {
@@ -954,7 +1105,48 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
             trailing_inset: 12.0,
         },
         t,
-    )
+    );
+    match guard_notice(ui, t) {
+        Some(notice) => col().key("toolbar-notice").w_full().child(bar).child(notice),
+        None => bar,
+    }
+}
+
+/// The button of the guard's notice: the app the system opens the type with, by name, when the system says one.
+pub(crate) fn open_in_words(app: Option<&str>) -> String {
+    match app {
+        Some(app) => format!("Open in {app}"),
+        None => super::refusal_text::OPEN_ELSEWHERE.to_string(),
+    }
+}
+
+/// The editor's guard refused the open file (`EditGuarded`): it is open read-only here. The banner under the toolbar
+/// says, per part, what editing here would drop (`DroppedPart::notice`), with "Open in <app>" through the viewer's
+/// "Open in another app…" (`Intent::OpenInAnotherApp`). `None`: not guarded.
+pub(crate) fn guard_notice(ui: &Ui, t: &Theme) -> Option<El> {
+    use crate::ui::banner::{self, Banner, Run, Tone};
+    let guarded = ui.source.edit_guarded(&ui.file.id);
+    if guarded.is_empty() {
+        return None;
+    }
+    let words = guarded.iter().map(|part| part.notice()).collect::<Vec<_>>().join(" ");
+    let action = open_in_words(ui.source.default_app(&ui.file.id).as_deref());
+    let runs = [Run::Words(words)];
+    let open: banner::Handler = |s, _| {
+        if let Some(ui) = super::ui(s) {
+            ui.intent(Intent::OpenInAnotherApp);
+        }
+    };
+    Some(banner::banner(
+        &Banner {
+            tone: Tone::Neutral,
+            icon: &super::icons::INFO,
+            runs: &runs,
+            action: Some((&action, open)),
+            dismiss: None,
+        },
+        t,
+    ))
 }
 
 /// The window with the editor's frame: a text document (`doc`), or what is shown when the editor
@@ -964,10 +1156,14 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: Option<&WordDoc>) -> 
     let keeping = match (doc, &ui.office.over) {
         (None, _) => Keeping::NoEditor,
         (Some(_), Some(super::office_over::Over::Conflict(_))) => Keeping::Conflict,
+        (Some(_), _) if ui.office.edit.as_ref().is_some_and(|edit| edit.saving) => Keeping::Saving,
         (Some(doc), _) if doc.kept == Kept::Unsaved => Keeping::Unsaved,
+        (Some(_), _) if ui.office.edit.as_ref().is_some_and(|edit| edit.queued == Some(ui.file.version)) => Keeping::Queued,
         (Some(_), _) => Keeping::Saved,
     };
+    // Save is off while it saves; the dot stays (what is typed meanwhile is still unsaved).
     let unsaved = matches!(keeping, Keeping::Unsaved | Keeping::Conflict);
+    let dot = unsaved || keeping == Keeping::Saving;
     let mut body = row().key("viewer-row").grow(1.0).min_h(0.0).w_full();
     body = match doc {
         Some(doc) => {
@@ -988,7 +1184,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: Option<&WordDoc>) -> 
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar(s, ui, unsaved, &t));
+        .child(toolbar(s, ui, dot, &t));
     if doc.is_some_and(|doc| doc.older) {
         main = main.child(super::text::banner_el(&super::icons::INFO, OLDER_FORMAT, None, &t));
     }

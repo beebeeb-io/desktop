@@ -46,6 +46,9 @@ impl Drop for ApiClient {
 // `session_zeroizes_master_key_on_drop` test.
 impl zeroize::ZeroizeOnDrop for ApiClient {}
 
+/// The longest a bulk GET may run in all, however steadily its body arrives.
+const BULK_GET_CEILING: Duration = Duration::from_secs(15 * 60);
+
 impl ApiClient {
     #[cfg(target_os = "windows")]
     pub fn credential_lifetime(&self) -> std::sync::Weak<()> {
@@ -162,11 +165,11 @@ impl ApiClient {
                 encode(variant)
             )
         };
-        if variant == "medium" {
-            if let Some(blurhash) = blurhash.filter(|value| !value.is_empty()) {
-                url.push_str("?blurhash=");
-                url.push_str(&encode(blurhash));
-            }
+        if variant == "medium"
+            && let Some(blurhash) = blurhash.filter(|value| !value.is_empty())
+        {
+            url.push_str("?blurhash=");
+            url.push_str(&encode(blurhash));
         }
         url
     }
@@ -311,6 +314,34 @@ impl ApiClient {
         Ok(resp.json::<T>().await?)
     }
 
+    /// GET a JSON body that can be tens of MB (the whole-tree snapshot of a large account). The app's 30 s
+    /// request timeout is a TOTAL cap, headers and body together, so a body that needs longer than 30 s to
+    /// arrive was cut off and surfaced as "error decoding response body" (0.9.0). Here no total cap applies:
+    /// a connect timeout, then `read_timeout` of silence on the connection (a stalled link still fails
+    /// in bounded time) and a [`BULK_GET_CEILING`] on the whole transfer.
+    pub(super) async fn get_typed_bulk<T: serde::de::DeserializeOwned>(&self, path: &str) -> ApiResult<T> {
+        self.get_typed_bulk_with(path, Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))
+            .await
+    }
+
+    pub(super) async fn get_typed_bulk_with<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        read_timeout: Duration,
+    ) -> ApiResult<T> {
+        let url = self.url(path);
+        let http = api_base_client_builder(&self.base_url)
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(read_timeout)
+            .default_headers(provenance_headers())
+            .build()
+            .expect("reqwest client");
+        let resp = self
+            .send_with_retry_on(&http, || http.get(&url).timeout(BULK_GET_CEILING))
+            .await?;
+        Ok(resp.json::<T>().await?)
+    }
+
     /// Internal: issue an arbitrary request (built by `build`) with bounded 429
     /// backoff + retry, returning a 2xx response or a descriptive error.
     ///
@@ -323,21 +354,55 @@ impl ApiClient {
         &self,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> ApiResult<reqwest::Response> {
+        self.send_with_retry_on(&self.client, build).await
+    }
+
+    /// [`Self::send_with_retry`] executed on `http` (a client with its own timeouts).
+    pub(super) async fn send_with_retry_on(
+        &self,
+        http: &reqwest::Client,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> ApiResult<reqwest::Response> {
         let mut spent: u64 = 0;
         let mut attempt: u32 = 0;
+        // Transport/5xx retries are counted apart from 429 retries; each class is bounded on its own.
+        let mut transport_attempt: u32 = 0;
+        // The last 502/503/504 seen: surfaced if the retry that followed it fails to connect at all.
+        let mut held: Option<reqwest::Response> = None;
         loop {
-            let resp = match build()
+            let request = build()
                 .header("Authorization", format!("Bearer {}", self.token))
-                .send()
-                .await
-            {
+                .build()?;
+            let idempotent = is_idempotent(request.method());
+            let resp = match http.execute(request).await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    if let Some(old) = held.take() {
+                        return Self::check_status(old).await;
+                    }
+                    if let Some(wait) = transport_retry_decision(
+                        transport_attempt,
+                        e.is_connect(),
+                        e.is_timeout() || e.is_request(),
+                        idempotent,
+                    ) {
+                        tokio::time::sleep(wait).await;
+                        transport_attempt += 1;
+                        continue;
+                    }
                     self.link.note_reqwest_error(&e, now_unix_secs() as i64);
                     return Err(e.into());
                 }
             };
             self.link.note_status(resp.status(), now_unix_secs() as i64);
+            if matches!(resp.status().as_u16(), 502..=504)
+                && let Some(wait) = transport_retry_decision(transport_attempt, false, true, idempotent)
+            {
+                tokio::time::sleep(wait).await;
+                transport_attempt += 1;
+                held = Some(resp);
+                continue;
+            }
             if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Self::check_status(resp).await;
             }

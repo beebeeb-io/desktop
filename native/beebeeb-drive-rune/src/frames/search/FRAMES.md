@@ -4,9 +4,7 @@ The checklist for `src/frames/search`. Source: `design/desktop-v2/FRAMES.md` and
 (group "Shared, Search and Trash"). Status is `built` (gated light and dark, the truth line at 0
 failing in both) or `not built`. State on 2026-11-12: 4 of 4 built (#332), and linked: typing, opening a result, Back, Esc.
 
-`src/frames/shared/FRAMES.md` still lists these four frames as not built: that file is another
-lane's while this one is open, so its Search section stays until the integrator drops it (a pure
-move would also have to change its header and the statuses).
+`src/frames/shared/FRAMES.md` lists these four frames too, and points here.
 
 | Frame | What it is | Status |
 | --- | --- | --- |
@@ -54,15 +52,17 @@ flowchart LR
 - **Pointer:** a click selects a result, a double-click opens it, a right-click asks for its
   menu; a recent search runs on a click; Clear forgets them. The panel's Share… (`DW-0407`),
   Version history (`DW-0413`) and Available offline (`Do("keep-offline")`) ask for the selected
-  result. The toolbar's Sort (`DW-0406`), New (`DW-0415`), grid view (`DW-1102`) and the status
-  line (`DW-1201`) ask for their frames (intents nothing drains yet; the status line is linked by
-  the tray lane).
+  result (`actions.rs`: Share and Version history through Files' dialogs, which stand over the results; Available
+  offline through `FilesSource::keep_offline`). The toolbar's Sort (`DW-0404`) orders the results in Search's own
+  state with Files' Sort entries, the view switch (`DW-1102`) shows a grid of tiles or the list, New (`DW-0414`) opens
+  Files' New menu as This PC does. The Menu key or a right-click (`DW-0402`) opens the result's menu: Open, Show in
+  Files (`files::reveal`), Share…, Version history…, Details. The status line (`DW-1201`) is linked by the tray lane.
 
 ## Not built here
 
-- The engine behind `SearchSource` (the wiring package), and a cap or a virtual list for a long
-  answer: the results list builds every row it is given.
-- The file menu of a result with Show in enclosing folder (DW-0402's menu, asked for by intent).
+- A cap or a virtual list for a long answer: the results list builds every row it is given. (The engine is wired:
+  `engine_host::search::EngineSearchSource` reads the engine's local index, and a refused index build is retried
+  from the window: w17-search-index-retry.)
 - The keys: the Files window's own (`keymap.js`, `keymap-files.js`, the empty state of DW-0803
   among them: `empty`, `-tile`, `-icon`, `-title`, `-text`, drawn with `ui::empty`), plus what
   `scripts/keymap-search.js` adds in a Files frame with the field focused, in the Shared and Trash
@@ -74,3 +74,10 @@ flowchart LR
   title, Back and Forward off, and the field focused; Open in File Explorer asks the shell.
 - After Esc the field keeps the keyboard (as before): Alt+Left is then the field's own key until
   focus leaves it.
+
+## Wired since (waves 17 and 18, 2026-11)
+
+The panel's Share, Version history and Available offline, the toolbar's Sort, the grid and list switch and New, and the
+result menu (Open, Show in Files, Share, Version history, Details) act on the selected result (w17-search-actions).
+The "Search isn't available yet" path now shows only while the index is being built; a listing still in progress says
+so in the results (w18 gaps: first-listing progress).

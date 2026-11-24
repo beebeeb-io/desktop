@@ -393,7 +393,7 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
     let mut new = rune::col()
         .key("new-password")
         .w_full()
-        .gap(6.0)
+        .gap(crate::theme::scale::space::S6)
         .child(frozen(fm::field(
             1,
             &Field {

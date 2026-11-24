@@ -4,12 +4,13 @@ name: Desktop release (native Windows)
 # packaging/windows/build-installer.ps1 (plain makensis, no Tauri bundler) and published to the v2 channel manifests
 # (desktop/v2/<channel>.json) that the bridge release 0.8.25 and every native build read.
 #
-# It is a separate workflow on purpose: release.yml stays the 0.8.x path, byte for byte, and the manifests 0.8.24
+# It is a separate workflow on purpose: the 0.8.x Tauri line has its own release path (a release branch cut from the
+# desktop-v0.8.25 tag, where that line's release workflow still exists), and the manifests 0.8.24
 # and older read (desktop/latest.json, beta.json, alpha.json) are never written here, so a native build can never
 # reach a client that did not pass through the bridge. Design, decisions and what is still open:
 # docs/superpowers/specs/2026-11-11-native-installer-updater.md.
 #
-# Same gates as release.yml: authored RELEASE_NOTES.md naming the version, RELEASE_BLOCKERS.md empty, the reviewed
+# The same gates as the 0.8.x line: authored RELEASE_NOTES.md naming the version, RELEASE_BLOCKERS.md empty, the reviewed
 # branch point, the Authenticode gate, the updater-signature key guard.
 #
 # Signing boundary (spec section 6, "The signing boundary"): the two jobs that sign, `build` and `publish-manifest`,
@@ -63,7 +64,7 @@ jobs:
           fi
           IFS=. read -r major minor _ <<< "$RELEASE_VERSION"
           if (( major == 0 && minor < 9 )); then
-            echo "::error::$RELEASE_VERSION is a 0.8.x (Tauri) version: release it with release.yml. This workflow publishes native builds, 0.9.0 and later."
+            echo "::error::$RELEASE_VERSION is a 0.8.x (Tauri) version, and this workflow publishes native builds, 0.9.0 and later. Release a 0.8.x hotfix from the desktop-v0.8.25 line: cut a release branch from that tag, where the 0.8.x release workflow still exists."
             exit 1
           fi
           case "$RELEASE_CHANNEL" in
@@ -156,7 +157,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Release script tests
-        run: bun test scripts/tests/nativeChannelManifest.test.ts scripts/tests/releaseChannelChecks.test.ts
+        run: bun test scripts/tests/nativeChannelManifest.test.ts scripts/tests/releaseChannelChecks.test.ts scripts/tests/updaterSignatureKey.test.ts
 
       # The count line is asserted: a run that executed no test is a failure, not a pass.
       - name: Updater tests
@@ -259,6 +260,8 @@ jobs:
         shell: bash
         env:
           BEEBEEB_RELEASE_VERSION: ${{ inputs.version }}
+          # The channel this build is cut on: a fresh install starts there (settings/updates.rs).
+          BEEBEEB_RELEASE_CHANNEL: ${{ inputs.channel }}
           # A release names its identity: the build script refuses a release build without it, and one with the
           # test identifier (native/beebeeb-drive-rune/build.rs).
           BEEBEEB_APP_IDENTIFIER: io.beebeeb.app
@@ -269,6 +272,19 @@ jobs:
           echo "commit time (not-before): $BEEBEEB_BUILD_NOT_BEFORE"
           echo "BUILD_NOT_BEFORE=$BEEBEEB_BUILD_NOT_BEFORE" >> "$GITHUB_ENV"
           cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      # The two helpers the installer ships beside the app exe (the app starts each confined, looking for it next to
+      # its own exe: media::transport::HELPER_NAME, office_host::helper_exe). They are their own crates with their own
+      # target folders, so build-installer.ps1's default (beside the app exe) never finds them: build them here and
+      # hand their paths over below. Without the media helper a video opens as "No preview" (0.9.0 real install).
+      - name: Build the media and Office helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd native/beebeeb-office-render && cargo build --release --locked --target x86_64-pc-windows-msvc)
+          test -f native/beebeeb-office-render/target/x86_64-pc-windows-msvc/release/beebeeb-office-render.exe
+          (cd native/beebeeb-media-helper && cargo build --release --locked --target x86_64-pc-windows-msvc)
+          test -f native/beebeeb-media-helper/target/x86_64-pc-windows-msvc/release/beebeeb-media-helper.exe
 
       # What is checked is the binary that ships, not the environment it was meant to be built in: it must carry
       # the updater's mark with exactly the commit's time, once, and that time must be a plausible one (not before
@@ -334,6 +350,8 @@ jobs:
         run: |
           & .\packaging\windows\build-installer.ps1 -Mode release -Version $env:RELEASE_VERSION `
             -Exe 'native\beebeeb-drive-rune\target\x86_64-pc-windows-msvc\release\beebeeb-drive.exe' `
+            -OfficeRenderExe 'native\beebeeb-office-render\target\x86_64-pc-windows-msvc\release\beebeeb-office-render.exe' `
+            -MediaHelperExe 'native\beebeeb-media-helper\target\x86_64-pc-windows-msvc\release\beebeeb-media-helper.exe' `
             -OutDir 'release-assets' -NsisDir $env:NSIS_DIR -PluginDir $env:NSIS_PLUGIN_DIR
           if ($LASTEXITCODE -ne 0) { throw "build-installer.ps1 failed (exit $LASTEXITCODE)" }
           Remove-Item -Recurse -Force 'release-assets\stage-release'
@@ -392,7 +410,10 @@ jobs:
 
   release:
     name: Create GitHub Release
-    if: ${{ !inputs.publish_existing }}
+    # A status function is required: without one the implicit success() also demands every transitive need
+    # (a skipped verify-branch-point on a dispatch from main) succeeded, so nothing published.
+    # validate-release-notes (RELEASE_BLOCKERS.md, fail closed) is upstream of build, so build success implies it passed.
+    if: ${{ !cancelled() && !inputs.publish_existing && needs.build.result == 'success' }}
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -403,13 +424,24 @@ jobs:
         with:
           persist-credentials: false
 
+      # The website changelog entry is read from this hidden block (site: scripts/changelog-publish.ts).
+      - name: Require the changelog block in the release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -Eq '^<!--[[:space:]]*changelog([[:space:]]|$)' RELEASE_NOTES.md || ! grep -q -- '-->' RELEASE_NOTES.md; then
+            echo "::error file=RELEASE_NOTES.md::RELEASE_NOTES.md has no '<!-- changelog ... -->' block. Author it at the end of the notes. See docs/RELEASING.md."
+            exit 1
+          fi
+          echo "RELEASE_NOTES.md carries a changelog block"
+
       - name: Download artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
 
       # make_latest is false here: GitHub's "Latest" is what beebeeb.io/download offers. A native release becomes
-      # "Latest" only when its stable manifest is published (job mark-latest; Guus, 2026-11-11).
+      # "Latest" only when its stable manifest is published (job mark-latest; decided 2026-11-11).
       - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -618,7 +650,7 @@ jobs:
             git push
           fi
 
-  # Guus, 2026-11-11: GitHub's "Latest" shows a native release only once it is stable. A release is created with
+  # Decided 2026-11-11: GitHub's "Latest" shows a native release only once it is stable. A release is created with
   # make_latest false; this job marks it when its STABLE manifest has been published. Its own job: the job that
   # holds the signing key keeps `contents: read`.
   mark-latest:
@@ -639,3 +671,35 @@ jobs:
           set -euo pipefail
           id="$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id')"
           gh api -X PATCH "repos/$REPO/releases/$id" -f make_latest=true --jq '.tag_name'
+
+  # docs/RELEASING.md step 11, as a job: after a stable publish, the v2 stable manifest and GitHub's Latest release
+  # must name the same version. Read-only (no token, no secrets); a red run is a failed release.
+  delivery-check:
+    name: Check stable manifest matches GitHub Latest
+    if: ${{ always() && inputs.channel == 'stable' && needs.publish-manifest.result == 'success' && needs.mark-latest.result == 'success' }}
+    needs:
+      - publish-manifest
+      - mark-latest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DESKTOP_STABLE_MANIFEST_URL: https://releases.beebeeb.io/desktop/v2/stable.json
+      DESKTOP_LATEST_RELEASE_API: https://api.github.com/repos/${{ github.repository }}/releases/latest
+    steps:
+      - name: Checkout the dispatched commit (scripts only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      # The host may serve the new manifest a moment after the push: retry a few times before calling it drift.
+      - name: Run the delivery drift check
+        shell: bash
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            if node scripts/release-channel-checks.mjs delivery; then exit 0; fi
+            echo "delivery check attempt $attempt failed"
+            if [ "$attempt" -lt 6 ]; then sleep 20; fi
+          done
+          exit 1

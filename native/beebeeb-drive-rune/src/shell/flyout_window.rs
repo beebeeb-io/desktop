@@ -65,6 +65,7 @@ pub fn fixture_state() -> FlyoutState {
 }
 
 pub fn view(s: &FlyoutState, cx: &mut Cx<FlyoutState>) -> El {
+    crate::ui::focus::install(cx);
     match registry::FLYOUT {
         Some(view) => view(s, cx),
         None => placeholder::flyout(s, cx),

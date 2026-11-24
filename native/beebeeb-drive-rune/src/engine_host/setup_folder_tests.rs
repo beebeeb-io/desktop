@@ -773,8 +773,7 @@ fn a_refused_start_shows_the_modal_in_the_first_run_and_another_folder_can_be_ch
     let rect = rt
         .elements()
         .into_iter()
-        .filter(|e| !e.exiting && e.role == "button" && e.label.as_deref() == Some("Try again"))
-        .next_back()
+        .rfind(|e| !e.exiting && e.role == "button" && e.label.as_deref() == Some("Try again"))
         .expect("the modal's Try again")
         .rect;
     let (x, y) = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);

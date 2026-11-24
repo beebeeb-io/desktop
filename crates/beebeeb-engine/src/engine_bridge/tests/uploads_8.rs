@@ -692,6 +692,22 @@ async fn a_finder_write_outlives_thirty_server_errors_and_lands() {
     );
 }
 
+/// A port nothing listens on: bind, drop, and confirm a connect is refused (the port may have been taken
+/// again by a parallel test between the drop and the check).
+fn closed_port() -> u16 {
+    loop {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        if let Err(e) = std::net::TcpStream::connect(("127.0.0.1", port))
+            && e.kind() == std::io::ErrorKind::ConnectionRefused
+        {
+            return port;
+        }
+    }
+}
+
 /// The same with nothing listening: 30 connection errors, then the network comes back.
 ///
 /// The server the save lands on is started only after the outage, as in the scenario. A
@@ -705,10 +721,7 @@ async fn a_finder_write_outlives_thirty_connection_errors_and_lands() {
     let sync_root = dir.path().join("sync-root");
     std::fs::create_dir_all(&sync_root).unwrap();
     // An API whose address nothing listens on.
-    let closed = {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        format!("http://{}", listener.local_addr().unwrap())
-    };
+    let closed = format!("http://127.0.0.1:{}", closed_port());
     let offline = test_bridge_with_api(&dir.path().join("state.db"), closed, master_key);
     seed_uploaded_db_row(&offline, "c66134ff-51c8-549b-96fd-32d350309854");
     fp_save(
@@ -738,7 +751,7 @@ async fn a_finder_write_outlives_thirty_connection_errors_and_lands() {
     let server = VersionedServerMock::start();
     server.seed_file("c66134ff-51c8-549b-96fd-32d350309854", 1);
     let bridge = EngineBridge::new(
-        &crate::identity::REAL,
+        &crate::identity::TEST,
         offline.db.clone(),
         Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key)),
     );

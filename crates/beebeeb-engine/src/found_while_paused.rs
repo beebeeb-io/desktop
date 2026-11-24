@@ -1,4 +1,4 @@
-//! Task 2267 (fix round 2): what the person decides about the changes Beebeeb found while sync was paused. The
+//! Task 2267: what the person decides about the changes Beebeeb found while sync was paused. The
 //! ownership proof (`own_data_proof.rs`) holds every queued change it cannot tie to the account's proven data as
 //! `found_while_paused`; Settings › Sync shows them in one entry with two actions, and neither deletes anything:
 //!
@@ -452,7 +452,7 @@ thread_local! {
 }
 
 /// Run `hook` at the next keep on this thread, right before it forgets an item's rows and changes.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn before_forget_for_test(hook: impl FnOnce() + 'static) {
     BEFORE_FORGET.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }

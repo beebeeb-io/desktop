@@ -245,7 +245,7 @@ impl StateDb {
         // Task 1697: capture each removed row's parent BEFORE its delete —
         // the change log must tell the replica's materialized filter where
         // each deleted item lived. (parent_id read per row inside the tx.)
-        let old_parent_of = |tx: &rusqlite::Transaction, file_id: &str| -> Option<String> {
+        let old_parent_of = |tx: &Connection, file_id: &str| -> Option<String> {
             tx.query_row(
                 "SELECT parent_id FROM files WHERE file_id = ?1",
                 params![file_id],
@@ -259,7 +259,7 @@ impl StateDb {
         // Slice 58: a removed row must not be named by a queued operation any more. The
         // reconcile path enforces the same invariant (nothing names a dropped row); a
         // terminal-failed op would otherwise keep the row in `waiting_rows` forever.
-        let drop_ops = |tx: &rusqlite::Transaction, file_id: &str| -> rusqlite::Result<()> {
+        let drop_ops = |tx: &Connection, file_id: &str| -> rusqlite::Result<()> {
             tx.execute(
                 "DELETE FROM upload_resume WHERE op_id IN (SELECT op_id FROM operation_queue WHERE file_id = ?1)",
                 params![file_id],
@@ -279,12 +279,30 @@ impl StateDb {
             let root_path = root.path.trim_matches('/').to_string();
             if !root_path.is_empty() {
                 let descendants: Vec<PrunedRow> = {
+                    // Backlog 1898: descendants are found by walking `parent_id` from the
+                    // root's id, never by path alone. After a rename/move race a LIVE folder
+                    // elsewhere can carry the same path ("Work"); a path-prefix sweep would
+                    // delete its files too. A row with no `parent_id` (older rows) still
+                    // falls back to the path prefix, but only while no other folder row
+                    // holds the root's path: with two, a parentless row cannot be placed.
                     let mut dstmt = tx.prepare(
-                        "SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files
-                         WHERE substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
+                        "WITH RECURSIVE sub(file_id) AS (
+                             SELECT file_id FROM files WHERE parent_id = ?2
+                             UNION
+                             SELECT f.file_id FROM files f JOIN sub ON f.parent_id = sub.file_id
+                         )
+                         SELECT file_id, path, item_kind, local_hash, CASE WHEN fetched_min_version > 0 THEN fetched_hash END FROM files
+                         WHERE file_id != ?2
+                           AND (file_id IN (SELECT file_id FROM sub)
+                                OR ((parent_id IS NULL OR parent_id = '')
+                                    AND substr(ltrim(path, '/'), 1, length(?1) + 1) = ?1 || '/'
+                                    AND NOT EXISTS (
+                                        SELECT 1 FROM files o
+                                        WHERE o.file_id != ?2 AND o.item_kind = 'folder'
+                                          AND trim(o.path, '/') = ?1)))
                          ORDER BY length(path) DESC, path DESC",
                     )?;
-                    let drows = dstmt.query_map(params![root_path], |r| {
+                    let drows = dstmt.query_map(params![root_path, root.file_id], |r| {
                         Ok(PrunedRow {
                             file_id: r.get(0)?,
                             path: r.get(1)?,
@@ -801,5 +819,111 @@ impl StateDb {
         rehome_orphaned_writes_conn(&tx)?;
         tx.commit()?;
         Ok(pruned)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed(db: &StateDb, file_id: &str, path: &str, parent: Option<&str>, is_dir: bool) {
+        db.upsert_file(&FileEntry {
+            file_id: file_id.into(),
+            path: path.into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: 1,
+            modified_at: 0,
+            content_hash: None,
+            remote_updated_at: 0,
+            parent_id: parent.map(str::to_string),
+            item_kind: if is_dir { ItemKind::Folder } else { ItemKind::File },
+        })
+        .unwrap();
+        db.set_file_contract_state(&FileContractState {
+            file_id: file_id.into(),
+            namespace: Namespace::MyFiles,
+            parent_id: parent.map(str::to_string),
+            shared_root_id: None,
+            share_id: None,
+            owner_email: None,
+            permission_bits: 0,
+            item_kind: if is_dir { ItemKind::Folder } else { ItemKind::File },
+            content_type: None,
+            current_version: 0,
+            current_object_version_id: None,
+            local_base_version: 0,
+            local_hash: None,
+            cache_path: None,
+            cache_bytes: 0,
+            pin_state: PinState::Inherit,
+            inherited_pin_state: PinState::Inherit,
+            last_sync_at: 0,
+        })
+        .unwrap();
+    }
+
+    fn ids(rows: &[PrunedRow]) -> HashSet<String> {
+        rows.iter().map(|r| r.file_id.clone()).collect()
+    }
+
+    /// Backlog 1898: purging a stale "Work" leaves a live "Work" (same path, other id) whole.
+    #[test]
+    fn removals_folder_purge_keeps_a_same_name_live_folders_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed(&db, "old-work", "Work", None, true);
+        seed(&db, "old-a", "Work/a.txt", Some("old-work"), false);
+        seed(&db, "old-sub", "Work/sub", Some("old-work"), true);
+        seed(&db, "old-b", "Work/sub/b.txt", Some("old-sub"), false);
+        seed(&db, "live-work", "Work", None, true);
+        seed(&db, "live-c", "Work/c.txt", Some("live-work"), false);
+        seed(&db, "live-d", "Work/sub/d.txt", Some("live-work"), false);
+        // A parentless row cannot be placed while two folders hold "Work": it stays.
+        seed(&db, "orphan", "Work/e.txt", None, false);
+
+        let removed = db.delete_file_subtree("old-work").unwrap();
+        assert_eq!(
+            ids(&removed),
+            ["old-work", "old-a", "old-sub", "old-b"].iter().map(|s| s.to_string()).collect()
+        );
+        let pos = |id: &str| removed.iter().position(|r| r.file_id == id).unwrap();
+        assert!(pos("old-b") < pos("old-sub") && pos("old-sub") < pos("old-work"));
+        for live in ["live-work", "live-c", "live-d", "orphan"] {
+            assert!(db.get_file(live).unwrap().is_some(), "{live} must stay");
+        }
+    }
+
+    /// Backlog 1898: "Work 2" (and "Work 2/…") is a sibling, not a child of "Work".
+    #[test]
+    fn removals_folder_purge_keeps_a_prefix_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed(&db, "work", "Work", None, true);
+        seed(&db, "a", "Work/a.txt", Some("work"), false);
+        seed(&db, "work2", "Work 2", None, true);
+        seed(&db, "b", "Work 2/b.txt", Some("work2"), false);
+        seed(&db, "work2-legacy", "Work 2/c.txt", None, false);
+        seed(&db, "workfile", "Workbook.xlsx", None, false);
+
+        let removed = db.delete_file_subtree("work").unwrap();
+        assert_eq!(ids(&removed), ["work", "a"].iter().map(|s| s.to_string()).collect());
+        for kept in ["work2", "b", "work2-legacy", "workfile"] {
+            assert!(db.get_file(kept).unwrap().is_some(), "{kept} must stay");
+        }
+    }
+
+    /// A child moved out of the folder (new parent, path not yet updated) is not purged with it.
+    #[test]
+    fn removals_folder_purge_follows_parent_not_stale_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed(&db, "work", "Work", None, true);
+        seed(&db, "other", "Other", None, true);
+        seed(&db, "moved", "Work/moved.txt", Some("other"), false);
+        seed(&db, "inside", "Elsewhere/x.txt", Some("work"), false);
+
+        let removed = db.delete_file_subtree("work").unwrap();
+        assert_eq!(ids(&removed), ["work", "inside"].iter().map(|s| s.to_string()).collect());
+        assert!(db.get_file("moved").unwrap().is_some());
     }
 }

@@ -12,12 +12,14 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
 use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use crate::test_api::{FakeApi, Request};
+
+type Hold = Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>;
 
 const WAIT: Duration = Duration::from_secs(30);
 const FILE: &str = "a0000000-0000-4000-8000-000000000701";
@@ -33,7 +35,7 @@ struct Rig {
     session: SessionGeneration,
     state_path: PathBuf,
     /// The next `GET .../versions` says on the first that it reached the fake, then waits on the second.
-    hold: Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>,
+    hold: Hold,
     _dir: tempfile::TempDir,
 }
 
@@ -87,7 +89,7 @@ fn rig() -> Rig {
     account.add_version(FILE, "ver-a", "2026-11-01T10:00:00Z", 11);
     account.add_version(FILE, "ver-c", "2026-11-03T10:00:00Z", 13);
     account.add_version(FILE, "ver-b", "2026-11-02T10:00:00Z", 12);
-    let hold: Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>> = Arc::default();
+    let hold: Hold = Arc::default();
     let (handler, held) = (account_handler(account.clone()), hold.clone());
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         if req.route().starts_with("GET ") && req.route().ends_with("/versions") {
@@ -106,7 +108,7 @@ fn rig() -> Rig {
         state_dir,
         api_base: fake.base.clone(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     let dir = tempfile::tempdir().unwrap();
     let state_path = dir.path().join("state.db");
     let db = StateDb::open(&state_path).unwrap();

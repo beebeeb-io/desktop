@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use super::*;
 use crate::engine_host::open::{self, Opened};
-use crate::frames::tray::source::{BoardFixture, Changes, FRAMES, Hidden, Status, What};
+use crate::frames::tray::source::{BoardFixture, Action, Changes, FRAMES, Hidden, Status, What};
 use crate::shell::actions::EngineActions;
 use crate::shell::tray::tray_model;
 
@@ -84,6 +84,16 @@ fn error(code: &'static str) -> HostMessage {
     report(status)
 }
 
+/// The engine's `paused` while it holds sync on a metered connection (`power::PausedFor::Metered`).
+fn metered() -> HostMessage {
+    let mut status = plain_status("paused", None, None);
+    status.reason = Some(Reason {
+        code: beebeeb_engine::power::PausedFor::Metered.code(),
+        detail: None,
+    });
+    report(status)
+}
+
 fn pause(state: PauseState) -> HostMessage {
     HostMessage::Event(EngineEvent::PauseChanged(PauseChanged { state }))
 }
@@ -140,6 +150,8 @@ fn each_report_of_the_engine_moves_the_view_the_flyout_and_the_b_read() {
             Report::Quiet,
             EngineState::Checking,
         ),
+        // 090b: the engine's own hold on a metered connection (the flyout offers Sync anyway).
+        (metered(), "paused", Report::Metered, EngineState::Checking),
         (pause(PauseState::Idle), "", Report::Unknown, EngineState::Checking),
         (plain("offline"), "offline", Report::Offline, EngineState::Offline),
         (error("timeout"), "error", Report::ServerError, EngineState::Offline),
@@ -226,6 +238,7 @@ fn texts(snapshot: &Snapshot) -> Vec<String> {
     match &snapshot.changes {
         Changes::Hidden(why) => out.extend([why.title().to_string(), why.sentence(name)]),
         Changes::Empty { text } => out.push(text.clone()),
+        Changes::Loading | Changes::Failed => {}
         Changes::Rows { rows, .. } => {
             for row in rows {
                 out.push(row.name.clone());
@@ -558,7 +571,7 @@ fn a_real_account_from_signed_out_to_locked_shows_what_the_engine_knows() {
     let locked = tray.snapshot();
     assert_eq!(
         (&locked.status, &locked.changes, locked.button),
-        (&Status::LockedSyncOff, &Changes::Hidden(Hidden::Locked), None)
+        (&Status::LockedSyncOff, &Changes::Hidden(Hidden::Locked), Some((Action::Unlock, true)))
     );
     let facts = tray.facts();
     assert!(

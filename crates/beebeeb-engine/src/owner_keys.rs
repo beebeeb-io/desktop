@@ -27,12 +27,72 @@ struct Custody {
     /// record or a purpose-bound registration sets it (L7c/L7d).
     remember: bool,
 }
+/// dc-163: records a prepare pass writes per commit. One commit is a short insert loop (no other
+/// work runs under the lock), so it can be larger than the ingest's row batch.
+const RECORDS_PER_COMMIT: usize = 5_000;
+
+/// dc-163: the records a prepare pass has decided but not yet written. They are written
+/// [`RECORDS_PER_COMMIT`] at a time in one transaction (the first pull wrote one commit per row),
+/// and always before anything that reads another row's record or posts a wrap. A pass that fails
+/// or dies before a write loses only records the next pass derives again.
+struct PendingRecords {
+    rows: Vec<OwnedKeyRecord>,
+    index: HashMap<String, usize>,
+    revision: u64,
+}
+
+impl PendingRecords {
+    fn new(db: &StateDb) -> Self {
+        Self {
+            rows: Vec::new(),
+            index: HashMap::new(),
+            revision: db.account_revision(),
+        }
+    }
+
+    /// The record of `id`: the one decided in this pass, else the stored one.
+    fn get(&self, db: &StateDb, id: &str) -> anyhow::Result<Option<OwnedKeyRecord>> {
+        match self.index.get(id) {
+            Some(&at) => Ok(Some(self.rows[at].clone())),
+            None => Ok(db.get_owned_key_record(id)?),
+        }
+    }
+
+    fn put(&mut self, scope: &AccountScope<'_>, record: &OwnedKeyRecord) -> anyhow::Result<()> {
+        scope.check()?;
+        match self.index.get(&record.file_id) {
+            Some(&at) => self.rows[at] = record.clone(),
+            None => {
+                self.index.insert(record.file_id.clone(), self.rows.len());
+                self.rows.push(record.clone());
+            }
+        }
+        if self.rows.len() >= RECORDS_PER_COMMIT {
+            self.flush(scope)?;
+        }
+        Ok(())
+    }
+
+    /// Writes every pending record in one transaction, only while the account is still the
+    /// pass's (the revision is checked under the database lock, as `AccountScope::put` does).
+    fn flush(&mut self, scope: &AccountScope<'_>) -> anyhow::Result<()> {
+        if self.rows.is_empty() {
+            return Ok(());
+        }
+        scope.check()?;
+        scope.db.put_owned_key_records_at_revision(&self.rows, self.revision)?;
+        self.rows.clear();
+        self.index.clear();
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct Batch {
     rows: HashMap<String, Value>,
     custody: HashMap<String, Option<Custody>>,
     /// Typed per-folder failures, so a batch asks once per folder whether its
-    /// custody is usable instead of once per row (review P3-4).
+    /// custody is usable instead of once per row.
     failures: HashMap<String, SharedFolderKeyError>,
     inventory: HashMap<String, HashMap<String, Value>>,
     invites: Option<Vec<Value>>,
@@ -76,7 +136,7 @@ pub enum SharedFolderKeyError {
     /// There is no custody key here: either the invite copy was only proven as
     /// a legacy key (read-only for one batch, L11), or the deployment's
     /// shared-folders feature gate answered that custody is unavailable
-    /// (review P2-1/P2-2). Never a reason to write a key.
+    ///. Never a reason to write a key.
     NoCustody,
     /// This device has seen custody for the folder, and the server now answers
     /// that it is absent (L7c, task 2279 R2). Refuses this row only: the
@@ -106,7 +166,7 @@ pub fn shared_folder_key_unavailable(error: &anyhow::Error) -> bool {
     error.downcast_ref::<SharedFolderKeyError>().is_some()
 }
 
-/// Open only the purpose-bound owner-copy format (task 2255 / review P2-1).
+/// Open only the purpose-bound owner-copy format.
 /// The wire frame is `nonce(12) || ciphertext(48)`.
 fn invite_owner_copy(master: &MasterKey, id: &str, frame: &[u8]) -> Option<FileKey> {
     if frame.len() != 60 {
@@ -388,7 +448,7 @@ impl Batch {
                 .unwrap_or_default()
                 .cmp(a["created_at"].as_str().unwrap_or_default())
         });
-        // Review P3-6: every approved purpose-bound copy is tried before any
+        // every approved purpose-bound copy is tried before any
         // legacy copy. A newer legacy invite must not beat an older
         // purpose-bound one.
         for invite in &approved {
@@ -406,7 +466,7 @@ impl Batch {
             let Some(invite_id) = invite["id"].as_str() else {
                 continue;
             };
-            // Review P3-5 / 2276 P3-A: one invite's rows can be gone (a race
+            // one invite's rows can be gone (a race
             // made it unapproved between the two reads). Only the server's
             // own "gone / not approved" answers skip it; a 401, another client
             // error, a 5xx or a transport failure is the batch's failure.
@@ -474,7 +534,7 @@ impl Batch {
             Err(error) if crate::api_client::upgrade_required(&error) => {
                 return Err(anyhow::Error::new(SharedFolderKeyError::UpgradeRequired));
             }
-            // Review P2-2: with the feature gate off, web main still writes
+            // with the feature gate off, web main still writes
             // purpose-bound owner copies but this deployment cannot hold
             // custody. That is a typed "no custody here", swallowed for the
             // row like `UpgradeRequired`; never a legacy write or a retry.
@@ -566,11 +626,8 @@ impl Batch {
 
 /// Constant-time key comparison: the position of a difference must not leak.
 fn same_key(left: &FileKey, right: &FileKey) -> bool {
-    let mut diff = 0u8;
-    for (a, b) in left.as_bytes().iter().zip(right.as_bytes()) {
-        diff |= a ^ b;
-    }
-    std::hint::black_box(diff) == 0
+    use subtle::ConstantTimeEq;
+    left.as_bytes().ct_eq(right.as_bytes()).into()
 }
 
 async fn verify_winner(
@@ -701,12 +758,13 @@ impl crate::engine_bridge::EngineBridge {
             }
         }
         let mut prepared = Vec::with_capacity(rows.len());
+        let mut pending = PendingRecords::new(self.db());
         for input in rows {
             scope.check()?;
             let Some(id) = input["id"].as_str().filter(|s| !s.is_empty()) else {
                 continue;
             };
-            let old = self.db().get_owned_key_record(id)?;
+            let old = pending.get(self.db(), id)?;
             let mut row = input.clone();
             let mut record = old.clone().unwrap_or_else(|| OwnedKeyRecord {
                 file_id: id.to_string(),
@@ -770,6 +828,7 @@ impl crate::engine_bridge::EngineBridge {
                 .resolve_envelope(&master, &row, &mut requests, &mut record, id)
                 .await;
             let Ok(outcome) = outcome else {
+                pending.flush(&scope)?;
                 block_malformed_row(&scope, old.as_ref(), &mut record)?;
                 prepared.push(PreparedOwnedRow {
                     row,
@@ -793,10 +852,12 @@ impl crate::engine_bridge::EngineBridge {
                 && class.is_some()
                 && (derived_readable || (text.is_none() && !sparse));
             if candidate.is_none() && !ordinary_legacy && !malformed && is_foreign {
+                // The shared root and its wraps are read from the stored records.
+                pending.flush(&scope)?;
                 match batch.shared_root(&scope, &row, record.shared_root_id.as_deref()).await {
                     Ok(Some(root)) => {
                         record.shared_root_id = Some(root.clone());
-                        // Review P2-1: a legacy-proven key (`remember == false`)
+                        // a legacy-proven key (`remember == false`)
                         // is not custody — the server may have chosen it
                         // (core Attack B). It never resolves an L7 child wrap
                         // and never pins an L8 envelope; in the honest case a
@@ -840,11 +901,9 @@ impl crate::engine_bridge::EngineBridge {
             if let Some((key, _)) = candidate.as_ref()
                 && record.foreign_added
                 && record.owner_wrap.is_none()
-            {
-                if record.pending_owner_wrap.is_none() {
+                && record.pending_owner_wrap.is_none() {
                     record.pending_owner_wrap = Some(keys::wrap_owner_file_key(&master, id, key)?);
                 }
-            }
             let tree_or_content_changed = self.db().get_file_contract_state(id)?.is_some_and(|previous| {
                 previous.parent_id.as_deref() != row["parent_id"].as_str()
                     || row["version_number"]
@@ -866,10 +925,12 @@ impl crate::engine_bridge::EngineBridge {
             if !readable {
                 record.blocked_fingerprint = Some(record.fingerprint());
             }
-            scope.put(&record)?;
+            pending.put(&scope, &record)?;
             if let Some((key, _)) = candidate.as_ref()
                 && record.pending_owner_wrap.is_some()
             {
+                // A24: the minted wrap is stored before it is posted.
+                pending.flush(&scope)?;
                 // A24: read the winner first; a second wrap is blocked, never re-posted.
                 if let Err(_error) = adopt(&scope, &mut record, key, true).await {
                     scope.check()?;
@@ -880,6 +941,7 @@ impl crate::engine_bridge::EngineBridge {
             }
             prepared.push(PreparedOwnedRow { row, record, readable });
         }
+        pending.flush(&scope)?;
         scope.check()?;
         Ok(prepared)
     }
@@ -918,7 +980,7 @@ impl crate::engine_bridge::EngineBridge {
         {
             return Ok(found);
         }
-        let mut keys = RequestKeys::load(&self.api()).await;
+        let mut keys = RequestKeys::load(self.api()).await;
         let found = keys.row_keys(&master, row);
         *self
             .request_keys
@@ -948,11 +1010,10 @@ impl crate::engine_bridge::EngineBridge {
             if record.pending_owner_wrap.is_none() || record.blocked_fingerprint.is_some() {
                 continue;
             }
-            if let Ok((key, _)) = record_key(&master, &record, kind_in_db(self.db(), &record.file_id)) {
-                if adopt(&scope, &mut record, &key, true).await.unwrap_or(false) {
+            if let Ok((key, _)) = record_key(&master, &record, kind_in_db(self.db(), &record.file_id))
+                && adopt(&scope, &mut record, &key, true).await.unwrap_or(false) {
                     confirmed += 1;
                 }
-            }
         }
         scope.check()?;
         Ok(confirmed)
@@ -967,7 +1028,7 @@ impl crate::engine_bridge::EngineBridge {
             .remove(id)
             .flatten()
             .ok_or_else(|| anyhow::Error::new(SharedFolderKeyError::NoCustody))?;
-        // Review P2-1: a legacy-proven key is readable for one batch only. It
+        // a legacy-proven key is readable for one batch only. It
         // is not custody, so the shared-index repair must never seal names
         // under it.
         if !custody.remember {

@@ -3,6 +3,7 @@
 //! | Piece | Function | Keys it gives |
 //! | --- | --- | --- |
 //! | List | `list(index, title, rows, foot, t)` | `list-<L>-title`, `list-<L>-body`, `list-<L>-foot` |
+//! | List of controls, one Tab stop | `roving_list(index, title, rows, foot, t)` | as `list` |
 //! | Row | `item(list, index, &Item, t)` | `item-<L>-<I>`, `-icon`, `-title`, `-sub`, and per trailing piece below |
 //! | Value | `Trailing::Value` / `Mono` | `item-<L>-<I>-value` |
 //! | Chevron (opens a pane) | `Trailing::Chevron` | `item-<L>-<I>-chev` |
@@ -18,11 +19,18 @@
 //! switch, a button) is the thing that takes focus. A row with a pop-up button is ONE control,
 //! `Role::PopUp`: the row takes the press and the focus, and the pop-up button inside it is
 //! its picture (never a second Tab stop).
+//!
+//! Which list: when every row IS the control (`Role::Link`, `Role::Radio`, `Role::PopUp`, an
+//! account row built with `link` or `selected`), the rows go in a [`roving_list`]: one Tab stop,
+//! the arrows, Home, End, Page Up and Page Down move between the rows and typing picks a row by
+//! its first letters. A row that holds its own switch or buttons goes in a plain [`list`], every
+//! control in it its own Tab stop. Both number their rows ("3 of 7", over that one list: the set
+//! a screen reader announces is the role list, not the pane).
 
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, radius, type_};
 use rune::tok::Family;
-use rune::{El, Icon, TextStyle, col, el, row};
+use rune::{El, Icon, Key, KeyEvent, TextStyle, Tx, col, el, row};
 
 use super::kit;
 use super::settings_shell::SUB;
@@ -161,34 +169,6 @@ pub fn pop_button(key: &str, choice: &str, t: &Theme) -> El {
         ))
 }
 
-/// A switch at a row's trailing edge: ink when on (never Amber: a switch is not the primary
-/// action), the knob in the paper colour when on and white when off, as the board draws it.
-/// (`detail_pane::switch` draws the knob white in both states.) Keys: `<key>-switch`, `<key>-knob`.
-pub fn switch(key: &str, name: &str, on: bool, t: &Theme) -> El {
-    row()
-        .key(format!("{key}-switch"))
-        .role("switch")
-        .label(name)
-        .checked(on)
-        .size(36.0, 20.0)
-        .radius(10.0)
-        .fill(if on { t.text } else { t.paper3 })
-        .border(1.0, if on { t.text } else { t.separator_strong })
-        .border_layout()
-        .center_y()
-        .focusable(true)
-        .child(
-            el().key(format!("{key}-knob"))
-                .size(14.0, 14.0)
-                .radius(7.0)
-                .fill(if on { t.paper } else { t.white })
-                // `shadow-1`: the light theme's ink in both themes.
-                .box_shadow(kit::drop(1.0, 3.0, rune::oklch(0.18, 0.01, 70.0).alpha(0.04)))
-                .box_shadow(kit::drop(1.0, 2.0, rune::oklch(0.18, 0.01, 70.0).alpha(0.06)))
-                .ml(if on { 18.0 } else { 2.0 }),
-        )
-}
-
 /// One row (`.kit-item`). Keys: `item-<L>-<I>` and the pieces named in the module's table.
 /// The row's own press is the caller's (`.on_press`), for `Role::Link` and `Role::Button`.
 pub fn item(list: usize, index: usize, it: &Item, t: &Theme) -> El {
@@ -217,6 +197,7 @@ pub fn item_with(list: usize, index: usize, it: &Item, extra: Vec<El>, t: &Theme
             .role("radio")
             .label(it.name())
             .checked(chosen)
+            .focus_selected(chosen)
             .hover(t.hover)
             .press(t.press)
             .focusable(true),
@@ -284,9 +265,21 @@ pub fn item_with(list: usize, index: usize, it: &Item, extra: Vec<El>, t: &Theme
     r
 }
 
-/// A list (`.kit-list`): the heading, the card with its rows, the foot note.
-/// Keys: `list-<L>-title`, `list-<L>-body`, `list-<L>-foot`.
+/// A list (`.kit-list`): the heading, the card with its rows, the foot note. Each row is told
+/// its place in this list (`position_in_set`). Keys: `list-<L>-title`, `list-<L>-body`,
+/// `list-<L>-foot`.
 pub fn list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>, t: &Theme) -> El {
+    build(index, title, rows, foot, false, t)
+}
+
+/// [`list`] whose rows are each the control: one Tab stop (the selected row, else the first),
+/// Up, Down, Home, End, Page Up and Page Down rove between the rows, and typing picks the row
+/// whose name starts with what was typed.
+pub fn roving_list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>, t: &Theme) -> El {
+    build(index, title, rows, foot, true, t)
+}
+
+fn build(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>, roving: bool, t: &Theme) -> El {
     let mut l = col().key(format!("list-{index}")).role("group").gap(6.0);
     if let Some(title) = title {
         l = l
@@ -303,19 +296,32 @@ pub fn list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>
         .key(format!("list-{index}-rows"))
         .w_full()
         .clip_rounded(radius::LG);
-    for r in rows {
-        rows_box = rows_box.child(r);
+    let size = rows.len();
+    for (i, r) in rows.into_iter().enumerate() {
+        rows_box = rows_box.child(r.position_in_set(i + 1, size));
     }
-    l = l.child(
-        col()
-            .key(format!("list-{index}-body"))
-            .role("list")
-            .w_full()
-            .radius(radius::LG)
-            .fill(t.card)
-            .box_shadow(kit::ring(kit::HAIR, t.separator))
-            .child(rows_box),
-    );
+    let mut body = col()
+        .key(format!("list-{index}-body"))
+        .role("list")
+        .w_full()
+        .radius(radius::LG)
+        .fill(t.card)
+        .box_shadow(kit::ring(kit::HAIR, t.separator));
+    if roving {
+        // Rune roves a `list` on the arrows, Home and End and type-selects in it; a settings
+        // list is never longer than its pane, so a page is the whole list: Page Up and Page
+        // Down go to its ends.
+        body = body.focus_group().on_key(|_: &mut crate::State, ev: &KeyEvent, tx: &mut Tx| {
+            let to = match ev.key {
+                Key::PageUp => Key::Home,
+                Key::PageDown => Key::End,
+                _ => return false,
+            };
+            tx.send_key(KeyEvent { key: to, mods: ev.mods });
+            true
+        });
+    }
+    l = l.child(body.child(rows_box));
     if let Some(foot) = foot {
         l = l.child(
             col()
@@ -362,3 +368,7 @@ pub fn item_danger(list: usize, index: usize, icon: &'static Icon, title: &str, 
                 .truncate(),
         )
 }
+
+#[cfg(test)]
+#[path = "settings_list_tests.rs"]
+mod tests;

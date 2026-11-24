@@ -18,6 +18,12 @@ impl Drop for ReopenOnDrop<'_> {
         self.0.finish_close();
     }
 }
+impl Default for AuthAttempts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuthAttempts {
     pub fn new() -> Self {
         Self {

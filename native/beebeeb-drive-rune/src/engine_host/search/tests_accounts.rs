@@ -1,4 +1,4 @@
-//! Task 2488 for Search (slice A8), on the REAL engine handle: credential stores in memory and the engine's fake API on
+//! Task 2488 for Search, on the REAL engine handle: credential stores in memory and the engine's fake API on
 //! loopback, with two invented accounts. The local state is a database of this test's own
 //! (`Engine::use_local_state_for_test`), written with the engine's writers and recorded as the first account's. The
 //! first account finds its own name and keeps its search; it signs out keeping the local data; the second account,
@@ -103,7 +103,7 @@ fn found(source: &mut Source, query: &str) -> Option<Vec<String>> {
     source.ask(query, Narrow::All);
     settle(source);
     match source.search(query, Narrow::All) {
-        Answer::Found { hits, .. } => Some(hits.into_iter().map(|hit| hit.id).collect()),
+        Answer::Found { hits, .. } => Some(hits.iter().map(|hit| hit.id.clone()).collect()),
         Answer::Searching => panic!("the query was not answered"),
         // Not available, and why (row S8): no result list either way.
         Answer::Unavailable | Answer::NotThisAccounts => None,

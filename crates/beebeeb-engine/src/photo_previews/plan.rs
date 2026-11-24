@@ -155,6 +155,15 @@ pub fn plan<'a>(
         .collect()
 }
 
+/// Whether the entry at `photo`'s place under `sync_root` is its own row's (`drive_v2::case_place`): not when another
+/// server item has its name, or its name but for letter case on a volume that compares names without case, and the
+/// entry is that item's. Asked right before the original is read: the other item's bytes are never made into this
+/// photo's preview. A place that cannot be told is not its own.
+pub fn own_place(db: &StateDb, sync_root: &Path, photo: &LocalPhoto) -> bool {
+    crate::drive_v2::case_place::PlaceCheck::new(db, sync_root, crate::drive_v2::case_place::CaseRule::host())
+        .is_own_place(&photo.id)
+}
+
 /// The original of `photo` under `sync_root`, when every byte of it is on this PC now and its size is the one the
 /// local state records: asked from the attributes and the size only, so nothing is fetched. `None`: skip it, never
 /// open it.

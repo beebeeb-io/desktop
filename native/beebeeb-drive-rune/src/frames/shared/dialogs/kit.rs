@@ -26,18 +26,19 @@ use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::settings_dialog::{DIALOG_TITLE, scrim_color};
 use crate::ui::settings_list::{FOOT, LIST_TITLE};
+use crate::ui::dialog::{Dialog, Foot as DFoot, Head, dialog};
 use crate::ui::{field as ui_field, kit};
 use rune::tok::Family;
 use rune::{Color, El, Icon, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 
 /// `.kit-field-outer`: a field's label above it.
-pub const FIELD_LABEL: TextStyle = TextStyle::new(11.0, 500.0).lh(15.0);
+pub const FIELD_LABEL: TextStyle = crate::theme::scale::text::CAPTION_LOOSE;
 /// `.kit-field-value`, `.kit-field-ph`: what is typed, and the placeholder.
-pub const FIELD_VALUE: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+pub const FIELD_VALUE: TextStyle = crate::theme::scale::text::READ;
 /// `.t-body`: a dialog's sentence that says what will happen.
-pub const BODY: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+pub const BODY: TextStyle = crate::theme::scale::text::READ;
 /// `.kit-seg-md span`: a tab of the wide switch.
-pub const SEG_MD: TextStyle = TextStyle::new(12.5, 550.0).lh(17.0);
+pub const SEG_MD: TextStyle = crate::theme::scale::text::FIELD_STRONG;
 /// `.kit-banner-text`.
 pub const NOTE: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
 
@@ -84,39 +85,15 @@ pub fn layer(
 /// The card (`.wn-dlg`), as `ui::dialog::card` draws it, with a head of the caller's: a back
 /// button beside the title (DW-0512), or none (DW-0513b opens on its own heading).
 pub fn card(name: &str, width: f32, head: Option<El>, body: Vec<El>, foot: El, t: &Theme) -> El {
-    let mut b = col().key("dlg-body").pt(10.0).px(24.0).pb(18.0).gap(12.0).min_h(0.0);
-    for child in body {
-        b = b.child(child);
-    }
-    let foot = foot_band(foot, "dlg-foot", t);
-    let mut clip = col().key("dlg-clip").w_full().clip_rounded(crate::ui::dialog::RADIUS);
-    if let Some(head) = head {
-        clip = clip.child(col().key("dlg-head").pt(20.0).px(24.0).pb(4.0).gap(3.0).child(head));
-    }
-    shadowed(col().key("dlg").role("dialog").label(name), width, t).child(clip.child(b).child(foot))
-}
-
-/// The card's surface: its corner, fill, shadow and hairline ring. The foot's hairline makes a
-/// dialog's height end in a half point, so centring puts its top on a quarter point; the board
-/// draws it there, edges half covered, and so does this (`pixel_snap(false)`).
-fn shadowed(card: El, width: f32, t: &Theme) -> El {
-    card.pixel_snap(false)
-        .w(width)
-        .radius(crate::ui::dialog::RADIUS)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-}
-
-/// The band of buttons at a card's bottom (`.wn-dlg-foot`).
-fn foot_band(foot: El, key: &str, t: &Theme) -> El {
-    foot.key(key.to_string())
-        .gap(8.0)
-        .py(16.0)
-        .px(24.0)
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
+    dialog(
+        Dialog {
+            head: head.map(Head::Custom).unwrap_or(Head::None),
+            body,
+            foot: DFoot::Custom(foot),
+            ..Dialog::new("dlg", name, width)
+        },
+        t,
+    )
 }
 
 /// The standard head: the title and the line under it (`.t-title`, `.t-sub`).
@@ -152,43 +129,17 @@ pub fn alert(
     dismiss: fn(&mut State, &mut Tx),
     t: &Theme,
 ) -> El {
-    let words = col()
-        .key("alert-words")
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(6.0)
-        .child(
-            kit::label("alert-title", title, DIALOG_TITLE, t.text)
-                .role("heading")
-                .level(2)
-                .w_full(),
-        )
-        .child(kit::label("alert-sub", sub, style::SUB, t.text_tertiary).wrap());
-    let head = row()
-        .key("alert-head")
-        .pt(20.0)
-        .px(24.0)
-        .pb(16.0)
-        .gap(14.0)
-        .items_start()
-        .child(tile)
-        .child(words);
-    let inner = width - 48.0;
-    let band = match foot {
-        Foot::Even(buttons) => {
-            let n = buttons.len().max(1) as f32;
-            let each = (inner - 8.0 * (n - 1.0)) / n;
-            row().center_y().children(buttons.into_iter().map(|b| b.w(each)))
-        }
-        Foot::Stack(buttons) => col().children(buttons.into_iter().map(|b| b.w_full())),
-    };
-    let card = shadowed(col().key("alert").role("alertdialog").label(name), width, t).child(
-        col()
-            .key("alert-clip")
-            .w_full()
-            .clip_rounded(crate::ui::dialog::RADIUS)
-            .child(head)
-            .child(foot_band(band, "alert-foot", t)),
+    let card = dialog(
+        Dialog {
+            alert: true,
+            head: Head::Alert { tile, title, sub },
+            foot: match foot {
+                Foot::Even(buttons) => DFoot::Even(buttons),
+                Foot::Stack(buttons) => DFoot::Stack(buttons),
+            },
+            ..Dialog::new("alert", name, width)
+        },
+        t,
     );
     el().key(format!("alert-{}", slug(name)))
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
@@ -299,8 +250,8 @@ pub fn field(
         .key(key.to_string())
         .w_full()
         .h(28.0)
-        .px(8.0)
-        .gap(6.0)
+        .px(crate::theme::scale::space::S8)
+        .gap(crate::theme::scale::space::S6)
         .center_y()
         .radius(radius::MD)
         .border_layout()
@@ -321,7 +272,7 @@ pub fn field(
     col()
         .key(format!("{key}-wrap"))
         .w_full()
-        .gap(6.0)
+        .gap(crate::theme::scale::space::S6)
         .child(outer_label(&format!("{key}-label"), spec.label, t))
         .child(well)
 }
@@ -348,8 +299,8 @@ pub fn seg(n: usize, name: &str, tabs: &[(&'static str, bool)], t: &Theme, each:
         .role("tablist")
         .label(name)
         .w_full()
-        .padding(2.0)
-        .radius(10.0)
+        .padding(crate::theme::scale::space::S2)
+        .radius(crate::theme::tokens::radius::LG)
         .fill(t.field)
         .box_shadow(kit::ring_inset(t.separator));
     for (i, (words, on)) in tabs.iter().enumerate() {
@@ -361,7 +312,7 @@ pub fn seg(n: usize, name: &str, tabs: &[(&'static str, bool)], t: &Theme, each:
             .checked(*on)
             .grow(1.0)
             .h(28.0)
-            .px(12.0)
+            .px(crate::theme::scale::space::S12)
             .center()
             .radius(8.0)
             .focusable(true)
@@ -394,13 +345,13 @@ pub fn list(n: usize, name: &str, title: Option<&str>, body: El, foot: Option<&s
         .role("group")
         .label(name)
         .w_full()
-        .gap(6.0);
+        .gap(crate::theme::scale::space::S6);
     if let Some(title) = title {
         l = l.child(
             kit::label(format!("list-{n}-title"), title, LIST_TITLE, t.text_tertiary)
                 .a11y_hidden()
                 .w_full()
-                .px(14.0),
+                .px(crate::theme::scale::space::S14),
         );
     }
     l = l.child(
@@ -416,7 +367,7 @@ pub fn list(n: usize, name: &str, title: Option<&str>, body: El, foot: Option<&s
         l = l.child(
             kit::label(format!("list-{n}-foot"), foot, FOOT, t.text_tertiary)
                 .w_full()
-                .px(16.0)
+                .px(crate::theme::scale::space::S16)
                 .wrap(),
         );
     }
@@ -472,8 +423,8 @@ pub fn person(n: usize, m: usize, member: &Member, link: bool, t: &Theme) -> El 
         .label(format!("{}, {line}", member.name))
         .w_full()
         .h(40.0)
-        .px(10.0)
-        .gap(8.0)
+        .px(crate::theme::scale::space::S10)
+        .gap(crate::theme::scale::space::S8)
         .center_y()
         .child(avatar(&format!("{k}-person"), &member.initials, member.hue, t))
         .child(words);
@@ -531,7 +482,7 @@ pub fn groups(g: &Groups, numbers: &[String], t: &Theme) -> El {
         .radius(12.0)
         .fill(t.field);
     for (l, line) in numbers.chunks(4).enumerate() {
-        let mut r = row().key(format!("safety-line-{l}")).a11y_hidden().gap(16.0);
+        let mut r = row().key(format!("safety-line-{l}")).a11y_hidden().gap(crate::theme::scale::space::S16);
         for (c, group) in line.iter().enumerate() {
             let i = l * 4 + c;
             r = r.child(
@@ -556,7 +507,7 @@ pub fn note(key: &str, icon: &'static Icon, words: &str, t: &Theme) -> El {
         .w_full()
         .py(11.0)
         .px(13.0)
-        .gap(10.0)
+        .gap(crate::theme::scale::space::S10)
         .items_start()
         .radius(13.0)
         .fill(t.tile)

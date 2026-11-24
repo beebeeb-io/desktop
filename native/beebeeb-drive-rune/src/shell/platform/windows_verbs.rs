@@ -1,7 +1,7 @@
 //! Slice B6 (plan40 batch 1): Beebeeb's four items in File Explorer's classic menu (DW-1183, "Show more options"):
 //! Share with Beebeeb…, Copy Beebeeb link, Show in Beebeeb, Version history… (`control::ExplorerVerb`).
 //!
-//! Three parts, one per process and moment (the lead's ruling of 2026-11-15 16:45: no URI scheme):
+//! Three parts, one per process and moment (no URI scheme):
 //!
 //! - **The menu** ([`register`]): per-user verbs under `HKCU\Software\Classes\*\shell`, one key per verb, for files
 //!   whose path starts with the sync folder's (`AppliesTo`). Each runs `"<this program>" --explorer-verb=<verb> "%1"`,
@@ -65,6 +65,8 @@ struct Waiting {
 thread_local! {
     /// The verb that waits for the cover's end, on the window's thread. One: a later verb replaces it.
     static WAITING: RefCell<Option<Waiting>> = const { RefCell::new(None) };
+    /// A verb whose folder is being read on the worker (task 050): its row is selected when the read lands.
+    static OPENING: RefCell<Option<Waiting>> = const { RefCell::new(None) };
 }
 
 fn unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -137,7 +139,7 @@ fn write_menu(identity: AppIdentity, root: &Path) -> Result<(), PlatformError> {
 }
 
 /// Takes this build's four keys away, with everything under them. A key that is not there is not an error.
-fn remove_menu(identity: AppIdentity) -> Result<(), PlatformError> {
+fn remove_menu(_identity: AppIdentity) -> Result<(), PlatformError> {
     for verb in ExplorerVerb::ALL {
         reg_delete_tree(&verb_key(crate::shell::identity::engine_identity(), verb))?;
     }
@@ -348,8 +350,9 @@ pub(crate) fn handle(s: &mut State, verb: ExplorerVerb, item: &str, tx: &mut Tx)
 /// [`handle`], with the engine lookup handed in (a test's).
 pub(crate) fn handle_with(s: &mut State, verb: ExplorerVerb, item: &str, engine: Option<&dyn ItemLookup>, tx: &mut Tx) {
     // Under the wake cover the engine has not said whether the wake locks: nothing is looked up, navigated or opened
-    // behind it. The verb waits for the cover's end (review of #463, P3-7).
-    if registry::covered(s) {
+    // behind it. The verb waits for the cover's end (review of #463, P3-7). Also a verb that comes before the main
+    // window's first poll after an unannounced wake (`host::under_the_wake_cover`; review of #464, P3-1).
+    if host::under_the_wake_cover(s) {
         let account = s.shell.app.account().map(str::to_owned);
         WAITING.set(Some(Waiting {
             verb,
@@ -373,11 +376,12 @@ pub(crate) fn handle_with(s: &mut State, verb: ExplorerVerb, item: &str, engine:
 /// unlock. `true`: it ran.
 pub(crate) fn after_the_cover(s: &mut State, tx: &mut Tx) -> bool {
     // Every poll comes here: nothing waits, nothing to read.
+    let landed = finish_open(s, tx);
     if WAITING.with_borrow(Option::is_none) {
-        return false;
+        return landed;
     }
     let engine = unpoisoned(&ENGINE).clone();
-    after_the_cover_with(s, engine.as_deref().map(|e| e as &dyn ItemLookup), tx)
+    after_the_cover_with(s, engine.as_deref().map(|e| e as &dyn ItemLookup), tx) || landed
 }
 
 /// [`after_the_cover`], with the engine lookup handed in (a test's).
@@ -429,7 +433,39 @@ fn open(s: &mut State, verb: ExplorerVerb, folder: Option<String>, item: &str, t
     crate::frames::files::reset::close_dialogs(s);
     if !shown {
         s.open_folder(folder);
+        // The running app reads the folder on the worker: the row is selected once the read lands (`finish_open`).
+        if s.folder_reads.opening() {
+            let account = s.shell.app.account().map(str::to_owned);
+            OPENING.set(Some(Waiting {
+                verb,
+                item: item.to_owned(),
+                account,
+            }));
+            return;
+        }
     }
+    select_and_run(s, verb, item, tx);
+}
+
+/// The poll after a folder opened for a verb was read: the row is selected and the verb's surface follows. A read
+/// still out waits; a window that locked, or another account, drops it; a row the read does not hold says so.
+/// `true`: the window changed.
+fn finish_open(s: &mut State, tx: &mut Tx) -> bool {
+    if OPENING.with_borrow(Option::is_none) || s.folder_reads.opening() {
+        return false;
+    }
+    let Some(waiting) = OPENING.take() else {
+        return false;
+    };
+    if !session_gate::open(s) || waiting.account.as_deref() != s.shell.app.account() {
+        host::log("a File Explorer verb that waited for its folder was not followed: the window locked, or another account");
+        return false;
+    }
+    select_and_run(s, waiting.verb, &waiting.item, tx);
+    true
+}
+
+fn select_and_run(s: &mut State, verb: ExplorerVerb, item: &str, tx: &mut Tx) {
     let Some(row) = row_of(s, item) else {
         host::log("a File Explorer verb found no row");
         return;

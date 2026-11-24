@@ -7,18 +7,20 @@
 //! Photos viewer's stage. The stage's size goes to the player in device pixels (`PlayerHandle::set_view_size`).
 //! A source that hands no player draws what a kind without a viewer draws, and nothing is downloaded.
 
-use beebeeb_media_protocol::{Codec, MEDIA_SYSTEM_DECODER_ON};
 use rune::tok::Family;
-use rune::{Align, Color, El, SurfaceFit, TextStyle, col, el, row};
+use rune::{Color, El, SurfaceFit, TextStyle, col, el, row};
 
 use super::chrome::{Dot, Status};
 use super::kinds::clock;
 use super::source::{Body, NoPreview};
-use super::{Intent, Ui, media_icons, states, style};
+use super::{Intent, Ui, media_icons, refusal_text, states, style};
 use crate::State;
+use crate::theme::scale;
 use crate::media::player::{NoSound, PlayState, PlayerHandle, Refusal};
 use crate::theme::tokens::Theme;
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::kit;
+use crate::ui::view_state::{ViewState, view_state};
 
 #[cfg(test)]
 #[path = "player_view_tests.rs"]
@@ -39,55 +41,28 @@ const SEEK_STEP_MS: u64 = 5_000;
 const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
 const TIME: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(16.0);
 
-/// The words of a refusal. `NoDecoder` names the FORMAT, never the file.
+/// The words of a refusal (the table is `refusal_text`).
 pub fn refusal_words(why: &Refusal) -> String {
-    refusal_words_with(MEDIA_SYSTEM_DECODER_ON, why)
+    refusal_text::text(why).sentence
 }
 
-/// [`refusal_words`] for a given state of `MEDIA_SYSTEM_DECODER_ON`. While the switch is off the app does not use the
-/// PC's own decoders, so a refusal that comes from their absence never tells a person to install one (the app would
-/// not use it, and the PC may have it already): it says Beebeeb can't play the format yet.
+/// [`refusal_words`] for a given state of `MEDIA_SYSTEM_DECODER_ON`.
+#[cfg(test)]
 pub fn refusal_words_with(system_decoder_on: bool, why: &Refusal) -> String {
-    match why {
-        Refusal::NoDecoder(name) => format!("This PC can't play {name} files here."),
-        Refusal::NoSystemDecoder(Codec::Hevc) if !system_decoder_on => {
-            "Beebeeb can't play HEVC video yet. Open it in another app.".into()
-        }
-        Refusal::NoSystemDecoder(codec) if !system_decoder_on => {
-            format!(
-                "Beebeeb can't play {} files yet. Open it in another app.",
-                codec_name(*codec)
-            )
-        }
-        Refusal::NoSystemDecoder(Codec::Hevc) => {
-            "This PC can't play HEVC video without Microsoft's HEVC extension.".into()
-        }
-        Refusal::NoSystemDecoder(codec) => format!("This PC can't play {} files here.", codec_name(*codec)),
-        Refusal::NoSystemMedia(codec) => format!(
-            "This PC can't play {} files: this edition of Windows has no media codecs.",
-            codec_name(*codec)
-        ),
-        Refusal::CouldNotPlay => "This file could not be played.".into(),
-        Refusal::NotSignedIn => "Sign in to play this file.".into(),
-        Refusal::NeedsWindowsUpdate => crate::windows_floor::NEEDS_WINDOWS_UPDATE.into(),
-        Refusal::NotInstalled | Refusal::NoSandbox => "Playback isn't available on this PC.".into(),
-    }
+    refusal_text::text_with(system_decoder_on, why).sentence
 }
 
 /// The line for a file whose sound this PC cannot play (decision of 2026-11-15 19:50): the video keeps playing.
 /// The name is the FORMAT's (`Codec::name`), never the file's.
 pub fn no_sound_words(why: NoSound) -> String {
-    match why {
-        NoSound::Codec(codec) => format!("Sound isn't available on this PC ({})", codec_name(codec)),
-        NoSound::Device => "Sound isn't available on this PC".into(),
-    }
+    refusal_text::no_sound(why).0
 }
 
 /// The no-sound line with "Open in another app\u{2026}" one press away (the press of [`refused`]). `prefix` keys it.
 pub fn no_sound_line(prefix: &'static str, why: NoSound, ink: Color, t: &Theme) -> El {
     row()
         .key(format!("{prefix}-no-sound"))
-        .gap(12.0)
+        .gap(scale::space::S12)
         .center_y()
         .child(kit::label(
             format!("{prefix}-no-sound-words"),
@@ -96,7 +71,7 @@ pub fn no_sound_line(prefix: &'static str, why: NoSound, ink: Color, t: &Theme) 
             ink,
         ))
         .child(
-            super::text::tool_action("no-sound-open", "Open in another app\u{2026}", None, None, t).on_press(
+            super::text::tool_action("no-sound-open", refusal_text::no_sound(why).1, None, None, t).on_press(
                 |s: &mut State| {
                     if let Some(ui) = super::ui(s) {
                         ui.intent(Intent::OpenInAnotherApp);
@@ -106,29 +81,73 @@ pub fn no_sound_line(prefix: &'static str, why: NoSound, ink: Color, t: &Theme) 
         )
 }
 
-fn codec_name(codec: Codec) -> &'static str {
-    codec.name().unwrap_or("this")
+#[cfg(test)]
+pub use super::refusal_text::{OPEN_DEFAULT, OPEN_ELSEWHERE};
+
+/// The button's words for a refusal, as shipped.
+#[cfg(test)]
+pub fn refusal_action(why: &Refusal) -> &'static str {
+    refusal_text::text(why).action
 }
 
-/// The refusal's state: the words and "Open in another app\u{2026}" one press away.
-pub fn refused(words: &str, t: &Theme) -> El {
+/// [`refusal_action`] for a given state of the switch.
+#[cfg(test)]
+pub fn refusal_action_with(system_decoder_on: bool, why: &Refusal) -> &'static str {
+    refusal_text::text_with(system_decoder_on, why).action
+}
+
+/// The state of the refusal `why`: its words ([`refusal_words`]) and its button ([`refusal_action`]).
+pub fn refused_for(why: &Refusal, t: &Theme) -> El {
+    let text = refusal_text::text(why);
+    refused_with(&text.sentence, text.action, text.link, t)
+}
+
+/// `store`: the Microsoft Store page to offer beside the button, only where the refusal says Windows lacks the
+/// extension (`refusal_text::Text::link`).
+fn refused_with(words: &str, action: &'static str, store: Option<&'static str>, t: &Theme) -> El {
+    // A refusal is final for this file here: it offers the other app, never "Try again".
+    let mut buttons = row().key("refused-actions").gap(scale::space::S8).child(
+        button(keys("refused-open"), action, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(
+            |s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.intent(Intent::OpenInAnotherApp);
+                }
+            },
+        ),
+    );
+    if let Some(url) = store {
+        buttons = buttons.child(
+            button(
+                keys("refused-store"),
+                "Get HEVC Video Extensions",
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(move |s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.intent(Intent::OpenInBrowser(url.to_string()));
+                }
+            }),
+        );
+    }
     col()
         .key("viewer-body")
         .grow(1.0)
         .h_full()
         .center()
-        .gap(12.0)
         .fill(style::stage(t))
-        .child(kit::label("refused-words", words.to_string(), style::TITLE, t.text).align(Align::Center))
-        .child(
-            super::text::tool_action("refused-open", "Open in another app\u{2026}", None, None, t).on_press(
-                |s: &mut State| {
-                    if let Some(ui) = super::ui(s) {
-                        ui.intent(Intent::OpenInAnotherApp);
-                    }
-                },
-            ),
-        )
+        .child(view_state(
+            ViewState::Failed {
+                key: "refused",
+                title: "Can\u{2019}t play this here",
+                why: words,
+                retry: Some(buttons),
+            },
+            t,
+        ))
 }
 
 /// The size a `frame` takes in a `stage`, both in the same unit: scaled to fit, never enlarged past the stage,
@@ -223,7 +242,7 @@ pub fn toggle(handle: &PlayerHandle) {
 /// Where a press or drag at `x` on a scrubber `w` wide lands in a file `length_ms` long. `None`: the length is not
 /// known yet or the scrubber has no width, so there is nowhere to go.
 pub fn seek_target(length_ms: u64, x: f32, w: f32) -> Option<u64> {
-    if length_ms == 0 || !(w > 0.0) || x.is_nan() {
+    if length_ms == 0 || w.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) || x.is_nan() {
         return None;
     }
     let part = f64::from((x / w).clamp(0.0, 1.0));
@@ -337,8 +356,8 @@ fn bar_with(
         .key(format!("{prefix}-bar"))
         .w_full()
         .h(46.0)
-        .px(16.0)
-        .gap(12.0)
+        .px(scale::space::S16)
+        .gap(scale::space::S12)
         .center_y()
         .child(
             kit::glyph(
@@ -423,7 +442,7 @@ pub fn view(ui: &Ui, t: &Theme) -> El {
     if let Some(handle) = ui.source.player() {
         let state = handle.state_of(&ui.file.id);
         if let Some(why) = state.as_ref().and_then(|s| s.refused.as_ref()) {
-            return refused(&refusal_words(why), t);
+            return refused_for(why, t);
         }
         let times = state.as_ref().map_or(
             Times {

@@ -94,7 +94,7 @@ Paths are relative to the desktop repo root.
 
 ```bash
 WT=~/code/bb-worktrees/desktop-1873-r4          # the lane's tree
-LOCK=~/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh
+LOCK=~/Development/Beebeeb/beebeeb.io/scripts/coord/the lock script
 EVID=~/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/1873
 ```
 

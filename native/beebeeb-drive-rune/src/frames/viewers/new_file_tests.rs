@@ -268,49 +268,28 @@ fn a_name_the_folder_already_has_says_why_and_typing_takes_the_message_away() {
     assert!(!has(&rt, "field-0-msg"), "typing takes the message away");
 }
 
-/// Lock 4 (D-OV-3): 0.9.0 offers no Office type. Mutant: `OFFICE_EDITOR = true` in `new_file.rs` -> red.
+/// Lock 4 (D-OV-3) is off: the editor ships, so the Office types are offered. Mutant: `OFFICE_EDITOR = false` -> red.
 #[test]
-fn new_file_offers_no_office_type_in_090() {
-    assert!(
-        !super::new_file::OFFICE_EDITOR,
-        "0.9.0 ships the viewer, not the editor"
-    );
-    assert!(
-        Kind::offered().iter().all(|k| !k.office()),
-        "an office type is offered: {:?}",
-        Kind::offered()
-    );
+#[allow(clippy::assertions_on_constants)]
+fn new_file_offers_the_office_types() {
+    assert!(super::new_file::OFFICE_EDITOR, "the editor ships: the office types are offered");
+    assert_eq!(Kind::offered().len(), Kind::ALL.len());
     let (mut rt, _calls) = runtime();
     open_dialog(&mut rt);
-    assert!(has(&rt, "type-0") && has(&rt, "type-1"));
-    for i in 2..Kind::ALL.len() {
-        assert!(!has(&rt, &format!("type-{i}")), "tile type-{i} is drawn");
+    for i in 0..Kind::ALL.len() {
+        assert!(has(&rt, &format!("type-{i}")), "tile type-{i} is not drawn");
     }
-    // The arrows never reach an office type, and Continue never asks for New document.
-    for _ in 0..6 {
+    // The arrows reach Word, Excel and PowerPoint.
+    let mut seen = Vec::new();
+    for _ in 0..Kind::ALL.len() {
         press(&mut rt, Key::Right);
-        assert!(!picked(&rt).unwrap().office());
+        seen.push(picked(&rt).unwrap());
     }
-    operate(&mut rt, "btn-0");
-    assert!(
-        super::take_asked(&mut rt.state)
-            .iter()
-            .all(|i| !matches!(i, Intent::NewDocument(_)))
-    );
-    // New's menu has no New document… (DW-1520).
-    assert!(
-        crate::frames::files::menus::new_menu()
-            .iter()
-            .all(|e| !format!("{e:?}").contains("new-document"))
-    );
+    assert!(seen.iter().any(|k| k.office()));
 }
 
 #[test]
-#[ignore = "0.9.1: runs when OFFICE_EDITOR is true"]
 fn an_office_type_goes_on_to_new_document_without_a_name_here() {
-    if !super::new_file::OFFICE_EDITOR {
-        return;
-    }
     let (mut rt, calls) = runtime();
     for (steps, kind) in [(2, Kind::Word), (3, Kind::Excel), (4, Kind::PowerPoint)] {
         open_dialog(&mut rt);
@@ -318,7 +297,8 @@ fn an_office_type_goes_on_to_new_document_without_a_name_here() {
             press(&mut rt, Key::Right);
         }
         assert_eq!(picked(&rt), Some(kind));
-        operate(&mut rt, "btn-0");
+        // Continue, without the shell's poll (which hands the intent on): New document is asked for.
+        super::new_file::go_on(&mut rt.state);
         assert_eq!(dialog_step(&rt), None, "{kind:?}: New document takes over");
         assert_eq!(super::take_asked(&mut rt.state), [Intent::NewDocument(kind)]);
     }
@@ -476,4 +456,21 @@ fn the_list_behind_the_dialog_keeps_its_identity() {
     assert_eq!(path(&rt), before, "opening the dialog moved the list to a new parent");
     press(&mut rt, Key::Escape);
     assert_eq!(path(&rt), before, "closing the dialog moved the list again");
+}
+
+#[test]
+fn dialog_continue_by_mouse_puts_the_keyboard_in_the_name_field() {
+    let (mut rt, _calls) = runtime();
+    open_dialog(&mut rt);
+    press(&mut rt, Key::Right);
+    rt.frame(1.0);
+    let [x, y, w, h] = info(&rt, "btn-0").rect;
+    rt.pointer_down(x + w / 2.0, y + h / 2.0);
+    rt.pointer_up(x + w / 2.0, y + h / 2.0);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(dialog_step(&rt), Some(Step::Name));
+    assert_eq!(focused(&rt).as_deref(), Some(super::new_file::NAME_INPUT));
+    let nf = rt.state.viewer.new_file.as_ref().expect("the dialog is open");
+    assert_eq!(nf.name.range(), (0, UNTITLED.len()));
 }

@@ -25,19 +25,21 @@ pub mod long_list;
 pub mod menus;
 pub mod names;
 pub mod open_with_menu;
+pub mod pins;
 mod outcomes;
 pub mod preview;
 pub mod protected;
 pub mod protected_fixture;
 pub mod rename;
+pub mod reread;
 pub mod reset;
 pub mod retry;
+pub mod reveal;
 mod row_facts;
 pub mod scenes_waveb;
 pub mod select_bar;
 pub mod session;
 pub mod share;
-pub mod sidebar;
 pub mod sorting;
 pub mod source;
 pub mod to_trash;
@@ -52,9 +54,15 @@ mod browse_states_tests;
 #[cfg(test)]
 mod long_list_tests;
 #[cfg(test)]
+mod open_in_app_tests;
+#[cfg(test)]
 mod open_with_menu_tests;
 #[cfg(test)]
+mod pins_tests;
+#[cfg(test)]
 mod protected_tests;
+#[cfg(test)]
+mod rebuilt_tests;
 #[cfg(test)]
 mod rest_tests;
 #[cfg(test)]
@@ -159,8 +167,12 @@ pub enum Toast {
     ReadOneAtATime,
     /// "Upload cancelled. The copy is in the Recycle Bin." (DW-0427)
     UploadCancelled,
-    /// "Keep this file on this PC first." (DW-1562): Open With ▸ an app, on a file that is not kept on this PC.
-    KeepFirst,
+    /// "Downloading 12.3 MB…": a file not kept on this PC was handed to another app (Open, Open With ▸ an app or
+    /// Other…) and Windows fetches it first. Its size from the row; `None`: "Downloading…".
+    Downloading(Option<i64>),
+    /// "Unsaved changes to 2 files were kept on this PC.": the office editor's notice after unlock, for that many
+    /// files (`frames::office::edit::recovery`).
+    KeptEdits(u16),
 }
 
 impl Toast {
@@ -168,7 +180,7 @@ impl Toast {
     pub fn stays(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
             Toast::Trashed => 6,
-            Toast::Failed(..) | Toast::ReadOneAtATime | Toast::UploadCancelled | Toast::KeepFirst => 8,
+            Toast::Failed(..) | Toast::ReadOneAtATime | Toast::UploadCancelled | Toast::KeptEdits(_) => 8,
             _ => 3,
         })
     }
@@ -186,13 +198,30 @@ impl Toast {
             ActionError::NotAll => " Some items were left as they were.",
             ActionError::NotOnThisSystem => " It is not available on this computer yet.",
             ActionError::NotYet => " It is not available yet.",
+            ActionError::NotAFile => " Only a file can have a link here, not a folder.",
             ActionError::HasLink => {
                 " This file already has a link that can't be copied here yet. To get a new link, stop sharing the \
                  file in the web app first."
             }
             ActionError::NotSent => " It has changes that are not uploaded yet.",
+            ActionError::PinLimit => " Unpin a folder first.",
             ActionError::HoldsKept => " Something in it is kept on this PC.",
             ActionError::NotToRecycleBin => " This file can't go to the Recycle Bin, so it was left as it is.",
+            // The viewers' words for a full disk ("Not enough space to decrypt", "free on this PC").
+            ActionError::NoRoom => " There is not enough space on this PC.",
+            ActionError::TooLarge => " It is too large to make here.",
+            // w36: a name the folder refused after the dialog's own check (a file that is not listed yet, a name
+            // Windows reads as another's): said, so Try again is asked with another name.
+            ActionError::NameTaken if action == Action::NewFile => {
+                " Something here already has that name. Try again with another name."
+            }
+            ActionError::NameShared => {
+                " Another item here has the same name. Rename one on the web to use it on this PC."
+            }
+            ActionError::NameSharedButCase => {
+                " Another item here has the same name except for capital letters. Rename one on the web to use it on \
+                 this PC."
+            }
             _ => "",
         };
         format!("Couldn't {}.{fix}", action.words())
@@ -271,8 +300,12 @@ pub struct Actions {
     /// A board frame that draws a long list from this row on (DW-0420b: the gate draws one frame
     /// and cannot scroll). 0 in the app.
     pub board_first_row: usize,
+    /// How far down the list is scrolled (`reread.rs`: a read after a check keeps the rows in view in place).
+    pub list_scroll: reread::ListScroll,
     /// Open With (DW-1562): the submenu's keyboard line, and the Office switches a board scene turns on.
     pub open_with: open_with_menu::Ui,
+    /// An item to select as soon as its folder's listing holds it (`reveal.rs`).
+    pub reveal: Option<String>,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -315,7 +348,9 @@ impl Actions {
             local: local::Ui::default(),
             first_load_strip: false,
             board_first_row: 0,
+            list_scroll: reread::ListScroll::default(),
             open_with: open_with_menu::Ui::default(),
+            reveal: None,
         }
     }
 }
@@ -466,8 +501,27 @@ impl State {
         self.actions.open_with.line = None;
     }
 
-    /// Close the menu and give the keyboard back to the list.
+    /// Close the menu (Escape, a click outside) and give the keyboard back to where it came from: New and Sort to
+    /// their button (RC2-8), the file menus to the list.
     pub fn close_menu_tx(&mut self, tx: &mut Tx) {
+        let button = match self.actions.menu.map(|open| open.kind) {
+            Some(MenuKind::New) => Some("new-btn"),
+            Some(MenuKind::Sort) => Some("sort-btn"),
+            _ => None,
+        };
+        self.close_menu();
+        match button {
+            // The menu's trigger, as a web menu's close does; its ring when the keyboard closed it.
+            Some(button) => {
+                let ring = tx.by_keys();
+                tx.return_focus(button, ring);
+            }
+            None => tx.focus("rows", false),
+        }
+    }
+
+    /// Close the menu after a pick: the keyboard goes to the list, where what was picked acts.
+    fn close_menu_picked(&mut self, tx: &mut Tx) {
         self.close_menu();
         tx.focus("rows", false);
     }
@@ -594,7 +648,7 @@ impl State {
     }
 
     /// Select the rows with these ids; the keyboard is on the last of them.
-    fn select_ids(&mut self, ids: &[String]) {
+    pub(super) fn select_ids(&mut self, ids: &[String]) {
         let rows: BTreeSet<usize> = self
             .listing
             .items
@@ -613,6 +667,7 @@ impl State {
     fn entered(&mut self) {
         self.actions.selection.clear();
         self.actions.anchor = None;
+        self.actions.reveal = None;
         self.actions.undo.clear();
         // The rows an Undo waits for are another folder's now: its answer puts nothing in this one.
         self.actions.trash.restoring.clear();
@@ -634,10 +689,39 @@ impl State {
         if self.refused_without_session() {
             return;
         }
-        self.files.back.push(self.listing.folder.id.clone());
+        // An open still out never showed: the folder Back returns to is the one shown, once.
+        if !self.folder_reads.opening() {
+            self.files.back.push(self.listing.folder.id.clone());
+        }
         self.actions.forward.clear();
+        self.show_folder(id);
+    }
+
+    /// Shows the folder with this id: read on the worker when the running app wired one (the rows shown stay until
+    /// the answer, [`State::take_opened`]), at once otherwise.
+    fn show_folder(&mut self, id: Option<String>) {
+        let account = self.shell.app.account().map(str::to_owned);
+        if self.folder_reads.ask(id.clone(), account, reread::ReadFor::Open) {
+            // A reveal asked before this open is the folder left's.
+            self.actions.reveal = None;
+            return;
+        }
         (self.listing, self.list_error) = crate::load(self.source.as_ref(), id.as_deref());
         self.entered();
+    }
+
+    /// The answer of a folder opened on the worker: it replaces the rows, as an open made at once does. An item to
+    /// reveal that was asked for while it was out is selected in it. Returns the scroll that puts it in view.
+    pub(crate) fn take_opened(
+        &mut self,
+        listing: crate::source::Listing,
+        error: Option<crate::source::SourceError>,
+    ) -> Option<f32> {
+        let reveal = self.actions.reveal.take();
+        (self.listing, self.list_error) = (listing, error);
+        self.entered();
+        self.actions.reveal = reveal;
+        self.apply_reveal()
     }
 
     /// Back, leaving the folder shown to Forward.
@@ -646,11 +730,25 @@ impl State {
             return false;
         }
         let here = self.listing.folder.id.clone();
+        if self.folder_reads.reader.is_some() {
+            let Some(parent) = self.files.back.pop() else {
+                return false;
+            };
+            self.actions.forward.push(here.clone());
+            self.show_folder(parent);
+            // The folder left is the row selected in the one Back returns to: once the read on the worker lands
+            // (`take_opened`), or at once when it is already there.
+            self.actions.reveal = here;
+            self.apply_reveal();
+            return true;
+        }
         if !self.go_back() {
             return false;
         }
-        self.actions.forward.push(here);
+        self.actions.forward.push(here.clone());
         self.entered();
+        self.actions.reveal = here;
+        self.apply_reveal();
         true
     }
 
@@ -666,9 +764,10 @@ impl State {
         let Some(id) = self.actions.forward.pop() else {
             return false;
         };
-        self.files.back.push(self.listing.folder.id.clone());
-        (self.listing, self.list_error) = crate::load(self.source.as_ref(), id.as_deref());
-        self.entered();
+        if !self.folder_reads.opening() {
+            self.files.back.push(self.listing.folder.id.clone());
+        }
+        self.show_folder(id);
         true
     }
 
@@ -682,15 +781,10 @@ impl State {
         }
     }
 
-    /// Open the selection: one folder opens in place; files go to their apps, all of them.
-    /// Returns whether the folder shown changed.
+    /// Open the selection: one folder opens in place; a file opens in the window's viewer (w29: never in another
+    /// app from here; "Open in another app" in the viewer is that press). Several files: the first opens, and the
+    /// window says one opens at a time. Returns whether the folder shown changed.
     pub fn open_selection(&mut self, tx: &mut Tx) -> bool {
-        self.open_selection_with(tx, true)
-    }
-
-    /// [`Self::open_selection`]. `viewer`: one file of a type the window shows itself may open in the window's
-    /// viewer. `false` ("Open in its app"): every file goes to its own app, as the button says.
-    pub(crate) fn open_selection_with(&mut self, tx: &mut Tx, viewer: bool) -> bool {
         if self.needs_session(tx) {
             return false;
         }
@@ -722,24 +816,25 @@ impl State {
         if files.is_empty() {
             return false;
         }
-        // One file of a type the window shows itself: its viewer (`frames::viewers`, the router).
-        if viewer && matches!(&files[..], [only] if crate::frames::viewers::open_item(self, only)) {
-            return true;
-        }
-        // Several files: source code, scripts and web pages are never handed to another app (one alone opens in
-        // the window's viewer, where it is read and not run). The others open as before, and the toast says
-        // which were left.
-        let (read_here, files): (Vec<DriveItem>, Vec<DriveItem>) = files
-            .into_iter()
-            .partition(|file| viewer && crate::frames::viewers::only_read_here(self, file));
         self.forget_undo();
-        if !files.is_empty() {
-            if let Err(why) = self.actions.source.open(&files) {
-                self.failed(Action::Open, why, tx);
-                return false;
+        let several = files.len() > 1;
+        if let Some(first) = files.first() {
+            // Asked before the hand-over: once Windows has it, the copy may already be on its way.
+            let fetch = crate::frames::open_file::fetch_toast(self, first);
+            match crate::frames::open_file::open_file(self, crate::frames::open_file::Target::Item(first)) {
+                crate::frames::open_file::Opened::Failed(why) => {
+                    self.failed(Action::Open, why, tx);
+                    return false;
+                }
+                crate::frames::open_file::Opened::DefaultApp if !several => {
+                    if let Some(toast) = fetch {
+                        self.show_toast(toast, tx);
+                    }
+                }
+                _ => {}
             }
         }
-        if !read_here.is_empty() {
+        if several {
             self.show_toast(Toast::ReadOneAtATime, tx);
         }
         false
@@ -747,6 +842,7 @@ impl State {
 
     /// A double-click: this row alone, opened.
     pub fn open_row(&mut self, row: usize, tx: &mut Tx) -> bool {
+        eprintln!("OPEN_ROW {row}");
         if row >= self.listing.items.len() {
             return false;
         }
@@ -893,7 +989,7 @@ impl State {
         }
         // Sort's choices keep the menu open, as a menu of ticks does; everything else closes it.
         if open.kind != MenuKind::Sort {
-            self.close_menu_tx(tx);
+            self.close_menu_picked(tx);
         }
         let sort = self.actions.sort;
         match id {
@@ -923,6 +1019,7 @@ impl State {
             "free-up-space" => {
                 self.free_up_space(tx);
             }
+            "pin" => self.toggle_pin(tx),
             "duplicate" => {
                 self.duplicate_selected(tx);
             }
@@ -1072,7 +1169,12 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
         s.show_detail_pane = false;
         let names: Vec<&str> = s.listing.items.iter().map(|i| i.name.as_str()).collect();
         let original = s.listing.items[6].clone();
-        if s.actions.source.duplicate(&[original.clone()], &names).is_ok() && s.take_changes().0 {
+        if s.actions
+            .source
+            .duplicate(std::slice::from_ref(&original), &names)
+            .is_ok()
+            && s.take_changes().0
+        {
             s.open_rename(7);
             let mut edit = rune::TextEdit::new(original.name.clone());
             edit.set_caret(names::stem_len(&original.name, false));

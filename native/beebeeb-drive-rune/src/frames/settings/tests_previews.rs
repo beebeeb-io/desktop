@@ -71,6 +71,18 @@ fn tab_to(rt: &mut Runtime<State>, target: &str) {
             return;
         }
     }
+    // A roving group is one Tab stop: its other members take arrows.
+    for _ in 0..80 {
+        key(rt, Key::Tab);
+        for arrow in [Key::Right, Key::Down, Key::Up] {
+            for _ in 0..12 {
+                key(rt, arrow.clone());
+                if focused(rt).as_deref() == Some(target) {
+                    return;
+                }
+            }
+        }
+    }
     panic!("Tab never reaches {target}");
 }
 
@@ -318,6 +330,83 @@ impl DriveSettings for Bare {
     fn reload_insights(&mut self) {
         self.0.reload_insights();
     }
+}
+
+/// A source that answers this pane with one fixed state and counts the reloads asked.
+struct Probe(Bare, PhotoPreviews, std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl DriveSettings for Probe {
+    fn storage(&self) -> Storage {
+        self.0.0.storage()
+    }
+    fn set_limit(&mut self, which: Kept, gb: u32) {
+        self.0.0.set_limit(which, gb);
+    }
+    fn clear(&mut self, which: Kept) {
+        self.0.0.clear(which);
+    }
+    fn sync(&self) -> SyncPane {
+        self.0.0.sync()
+    }
+    fn set_status_on_files(&mut self, on: bool) {
+        self.0.0.set_status_on_files(on);
+    }
+    fn set_open_at_login(&mut self, on: bool) {
+        self.0.0.set_open_at_login(on);
+    }
+    fn set_paused(&mut self, paused: bool) {
+        self.0.0.set_paused(paused);
+    }
+    fn sync_anyway(&mut self) {
+        self.0.0.sync_anyway();
+    }
+    fn repair(&mut self) {
+        self.0.0.repair();
+    }
+    fn turn_off_explorer(&mut self) {
+        self.0.0.turn_off_explorer();
+    }
+    fn insights(&self) -> &Insights {
+        self.0.0.insights()
+    }
+    fn reload_insights(&mut self) {
+        self.0.0.reload_insights();
+    }
+    fn photo_previews(&self) -> PhotoPreviews {
+        self.1.clone()
+    }
+    fn reload_previews(&mut self) {
+        self.2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn probed(answer: PhotoPreviews) -> (Runtime<State>, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let mut state = init();
+    assert!(super::scene("DW-0744", &mut state));
+    let reloads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    state.settings.drive = Box::new(Probe(Bare(BoardDrive::new()), answer, reloads.clone()));
+    (start(state), reloads)
+}
+
+#[test]
+fn loading_empty_and_failed_say_what_they_are() {
+    let (rt, _) = probed(PhotoPreviews::Loading);
+    assert!(find(&rt, "loading").is_some() && says(&rt, "Loading your preview settings"));
+    assert!(!says(&rt, "2,431") && find(&rt, "item-0-0-switch").is_none());
+
+    let (rt, _) = probed(PhotoPreviews::NotBound("Unlock Beebeeb with this account."));
+    assert!(find(&rt, "previews-locked").is_some() && says(&rt, "Unlock Beebeeb with this account."));
+    assert!(find(&rt, "loading").is_none(), "a locked vault never reads as loading");
+
+    let (mut rt, reloads) = probed(PhotoPreviews::Failed("Couldn't reach Beebeeb."));
+    assert!(find(&rt, "previews-failed").is_some() && says(&rt, "Couldn't reach Beebeeb."));
+    assert!(find(&rt, "item-0-0-switch").is_none());
+    press(&mut rt, "previews-failed-retry");
+    assert_eq!(
+        reloads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "Try again reads again"
+    );
 }
 
 #[test]

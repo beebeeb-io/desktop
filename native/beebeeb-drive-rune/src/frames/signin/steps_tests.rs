@@ -477,7 +477,7 @@ fn after_a_passkey_the_vault_password_is_asked_with_focus_in_its_field() {
     assert_eq!(info(&rt, "field-0-msg").role, "alert");
     assert!(ui(&mut rt).take_intents().is_empty(), "nothing was unlocked");
     assert_eq!(focused(&rt).as_deref(), Some(PASSWORD_KEY));
-    press(&mut rt, Key::Text("x".repeat(board::PASSWORD_LEN - 5).into()));
+    press(&mut rt, Key::Text("x".repeat(board::PASSWORD_LEN - 5)));
     press(&mut rt, Key::Enter);
     assert_eq!(ui(&mut rt).take_intents(), vec![Intent::Next(NextAfterSignIn::Drive)]);
     assert!(ui(&mut rt).password.text.is_empty());
@@ -1020,4 +1020,138 @@ fn the_phrase_hint_names_another_device_only_where_the_source_has_the_door() {
         a11y(&rt).contains("approve from another device"),
         "with the door it is drawn"
     );
+}
+
+/// Backlog 1680: a two-factor sign-in whose vault key is not on this PC goes on to the twelve words. The words
+/// unlock the vault of the same account: the window never says the account changed, and never hands out
+/// `AccountMismatch`.
+#[test]
+fn two_factor_then_the_recovery_phrase_never_says_the_account_changed() {
+    let (mut rt, calls) = signed_in(Script::default());
+    assert_eq!(ui(&mut rt).screen, Screen::TwoFactor { backup: false });
+    // The sixth digit is on its way to the engine (no fixture answer is queued: the test gives the answer below).
+    ui(&mut rt).code.replace_text(board::TOTP);
+    ui(&mut rt).verifying = true;
+    // The engine's answer for this account: the code is right, the vault key is not on this PC.
+    rt.update(|s, _| {
+        let ui_ = s.signin.as_mut().expect("the sign-in window is open");
+        ui_.apply(super::source::SignInEvent::TwoFactor(Ok(NextAfterSignIn::RecoveryPhrase)));
+    });
+    rt.frame(0.0);
+    assert_eq!(ui(&mut rt).screen, Screen::Phrase);
+    for (i, word) in board::WORDS.iter().enumerate() {
+        ui(&mut rt).words[i].replace_text(*word);
+    }
+    rt.frame(0.0);
+    assert!(ui(&mut rt).can_restore());
+    assert!(!a11y(&rt).to_lowercase().contains("account changed"));
+    ui(&mut rt).restore();
+    ui(&mut rt).pump();
+    assert!(calls.borrow().contains(&"restore"));
+    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::Next(NextAfterSignIn::Drive)]);
+    assert!(!a11y(&rt).to_lowercase().contains("account changed"));
+}
+
+// ---------------------------------------------------------------------------
+// The twelve words as one grid (dc-155)
+// ---------------------------------------------------------------------------
+
+/// Every accessibility node keyed `key`, anywhere in the tree.
+pub(super) fn a11y_nodes(rt: &Runtime<State>, key: &str) -> Vec<serde_json::Value> {
+    fn walk(v: &serde_json::Value, key: &str, out: &mut Vec<serde_json::Value>) {
+        match v {
+            serde_json::Value::Object(map) => {
+                if map.get("key").and_then(|k| k.as_str()) == Some(key) {
+                    out.push(v.clone());
+                }
+                map.values().for_each(|c| walk(c, key, out));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|c| walk(c, key, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&rt.accessibility_json(), key, &mut out);
+    out
+}
+
+/// The set size Rune reports for the item keyed `key`: AccessKit carries it on the item's
+/// nearest container (the node whose children hold it).
+pub(super) fn a11y_set_size_of(rt: &Runtime<State>, key: &str) -> Option<u64> {
+    fn walk(v: &serde_json::Value, key: &str) -> Option<Option<u64>> {
+        match v {
+            serde_json::Value::Object(map) => {
+                let holds = map.values().any(|c| {
+                    c.as_array().is_some_and(|kids| kids.iter().any(|k| k.get("key").and_then(|k| k.as_str()) == Some(key)))
+                });
+                if holds {
+                    return Some(map.get("setSize").and_then(|s| s.as_u64()));
+                }
+                map.values().find_map(|c| walk(c, key))
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(|c| walk(c, key)),
+            _ => None,
+        }
+    }
+    walk(&rt.accessibility_json(), key).flatten()
+}
+
+#[test]
+fn each_word_box_says_its_place_of_twelve() {
+    let (rt, _) = signed_in(phrase_script());
+    for (i, key) in WORD_KEYS.iter().enumerate() {
+        let nodes = a11y_nodes(&rt, key);
+        assert_eq!(nodes.len(), 1, "{key}");
+        assert_eq!(nodes[0]["name"], format!("Recovery word {}", i + 1));
+        assert_eq!(nodes[0]["position"], i + 1, "{} of 12", i + 1);
+        assert_eq!(a11y_set_size_of(&rt, key), Some(12), "{key}");
+    }
+}
+
+#[test]
+fn the_arrows_space_and_backspace_move_word_to_word_through_the_grid() {
+    let (mut rt, _) = signed_in(phrase_script());
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    type_(&mut rt, "harbor");
+    // Left at the start of the first box: nothing before it.
+    press(&mut rt, Key::Home);
+    press(&mut rt, Key::Left);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    // Right inside the word stays; at its end goes to the next box's start.
+    press(&mut rt, Key::Right);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    press(&mut rt, Key::End);
+    press(&mut rt, Key::Right);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[1]));
+    // Left at the start goes back with the caret at the word's end.
+    press(&mut rt, Key::Left);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    let w = &ui(&mut rt).words[0];
+    assert_eq!((w.anchor, w.focus), (6, 6), "the caret at the end of the word");
+    // Space at the end of a word: the next box. A space is never typed into a word.
+    press(&mut rt, Key::Text(" ".into()));
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[1]));
+    press(&mut rt, Key::Text(" ".into()));
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[1]), "an empty box keeps its place");
+    assert!(ui(&mut rt).words[1].text.is_empty());
+    // Backspace in an empty box: back one, the word untouched.
+    press(&mut rt, Key::Backspace);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    assert_eq!(ui(&mut rt).words[0].text, "harbor");
+    // Up and Down keep the column; nothing above the top row, nothing below the bottom.
+    press(&mut rt, Key::Up);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
+    for row in 1..4 {
+        press(&mut rt, Key::Down);
+        assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[row * 3]));
+    }
+    press(&mut rt, Key::Down);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[9]));
+    press(&mut rt, Key::Up);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[6]));
+    // Right at the end of the last box: nothing after it.
+    click(&mut rt, WORD_KEYS[11]);
+    press(&mut rt, Key::Right);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[11]));
+    assert_eq!(ui(&mut rt).words[0].text, "harbor", "no move touched a word");
 }

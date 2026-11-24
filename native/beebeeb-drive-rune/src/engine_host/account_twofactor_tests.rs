@@ -29,6 +29,8 @@ struct Fake {
     wrong_code: Arc<AtomicBool>,
     /// The disable route waits this many milliseconds before it answers.
     disable_delay_ms: Arc<AtomicU64>,
+    /// The disable and the backup-codes routes do not answer while this is set (the test lets them go).
+    held: Arc<AtomicBool>,
     asked: Arc<Mutex<Vec<String>>>,
     /// The status the email's resend answers with (200: sent; 404; 429 wait; 500).
     resend_status: Arc<AtomicU16>,
@@ -48,6 +50,8 @@ fn fake() -> Fake {
     let disable_delay_ms = Arc::new(AtomicU64::new(0));
     let asked: Arc<Mutex<Vec<String>>> = Arc::default();
     let (wrong, delay, log) = (wrong_code.clone(), disable_delay_ms.clone(), asked.clone());
+    let held_out = Arc::new(AtomicBool::new(false));
+    let held = held_out.clone();
     let (resend_status, verify_ok) = (Arc::new(AtomicU16::new(200)), Arc::new(AtomicBool::new(false)));
     let (resend_in, verify_in) = (resend_status.clone(), verify_ok.clone());
     let password_changes = Arc::new(AtomicBool::new(false));
@@ -66,10 +70,12 @@ fn fake() -> Fake {
             "POST /api/v1/auth/2fa/enable" if wrong.load(Ordering::SeqCst) => Reply::json(401, json!({})),
             "POST /api/v1/auth/2fa/enable" => Reply::ok(json!({})),
             "POST /api/v1/auth/2fa/disable" => {
+                hold(&held);
                 std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
                 Reply::ok(json!({}))
             }
             "POST /api/v1/auth/2fa/backup-codes" => {
+                hold(&held);
                 std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
                 Reply::ok(json!({ "backup_codes": ["11111111", "22222222"] }))
             }
@@ -98,6 +104,7 @@ fn fake() -> Fake {
         api,
         wrong_code,
         disable_delay_ms,
+        held: held_out,
         asked,
         resend_status,
         verify_ok,
@@ -129,17 +136,43 @@ fn signed_in(fake: &Fake) -> TestEngine {
     engine
 }
 
-/// Pump until a call answers (at most 10 s).
+/// A wait that lasts this long is a call or a request that hangs: the test fails. Never what a test waits for, and
+/// never how long one may take: every wait ends on its own event.
+const HANGS: Duration = Duration::from_secs(300);
+
+/// Pump until a call answers. `None`: no call is out, so nothing is left that could answer. A call ends when its
+/// worker does (it sends an answer whatever happened, a panic included), not within a time: a password change is
+/// several key derivations and takes as long as the machine gives it.
 fn answer(source: &mut Source) -> Option<(CallKind, Answered)> {
     let began = Instant::now();
-    while began.elapsed() < Duration::from_secs(10) {
+    loop {
         source.pump();
         if let Some(answered) = source.call_answer() {
             return Some(answered);
         }
+        if source.calls.out.is_empty() {
+            return None;
+        }
+        assert!(began.elapsed() < HANGS, "a call that is out never ended");
         std::thread::sleep(Duration::from_millis(10));
     }
-    None
+}
+
+/// A route's answer waits here while the test holds it.
+fn hold(held: &AtomicBool) {
+    let began = Instant::now();
+    while held.load(Ordering::SeqCst) && began.elapsed() < HANGS {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Wait until Beebeeb was asked `route` (the request is out, sent under the session as it is now).
+fn asked(fake: &Fake, route: &str) {
+    let began = Instant::now();
+    while !fake.asked.lock().unwrap().iter().any(|asked| asked.ends_with(route)) {
+        assert!(began.elapsed() < HANGS, "{route} was never asked");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn settle(source: &mut Source) {
@@ -293,7 +326,7 @@ fn the_panes_of_email_and_two_factor_are_reachable_and_two_factor_waits_for_the_
     // The Name page and the password change answer too (`account_actions.rs`, `account_password.rs`).
     assert_ne!(source.pane_state(Pane::Name), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Password), PaneState::Unwired);
-    // Deleting the account answers too (slice A6, `account_deletion.rs`).
+    // Deleting the account answers too (`account_deletion.rs`).
     assert_ne!(source.pane_state(Pane::Delete), PaneState::Unwired);
 }
 
@@ -402,18 +435,27 @@ fn new_backup_codes_reach_the_pane_when_the_screen_locks_while_the_request_is_ou
     let fake = fake();
     let engine = signed_in(&fake);
     let mut source = Source::new(engine.clone());
-    fake.disable_delay_ms.store(500, Ordering::SeqCst);
+    // Beebeeb holds its answer from the moment it was asked until the screen is locked: the request went out under
+    // the open screen and its answer lands under the lock, however long the worker and the lock take.
+    fake.held.store(true, Ordering::SeqCst);
     assert!(source.start_call(CallKind::NewBackupCodes, "123456", ""));
-    std::thread::sleep(Duration::from_millis(150));
+    asked(&fake, "2fa/backup-codes");
     engine.lock_screen().expect("an open lock locks the screen");
-    // The answer lands under the lock: kept, never handed over while the screen is locked.
+    fake.held.store(false, Ordering::SeqCst);
+    // The answer lands under the lock: kept, never handed over while the screen is locked. The call is out until
+    // its answer was taken in, so the loop ends on that and not on a time.
     let began = Instant::now();
-    while began.elapsed() < Duration::from_millis(1_200) {
+    loop {
         source.pump();
         assert!(source.call_answer().is_none(), "not answered under the lock");
         assert!(source.late_codes().is_none(), "never handed over under the lock");
+        if source.calls.out.is_empty() {
+            break;
+        }
+        assert!(began.elapsed() < HANGS, "the call never ended");
         std::thread::sleep(Duration::from_millis(20));
     }
+    assert!(source.late_codes().is_none(), "never handed over under the lock");
     engine
         .unlock_screen_platform_verified(engine.session_turn())
         .expect("the platform's yes unlocks the screen");
@@ -677,13 +719,16 @@ fn a_success_answered_after_a_lock_and_an_unlock_is_not_current() {
     let fake = fake();
     let engine = signed_in(&fake);
     let mut source = Source::new(engine.clone());
-    fake.disable_delay_ms.store(600, Ordering::SeqCst);
+    // Beebeeb holds its answer from the moment it was asked until the screen was locked and unlocked: the call is
+    // out across both, however long its worker took to send it and however long the lock and the unlock take.
+    fake.held.store(true, Ordering::SeqCst);
     assert!(source.start_call(CallKind::TurnOffTwoFactor, "123456", ""));
-    std::thread::sleep(Duration::from_millis(100));
+    asked(&fake, "2fa/disable");
     engine.lock_screen().expect("an open lock locks the screen");
     engine
         .unlock_screen_platform_verified(engine.session_turn())
         .expect("the platform's yes unlocks the screen");
+    fake.held.store(false, Ordering::SeqCst);
     let Some((CallKind::TurnOffTwoFactor, Answered::Done)) = answer(&mut source) else {
         panic!("the same account: Beebeeb's answer is handed over");
     };

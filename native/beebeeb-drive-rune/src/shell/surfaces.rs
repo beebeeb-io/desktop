@@ -30,6 +30,7 @@ pub enum WindowKind {
 
 pub const MAIN_KEY: &str = "main";
 pub const FLYOUT_KEY: &str = "flyout";
+pub const TRAY_TIP_KEY: &str = "tray-tip";
 /// Not a Rune window key of its own (the first-run window is the one window in that mode);
 /// the name a first-run lane's saved state would go under.
 pub const FIRST_RUN_KEY: &str = "first-run";
@@ -122,9 +123,12 @@ pub fn main_options(restored: &Restored) -> WindowOptions {
     }
 }
 
-/// The one window opened as the first-run window: its fixed size, wherever the OS puts it.
-pub fn first_run_options() -> WindowOptions {
+/// The one window opened as the first-run window: its fixed size, cut to the work area when the screen is
+/// smaller (`place`, from `work_area::first_place`), wherever the OS puts it when no display is known.
+pub fn first_run_options(place: &Restored) -> WindowOptions {
     WindowOptions {
+        position: place.position,
+        physical_size: place.physical_size,
         min_size: Some(FIRST_RUN_SIZE),
         ..WindowOptions::default()
     }
@@ -141,6 +145,37 @@ pub fn flyout_options() -> WindowOptions {
         max_size: Some(flyout::SIZE),
         ..WindowOptions::default()
     }
+}
+
+/// The first-run tray tip (DW-0380): as the flyout, at the tip's size.
+pub fn tray_tip_options() -> WindowOptions {
+    WindowOptions {
+        borderless: true,
+        always_on_top: true,
+        visible: false,
+        resizable: false,
+        min_size: Some(super::tray_tip_window::SIZE),
+        max_size: Some(super::tray_tip_window::SIZE),
+        ..WindowOptions::default()
+    }
+}
+
+/// The primary display with the part its taskbar leaves free (`work`: `work_area::os_work_areas`), where Windows
+/// keeps the b by default. A display with no work area pair keeps its whole rectangle.
+pub fn primary_anchor(displays: &[Monitor], work: &[(flyout::Rect, flyout::Rect)]) -> Option<flyout::Anchor> {
+    let d = displays.iter().find(|d| d.primary).or_else(|| displays.first())?;
+    let monitor = flyout::Rect {
+        x: d.x,
+        y: d.y,
+        w: d.w as i32,
+        h: d.h as i32,
+    };
+    let area = work.iter().find(|(m, _)| *m == monitor).map_or(monitor, |(_, w)| *w);
+    Some(flyout::Anchor {
+        monitor,
+        work: area,
+        scale: d.scale,
+    })
 }
 
 #[cfg(test)]
@@ -199,7 +234,7 @@ mod tests {
             ..saved
         };
         assert_eq!(size_on_change(FirstRun, Main, Some(&maximized)), Some((1280.0, 800.0)));
-        assert_eq!(first_run_options().min_size, Some((960.0, 640.0)));
+        assert_eq!(first_run_options(&Restored::default()).min_size, Some((960.0, 640.0)));
     }
 
     #[test]
@@ -216,6 +251,18 @@ mod tests {
         let o = flyout_options();
         assert!(o.borderless && o.always_on_top && !o.visible && !o.resizable);
         assert_eq!((o.min_size, o.max_size), (Some((340.0, 520.0)), Some((340.0, 520.0))));
+    }
+
+    #[test]
+    fn the_tray_tip_is_fixed_frameless_topmost_starts_hidden_and_sits_on_the_primary_display() {
+        let o = tray_tip_options();
+        assert!(o.borderless && o.always_on_top && !o.visible && !o.resizable);
+        let m = |x, primary| Monitor { x, y: 0, w: 1920, h: 1080, scale: 1.0, primary };
+        let whole = flyout::Rect { x: 1920, y: 0, w: 1920, h: 1080 };
+        let work = flyout::Rect { h: 1040, ..whole };
+        let a = primary_anchor(&[m(0, false), m(1920, true)], &[(whole, work)]).expect("a display");
+        assert_eq!((a.monitor, a.work), (whole, work));
+        assert_eq!(primary_anchor(&[], &[]), None);
     }
 
     #[test]

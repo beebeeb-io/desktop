@@ -343,7 +343,7 @@ fn a_parent_404_under_a_ghost_is_rearmed_and_nothing_else_is() {
     );
 }
 
-/// D8 amendment (lead ruling 2026-10-29): a change held for the person that gave up on the 404 its ghost caused gets
+/// D8 amendment: a change held for the person that gave up on the 404 its ghost caused gets
 /// its retry budget back in the remap, keeps its pause, and is never re-labelled; a park or another error is left.
 #[test]
 fn a_person_paused_upload_on_a_parent_404_under_a_remapped_ghost_gets_its_budget_back_and_keeps_its_pause() {
@@ -1293,6 +1293,8 @@ fn backups_unknown_with_a_file_on_disk_is_kept_and_held() {
         }
     );
 }
+/// A change a case makes to the rows and ops of the scenario.
+type Mutation = dyn Fn(&mut Vec<Row>, &mut Vec<Op>);
 
 /// D5: "only if the whole subtree is scaffolding". Anything else there keeps it, even with no file on disk: a
 /// change queued under it, a row that is not a ghost, an op acting on one of its folders, a change moving in, or a
@@ -1330,7 +1332,7 @@ fn backups_unknown_with_more_than_scaffolding_under_it_is_kept_and_held() {
     let held_for_the_person = |_: &mut Vec<Row>, ops: &mut Vec<Op>| {
         ops[1].paused_reason = Some("found_while_paused".to_string());
     };
-    let cases: [(&str, &dyn Fn(&mut Vec<Row>, &mut Vec<Op>)); 5] = [
+    let cases: [(&str, &Mutation); 5] = [
         ("upload under it", &upload_under_it),
         ("server file under it", &server_file_under_it),
         ("rename of a folder", &rename_of_a_folder),

@@ -49,14 +49,14 @@ the `EngineHost` given to `open`: a `ChannelHost` queues each `HostMessage` (typ
 the conflict window") and calls the wake hook on the ENGINE's thread; the UI thread drains the receiver when
 woken. `{:?}` of a message prints its kind and never a name or a path.
 
-**Rules the handle keeps** (from `signin/`, the same ones the Tauri shell uses): a stored vault key is loaded
+**Rules the handle keeps** (from `signin/`, the same ones the 0.8.x shell used): a stored vault key is loaded
 only when it is provably this account's (`signin::store::load_session_from_vault`, task 2447); a sign-in removes
 a key that is not this account's before it stores its token; the phrase's key is stored only after the server
 confirmed it; an engine starts only with the keys of the session in memory, after the local data is bound to
 that account. A start onto another account's local data is refused on every OS and deletes nothing.
 
 **Not in the handle yet:** the plan check (`GateState::NoPlan` is never answered), device approval, passkeys,
-Windows Hello, the legacy flat credential layout (read by the Tauri shell only), a sign-out that sends or deletes
+Windows Hello, the legacy flat credential layout (read by the 0.8.x shell only, which is gone), a sign-out that sends or deletes
 local data (only "keep"), a startup probe of the stored token against the server, storage numbers. The API base
 is process-wide and read at run time (`BB_API_BASE`).
 
@@ -67,7 +67,7 @@ name (the host passes a BASE dir to `state_paths::init_from_app_local_data_dir(i
 identity or folder afterwards is an error), the credential service, the suggested sync folder, the Cloud Files
 provider name, GUID and class ids, the backup device (the test build is another device and never adopts a
 folder), the daemon socket, the macOS app group, the log folder, and the part of the temp and cache dirs a purge
-may delete from. A host decides its identity when it is BUILT (the Tauri shell: `real_app.rs`; the native app:
+may delete from. A host decides its identity when it is BUILT (the 0.8.x shell chose it in `real_app.rs`, now gone; the native app:
 `build.rs`, from `BEEBEEB_APP_IDENTIFIER`), never at run time. The test build does not run on macOS
 (`EngineIdentity::refusal_on`), and no engine starts in a folder registered to another sync provider
 (`sync_root_owner`). Never write one of those names as a literal and never name `identity::REAL` or `TEST` in

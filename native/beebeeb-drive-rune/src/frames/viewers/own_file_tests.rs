@@ -242,7 +242,7 @@ fn mfx_the_video_bars_play_opens_it_through_the_source() {
 #[test]
 fn mfx_a_files_video_shows_none_of_another_files_state() {
     let (mut rt, calls) = opened("v1", holding_refused("song-a", KindHint::Audio));
-    assert!(!has(&rt, "refused-words"), "another file's refusal is not this video's");
+    assert!(!has(&rt, "refused-text"), "another file's refusal is not this video's");
     assert!(has(&rt, "video-stage"), "the video's own stage is drawn");
     assert_eq!(words(&rt, "video-elapsed"), "0:00");
     space(&mut rt);
@@ -259,7 +259,7 @@ fn mfx_a_files_video_shows_none_of_another_files_state() {
 fn mfx_a_recordings_view_shows_none_of_another_files_state() {
     let (rt, _calls) = opened("b1", holding_refused("song-a", KindHint::Audio));
     assert!(
-        !has(&rt, "refused-words"),
+        !has(&rt, "refused-text"),
         "another recording's refusal is not this one's"
     );
     assert_eq!(words(&rt, "audio-title"), "Invented b1");
@@ -284,7 +284,7 @@ fn mfx_a_recordings_button_and_space_are_the_same_press() {
 #[test]
 fn mfx_space_on_a_refused_video_plays_it_again() {
     let (mut rt, calls) = opened("v1", holding_refused("v1", KindHint::Video));
-    assert!(has(&rt, "refused-words"), "the video's own refusal is shown");
+    assert!(has(&rt, "refused-text"), "the video's own refusal is shown");
     space(&mut rt);
     assert_eq!(
         *calls.borrow(),

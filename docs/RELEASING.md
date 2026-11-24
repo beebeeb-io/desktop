@@ -10,11 +10,13 @@ workflow and the macOS release scripts are gone (no Tauri build on any OS in 0.9
 
 ## Release blockers
 
-`RELEASE_BLOCKERS.md` at the repository root lists what must be fixed before any desktop release is cut, one list item (a line that starts with `- `) per blocker. While it lists an item, the release checks refuse: `release.yml` fails closed in its "Validate release notes" job (step "Refuse while RELEASE_BLOCKERS.md lists an item", with an `::error` that names the file), and `scripts/release-macos-local.sh` stops at step 1 and prints the items. A blocker is added when a merge to main ships something that must not reach a release yet, and the change that resolves it removes its item; an empty list, or no file, lets the release through. It exists because a rule that lives only in someone's memory does not stop a release: the first blocker is that a sign-out discards Finder saves still waiting to upload, so no release may ship the Finder write queue until that is fixed. `scripts/test-release-macos-local.sh` has a scenario that proves the script refuses. An item prefixed `- [macOS] ` (exact token, case-sensitive) is scoped to macOS only and is skipped by the Windows and Linux release workflow; `scripts/release-blockers-check.sh` implements the scope logic, and `scripts/test-release-blockers-check.sh` covers it.
+`RELEASE_BLOCKERS.md` at the repository root lists what must be fixed before any desktop release is cut, one list item (a line that starts with `- `) per blocker. While it lists an item, the release checks refuse: on this line `release-native-windows.yml` fails closed in its `validate-release-notes` job (step "Refuse while RELEASE_BLOCKERS.md lists a Windows item", with an `::error` that names the file). On the 0.8.x line the same refusal lives in that line's `release.yml` and `scripts/release-macos-local.sh`. A blocker is added when a merge to main ships something that must not reach a release yet, and the change that resolves it removes its item; an empty list, or no file, lets the release through. It exists because a rule that lives only in someone's memory does not stop a release: the first blocker is that a sign-out discards Finder saves still waiting to upload, so no release may ship the Finder write queue until that is fixed. On the 0.8.x line `scripts/test-release-macos-local.sh` has a scenario that proves the macOS script refuses. An item prefixed `- [macOS] ` (exact token, case-sensitive) is scoped to macOS only and is skipped by the Windows and Linux release workflow; `scripts/release-blockers-check.sh` implements the scope logic, and `scripts/test-release-blockers-check.sh` covers it.
+
+**Comparison with main (LD-0014).** A release branch carries its own copy of `RELEASE_BLOCKERS.md`, so deleting an item there would lift a gate that main still holds. `scripts/verify-release-branch-point.sh` (run for `release/*` dispatches before the build) therefore also refuses a branch whose file lacks an item that `origin/main`'s file lists, of any platform, and names the missing items. `scripts/release-blockers-check.sh` does the comparison when `RELEASE_BLOCKERS_MAIN_REF` is set (items are compared after trimming whitespace and normalising the bullet; a missing item is printed as `main: <item>` and binds by its scope). The reverse is allowed: an item the branch has and main no longer lists still binds. Resolve a blocker on main first, then bring that change into the release branch.
 
 **Amended 2026-10-24:** that first item was removed for desktop 0.8.12 on a maintainer waiver after 1 of the 12 sign-out device checks had run and passed (spec `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md`, §13.4 and §14). It goes back into the file after 0.8.12, so later releases stay gated until the other 11 pass.
 
-**Amended 2026-11-05:** the unscoped shared-folders item (2237d, Task 13's signed Finder/Explorer device rung) was moved out of this file before desktop 0.8.21. Guus ruled that it gates turning `shared_folders_v1` on for everyone (step 6 of `docs/superpowers/plans/2026-10-29-2237-flip-sequence-and-device-rungs.md` in the workspace), not a desktop release. The rung runs on released builds against production once the flag is on for the founders only (step 5), so it cannot also gate the release those builds come from. 0.8.21 ships with the flag off: on 2026-11-05 production's `shared_folders_v1` was disabled with 0 rules.
+**Amended 2026-11-05:** the unscoped shared-folders item (2237d, Task 13's signed Finder/Explorer device rung) was moved out of this file before desktop 0.8.21. The maintainers ruled that it gates turning `shared_folders_v1` on for everyone (step 6 of `docs/superpowers/plans/2026-10-29-2237-flip-sequence-and-device-rungs.md` in the workspace), not a desktop release. The rung runs on released builds against production once the flag is on for the founders only (step 5), so it cannot also gate the release those builds come from. 0.8.21 ships with the flag off: on 2026-11-05 production's `shared_folders_v1` was disabled with 0 rules.
 
 ## Release Notes Template
 
@@ -52,10 +54,36 @@ Write a 2-4 sentence intro in plain, honest language. Explain what changed and w
 <!-- stable: --> Existing Windows installs receive this release through the in-app updater automatically.
 <!-- alpha/beta: --> This release is published to the <alpha|beta> channel first. Windows installs following that channel receive it through the in-app updater; stable installs receive it only once it is promoted to stable.
 
+<!-- 0.8.x only (a native release is Windows-only, with no .dmg): -->
 On macOS the in-app update cannot install: download the `.dmg` from this release and drag Beebeeb into Applications to replace the installed version.
 
-For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets; for macOS, the `.dmg` from the same release.
+For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets; <!-- 0.8.x only: --> for macOS, the `.dmg` from the same release.
+
+<!-- changelog
+title: Desktop X.Y.Z: <short tagline>
+date: YYYY-MM-DD
+tags: desktop
+release: https://github.com/beebeeb-io/desktop/releases/tag/desktop-vX.Y.Z
+summary: <one plain sentence for the website changelog>
+new:
+- <user-visible addition, one line each>
+improved:
+- <user-visible improvement, one line each>
+-->
 ```
+
+### Changelog step (every release)
+
+The website changelog entry is not the generated GitHub changelog (`generate_release_notes: true` only appends that
+under the authored notes). It is written by hand as the hidden `<!-- changelog ... -->` block at the **end** of
+`RELEASE_NOTES.md` (shape above; a filled example is in the repository's `RELEASE_NOTES.md`). The step, in order:
+
+1. Author the block with the notes, in plain user-facing language: what a customer sees, not what changed in code.
+2. Commit it with the notes. The `release-native-windows.yml` job `publish-release` fails closed, with an `::error`
+   naming the file, when the block is missing; that is late (after the build), so check for it before dispatching.
+3. After the release is published, the site team turns the block into the website entry from the site repo:
+   `bun scripts/changelog-publish.ts --release desktop desktop-v<version>` (dry run: validates and prints), then
+   `--create` for a draft or `--publish`. Never publish the entry before the GitHub release is published.
 
 The release workflow enforces these rules (`node scripts/release-channel-checks.mjs notes <version> <channel>`,
 tested in `tests/releaseChannelChecks.test.ts`):
@@ -84,9 +112,10 @@ tested in `tests/releaseChannelChecks.test.ts`):
   workflow detects the binding `[macOS]` items automatically and passes `--no-macos` to the
   validator; `release-native-windows.yml` always passes it (a native release is Windows only).
   `scripts/test-release-blockers-check.sh` and `scripts/tests/releaseChannelChecks.test.ts`
-  cover both branches.
+  cover both branches. In both modes a sentence about updating or automatic delivery must name Windows and
+  not macOS (LD-0077); only the macOS line and the not-in-this-release line are exempt.
 
-Windows releases publish both NSIS (`setup.exe`) and MSI assets. Keep the updater manifest split
+On the 0.8.x line, Windows releases publish both NSIS (`setup.exe`) and MSI assets (a native 0.9.0 release publishes one NSIS installer and no MSI). Keep the updater manifest split
 by installer type: `windows-x86_64-nsis` must point at the NSIS asset, `windows-x86_64-msi` must
 point at the MSI asset, and the generic `windows-x86_64` fallback should stay on NSIS because
 fresh installs are documented as NSIS installs. Mixing installer types during an update creates
@@ -111,7 +140,7 @@ is a two-release sequence:
    the app's `tauri.conf.json`, but CI still uses the **old** `TAURI_SIGNING_PRIVATE_KEY`. Existing
    installs trust only the old baked key, so they can verify and apply this release. After applying
    it, those installs contain the new baked public key.
-2. **New-key release N+1:** only after release N has shipped and Guus has explicitly decided it is
+2. **New-key release N+1:** only after release N has shipped and a maintainer has explicitly decided it is
    safe to advance, update CI out of band so `TAURI_SIGNING_PRIVATE_KEY` contains the new private
    key and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` contains its passphrase. Release N+1 and later are
    signed with the new key and verified by installs that already applied N.
@@ -119,7 +148,7 @@ is a two-release sequence:
 For the task-1240 rotation, the transition commit bakes in the new updater public key with minisign
 fingerprint `C6FADFD59D732197`. The old pre-launch key baked into previously released builds had
 fingerprint `545D7BA77EDEA7E1`. The replacement private key and passphrase must be delivered to
-Guus out of band; do not commit them and do not paste them into release notes, issues, PRs, logs,
+a maintainer out of band; do not commit them and do not paste them into release notes, issues, PRs, logs,
 or chat. The CI secret change is deliberately not part of this commit.
 
 ### State of the task-1240 rotation (checked 2026-10-29): done
@@ -185,7 +214,7 @@ Mechanical checklist for release N:
 
 Mechanical checklist for release N+1:
 
-1. Do not start N+1 until Guus has confirmed release N adoption/recovery expectations. With the
+1. Do not start N+1 until a maintainer has confirmed release N adoption/recovery expectations. With the
    current static `releases.beebeeb.io/desktop/latest.json` feed, an old install that first checks
    after N+1 is published will see the new-key signature and reject it; public rollout needs either
    confidence that old installs have crossed N, an accepted manual-reinstall fallback, or a
@@ -207,8 +236,9 @@ Mechanical checklist for release N+1:
    `C6FADFD59D732197` and prove it with a real `minisign -Vm <asset> -P <key>` against an N+1 asset
    before deploying the site. Also update the key ID in this repo's README.
 
-Run the local verifier before either release. It requires the Tauri CLI from `bun install`; in a
-worktree without `node_modules`, set `TAURI_CLI` to the installed `@tauri-apps/cli/tauri.js`.
+Run the local verifier before either release. It needs the signer's Tauri CLI: run `bun install` in
+`scripts/updater-signer/`, then set `TAURI_CLI=scripts/updater-signer/node_modules/@tauri-apps/cli/tauri.js`
+(there is no root `package.json`, so the script's default `node_modules` lookup finds nothing).
 
 ```sh
 node scripts/verify-updater-key-rotation.mjs
@@ -341,7 +371,7 @@ needed per release. The trust boundary has four parts, and each one is checked:
   dispatch from them is refused; promoting an existing release with `publish_existing=true` does
   not run the check.
 
-The workflow has no reviewer gate on the environment: a release stays one dispatch.
+The `desktop-release` environment has 2 required reviewers (see "Signing" in `RELEASE.md`): a release dispatch waits for their approval before any signing step runs.
 `signing-login-check.yml` proves the boundary without building or signing anything. It
 runs only the Azure login through the environment. From `main` it must pass. From any
 other branch it must fail with "not allowed to deploy to desktop-release". Run both
@@ -401,14 +431,14 @@ The native line's procedure is "Native Windows releases (0.9.0 and later)" below
 8. The `publish-manifest` job reads the GitHub release body into the channel manifest `notes` field, so the authored notes are what the in-app updater shows on every promoted channel.
 9. The `publish-manifest` job fails closed: every bundle a manifest entry points at, and its `.sig`, must be a fully uploaded, non-empty asset of `desktop-v<version>`, and the `.sig` must download (assets API, up to 3 attempts of at most 120 s) as a Tauri signature whose trusted comment names that bundle (`file:<bundle>`; the signing key is not checked here, so a key-rotation release still publishes). darwin is all-or-nothing: with no macOS asset at all (no dmg, no `Beebeeb.app.tar.gz`, no `.sig`, in any upload state) the manifest omits `darwin-aarch64`; any other macOS state (a dmg without the bundle, an upload still in progress, a missing, empty, unfetchable or foreign `.sig`) fails the channel manifest instead of silently dropping Macs from the update. Tested offline by `scripts/test-release-channel-manifest.sh` (CI job "Release channel manifest (fake gh test)").
 10. GitHub's "Latest" release is what beebeeb.io/download offers fresh installs, so it tracks the stable manifest: an initial `alpha`/`beta` release is created with `make_latest: false`, and a `stable` publish (new or `publish_existing=true`) marks `desktop-v<version>` as Latest.
-11. After any stable publish, run `node scripts/release-channel-checks.mjs delivery`. It compares `https://releases.beebeeb.io/desktop/latest.json` with GitHub's Latest desktop release and exits 1 on drift.
+11. After any stable publish, run the delivery drift check: `node scripts/release-channel-checks.mjs delivery`. It is a scripted check, not a judgement call: it compares `https://releases.beebeeb.io/desktop/latest.json` with GitHub's Latest desktop release, prints both values, and exits 1 on drift (or when either cannot be read). `DESKTOP_STABLE_MANIFEST_URL` and `DESKTOP_LATEST_RELEASE_API` override the two endpoints; `scripts/tests/releaseChannelChecks.test.ts` runs it against local servers (match, drift, unreadable). The `delivery-check` job in `release-native-windows.yml` runs it after `mark-latest` on stable; treat a red exit as a failed release.
 
 ## Native Windows releases (0.9.0 and later)
 
 The native Windows app has its own workflow, `.github/workflows/release-native-windows.yml`; the 0.8.x line's
 `release.yml` (on `main`) is the only writer of `desktop/latest.json`, `beta.json` and `alpha.json`, and it goes when
 `v2-native` merges into `main`. Whether the 0.8.25 bridge is promoted to beta and stable from the 0.8.x line before that
-merge, so that every 0.8.x install passes through it, is Guus's call (D-T-14). Design and open decisions:
+merge, so that every 0.8.x install passes through it, is the maintainers' decision. Design and open decisions:
 `docs/superpowers/specs/2026-11-11-native-installer-updater.md`. **Status: the workflow has never run.**
 
 - Same inputs (`version`, `channel`, `publish_existing`); a version below 0.9.0 is refused. Same gates: authored
@@ -423,7 +453,7 @@ merge, so that every 0.8.x install passes through it, is Guus's call (D-T-14). D
 - Every job that signs (here `build` and `publish-manifest`; on the 0.8.x line also `release.yml`'s `build` and the
   macOS signing workflow)
   names the `desktop-release` environment, and no step that holds a key installs dependencies. The settings that
-  make this a boundary are in the spec, section 6 ("Settings Guus must make").
+  make this a boundary are in the spec, section 6 ("Settings the maintainers must make").
 - Promoting a build to another channel and **withdrawing** one are both `publish_existing=true`: a withdrawal
   publishes a newer signed manifest that points at the version to go back to. Never delete a manifest to withdraw
   a build: the host can serve it again.

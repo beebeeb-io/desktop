@@ -455,9 +455,8 @@ fn ld0105_s5_a_requester_that_exits_fails_only_its_own_demands() {
     assert_eq!((gone, others), (vec![a], true));
     assert_eq!(ra.try_recv().ok(), Some(Answer::Failed), "its request fails");
     assert!(rb.try_recv().is_err(), "the other one still waits");
-    assert_eq!(
-        book.requester_exited(11).1,
-        false,
+    assert!(
+        !book.requester_exited(11).1,
         "no live requester left: the session stops"
     );
 }
@@ -568,7 +567,7 @@ fn ld0105_a4_a_needs_attention_row_is_checked_at_start_and_on_close_only() {
 /// `READ_AHEAD_ON_DEFAULT_KEY = true`.
 #[test]
 fn ld0105_p2_no_piece_goes_out_on_the_default_key() {
-    assert!(!READ_AHEAD_ON_DEFAULT_KEY, "off until a native rung measures it");
+    const { assert!(!READ_AHEAD_ON_DEFAULT_KEY, "off until a native rung measures it") };
     let mut book = DemandBook::default();
     let (a, _ra) = book.add(0, 4096, 1, KEYS);
     assert_eq!(
@@ -894,7 +893,7 @@ fn ld0105_p2_promotion_needs_every_byte_on_disk_and_comes_after_the_read_back() 
     assert!(!covers_whole(&[], size));
 }
 
-// ── Desktop #225: the native QA rung's two P1s (lead rulings, 2026-11-06) ────────────────────────
+// ── Desktop #225: the native QA rung's two P1s ────────────────────────
 
 /// Core's scripted server with a slow storage link (each GET takes `delay`): it records, per chunk,
 /// how many GETs ran, and the most GETs that ran beside chunk 0's (the demanded one).
@@ -919,33 +918,31 @@ impl SlowLink {
 }
 
 impl beebeeb_transfer::DirectIo for SlowLink {
-    fn api(&self, call: beebeeb_transfer::ApiCall) -> impl std::future::Future<Output = ApiReply> + Send {
-        self.inner.api(call)
+    async fn api(&self, call: beebeeb_transfer::ApiCall) -> ApiReply {
+        self.inner.api(call).await
     }
-    fn storage_get(
+    async fn storage_get(
         &self,
         url: &beebeeb_transfer::SignedUrl,
         expected_len: u64,
         total: std::time::Duration,
         idle: std::time::Duration,
         connect: std::time::Duration,
-    ) -> impl std::future::Future<Output = StorageReply> + Send {
-        async move {
-            let i: u32 = url.expose().rsplit("i=").next().unwrap().parse().unwrap();
-            {
-                let mut running = self.running.lock().unwrap();
-                running.insert(i);
-                if running.contains(&0) {
-                    self.beside_chunk_0
-                        .fetch_max(running.len() - 1, std::sync::atomic::Ordering::SeqCst);
-                }
-                *self.gets.lock().unwrap().entry(i).or_default() += 1;
+    ) -> StorageReply {
+        let i: u32 = url.expose().rsplit("i=").next().unwrap().parse().unwrap();
+        {
+            let mut running = self.running.lock().unwrap();
+            running.insert(i);
+            if running.contains(&0) {
+                self.beside_chunk_0
+                    .fetch_max(running.len() - 1, std::sync::atomic::Ordering::SeqCst);
             }
-            tokio::time::sleep(self.delay).await;
-            let reply = self.inner.storage_get(url, expected_len, total, idle, connect).await;
-            self.running.lock().unwrap().remove(&i);
-            reply
+            *self.gets.lock().unwrap().entry(i).or_default() += 1;
         }
+        tokio::time::sleep(self.delay).await;
+        let reply = self.inner.storage_get(url, expected_len, total, idle, connect).await;
+        self.running.lock().unwrap().remove(&i);
+        reply
     }
     fn storage_put(
         &self,
@@ -1144,14 +1141,14 @@ async fn ld0105_p1_a_cancelled_request_ends_it_and_never_poisons() {
     assert!(sink.withheld, "never promoted");
 }
 
-// ── The streaming kill switch (lead ruling, 2026-11-06) ─────────────────────────────────────────
+// ── The streaming kill switch ─────────────────────────────────────────
 
 /// Switch ON (dev builds): a pinned file on a PROGRESSIVE root streams through its range session;
 /// a non-progressive root or a file an earlier session handed back still takes the whole-file path.
 #[test]
 #[cfg(debug_assertions)]
 fn ld0105_switch_on_streams_a_pinned_file_through_its_range_session() {
-    assert!(W2_STREAMING, "ON in dev builds (this test build is one)");
+    const { assert!(W2_STREAMING, "ON in dev builds (this test build is one)") };
     assert_eq!(fetch_route(true, true, false), FetchRoute::RangeSession);
     assert_eq!(
         fetch_route(true, false, false),

@@ -58,7 +58,7 @@ pub enum Emptied {
     Missing,
     /// A step failed: NOT_IN_SYNC and the pin state were restored first. The status word only.
     Failed(&'static str),
-    /// The discard's own check under the exclusive handle refused (delta review P2-1): nothing changed.
+    /// The discard's own check under the exclusive handle refused: nothing changed.
     Refused(&'static str),
 }
 
@@ -179,6 +179,9 @@ thread_local! {
 
 /// `CfSetPinState(pin)` by path, with its own handle (the retry when the step's handle could not).
 pub(super) fn set_pin_by_path(path: &Path, pin: CF_PIN_STATE) -> bool {
+    if super::refuse_alias(path).is_err() {
+        return false;
+    }
     // LD-0113 Amendment 7: the write-access open below is refused on a read-only Backups file.
     let _read_only = super::read_only::Lifted::new(path);
     #[cfg(any(test, feature = "test-support"))]
@@ -515,7 +518,7 @@ fn restore_recorded_pin(db: &crate::state_db::StateDb, file_id: &str, path: &Pat
         return;
     };
     let view = super::placeholders::platform_view(path);
-    // Self-review: nothing at the path is not retried by an open on every tick (one metadata read).
+    // Nothing at the path is not retried by an open on every tick (one metadata read).
     if view == crate::unknown_check::PlatformView::Missing {
         return;
     }
@@ -677,7 +680,7 @@ pub(super) fn identity_of_handle(handle: HANDLE) -> Option<Vec<u8>> {
 pub const IDENTITY_MISMATCH: &str = "identity_mismatch";
 const NOT_POISONED: &str = "not_poisoned";
 
-/// Delta review P2-1: may the discard empty the placeholder it holds? Only if its FileIdentity is
+/// May the discard empty the placeholder it holds? Only if its FileIdentity is
 /// `file_id` (none: not this file) and, asked last, the poison row is still there.
 pub(crate) fn discard_guard(
     identity: Option<&[u8]>,
@@ -720,7 +723,7 @@ pub fn discard_now(
         .map_err(|_| DiscardRefused::Missing)?;
     // A pin lost earlier (review P3, poison.rs:373): the step restores that one.
     let recorded = db.pin_to_restore(file_id).ok().flatten().map(CF_PIN_STATE);
-    // Delta review P2-1 (lead ruling 2026-11-06): under the exclusive handle, before anything changes,
+    // Under the exclusive handle, before anything changes,
     // the placeholder at the row's path must be this file (its FileIdentity, the UTF-8 file id) and the
     // poison row must still be there. A stale path (a folder rename the database has not caught up
     // with) or a second discard in flight then empties nothing and clears nothing.
@@ -742,8 +745,8 @@ pub fn discard_now(
             Ok(())
         }
         // A plain file at the path is not ours to replace (review P3, poison.rs:572), and it carries no
-        // identity to prove it is this file: nothing is emptied, the poison stays (lead ruling
-        // 2026-11-06: the flag is never cleared without emptying), nothing is fetched.
+        // identity to prove it is this file: nothing is emptied, the poison stays (the flag is never
+        // cleared without emptying), nothing is fetched.
         Emptied::Gone => Err(DiscardRefused::Failed("not_a_placeholder")),
         Emptied::Refused(word) if word == NOT_POISONED => Err(DiscardRefused::NotPoisoned),
         Emptied::Refused(word) => Err(DiscardRefused::Failed(word)),

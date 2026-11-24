@@ -3,7 +3,7 @@
 use super::*;
 #[test]
 fn test_1698_review_trash_echo_marks_descendants_of_an_already_parked_folder() {
-    // PR #100 review (Codex P1, engine_bridge.rs ~5648): Finder trashing a
+    // Finder trashing a
     // folder parks ONLY the folder row (`queue_finder_delete`); the
     // server's `file_trash` echo is what marks the descendants. The
     // parked-root early return discarded the echo entirely, so nested
@@ -55,7 +55,7 @@ fn test_1698_review_trash_echo_marks_descendants_of_an_already_parked_folder() {
 
 #[test]
 fn test_1698_review_restore_un_trashes_the_entire_held_subtree() {
-    // PR #100 review (Codex P1, engine_bridge.rs ~5715): a restored FOLDER
+    // a restored FOLDER
     // must take its whole held subtree out of the trash view, not just the
     // root row. The authoritative re-snapshot preserves `Trashing` rows by
     // design, so it can never repair the descendants — they would linger

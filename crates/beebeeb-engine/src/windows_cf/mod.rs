@@ -52,8 +52,12 @@ pub mod callbacks;
 pub mod placeholders;
 // LD-0105 S6 / I5: emptying placeholders a failed fetch wrote into.
 pub mod poison;
-// Task 2523: a copy behind the current version, emptied in the measured order and given the new size.
+// Dc-009: Zone.Identifier (ZoneId=3) on files landed from another account's share.
+pub mod mark_of_web;
+// A copy behind the current version, emptied in the measured order and given the new size.
 pub mod stale_copy;
+// dc-103c: a placeholder holding ranges of a version the server moved past, emptied so the next open fetches the new one.
+pub mod stale_ranges;
 // LD-0105 W2: the streaming fetch (range sessions, cancel, open completion, W3's decline).
 pub mod streaming;
 // LD-0105 S0: a fetch's byte progress reported to Cloud Files.
@@ -61,8 +65,13 @@ pub mod fetch_progress;
 // LD-0105 S7: providers, the hydration policy and its read-back, the Explorer registration's Id.
 mod registration;
 pub use registration::*;
+// drive-complete-006b: the uninstaller's teardown of this identity's sync folders (keep downloaded files, or remove).
+pub mod registration_teardown;
 #[cfg(test)]
 mod reconcile_tests;
+// w36: an idle tick keeps no handle and does no per-row work.
+#[cfg(test)]
+mod idle_tick_native_tests;
 // LD-0105 part 1: the Windows-native rungs (S0, W1, S6), each on its own QA sync root.
 #[cfg(test)]
 mod ld0105_native_tests;
@@ -75,6 +84,8 @@ mod ld0113_protect_native_tests;
 mod sync_root_owner_native_tests; // a folder registered to another provider is read and refused // LD-0113 Amendment 9: a folder OneDrive moved, on a QA sync root.
 // LD-0113 Amendments 7 and 8a: files under Backups are read-only; the "Read-only" badge on the root.
 pub mod read_only;
+// Windows Search and Defender pass over a cloud-only file without hydrating it.
+pub mod scan_safety;
 // plan40 batch 1: refusing a service folder's move or delete (slice A9), "Show sync status on files" (slice B3).
 pub mod refuse_service_folders;
 pub mod signout;
@@ -82,7 +93,6 @@ pub mod status_on_files;
 pub mod status_ui;
 pub mod thumbnail_provider;
 
-use std::os::windows::ffi::OsStrExt;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -158,6 +168,40 @@ pub fn sync_root() -> Option<std::path::PathBuf> {
     SYNC_ROOT.read().ok().and_then(|root| root.clone())
 }
 
+/// Every Cloud Files change by a path (pin, stamp, convert, resize, mark) asks the 8.3 alias rule first (task 2415):
+/// a name the folder did not report may reach a different entry. From the sync root when `path` is below it, else
+/// from its own folder (its name alone). An `AlreadyExists` error is a conflict: change nothing.
+pub(crate) fn refuse_alias(path: &std::path::Path) -> std::io::Result<()> {
+    let root = sync_root();
+    let roots: Vec<&std::path::Path> = root.as_deref().into_iter().collect();
+    crate::name_alias::refuse_conflict_under_roots(path, &roots)
+}
+
+#[cfg(all(test, windows))]
+mod alias_guard_tests {
+    use super::*;
+
+    #[test]
+    fn changes_by_path_refuse_an_aliased_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("REPORT~1.PDF");
+        std::fs::write(&path, b"x").unwrap();
+        let _stub = crate::name_alias::stub::alias(&path);
+        let refused = |e: &anyhow::Error| {
+            e.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::AlreadyExists)
+        };
+        assert_eq!(refuse_alias(&path).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(refused(&placeholders::set_pin_state(&path, true, false).unwrap_err()));
+        assert!(refused(&placeholders::convert_to_unsynced_placeholder(&path, "id").unwrap_err()));
+        assert!(refused(&placeholders::restamp_cloud_only(&path, "a", "b").unwrap_err()));
+        assert!(refused(&placeholders::resize_placeholder(&path, 1).unwrap_err()));
+        assert!(refused(&placeholders::mark_not_in_sync_path(&path).unwrap_err()));
+        assert!(!poison::set_pin_by_path(&path, windows::Win32::Storage::CloudFilters::CF_PIN_STATE_PINNED));
+        assert!(path.exists());
+    }
+}
+
 // The provider GUID is fixed per app identity (`EngineIdentity::cloud_files_provider_guid`; `identity.rs` pins the
 // real app's): minted once (UUIDv4) and never changed, so the sync-root identity is stable across releases and
 // machines. A changed GUID would orphan existing placeholders.
@@ -204,10 +248,10 @@ pub fn set_bridge(bridge: Arc<EngineBridge>) {
     if bridge.is_stopping() || ensure_reactivation_allowed().is_err() {
         return;
     }
-    if let Some(connection) = connection.as_ref() {
-        if let Err(error) = BRIDGE.install(connection.generation, bridge) {
-            tracing::error!(%error, "callback reactivation refused");
-        }
+    if let Some(connection) = connection.as_ref()
+        && let Err(error) = BRIDGE.install(connection.generation, bridge)
+    {
+        tracing::error!(%error, "callback reactivation refused");
     }
 }
 
@@ -955,7 +999,7 @@ pub fn register_status_ui_for_sync_root(identity: &'static EngineIdentity, sync_
 ///   registered `CF_POPULATION_POLICY_ALWAYS_FULL` +
 ///   `DISABLE_ON_DEMAND_POPULATION_ON_ROOT`), so Windows never asks us for
 ///   placeholders on demand and no `FETCH_PLACEHOLDERS` callback is required.
-/// - `NOTIFY_FILE_CLOSE_COMPLETION` — the **UPLOAD** trigger (task 0780). Fires
+/// - `NOTIFY_FILE_CLOSE_COMPLETION` — the **UPLOAD** trigger. Fires
 ///   AFTER a handle that wrote a new/modified file in the connected root closes.
 ///   Unlike a `notify`/ReadDirectoryChanges watcher (which the CF filter starves
 ///   on a connected root), this DOES fire, so it is the create/modify hook for
@@ -1175,8 +1219,8 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
     // be reachable before we create any placeholder below.
     set_bridge(bridge.clone());
     crate::backup_protect::reconcile_backups_tree_soon(bridge.db_arc(), sync_root); // LD-0113 review #4
-    let created = populate_placeholders(bridge.db(), sync_root).created;
-    // Zero-knowledge (task 2240 slice 2): a count, never the sync root's path.
+    let created = populate_placeholders(bridge.db(), sync_root, &mut placed_memo()).created;
+    // Zero-knowledge: a count, never the sync root's path.
     tracing::info!(placeholders = created, "Cloud Files placeholders seeded");
 }
 
@@ -1200,16 +1244,18 @@ pub fn seed_placeholders(bridge: Arc<EngineBridge>, sync_root: &std::path::Path)
 /// No-op (logs at debug) until [`seed_placeholders`] has stashed the bridge;
 /// the runner only calls this on ticks that run after the bridge is built, so
 /// in practice the bridge is always present here.
-pub fn refresh_placeholders(sync_root: &std::path::Path) {
+pub fn refresh_placeholders(sync_root: &std::path::Path) -> populate::PopulateStats {
     let Some(bridge) = bridge() else {
         tracing::debug!("refresh_placeholders called before bridge was set; skipping");
-        return;
+        return populate::PopulateStats::default();
     };
-    // Task 2240 slice 2 (spec D6): what the refresh costs, measured every tick before anyone optimises it.
+    // Task 2240 slice 2: what the refresh costs, measured every tick before anyone optimises it.
     // Counts and milliseconds only, never a path.
-    let s = populate_placeholders(bridge.db(), sync_root);
+    let s = populate_placeholders(bridge.db(), sync_root, &mut placed_memo());
     tracing::debug!(
         rows = s.rows,
+        visited = s.visited,
+        dirs_listed = s.dirs_listed,
         skipped = s.skipped,
         ensure_dir_errors = s.ensure_dir_errors,
         create_calls = s.create_calls,
@@ -1222,6 +1268,16 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
         elapsed_ms = s.elapsed_ms,
         "placeholder refresh"
     );
+    s
+}
+
+/// w36: the tick's memo of placed rows ([`populate::PlacedMemo`]); it resets itself for another sync root.
+fn placed_memo() -> std::sync::MutexGuard<'static, populate::PlacedMemo> {
+    static PLACED: OnceLock<std::sync::Mutex<populate::PlacedMemo>> = OnceLock::new();
+    PLACED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 /// Per-tick reconcile of on-disk Cloud Files placeholder state back into the
@@ -1247,7 +1303,7 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
 /// written. Engine-owned statuses (`Uploading`/`Downloading`/`Conflict`/`Error`)
 /// are never overridden — `decode_os_state` returns `None` for them.
 ///
-/// ## Task 2240 slice 2: one listing per folder, and confirm before write
+/// ## One listing per folder, and confirm before write
 ///
 /// Each file row's attribute word comes from one listing of its parent folder, not one
 /// `GetFileAttributesW` per file (1.45–1.95 s of kernel time per tick on 37k files). A row whose
@@ -1259,15 +1315,19 @@ pub fn refresh_placeholders(sync_root: &std::path::Path) {
 ///
 /// Never logs a path or filename — only counts and milliseconds.
 #[cfg(target_os = "windows")]
-pub fn reconcile_placeholder_state(sync_root: &std::path::Path) {
+pub fn reconcile_placeholder_state(sync_root: &std::path::Path) -> crate::os_state_reconcile::ReconcilePlan {
     let Some(bridge) = bridge() else {
         tracing::debug!("reconcile_placeholder_state called before bridge was set; skipping");
-        return;
+        return crate::os_state_reconcile::ReconcilePlan {
+            deltas: Vec::new(),
+            counts: Default::default(),
+            next_cursor: 0,
+        };
     };
-    reconcile_placeholder_state_with(bridge.db(), sync_root, &RECONCILE_CURSOR);
+    reconcile_placeholder_state_with(bridge.db(), sync_root, &RECONCILE_CURSOR)
 }
 
-/// Where the next tick's sentinel window starts (spec D4). Only the sync tick touches it.
+/// Where the next tick's sentinel window starts. Only the sync tick touches it.
 #[cfg(target_os = "windows")]
 static RECONCILE_CURSOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -1599,7 +1659,7 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
             continue;
         }
         checked += 1;
-        // Task 1640: only agreed content is marked in sync, under one exclusive handle (P2-4).
+        // Only agreed content is marked in sync, under one exclusive handle (P2-4).
         // An edit the person made (the platform cleared its in-sync state), or a file whose
         // upload is queued, stays out of sync, so neither this engine nor Explorer's "Free up
         // space" can discard its bytes. Before, every `Local` row was stamped on every tick.
@@ -1627,9 +1687,11 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
     }
 }
 
+// A placeholder's identity read by its place (the prune of two server items with one name).
+pub mod identity_at;
 // The placeholder pass (task 2240, LD-0113), in its own file under the size ratchet.
 mod populate;
 use populate::populate_placeholders;
-pub use populate::restore_placeholders;
+pub use populate::{EarlyPasses, PopulateStats, placeholder_passes, restore_placeholders};
 
 pub mod upload_finalization;

@@ -33,7 +33,7 @@ impl std::fmt::Display for EngineStartBlocked {
 }
 
 /// The keys every engine start uses, and the identity of the session they belong to, read together UNDER
-/// the engine slot (lead rulings T8-⚠lock, T9-starts and T10-identity). Lock and Sign-out clear the session
+/// the engine slot. Lock and Sign-out clear the session
 /// before they release the slot, so a start that was waiting for the slot finds nothing here instead of
 /// starting an engine with keys that were just cleared. No start receives keys from its caller, so there
 /// is nothing to read them from but this. The identity comes from the SAME `Session` (its own email, and

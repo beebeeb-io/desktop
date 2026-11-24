@@ -244,7 +244,7 @@ impl<C: CredentialStores> Engine<C> {
         if !self.account_session_is_still(session) {
             // The request has gone out and Beebeeb may have changed the account (new backup codes, two-factor on):
             // a turn that moved for the SAME account (a screen lock, a session write) must not wipe what Beebeeb
-            // made unseen (review of desktop#424). The answer is dropped only when the session ended or another
+            // made unseen. The answer is dropped only when the session ended or another
             // account is signed in: its secrets are wiped here.
             // Whether a session is still in memory, asked directly (this is a worker: it may wait): a locked screen
             // keeps it (the case this exists for), a session that was forgotten or never there does not. Not

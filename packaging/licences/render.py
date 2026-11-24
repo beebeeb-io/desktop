@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Merge the `cargo about --format json` lists of the three shipped binaries into THIRD-PARTY-LICENSES.md.
+
+  render.py --root <repo> --version <x.y.z> --out <file> <app.json> <office-render.json> <media-helper.json>
+
+Deterministic: the same inputs give the same bytes (sorted; no dates), so `generate.sh --check` can diff.
+"""
+import argparse
+import hashlib
+import json
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+LOCKS = [
+    ("app", "native/beebeeb-drive-rune/Cargo.lock"),
+    ("office-render", "native/beebeeb-office-render/Cargo.lock"),
+    ("media-helper", "native/beebeeb-media-helper/Cargo.lock"),
+]
+RULE = "=" * 78
+SUB = "-" * 78
+REPO = "https://github.com/beebeeb-io/desktop"
+INDEX_BEGIN = "CRATE INDEX BEGIN"
+INDEX_END = "CRATE INDEX END"
+
+
+def lock_sha(path: Path) -> str:
+    """sha256 of the lock with CR bytes removed, so a CRLF checkout (Windows) gives the same value."""
+    return hashlib.sha256(path.read_bytes().replace(b"\r", b"")).hexdigest()
+
+
+def lock_packages(path: Path):
+    """(name, version, source) of every package in the lock that is not one of ours (a path crate has no source)."""
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    return [(p["name"], p["version"], p.get("source")) for p in data["package"] if p.get("source")]
+
+
+def code(text: str) -> str:
+    """A fenced code block holding `text` as written (the fence is longer than any run of backticks in it)."""
+    n = 3
+    while "`" * n in text:
+        n += 1
+    fence = "`" * n
+    return f"{fence}\n{text}\n{fence}"
+
+
+def read(root: Path, rel: str) -> str:
+    return (root / rel).read_text(encoding="utf-8").strip("\n")
+
+
+def git_sources(pkgs):
+    """Every git dependency of the three graphs: (url, rev) -> crate names."""
+    found = {}
+    for name, _version, source in pkgs:
+        if source.startswith("git+"):
+            url, _, rev = source[4:].partition("#")
+            url = url.split("?")[0]
+            found.setdefault((url, rev), set()).add(name)
+    return found
+
+
+# Crates that declare no licence anywhere: what the repository they come from says (checked by hand, 2026-11-18).
+SIBLING_LICENCES = {"beebeeb-office": "MIT OR Apache-2.0"}
+LICENCE_FILE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE")
+
+
+def git_crate_licences(root: Path, missing):
+    """For crates cargo-about skipped (publish = false git dependencies): (licence expression, [(file name, text)])
+    from `cargo metadata` and the licence files in the crate's folder and the folders above it, up to the git checkout's
+    top. A crate with neither an expression nor a file is an error: someone has to say what it is."""
+    found = {}
+    built = set()
+    wanted = set(missing)
+    for _label, rel in LOCKS:
+        manifest = root / rel.replace("Cargo.lock", "Cargo.toml")
+        out = subprocess.run(["cargo", "metadata", "--locked", "--format-version", "1", "--manifest-path", str(manifest)],
+                             check=True, capture_output=True, text=True).stdout
+        for p in json.loads(out)["packages"]:
+            key = (p["name"], p["version"])
+            if key not in wanted or key in found:
+                continue
+            here = Path(p["manifest_path"]).parent
+            files = []
+            d = here
+            for _ in range(6):
+                for f in sorted(d.iterdir()):
+                    if f.is_file() and f.name.upper().startswith(LICENCE_FILE_PREFIXES) and f.suffix.lower() in ("", ".txt", ".md"):
+                        files.append((f.name, f.read_text(encoding="utf-8", errors="replace").strip("\n")))
+                if (d / ".git").exists() or d == d.parent:
+                    break
+                d = d.parent
+            expr = p.get("license") or ""
+            if not expr and not files and p["name"] in SIBLING_LICENCES:
+                # desktop-office's glue crate has no licence field and no file of its own; the repository's README says
+                # "All projects are MIT OR Apache-2.0" and each project folder (wordcraft, gridcraft, ...) keeps the files.
+                expr = SIBLING_LICENCES[p["name"]]
+                for sub in sorted(d.iterdir()):
+                    for f in sorted(sub.glob("*")) if sub.is_dir() else []:
+                        if f.is_file() and f.name.upper().startswith(LICENCE_FILE_PREFIXES) and f.suffix.lower() in ("", ".txt", ".md", ".MIT"):
+                            files.append((f"{sub.name}/{f.name}", f.read_text(encoding="utf-8", errors="replace").strip("\n")))
+            found[key] = (expr, files, p.get("repository") or "")
+        built |= {(p["name"], p["version"]) for p in json.loads(out)["packages"]
+                  if p["id"] in {n["id"] for n in json.loads(out)["resolve"]["nodes"]}}
+    return found, built
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", required=True)
+    ap.add_argument("--version", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("json", nargs=3)
+    a = ap.parse_args()
+    root = Path(a.root)
+
+    # ---- the crates: one entry per (licence text), every crate under it, across the three lists.
+    groups = {}  # (id, text) -> {(name, version): repository}
+    listed = set()
+    for j in a.json:
+        for lic in json.loads(Path(j).read_text(encoding="utf-8"))["licenses"]:
+            text = lic["text"].strip("\n")
+            g = groups.setdefault((lic["id"], lic["name"], text), {})
+            for u in lic["used_by"]:
+                c = u["crate"]
+                g[(c["name"], c["version"])] = c.get("repository") or ""
+                listed.add((c["name"], c["version"]))
+    all_pkgs = []
+    for _label, rel in LOCKS:
+        all_pkgs += lock_packages(root / rel)
+    missing = sorted({(n, v) for n, v, _s in all_pkgs} - listed)
+    skipped, built = git_crate_licences(root, missing) if missing else ({}, set())
+    # Optional crates the lock records but no feature pulls in are not in any program: indexed, not licensed.
+    unbuilt = sorted(k for k in missing if k not in built)
+    for k in unbuilt:
+        skipped.pop(k, None)
+    unknown = [k for k in missing if k in built and (k not in skipped or not (skipped[k][0] or skipped[k][1]))]
+    if unknown:
+        sys.exit(f"render.py: no licence found for {unknown}: add a text under packaging/licences/texts and a rule here")
+
+    o = []
+    w = o.append
+    w("# BEEBEEB DESKTOP: THIRD-PARTY LICENCES AND SOURCE OFFER")
+    w("")
+    w(f"Beebeeb {a.version} (Initlabs B.V.). This file lists the software and data that is part of the Beebeeb desktop")
+    w("app (beebeeb-desktop.exe) and its two helper programs (beebeeb-office-render.exe, beebeeb-media-helper.exe),")
+    w("with each one's licence. It is installed beside the app and opened from Settings > About > Open-source licences.")
+    w("")
+    w("Generated by packaging/licences/generate.sh (cargo-about); do not edit by hand.")
+    w("")
+    for label, rel in LOCKS:
+        w(f"cargo-lock-sha256 {label}: {lock_sha(root / rel)}")
+        w("")
+    w(f"release-version: {a.version}")
+    w("")
+    w("## 1. BEEBEEB ITSELF: GNU AFFERO GENERAL PUBLIC LICENSE 3.0 OR LATER, AND WHERE TO GET THE SOURCE")
+    w("")
+    w("The Beebeeb desktop app and its helpers are free software under the GNU Affero General Public License,")
+    w("version 3 or (at your option) any later version. The complete corresponding source code of the version you")
+    w("have installed is available to everyone, free of charge:")
+    w("")
+    w(f"- Beebeeb desktop {a.version}: [{REPO}]({REPO}), release tag desktop-v{a.version} ([release]({REPO}/releases/tag/desktop-v{a.version}))")
+    for (url, rev), names in sorted(git_sources(all_pkgs).items()):
+        if "beebeeb-io" in url:
+            w(f"- Part of the build, pinned: {url} at commit {rev} ([source]({url}/tree/{rev}); crates: {', '.join(sorted(names))})")
+    for (url, rev), names in sorted(git_sources(all_pkgs).items()):
+        if "beebeeb-io" not in url:
+            w(f"- Other git dependency (its own licence is in section 5): {url} at commit {rev} ({', '.join(sorted(names))})")
+    w("")
+    w("The Office viewer's engine (WordCraft, GridCraft, DeckCraft, in the repository beebeeb-io/desktop-office) is under")
+    w("MIT OR Apache-2.0, at your option; its ArtCraft name and logos are trademarks and are not covered by that licence.")
+    w("")
+    w("Beebeeb is made by Initlabs B.V., the Netherlands. Questions about licences: support@beebeeb.io.")
+    w("")
+    w("### GNU AFFERO GENERAL PUBLIC LICENSE, Version 3 (full text)")
+    w("")
+    w(code(read(root, "LICENSE")))
+    w("")
+    w("## 2. FONTS")
+    w("")
+    w("Inter and JetBrains Mono are embedded in the app (SIL Open Font License 1.1). Their copyright notices and")
+    w("the licence follow.")
+    for name, rel in (("Inter", "native/beebeeb-drive-rune/assets/fonts/LICENSE-inter.txt"),
+                      ("JetBrains Mono", "native/beebeeb-drive-rune/assets/fonts/LICENSE-jetbrains-mono.txt")):
+        w("")
+        w(f"### {name}: SIL Open Font License 1.1")
+        w("")
+        w(code(read(root, rel)))
+    w("")
+    w("### Ubuntu Light (in beebeeb-office-render): Ubuntu Font Licence 1.0")
+    w("")
+    w("Ubuntu Light (Dalton Maag Ltd for Canonical Ltd), the Office viewer engine's last-resort text face, reaches")
+    w("the helper through the crate epaint_default_fonts. Its licence follows.")
+    w("")
+    w(code(read(root, "packaging/licences/texts/UFL-1.0.txt")))
+    w("")
+    w("## 3. DATA COMPILED INTO THE PDF RENDERER, AND OTHER NOTICES")
+    w("")
+    notices = read(root, "native/beebeeb-drive-rune/THIRD-PARTY-NOTICES.md")
+    w(notices.replace("\n## ", "\n\n### "))
+    w("")
+    w("## 4. MOZILLA PUBLIC LICENSE 2.0 SOFTWARE (SOURCE LINKS)")
+    w("")
+    mpl = sorted(k for (lid, _n, _t), g in groups.items() if lid == "MPL-2.0" for k in g)
+    if mpl:
+        w("The following crates are under the Mozilla Public License 2.0 (the text is in section 5). They are used")
+        w("UNMODIFIED, as published on crates.io. The exact source of each, as a file you can download:")
+        w("")
+        for name, version in mpl:
+            w(f"- {name} {version}: https://static.crates.io/crates/{name}/{name}-{version}.crate (page: https://crates.io/crates/{name}/{version})")
+        w("")
+        w("Under MPL-2.0 section 3.2 you may obtain the source of these files from the links above. Beebeeb's own")
+        w("code is a separate work that only links these crates; it is not covered by the MPL.")
+    else:
+        w("No crate of the three programs is under the MPL-2.0.")
+    w("")
+    w("## 5. RUST CRATES: LICENCES, WITH EVERY CRATE UNDER ITS LICENCE TEXT")
+    w("")
+    w("Each block is one licence text (a copyright line, where the crate's own text has one, is part of the text),")
+    w("followed by the crates that carry it. A crate with several licences (\"MIT OR Apache-2.0\") may be used under")
+    w("either. The same crate may be in the list of more than one program.")
+    order = sorted(groups.items(), key=lambda kv: (kv[0][0], -len(kv[1]), kv[0][2]))
+    for i, ((lid, lname, text), crates) in enumerate(order, 1):
+        w("")
+        w(f"### 5.{i}  {lname} ({lid}): {len(crates)} crate(s)")
+        w("")
+        for (name, version), repo in sorted(crates.items()):
+            w(f"- {name} {version}" + (f" ([{repo}]({repo}))" if repo else ""))
+        w("")
+        w(code(text))
+    if skipped:
+        w("")
+        w(f"### 5.{len(order) + 1}  Crates fetched from git repositories (not on crates.io): {len(skipped)} crate(s)")
+        w("")
+        w("The licence each declares, and the licence files found with it in its repository, exactly as shipped there.")
+        by_files = {}
+        for (name, version), (expr, files, repo) in sorted(skipped.items()):
+            by_files.setdefault((expr, tuple(files)), []).append((name, version))
+        for (expr, files), crates in sorted(by_files.items(), key=lambda kv: kv[1][0]):
+            w("")
+            w(f"Licence: {expr or 'not declared in Cargo.toml; the files below are the repository\'s'}")
+            w("")
+            for name, version in crates:
+                w(f"- {name} {version}")
+            for fname, text in files:
+                w("")
+                w(f"**{fname}**")
+                w("")
+                w(code(text))
+    if unbuilt:
+        w("")
+        w("Crates named in a Cargo.lock that are NOT compiled into any of the three programs (optional features that are")
+        w("not enabled), listed so the index is complete:")
+        w("")
+        w(", ".join(f"{n} {v}" for n, v in unbuilt))
+    w("")
+    w("## 6. INDEX OF EVERY CRATE OF THE THREE PROGRAMS")
+    w("")
+    w("(Machine-checked against Cargo.lock by packaging/licences/check.py; one \"name version\" per line.)")
+    w("")
+    idx = [INDEX_BEGIN] + [f"{name} {version}" for name, version in sorted({(n, v) for n, v, _s in all_pkgs})] + [INDEX_END]
+    w(code("\n".join(idx)))
+    w("")
+    Path(a.out).write_text(("\n".join(o) + "\n").replace("\r", ""), encoding="utf-8", newline="\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

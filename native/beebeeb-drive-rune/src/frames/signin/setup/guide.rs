@@ -1,5 +1,7 @@
 //! The first-time guide (DW-0380 and DW-0301 to DW-0305): a coach card over the main window, with
-//! a ring around the real control each tip explains. It starts when the first run ends ("Open my
+//! a ring around the real control each tip explains. DW-0380, where the b is, is a window of its own
+//! by the notification area (`shell::tray_tip_window`, opened and hidden by `shell::host`); nothing
+//! of it is drawn in the main window, and it takes none of the main window's keys. It starts when the first run ends ("Open my
 //! Beebeeb") and from Settings › General › "Show the guide again".
 //!
 //! [`Guide`] is the whole state (`State::guide`): which step shows, or none. The shell draws
@@ -18,7 +20,8 @@
 //! and nothing is kept. A lock of the same account leaves a place to come back to: when that account
 //! is unlocked and its mark still says "not done", the guide resumes on the step it was on, with the
 //! window put on that step's place and its card shown (review L335: it restarted at the first step
-//! and did not move the window, so on Shared or Photos no card showed). Finished ("Done") or skipped
+//! and did not move the window, so on Shared or Photos no card showed). A file that is open at the unlock
+//! stays open: the tip waits behind it. Finished ("Done") or skipped
 //! (Skip, Esc), it is done for that ACCOUNT on this PC and does not start by itself again
 //! (`guide_marks`; owner ruling 2026-11-13, a deviation from the board's "Shown once per PC",
 //! recorded in `FRAMES.md`).
@@ -32,7 +35,9 @@ use rune::{Color, Cx, El, Key, KeyEvent, Shadow, TextStyle, Tx, col, el, row};
 use super::guide_marks;
 use crate::State;
 use crate::shell::app::{GateState, Screen, Section};
+use crate::theme::scale::{self, space};
 use crate::theme::tokens::{self, Theme, type_};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::kit;
 
 /// DW-0380's heading.
@@ -63,9 +68,7 @@ pub const SKIP_KEY: &str = "coach-skip";
 pub const TIP_2_ROWS: usize = 10;
 
 /// `.t-body`: a tip's words.
-const TIP: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
-/// `.t-sub`: DW-0380's words.
-const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+const TIP: TextStyle = scale::text::READ;
 /// `.t-cap.font-mono`: "1 of 5".
 const COUNTER: TextStyle = type_::KBD;
 
@@ -120,6 +123,10 @@ pub struct Guide {
     /// Where that guide was, for its account: the step, and the row tip 2 points at. Kept until the mark's
     /// answer is taken in (a "not done" resumes there) or the account is gone; never another account's.
     resume_at: Option<(String, Step, Option<usize>)>,
+    /// The window was signed out since the last time the gate opened, and no first run came in between: the next
+    /// Ready is a sign-in or a sign-up on a PC whose first run was already done (it is once per PC, the guide once
+    /// per account), so that Ready asks for the account's mark itself (RC1: a second account's sign-up got no tip).
+    from_signed_out: bool,
 }
 
 /// The row tip 2 points at: the file that was selected when the guide started (the board points
@@ -220,7 +227,10 @@ pub fn showing(s: &State) -> Option<Step> {
 /// the card), Enter presses the focused one. `true`: the key was the guide's. The card's own
 /// key handler (focus is in the card), and `shell::host::shell_keys` before the shell's own keys.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    let Some(step) = showing(s) else { return false };
+    // DW-0380's keys are its own window's (`shell::tray_tip_window::on_key`).
+    let Some(step) = showing(s).filter(|step| *step != Step::Tray) else {
+        return false;
+    };
     let m = ev.mods;
     if m.cmd || m.ctrl || m.alt || m.logo {
         return false;
@@ -275,6 +285,17 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let open = s.shell.app.gate() == GateState::Ready;
     // The first run's own flag, not its `Intent::OpenDrive`: that intent stays for the shell.
     let mut ask = s.setup.as_mut().is_some_and(super::Ui::just_finished);
+    // A sign-in or sign-up that opens the window without a first run (this PC had one already): the account's
+    // mark is asked for too. A first run asks at its own end ("Open my Beebeeb"), so it takes the latch.
+    match s.shell.app.gate() {
+        GateState::SignedOut => s.guide.from_signed_out = true,
+        GateState::FirstRun => s.guide.from_signed_out = false,
+        GateState::Ready if s.guide.from_signed_out => {
+            s.guide.from_signed_out = false;
+            ask |= account.is_some() && s.guide.step.is_none();
+        }
+        _ => {}
+    }
     // Locked again before the mark's answer came (an answer made under the session before is never taken in): the
     // next unlock of the same account asks again.
     if s.shell.app.gate() == GateState::Locked && s.guide.resume_for.is_none() {
@@ -324,7 +345,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
                     account,
                     ..Guide::default()
                 };
-                if open {
+                // A file that is open stays open (the unlock shows it again, `engine_host::viewer`): the step is
+                // set and the window is not moved; its tip waits behind the file, as it does behind any viewer.
+                let on_file = matches!(s.shell.app.screen(), Screen::Drive(route) if route.item.is_some());
+                if open && !on_file {
                     show(s, step);
                 } else {
                     s.guide.step = Some(step);
@@ -340,12 +364,14 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
                     shown: false,
                     resume_for: None,
                     resume_at: None,
+                    from_signed_out: false,
                 };
             }
         }
         changed = true;
     }
-    let shows = showing(s).is_some();
+    // DW-0380 is not in this window: nothing here to focus.
+    let shows = showing(s).is_some_and(|step| step != Step::Tray);
     if shows && (s.guide.focus || !s.guide.shown) {
         s.guide.focus = false;
         tx.focus(NEXT_KEY, tx.focus_visible());
@@ -451,52 +477,9 @@ fn arrow(arrow: Arrow, t: &Theme) -> El {
         .a11y_hidden()
 }
 
-/// A 22 pt button of the card (`.kit-btn.kit-btn-sm`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Ghost,
-    Outline,
-    Amber,
-}
-
-fn button(key: &str, label: &str, kind: Kind, t: &Theme) -> El {
-    let b = row()
-        .key(key.to_string())
-        .role("button")
-        .label(label)
-        .h(22.0)
-        .px(12.0)
-        .center()
-        .radius(6.0)
-        .focusable(true)
-        .focus_ring(2.0, 2.0, t.accent_deep)
-        .cursor(rune::Cursor::Pointer);
-    let (b, ink) = match kind {
-        Kind::Ghost => (b.hover(t.hover).press(t.press), t.text_secondary),
-        Kind::Outline => (
-            b.fill(t.paper)
-                .border(1.0, t.card_border)
-                .border_layout()
-                .hover(t.paper2)
-                .press(t.paper3),
-            t.text,
-        ),
-        Kind::Amber => (
-            b.fill(t.accent)
-                .hover(t.accent.mix(Color::BLACK, 0.05))
-                .press(t.accent.mix(Color::BLACK, 0.10)),
-            t.accent_text_on,
-        ),
-    };
-    b.child(kit::label(
-        format!("{key}-label"),
-        label,
-        type_::BUTTON_SM.lh(17.1429),
-        ink,
-    ))
-}
-
-fn go_on(s: &mut State, tx: &mut Tx) {
+/// "Got it", "Next", "Done": the next step, with focus on its card's button. Also the tray tip's dismiss
+/// (`shell::host::on_tray_tip_dismissed`).
+pub(crate) fn go_on(s: &mut State, tx: &mut Tx) {
     next(s);
     if s.guide.step.is_some() {
         s.guide.focus = false;
@@ -511,10 +494,10 @@ fn card(width: f32, name: &str, t: &Theme) -> El {
         .label(name)
         .w(width)
         .pt(14.0)
-        .px(14.0)
+        .px(space::S14)
         .pb(12.0)
-        .gap(10.0)
-        .radius(12.0)
+        .gap(space::S10)
+        .radius(scale::radius::DIALOG)
         .fill(t.card)
         .box_shadow(kit::drop(16.0, 44.0, Color::BLACK.alpha(0.26)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
@@ -522,28 +505,10 @@ fn card(width: f32, name: &str, t: &Theme) -> El {
         .on_key(on_key)
 }
 
-/// DW-0380's card: the heading, the words, "Got it". A view of its own (no place, no arrow
-/// target), so a window of its own by the notification area can hold it unchanged (task 2479).
-pub fn tray_card(t: &Theme) -> El {
-    card(300.0, TRAY_TITLE, t)
-        .child(arrow(Arrow::Down(150.0), t))
-        .child(kit::label("coach-title", TRAY_TITLE, type_::HEAD, t.text))
-        .child(
-            kit::label("coach-text", TRAY_TEXT, SUB, t.text_tertiary)
-                .wrap()
-                .w_full(),
-        )
-        .child(
-            row()
-                .justify_end()
-                .child(button(NEXT_KEY, "Got it", Kind::Amber, t).on_press_tx(go_on)),
-        )
-}
-
 /// A tip's card: the words, the five dots, "n of 5", Skip (not on the last) and Next or Done.
 fn tip_card(n: u8, arrow_at: Arrow, t: &Theme) -> El {
     let last = n == 5;
-    let mut dots = row().key("coach-dots").gap(6.0).a11y_hidden();
+    let mut dots = row().key("coach-dots").gap(space::S6).a11y_hidden();
     for i in 0..5u8 {
         let on = i + 1 == n;
         dots = dots.child(
@@ -556,7 +521,7 @@ fn tip_card(n: u8, arrow_at: Arrow, t: &Theme) -> El {
     }
     let mut foot = row()
         .items_center()
-        .gap(8.0)
+        .gap(space::S8)
         .child(dots)
         .child(kit::label(
             "coach-counter",
@@ -566,9 +531,31 @@ fn tip_card(n: u8, arrow_at: Arrow, t: &Theme) -> El {
         ))
         .child(el().grow(1.0));
     if !last {
-        foot = foot.child(button(SKIP_KEY, "Skip", Kind::Ghost, t).on_press(|s: &mut State| skip(s)));
+        foot = foot.child(
+            button(
+                keys(SKIP_KEY),
+                "Skip",
+                None,
+                Variant::Ghost,
+                Size::Sm,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| skip(s)),
+        );
     }
-    foot = foot.child(button(NEXT_KEY, if last { "Done" } else { "Next" }, Kind::Outline, t).on_press_tx(go_on));
+    foot = foot.child(
+        button(
+            keys(NEXT_KEY),
+            if last { "Done" } else { "Next" },
+            None,
+            Variant::Secondary,
+            Size::Sm,
+            ButtonState::Enabled,
+            t,
+        )
+        .on_press_tx(go_on),
+    );
     card(280.0, &format!("Guide, tip {n} of 5"), t)
         .child(arrow(arrow_at, t))
         .child(
@@ -605,22 +592,13 @@ fn ring(rect: [f32; 4], radius: f32, t: &Theme) -> El {
 /// `shell::registry::view`: ONE call around the frame behind.
 pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
     let Some(step) = showing(s) else { return behind };
-    let t = tokens::theme(cx.system_dark());
-    let layer = el().key("window-with-guide").w_full().h_full().child(behind);
     let n = match step {
-        // Interim (the lead, 2026-11-12): the board draws this card on the desktop, by the b, where
-        // it covers only the window's lower right corner. Until it has a window of its own (task
-        // 2479) it stands in that corner of the main window, over the status line's end, clear of
-        // the details panel's buttons.
-        Step::Tray => {
-            return layer.child(
-                el().key("coach-place")
-                    .pin(None, None, Some(16.0), Some(44.0))
-                    .child(tray_card(&t)),
-            );
-        }
+        // DW-0380 is drawn in its own window by the b (`shell::tray_tip_window`).
+        Step::Tray => return behind,
         Step::Tip(n) => n,
     };
+    let t = tokens::theme(cx.system_dark());
+    let layer = el().key("window-with-guide").w_full().h_full().child(behind);
     let Some(spot) = spot(n, s) else { return layer };
     // Where the real control is in the window now (a row moves when its list scrolls). Unknown
     // until it is laid out once: the view runs again then.
@@ -671,7 +649,7 @@ fn at(s: &mut State, step: Step) {
 }
 
 /// The six board frames of the guide, for `frames::scenes`.
-pub const FRAMES: &[(&str, fn(&mut State))] = &[
+pub const FRAMES: &[crate::frames::signin::Scene<State>] = &[
     // The board's desktop holds the window as DW-0401 draws it (a file selected, its details).
     ("DW-0380", |s| at(s, Step::Tray)),
     ("DW-0301", |s| on_files(s, Step::Tip(1))),

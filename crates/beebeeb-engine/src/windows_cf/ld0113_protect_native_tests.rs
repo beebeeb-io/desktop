@@ -407,7 +407,7 @@ fn quoted(path: &Path) -> String {
 
 fn pictures_on() -> OwnBackups {
     OwnBackups {
-        device_folder: Some("GLegion".into()),
+        device_folder: Some("TestPC".into()),
         folders: vec![OwnBackupFolder {
             display_name: "Pictures".into(),
             source_path: PathBuf::from(r"C:\Users\qa\Pictures"),
@@ -447,7 +447,7 @@ fn counting_bridge(qa: &QaRoot) -> (crate::engine_bridge::EngineBridge, std::net
     );
     let db = Arc::new(StateDb::open(qa._dir.path().join("state.db")).unwrap());
     (
-        crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db, Arc::new(api)),
+        crate::engine_bridge::EngineBridge::new(&crate::identity::TEST, db, Arc::new(api)),
         listener,
     )
 }
@@ -470,13 +470,13 @@ async fn server_calls_after_deletes(qa: &QaRoot, rels: &[&str]) -> usize {
     .count()
 }
 
-/// A permanent delete of the whole folder (Shift+Delete, `rmdir /S`) goes bottom-up: Guus's ruling
-/// (2026-11-06 17:49, "Protect the whole tree") refuses each item under the root, so nothing goes, and
+/// A permanent delete of the whole folder (Shift+Delete, `rmdir /S`) goes bottom-up: the rule
+/// "protect the whole tree" refuses each item under the root, so nothing goes, and
 /// nothing reaches the server. The 7a0def6 rung, which protected the root only, left 0 children.
 #[tokio::test]
 async fn explorer_delete_of_backups_refused() {
     let mut qa = QaRoot::new(OwnBackups::default());
-    let fixture = ["Backups/OtherPC", "Backups/OtherPC/a.txt", "Backups/GLegion"];
+    let fixture = ["Backups/OtherPC", "Backups/OtherPC/a.txt", "Backups/TestPC"];
     qa.item("0b5ec0de-0000-4000-8000-0000000000c2", fixture[0], true);
     qa.item("0b5ec0de-0000-4000-8000-0000000000e4", fixture[1], false);
     qa.item("0b5ec0de-0000-4000-8000-0000000000e5", fixture[2], true);
@@ -577,21 +577,21 @@ fn rename_of_backups_refused() {
 #[test]
 fn own_enabled_subtree_delete_refused() {
     let mut qa = QaRoot::new(pictures_on());
-    qa.item("0b5ec0de-0000-4000-8000-0000000000c4", "Backups/GLegion", true);
-    qa.item("0b5ec0de-0000-4000-8000-0000000000c5", "Backups/GLegion/Pictures", true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000c4", "Backups/TestPC", true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000c5", "Backups/TestPC/Pictures", true);
     qa.item(
         "0b5ec0de-0000-4000-8000-0000000000c6",
-        "Backups/GLegion/Pictures/a.jpg",
+        "Backups/TestPC/Pictures/a.jpg",
         false,
     );
     qa.connect();
     cmd(
         &qa,
         "own_enabled_subtree_delete_refused",
-        &format!("del /F /Q {}", quoted(&qa.path("Backups/GLegion/Pictures/a.jpg"))),
+        &format!("del /F /Q {}", quoted(&qa.path("Backups/TestPC/Pictures/a.jpg"))),
     );
     assert!(
-        qa.path("Backups/GLegion/Pictures/a.jpg").exists(),
+        qa.path("Backups/TestPC/Pictures/a.jpg").exists(),
         "the backed-up file stays"
     );
     qa.fx
@@ -602,24 +602,24 @@ fn own_enabled_subtree_delete_refused() {
 #[test]
 fn own_disabled_subtree_delete_refused() {
     let mut qa = QaRoot::new(OwnBackups {
-        device_folder: Some("GLegion".into()),
+        device_folder: Some("TestPC".into()),
         folders: Vec::new(),
     });
-    qa.item("0b5ec0de-0000-4000-8000-0000000000c7", "Backups/GLegion", true);
-    qa.item("0b5ec0de-0000-4000-8000-0000000000c8", "Backups/GLegion/Pictures", true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000c7", "Backups/TestPC", true);
+    qa.item("0b5ec0de-0000-4000-8000-0000000000c8", "Backups/TestPC/Pictures", true);
     qa.item(
         "0b5ec0de-0000-4000-8000-0000000000c9",
-        "Backups/GLegion/Pictures/a.jpg",
+        "Backups/TestPC/Pictures/a.jpg",
         false,
     );
     qa.connect();
     cmd(
         &qa,
         "own_disabled_subtree_delete_refused",
-        &format!("del /F /Q {}", quoted(&qa.path("Backups/GLegion/Pictures/a.jpg"))),
+        &format!("del /F /Q {}", quoted(&qa.path("Backups/TestPC/Pictures/a.jpg"))),
     );
     assert!(
-        qa.path("Backups/GLegion/Pictures/a.jpg").exists(),
+        qa.path("Backups/TestPC/Pictures/a.jpg").exists(),
         "a turned-off backup stays in the drive"
     );
     qa.fx.assert_refused_once(MSG_MANAGED_IN_APP);
@@ -792,7 +792,7 @@ fn read_only(path: &Path) -> Option<bool> {
     crate::windows_cf::read_only::is_read_only(path)
 }
 
-/// Amendment 7 (Guus, 2026-11-06 19:30): the placeholder pass (the pull's path) mints a file under
+/// Amendment 7 (owner, 2026-11-06 19:30): the placeholder pass (the pull's path) mints a file under
 /// Backups read-only and in sync; a file outside and a folder are not read-only. A placeholder an older
 /// build minted takes the attribute when the tree's state is applied (at start, or when the role is
 /// flagged later) and stays in sync; a cleared role takes the attribute away again.
@@ -888,7 +888,13 @@ fn read_only_placeholder_hydrates() {
     // Another process opens it to read, as an editor does.
     let out = cmd(&qa, "read_only_placeholder_hydrates", &format!("type {}", quoted(&a)));
     let read = String::from_utf8_lossy(&out.stdout).into_owned();
-    let a_on_disk = placeholders::fully_on_disk(&a);
+    let a_on_disk = {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !placeholders::fully_on_disk(&a) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        placeholders::fully_on_disk(&a)
+    };
     // The engine's own changes.
     let hydrated = bounded(&qa, "read_only_placeholder_hydrates hydrate", || {
         placeholders::hydrate_placeholder(&b).map_err(|e| e.to_string())

@@ -31,7 +31,7 @@ pub async fn recovery_check_answer(
     session_token: &str,
     master_key: &beebeeb_core::kdf::MasterKey,
 ) -> Result<RecoveryCheckAnswer, String> {
-    // The check stands in for the key at the server, so its text is wiped after the request (fix round 1, item 10),
+    // The check stands in for the key at the server, so its text is wiped after the request,
     // and the body is serialized from a borrow of it (no second copy in a JSON value).
     let recovery_check = zeroize::Zeroizing::new(encode_base64(&*beebeeb_core::opaque::compute_recovery_check(
         master_key,

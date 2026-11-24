@@ -145,7 +145,9 @@ impl EngineBridge {
         } else {
             ItemKind::File
         };
-        let decrypted = if root.is_folder {
+        let decrypted = if root.claimed {
+            return shared_claimed_name(&item_kind).to_string();
+        } else if root.is_folder {
             folder_key
                 .zip(folder_keys_response)
                 .and_then(|(key, keys_response)| self.decrypted_folder_root_name(root, key, keys_response))
@@ -224,10 +226,13 @@ impl EngineBridge {
         let roots = shared_roots_from_invite_response(&body);
         let active_shared_root_ids: Vec<String> = roots.iter().map(|root| root.file_id.clone()).collect();
         let now = now_secs();
+        // dc-136d: a share accepted since the last refresh (a root this PC has no row for yet) brings a key.
+        let mut accepted = false;
 
         for root in &roots {
+            accepted |= self.db.get_file(&root.file_id)?.is_none();
             let mut folder_material = None;
-            if root.is_folder {
+            if root.is_folder && !root.claimed {
                 match self.shared_folder_material(root).await {
                     Ok((folder_key, folder_keys_response)) => {
                         folder_material = Some((folder_key, folder_keys_response));
@@ -297,17 +302,21 @@ impl EngineBridge {
             }
         }
 
+        // dc-136d: the names no key opened are tried again once the accepted share's key is here. Best effort.
+        if accepted && let Err(error) = self.db.retry_unreadable_names() {
+            tracing::warn!(%error, "could not ask to read the unreadable names again after a share was accepted");
+        }
+
         let removed = self.db.purge_revoked_shared_content(&active_shared_root_ids)?;
         let mut removed_shared_file_ids = Vec::new();
         let mut removed_cache_paths = Vec::new();
         for cache in removed {
             removed_shared_file_ids.push(cache.file_id);
             if let Some(path) = cache.cache_path {
-                if let Err(e) = std::fs::remove_file(&path) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
+                if let Err(e) = std::fs::remove_file(&path)
+                    && e.kind() != std::io::ErrorKind::NotFound {
                         tracing::warn!(path = %path, error = %e, "failed to remove revoked shared cache file");
                     }
-                }
                 removed_cache_paths.push(path);
             }
         }

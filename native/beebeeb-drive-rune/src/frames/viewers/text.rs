@@ -4,11 +4,14 @@
 use rune::{Align, Color, El, Icon, Span, col, el, row, text_input};
 
 use super::chrome::{Dot, Status};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::source::{Cut, Ink, Keep, OpenFile, Run, TextDoc, count_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
-use crate::theme::tokens::Theme;
+use crate::theme::scale;
+use crate::theme::tokens::{self, Theme};
 use crate::ui::toolbar::{ToolState, tool_button};
+use crate::ui::view_state::{self, ViewState};
 use crate::ui::{au, kit};
 
 /// The gutter: the line number's box, 16 pt of padding on both sides.
@@ -63,7 +66,7 @@ pub fn line(i: usize, runs: &[Run], current: bool, t: &Theme) -> El {
                 if current { t.text_secondary } else { t.text_tertiary },
             )
             .w(GUTTER_W)
-            .px(16.0)
+            .px(scale::space::S16)
             .align(Align::End),
         )
         .child(text);
@@ -88,7 +91,7 @@ fn wrapped_line(i: usize, runs: &[Run], t: &Theme) -> El {
         .child(
             kit::label(format!("ln-{i}"), (i + 1).to_string(), style::CODE, t.text_tertiary)
                 .w(GUTTER_W)
-                .px(16.0)
+                .px(scale::space::S16)
                 .align(Align::End)
                 .absolute(0.0, 0.0),
         );
@@ -114,7 +117,7 @@ pub fn body(doc: &TextDoc, wrap: bool, t: &Theme) -> El {
         .grow(1.0)
         .shrink()
         .h_full()
-        .py(12.0)
+        .py(scale::space::S12)
         .fill(t.bg)
         .clip_rounded(0.0)
         // A file longer than the window is read by scrolling (the wheel, a touchpad).
@@ -138,7 +141,7 @@ fn seg_tab(key: String, label: &str, on: bool, t: &Theme) -> El {
         .label(label)
         .checked(on)
         .h(24.0)
-        .px(10.0)
+        .px(scale::space::S10)
         .center()
         .radius(8.0)
         .focusable(true)
@@ -167,8 +170,8 @@ pub fn seg(name: &str, tabs: [(&str, bool); 2], t: &Theme) -> (El, [El; 2]) {
         .key("seg")
         .role("tablist")
         .label(name)
-        .padding(2.0)
-        .radius(10.0)
+        .padding(scale::space::S2)
+        .radius(tokens::radius::LG)
         .fill(t.field)
         .box_shadow(kit::ring_inset(t.separator));
     let [a, b] = tabs;
@@ -189,10 +192,10 @@ pub fn tool_action(key: &str, label: &str, icon: Option<&'static Icon>, hint: Op
         .role("button")
         .label(label)
         .h(22.0)
-        .px(12.0)
-        .gap(7.0)
+        .px(scale::space::S12)
+        .gap(scale::space::S7)
         .center()
-        .radius(6.0)
+        .radius(tokens::radius::MD)
         .fill(t.paper)
         .border(1.0, t.card_border)
         .border_layout()
@@ -207,7 +210,7 @@ pub fn tool_action(key: &str, label: &str, icon: Option<&'static Icon>, hint: Op
     let mut words = row()
         .key(format!("{key}-words"))
         .items_end()
-        .gap(4.0)
+        .gap(scale::space::S4)
         .child(style::fitted(format!("{key}-label"), label, style::BUTTON_SM, t.text));
     if let Some(hint) = hint {
         b = b.shortcut_hint(hint);
@@ -271,59 +274,30 @@ pub fn md_tools(source: bool, t: &Theme) -> Vec<El> {
     ]
 }
 
-/// The editor (DW-1523): the text in JetBrains Mono with line numbers, the line the caret is on
-/// marked. The coloured lines are drawn as the reader draws them; over them lies the text
-/// field that takes the typing (its own glyphs clear, its caret and selection showing), set in
-/// the same type on the same lines, so every key, the pointer, the clipboard, undo and the
-/// input method are the field's.
-pub fn editor(editor: &super::Editor, lines: &[Vec<Run>], t: &Theme) -> El {
-    // The line the caret is on, while the editor has the keyboard (not under a dialog).
-    let current = editor.edit.focused.then(|| editor.caret_line());
-    let mut under = col().key("editor-lines").w_full();
-    for (i, runs) in lines.iter().enumerate() {
-        if current == Some(i) {
-            // On the caret's line the marks are not dimmed: they are what is being typed.
-            let shown: Vec<Run> = runs
-                .iter()
-                .map(|run| Run {
-                    ink: if run.ink == Ink::Faint { Ink::Plain } else { run.ink },
-                    ..run.clone()
-                })
-                .collect();
-            under = under.child(line(i, &shown, true, t));
-        } else {
-            under = under.child(line(i, runs, false, t));
-        }
-    }
-    // The caret as the board draws it: 1.5 wide, 15 high, one point after the text.
-    let at = editor.edit.focus.min(editor.edit.text.len());
-    let column = editor.edit.text[..at]
-        .rsplit('\n')
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .count();
-    let caret_x = GUTTER_W + column as f32 * rune::text::advance("0", style::CODE) + 1.0;
-    let mut field = el().key("editor-field").w_full().child(under).child(
-        text_input(&editor.edit, style::CODE)
-            .key(super::EDITOR_KEY)
-            .label("Text")
-            .shortcut_hint("Ctrl+S")
-            .color(Color::TRANSPARENT)
-            .caret(Color::TRANSPARENT, t.selection)
-            .on_edit(super::editor_edit)
-            .pin(Some(GUTTER_W), Some(0.0), Some(0.0), Some(0.0)),
-    );
-    if let Some(current) = current {
-        field = field.child(
-            el().key(format!("caret-{current}"))
-                .ime_cursor()
-                .absolute(caret_x, current as f32 * LINE_H + 3.0)
-                .size(1.5, 15.0)
-                .radius(1.0)
-                .fill(t.accent_deep),
+/// The editor (DW-1523): the text in JetBrains Mono, painted by the field itself with `spans` (the
+/// highlighter's, or a note's runs), over the gutter numbers and the current-line fill of
+/// [`super::editor_view::underlay`]. Every key, the pointer, the clipboard, undo and the input
+/// method are the field's. Long text scrolls, as the reader's does.
+pub fn editor(editor: &super::Editor, file_name: &str, spans: Vec<Span>, t: &Theme) -> El {
+    let field = el()
+        .key("editor-field")
+        .w_full()
+        .child(super::editor_view::underlay(&editor.edit, file_name, t))
+        .child(
+            text_input(&editor.edit, style::CODE)
+                .key(super::EDITOR_KEY)
+                .label(editor_name(file_name))
+                .shortcut_hint("Ctrl+S")
+                .color(t.text)
+                .spans(spans)
+                .wrap()
+                .caret(t.accent_deep, t.selection)
+                .on_edit(super::editor_edit)
+                .on_input_key(super::editor_key)
+                .pin(Some(GUTTER_W), Some(0.0), Some(0.0), Some(0.0)),
         );
-    }
+    // An F6 stop: the field, the find bar and the live preview (`editor_view::f6_stop`).
+    let field = crate::ui::focus::pane(field, super::editor_view::FIELD_PANE);
     col()
         .key("viewer-body")
         .role("document")
@@ -331,22 +305,43 @@ pub fn editor(editor: &super::Editor, lines: &[Vec<Run>], t: &Theme) -> El {
         .shrink()
         .min_w(0.0)
         .h_full()
-        .py(12.0)
+        .py(scale::space::S12)
         .fill(t.bg)
         .clip_rounded(0.0)
+        .min_h(0.0)
+        .scroll(rune::ScrollSpec { stick_bottom: false })
         .child(field)
 }
 
-/// The toolbar's control of the editor: Save, a plain button with the lock (New stays the
-/// window's one Amber control).
-pub fn editor_tools(t: &Theme) -> Vec<El> {
-    vec![
+/// What a screen reader calls the editor's field: the file it edits ("Editing notes.md").
+pub fn editor_name(file_name: &str) -> String {
+    if file_name.is_empty() {
+        "Editing the file".to_string()
+    } else {
+        format!("Editing {file_name}")
+    }
+}
+
+/// The toolbar's controls of the editor: Save, a plain button with the lock (New stays the
+/// window's one Amber control), and Preview for a file that has a live preview.
+pub fn editor_tools(has_preview: bool, preview_open: bool, t: &Theme) -> Vec<El> {
+    let mut tools = vec![
         tool_action("tb-btn-0", "Save", Some(&icons::LOCK), Some("Ctrl+S"), t).on_press(|s: &mut State| {
             if let Some(ui) = ui(s) {
                 ui.save();
             }
         }),
-    ]
+    ];
+    if has_preview {
+        tools.push(
+            tool_action("tb-preview", "Preview", None, None, t).checked(preview_open).on_press(|s: &mut State| {
+                if let Some(ui) = ui(s) {
+                    ui.editor_view.preview_open = !ui.editor_view.preview_open;
+                }
+            }),
+        );
+    }
+    tools
 }
 
 /// DW-1519: another device saved a newer version while this one is open. The version on
@@ -361,7 +356,7 @@ pub fn newer_banner(file: &OpenFile, t: &Theme) -> Option<El> {
     };
     // The time is a figure: mono.
     let time = words.len() - newer.at.len() - 1;
-    let show = super::chrome::button("banner-btn", "Show it", super::chrome::ButtonKind::Outline, true, t).on_press(
+    let show = button(keys("banner-btn"), "Show it", None, Variant::Secondary, Size::Sm, ButtonState::Enabled, t).on_press(
         |s: &mut State| {
             if let Some(ui) = ui(s) {
                 ui.show_newer();
@@ -399,17 +394,21 @@ pub fn banner_el(icon: &'static Icon, words: &str, action: Option<El>, t: &Theme
 /// (task 2530, item 1). No board draws it: DW-1519's banner, its words wrapped (they are longer than a line).
 pub fn refused_banner(words: Option<&str>, t: &Theme) -> Option<El> {
     let words = words?;
-    let copy = super::chrome::button("banner-btn", "Save a copy", super::chrome::ButtonKind::Outline, true, t)
+    let copy = button(keys("banner-btn"), "Save a copy", None, Variant::Secondary, Size::Sm, ButtonState::Enabled, t)
         .on_press(|s: &mut State| {
             if let Some(ui) = ui(s) {
                 ui.resolve(Keep::Both);
             }
         });
-    let sentence = kit::label("banner-text", words, style::BANNER, t.text_secondary)
-        .wrap()
-        .grow(1.0)
-        .min_w(0.0);
-    Some(banner_of(&icons::INFO, sentence, Some(copy), t))
+    Some(view_state::view_state(
+        ViewState::Failed {
+            key: "refused",
+            title: "Not saved",
+            why: words,
+            retry: Some(copy),
+        },
+        t,
+    ))
 }
 
 /// [`banner_el`] with spans in its sentence (a figure in mono).
@@ -432,10 +431,10 @@ fn banner_of(icon: &'static Icon, sentence: El, action: Option<El>, t: &Theme) -
         .mt(10.0)
         .pl(12.0)
         .pr(10.0)
-        .py(9.0)
-        .gap(10.0)
+        .py(scale::space::S9)
+        .gap(scale::space::S10)
         .center_y()
-        .radius(10.0)
+        .radius(tokens::radius::LG)
         .fill(style::banner(t))
         .child(kit::glyph("banner-icon", icon, 16.0, t.text_secondary))
         .child(sentence);

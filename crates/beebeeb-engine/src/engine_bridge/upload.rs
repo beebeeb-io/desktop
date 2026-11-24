@@ -110,7 +110,7 @@ impl EngineBridge {
                 .as_deref()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
                 .and_then(|metadata| metadata["content_type"].as_str().map(str::to_string));
-            // Decision (lane, 2026-11-13): chunk format v2 adds one step before this landing. A
+            // chunk format v2 adds one step before this landing. A
             // completion whose name the server was not yet seen to hold (the first attempt failed
             // between `complete` and that check) asks the server first, because a version whose
             // commitment is not in the file's name opens on no device. Once held it is remembered,
@@ -171,7 +171,16 @@ impl EngineBridge {
         // `chunk_count == 1`), which the chunk loop below sends as a 28-byte
         // nonce + tag. Requires a server whose `/uploads/init` accepts
         // `file_size_bytes: 0`.
-        let plaintext_size = std::fs::metadata(payload_path)?.len();
+        let sealed_office = super::finder_edit::is_sealed_office(&metadata);
+        // A sealed Office save: the staged file is core's snapshot blob, `plaintext + SEAL_OVERHEAD` bytes.
+        let plaintext_size = if sealed_office {
+            std::fs::metadata(payload_path)?
+                .len()
+                .checked_sub(super::finder_edit::SEAL_OVERHEAD)
+                .ok_or_else(|| anyhow::anyhow!("staged upload payload could not be read"))?
+        } else {
+            std::fs::metadata(payload_path)?.len()
+        };
 
         let is_create = is_create_file_operation(&metadata);
         let payload_path_str = payload_path.to_string_lossy().into_owned();
@@ -354,6 +363,36 @@ impl EngineBridge {
                 served_record,
             )
             .await;
+        // Backlog 1648: a resumed session the server no longer knows (404, 410) may be one whose
+        // `complete` committed and whose answer never arrived (lost on the way, or the process died
+        // before it was recorded). The server is asked whether it holds this session's version before
+        // anything is abandoned: when it does, that answer is landed, once, and nothing is sent again.
+        // A lookup that fails leaves the session as it is, for the next attempt to ask again.
+        let body = match body {
+            Ok(completed) => Ok(completed),
+            Err(error) => {
+                let error = land_error_to_anyhow(error);
+                if resumed && matches!(error_http_status(&error), Some(404 | 410)) && !upload_file_changed(&error) {
+                    match self
+                        .api
+                        .committed_upload(&session.server_file_id, &session.object_version_id)
+                        .await?
+                    {
+                        Some(answer) => {
+                            tracing::info!(
+                                op_id = %op.op_id,
+                                file_id = %session.server_file_id,
+                                "upload: the session is gone and the server holds its version — landing it, nothing is uploaded again"
+                            );
+                            Ok(answer)
+                        }
+                        None => Err(error),
+                    }
+                } else {
+                    Err(error)
+                }
+            }
+        };
         match body {
             Ok(completed) => {
                 // §8.6.1: the version this upload produced, from the server's reply. An
@@ -413,8 +452,7 @@ impl EngineBridge {
             Err(error) => {
                 // The session checks and `SessionAbandoned` speak `anyhow`, as the API client
                 // does; `land_error_to_anyhow` hands them the error itself, so a marker it
-                // carries stays findable.
-                let error = land_error_to_anyhow(error);
+                // carries stays findable (done above, where a committed upload is looked for).
                 if upload_file_changed(&error) {
                     // `complete` refused the completion name: the file was renamed since this
                     // session's init. The session just answered, so it is this device's and live:
@@ -490,9 +528,7 @@ impl EngineBridge {
         // written in the landing's own transaction (the journal then owns the retry).
         #[cfg(target_os = "windows")]
         let finalization = match payload_path.as_deref() {
-            Some(path) => self
-                .defer_local_upload_finalization(op, server_file_id, sync_root, Path::new(path))
-                .map_err(EngineError::from)?,
+            Some(path) => self.defer_local_upload_finalization(op, server_file_id, sync_root, Path::new(path))?,
             None => None,
         };
         #[cfg(not(target_os = "windows"))]
@@ -507,7 +543,14 @@ impl EngineBridge {
         }
         // Task 1640: a sync-folder upload (no write id) records what it sent as the content this
         // device now agrees with the server on. A Finder write's copy is not read again.
+        // A sealed Office save is not hashed from its staged blob (that is not the content that was sent).
+        let sealed_office = op
+            .metadata_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .is_some_and(|metadata| super::finder_edit::is_sealed_office(&metadata));
         let completed_payload_hash = match (claim.and_then(|c| c.write.as_ref()), payload_path.as_deref()) {
+            (None, Some(_)) if sealed_office => None,
             (None, Some(path)) => match sha256_file_hex(Path::new(path)) {
                 Ok(hash) => Some(hash),
                 Err(e) => {
@@ -525,7 +568,7 @@ impl EngineBridge {
         // The item's key and CURRENT record (the completed upload's commitment included): a queued
         // successor's name is sealed again with them.
         let landing_material =
-            owned_key_and_record(&self.db, master_key, server_file_id.as_str()).map_err(EngineError::from)?;
+            owned_key_and_record(&self.db, master_key, server_file_id.as_str())?;
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
                 op_id: &op.op_id,
@@ -586,11 +629,18 @@ impl EngineBridge {
         if let Some(path) = payload_path.as_deref() {
             // Task 1700: post-complete thumbnail work never fails the upload, but its
             // failure is surfaced on the outcome so a red run names the real error.
-            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id.as_str())
-                .map_err(EngineError::from)?
+            let file_key = owned_key_and_pin(&self.db, self.api.master_key(), server_file_id.as_str())?
                 .0;
             match self
-                .finish_completed_upload(op, server_file_id, Path::new(path), content_type, &file_key, sync_root)
+                .finish_completed_upload(
+                    op,
+                    server_file_id,
+                    Path::new(path),
+                    // No thumbnail is cut from a sealed blob.
+                    if sealed_office { None } else { content_type },
+                    &file_key,
+                    sync_root,
+                )
                 .await
             {
                 Ok(()) => {
@@ -706,13 +756,22 @@ impl EngineBridge {
             if acked != 0 {
                 return Err(anyhow::anyhow!("an upload never continues a persisted session").into());
             }
-            let file = std::fs::File::open(payload_path)?;
+            // A sealed Office save is opened here, as it is read: the plaintext lives in memory only, never on disk.
+            let source: Box<dyn std::io::Read + Send> = if super::finder_edit::is_sealed_office(metadata) {
+                let plain = self.open_sealed_office(op, payload_path)?;
+                if plain.len() as u64 != session.payload_size as u64 {
+                    return Err(anyhow::anyhow!("staged upload payload could not be read").into());
+                }
+                Box::new(std::io::Cursor::new(plain))
+            } else {
+                Box::new(std::fs::File::open(payload_path)?)
+            };
             let mut writer = beebeeb_core::chunk_stream::ChunkEncryptor::from_reader_with_file_key(
                 file_key,
                 &server_file_id,
                 session.payload_size as u64,
                 chunk_size as u64,
-                file,
+                source,
             )?
             .with_recorded_pin(record.format)?;
             progress.update(0);
@@ -876,11 +935,9 @@ impl EngineBridge {
         // convention, so no network call is made.
         if let Ok(crate::owner_keys::StoredName::Name(name)) =
             crate::owner_keys::stored_name(&self.db, request_id, self.api.master_key())
-        {
-            if crate::owner_keys::safe_display_name(&name) {
+            && crate::owner_keys::safe_display_name(&name) {
                 return name;
             }
-        }
         if let Ok(row) = self.api.get_file(request_id).await
             && let Ok(keys) = self.request_row_keys(&row).await
             && crate::owner_keys::safe_display_name(&keys.name.name)
@@ -1059,6 +1116,25 @@ impl EngineBridge {
             Ok(None) => {}
             Err(e) => tracing::warn!(op_id = %op.op_id, error = %e, "upload: failed to read resume state"),
         }
+    }
+
+    /// A sealed Office save's staged blob, opened under the account key and bound to the op's file id. A blob that
+    /// does not open (damaged, another account's) is a retry with a fixed text: nothing is dropped from the queue.
+    fn open_sealed_office(
+        &self,
+        op: &PendingOperation,
+        payload_path: &Path,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, EngineError> {
+        let unreadable = || anyhow::anyhow!("staged upload payload could not be read");
+        let file_id = op.file_id.as_deref().ok_or_else(unreadable)?;
+        let sealed = std::fs::read(payload_path).map_err(|_| unreadable())?;
+        let (_, plain) = beebeeb_core::local_seal::open_recovery_snapshot(
+            &beebeeb_core::kdf::MasterKey::from_bytes(*self.api.master_key()),
+            file_id,
+            &sealed,
+        )
+            .map_err(|_| unreadable())?;
+        Ok(plain)
     }
 
     pub(super) async fn upload_thumbnails_for_plaintext_media(

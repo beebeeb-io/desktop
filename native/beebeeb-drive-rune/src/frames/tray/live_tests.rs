@@ -39,6 +39,7 @@ fn ready() -> Facts {
         explorer_ready: false,
         local: Some(Local::default()),
         storage: None,
+        unreadable: false,
     }
 }
 
@@ -110,7 +111,7 @@ fn before_the_engines_first_report_the_flyout_says_checking_never_up_to_date() {
 }
 
 /// The session gate decides first. Only a signed-in, unlocked account shows file names; the
-/// buttons that would do nothing (Unlock with Windows Hello: not wired) are not drawn.
+/// buttons that would do nothing are not drawn.
 #[test]
 fn the_gate_decides_before_anything_the_engine_reports_and_hides_every_name() {
     let empty_since = |name: &str| Changes::Empty {
@@ -129,14 +130,14 @@ fn the_gate_decides_before_anything_the_engine_reports_and_hides_every_name() {
             true,
             Status::Locked,
             Changes::Hidden(Hidden::Locked),
-            None,
+            Some((Action::Unlock, true)),
         ),
         (
             Gate::Locked,
             false,
             Status::LockedSyncOff,
             Changes::Hidden(Hidden::Locked),
-            None,
+            Some((Action::Unlock, true)),
         ),
         (
             Gate::NeedsRecoveryPhrase,
@@ -157,7 +158,7 @@ fn the_gate_decides_before_anything_the_engine_reports_and_hides_every_name() {
             false,
             Status::NoPlan { waiting: false },
             empty_since(NAME),
-            None,
+            Some((Action::ChoosePlan, true)),
         ),
     ];
     for (gate, running, status, changes, button) in cases {
@@ -217,12 +218,15 @@ fn a_ready_accounts_states_follow_the_boards_order() {
     assert_eq!((s.status, s.button), (Status::NotSyncing, None));
     facts.running = true;
     let s = step(&facts, &local);
-    // Add storage waits for an engine call (FRAMES.md, "Not wired"): no button.
-    assert_eq!((s.status, s.button), (Status::StorageFull { waiting: 5 }, None));
+    // Add storage opens the plans page in the browser.
+    assert_eq!(
+        (s.status, s.button),
+        (Status::StorageFull { waiting: 5 }, Some((Action::AddStorage, true)))
+    );
     local.held_for_quota = 0;
     let s = step(&facts, &local);
-    // Try again too.
-    assert_eq!((s.status, s.button), (Status::Offline, None));
+    // Try again reads the state again.
+    assert_eq!((s.status, s.button), (Status::Offline, Some((Action::TryAgain, false))));
     facts.report = Report::ServerError;
     assert_eq!(step(&facts, &local).status, Status::Offline, "Beebeeb did not answer");
     facts.report = Report::Idle;
@@ -246,7 +250,7 @@ fn a_ready_accounts_states_follow_the_boards_order() {
                 used: size_words(95),
                 plan: size_words(100)
             },
-            None
+            Some((Action::AddStorage, false))
         )
     );
     facts.storage = Some((89, 100));
@@ -526,4 +530,29 @@ fn a_rows_tile_follows_the_files_kind() {
     ] {
         assert_eq!(live::tile_for(name), tile, "{name}");
     }
+}
+
+/// 090b: the engine's `paused` report with reason `metered` is "This PC is on a metered connection" with Sync
+/// anyway; once the engine lifts its hold it reports a check again, and the flyout follows it.
+#[test]
+fn sync_anyway_is_offered_while_the_engine_holds_on_a_metered_connection() {
+    let held = snap(&Facts {
+        report: Report::Metered,
+        ..ready()
+    });
+    assert_eq!(held.status, Status::WaitingMetered);
+    assert_eq!(held.button, Some((Action::SyncAnyway, false)));
+    // The person's own pause says Paused, never metered.
+    let paused = snap(&Facts {
+        paused: true,
+        report: Report::Metered,
+        ..ready()
+    });
+    assert!(matches!(paused.status, Status::Paused { .. }), "{:?}", paused.status);
+    // Lifted: the engine syncs, and says so.
+    let lifted = snap(&Facts {
+        report: Report::Syncing,
+        ..ready()
+    });
+    assert!(matches!(lifted.status, Status::Syncing { .. }), "{:?}", lifted.status);
 }

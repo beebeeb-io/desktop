@@ -8,7 +8,7 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::engine_host::viewer::viewer_pdf::tests::sample_pdf;
+use crate::engine_host::viewer::viewer_pdf::tests::{sample_pdf, session};
 use crate::engine_host::viewer::viewer_pdf::{Ask, Document};
 use crate::frames::viewers::source::Match;
 
@@ -125,7 +125,8 @@ fn finds_false_for_non_pdf() {
 
 #[test]
 fn a_find_asked_down_the_channel_is_answered_under_its_serial() {
-    let document = open(text_pdf(&["Invented harbour ledger"]));
+    // The session reads the text at this first find (its pages are the helper's; a stand-in here).
+    let session = session(text_pdf(&["Invented harbour ledger"])).expect("the PDF opens");
     let (ask, asks) = mpsc::channel();
     ask.send(Ask::Find {
         serial: 5,
@@ -134,9 +135,8 @@ fn a_find_asked_down_the_channel_is_answered_under_its_serial() {
     .unwrap();
     drop(ask);
     let answers = Mutex::new(Vec::new());
-    document.serve_asks(&asks, &AtomicBool::new(false), &|_, _| {}, &|serial, matches| {
-        answers.lock().unwrap().push((serial, matches.len()))
-    });
+    let found = |serial, matches: Vec<Match>| answers.lock().unwrap().push((serial, matches.len()));
+    session.serve(&asks, &AtomicBool::new(false), &|_, _| {}, &found, &|| {});
     assert_eq!(answers.into_inner().unwrap(), [(5, 1)]);
 }
 
@@ -161,8 +161,8 @@ fn a_find_answered_after_the_document_closed_is_dropped() {
     assert!(ends.found.send((2, vec![here])).is_err(), "nobody reads it any more");
 
     // And a worker whose session ended (cancel) does not deliver the find it was running: positive control first.
-    let document = open(text_pdf(&["Invented harbour ledger"]));
     for (cancelled, expected) in [(false, 1), (true, 0)] {
+        let session = session(text_pdf(&["Invented harbour ledger"])).expect("the PDF opens");
         let (ask, asks) = mpsc::channel();
         ask.send(Ask::Find {
             serial: 9,
@@ -171,9 +171,8 @@ fn a_find_answered_after_the_document_closed_is_dropped() {
         .unwrap();
         drop(ask);
         let delivered = Mutex::new(0);
-        document.serve_asks(&asks, &AtomicBool::new(cancelled), &|_, _| {}, &|_, _| {
-            *delivered.lock().unwrap() += 1;
-        });
+        let found = |_, _| *delivered.lock().unwrap() += 1;
+        session.serve(&asks, &AtomicBool::new(cancelled), &|_, _| {}, &found, &|| {});
         assert_eq!(delivered.into_inner().unwrap(), expected, "cancelled: {cancelled}");
     }
 }

@@ -1,7 +1,7 @@
 //! The recent searches of Search (DW-0801): one `sync_state` row per account, `search_recent:{user id}`, its value the
 //! searches as a JSON list, newest first.
 //!
-//! Deleted at sign-out (lead ruling 2026-11-15 17:25, privacy): every session end deletes the row of its account
+//! Deleted at sign-out: every session end deletes the row of its account
 //! ([`StateDb::clear_search_recent`]), and an engine start with nobody signed in deletes every account's
 //! ([`StateDb::clear_every_search_recent`], lead ruling 23:03). The purge of an account's rows (`clear_account_data`) wipes the
 //! rows of every account too: `sign_out_sync_state_purge` keeps only the rows it names, and these are not among them.

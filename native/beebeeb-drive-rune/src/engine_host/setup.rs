@@ -1,6 +1,6 @@
 //! The first run on the real engine: [`EngineSetupSource`], the `SetupSource` of the running app.
 //!
-//! The contract is slice S2 of `docs/superpowers/specs/2026-11-12-native-sync-start-and-sign-out.md`.
+//! The contract is `docs/superpowers/specs/2026-11-12-native-sync-start-and-sign-out.md`.
 //!
 //! What it answers, and from where:
 //! - The sync folder (the contract's ruling Q2; `setup_folder.rs`): while the settings name none, the first run
@@ -75,7 +75,7 @@ mod app_lock;
 mod folder;
 #[path = "setup_previews.rs"]
 mod previews;
-// plan40 batch 1: step 1, "Add a passkey", with the password (slice A10).
+// Step 1, "Add a passkey", with the password.
 #[path = "setup_passkey.rs"]
 mod setup_passkey;
 #[cfg(test)]

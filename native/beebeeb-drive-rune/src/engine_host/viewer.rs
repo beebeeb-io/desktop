@@ -14,8 +14,8 @@
 //!   - any other file is downloaded and decrypted IN MEMORY by the engine's own download path
 //!     ([`Engine::open_file_in_memory`]: the path every hydrate uses, no crypto here), with the engine's
 //!     progress.
-//!   Text, Markdown, CSV / TSV (as text), PNG / JPEG / GIF / WebP pictures and PDFs are shown. A PDF's pages are
-//!   rendered on the same worker, page by page as the view shows them (`viewer_pdf`), from memory.
+//!     Text, Markdown, CSV / TSV (as text), PNG / JPEG / GIF / WebP pictures and PDFs are shown. A PDF's pages are
+//!     drawn by the confined helper, asked from the same worker page by page as the view shows them (`viewer_pdf`).
 //! - which app opens a file: a list's Open of a file that is kept on this PC while sync runs goes to the file's
 //!   own app ([`ViewerSource::kept_on_this_pc`]) when that app shows it (a document, a picture); the viewer is
 //!   for a file that is not on this PC (no download to disk), for a route that names a file directly, and for
@@ -64,10 +64,11 @@ use beebeeb_engine::file_ops;
 use zeroize::Zeroize;
 
 use super::log;
+use beebeeb_office_protocol::office::{EditKind, EditOp, HitMode, Template};
 use crate::frames::viewers::kinds::{self, PdfDoc, PhotoDoc, Picture, Viewer};
 #[allow(unused_imports)] // the text readers moved to `viewer_text.rs`; tests reach them through `super::*`.
 use crate::frames::viewers::source::{
-    Body, Cut, Details, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, SaveOutcome,
+    Body, Cut, Details, EditAnswer, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, SaveOutcome,
     Settled, Stopped, TextDoc, Truncated, ViewerSource, plain_lines,
 };
 
@@ -196,6 +197,85 @@ pub trait ViewerEngine: Send + Sync + 'static {
     fn begin_opening(&self, _session: SessionGeneration, _file_id: &str) -> u64 {
         0
     }
+    /// [`Engine::save_office_for`], under the engine's opening `opening`. A worker's.
+    fn save_office(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+        _base: i64,
+        _opening: u64,
+    ) -> Result<SaveEnd, EditRefused> {
+        Err(EditRefused::Failed)
+    }
+    /// [`Engine::save_office_copy_for`]. A worker's.
+    fn save_office_copy(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+        _device: &str,
+        _hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        Err(EditRefused::Failed)
+    }
+    /// [`Engine::create_office_for`]: the new file's id. A worker's.
+    fn create_office(
+        &self,
+        _session: SessionGeneration,
+        _folder: Option<&str>,
+        _name: &str,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<String, EditRefused> {
+        Err(EditRefused::Failed)
+    }
+    /// [`Engine::scratch_for`]: the session's sealed scratch for the editor's large working copies. `None`: copies
+    /// stay in memory.
+    fn office_scratch(
+        &self,
+        _session: SessionGeneration,
+    ) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
+        None
+    }
+    /// [`Engine::set_office_session_end_hook`]: a lock seals the open editors' unsaved work, a sign-out ends them,
+    /// before the session does. Asked again for every editor; the same hook each time.
+    fn office_install_session_end_hook(&self) {}
+    /// [`Engine::put_office_snapshot_for`]: keep an editing session's snapshot of `file_id` as its one recovery blob.
+    fn recovery_put(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _base: i64,
+        _bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
+    /// [`Engine::office_snapshots_for`]: the account's recovery blobs.
+    fn recovery_list(
+        &self,
+        _session: SessionGeneration,
+    ) -> Result<
+        Vec<beebeeb_engine::app::office_recovery::RecoveryEntry>,
+        beebeeb_engine::app::office_recovery::RecoveryRefused,
+    > {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
+    /// [`Engine::take_office_snapshot_for`]: the blob's bytes (the blob stays).
+    fn recovery_take(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
+    /// [`Engine::discard_office_snapshot_for`].
+    fn recovery_discard(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        Err(beebeeb_engine::app::office_recovery::RecoveryRefused::NotSignedIn)
+    }
     /// [`Engine::save_text_copy_for`]. A worker's.
     fn save_copy(
         &self,
@@ -212,11 +292,19 @@ pub trait ViewerEngine: Send + Sync + 'static {
 /// The engine handle, as the viewer asks it.
 pub struct LiveViewerEngine<C: CredentialStores> {
     engine: Arc<Engine<C>>,
+    /// "Open in another app" starts here, never on the window's thread.
+    launcher: super::launcher::Launcher,
+    /// What opens a file (the system's own; a test's stand-in).
+    open: super::files_launch::Start,
 }
 
 impl<C: CredentialStores> LiveViewerEngine<C> {
     pub(super) fn new(engine: Arc<Engine<C>>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            launcher: super::launcher::Launcher::default(),
+            open: super::open_path,
+        }
     }
 }
 
@@ -273,9 +361,20 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
                 super::path_the_system_opens(db, &sync_root, file_id).ok()
             })
         });
-        match path {
-            Ok(Some(path)) if super::open_path(&path).is_ok() => Elsewhere::Opened,
-            _ => Elsewhere::Refused,
+        // `Opened` is "the system was asked": the start itself runs on the launch worker, for this session, and the
+        // window's thread never waits for the launch lock (R-OW1).
+        let Ok(Some(path)) = path else {
+            return Elsewhere::Refused;
+        };
+        let asked = self.launcher.open_for(
+            &self.engine,
+            self.open,
+            path,
+            "viewer: the file did not open in another app",
+        );
+        match asked {
+            Ok(()) => Elsewhere::Opened,
+            Err(()) => Elsewhere::Refused,
         }
     }
 
@@ -331,6 +430,88 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
 
     fn begin_opening(&self, session: SessionGeneration, file_id: &str) -> u64 {
         self.engine.viewer_opening(session, file_id)
+    }
+
+    fn save_office(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+        base: i64,
+        opening: u64,
+    ) -> Result<SaveEnd, EditRefused> {
+        self.engine.save_office_for(session, file_id, bytes, base, opening)
+    }
+
+    fn save_office_copy(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+        device: &str,
+        hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        self.engine.save_office_copy_for(session, file_id, bytes, device, hhmm)
+    }
+
+    fn create_office(
+        &self,
+        session: SessionGeneration,
+        folder: Option<&str>,
+        name: &str,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<String, EditRefused> {
+        self.engine.create_office_for(session, folder, name, bytes)
+    }
+
+    fn office_scratch(
+        &self,
+        session: SessionGeneration,
+    ) -> Option<beebeeb_engine::app::office_scratch::ScratchStore> {
+        self.engine.scratch_for(session)
+    }
+
+    fn office_install_session_end_hook(&self) {
+        self.engine
+            .set_office_session_end_hook(std::sync::Arc::new(crate::engine_host::office_host::on_session_end));
+        self.engine
+            .set_office_unsaved_probe(std::sync::Arc::new(crate::engine_host::office_host::unsaved_count));
+    }
+
+    fn recovery_put(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        base: i64,
+        bytes: &zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        self.engine.put_office_snapshot_for(session, file_id, base, bytes)
+    }
+
+    fn recovery_list(
+        &self,
+        session: SessionGeneration,
+    ) -> Result<
+        Vec<beebeeb_engine::app::office_recovery::RecoveryEntry>,
+        beebeeb_engine::app::office_recovery::RecoveryRefused,
+    > {
+        self.engine.office_snapshots_for(session)
+    }
+
+    fn recovery_take(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        self.engine.take_office_snapshot_for(session, file_id)
+    }
+
+    fn recovery_discard(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+    ) -> Result<(), beebeeb_engine::app::office_recovery::RecoveryRefused> {
+        self.engine.discard_office_snapshot_for(session, file_id)
     }
 }
 
@@ -434,6 +615,14 @@ pub(super) enum Shows {
     Nothing,
 }
 
+/// Why a file with no viewer is not shown: a HEIC is said as that, any other kind has no viewer.
+fn heic_or_no_viewer(name: &str) -> NoPreview {
+    let heic = name
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| matches!(ext.to_ascii_lowercase().as_str(), "heic" | "heif"));
+    if heic { NoPreview::Heic } else { NoPreview::NoViewer }
+}
+
 pub(super) fn shows(name: &str) -> Shows {
     let ext = name
         .rsplit_once('.')
@@ -445,9 +634,22 @@ pub(super) fn shows(name: &str) -> Shows {
         Some(Viewer::Markdown) => Shows::Markdown,
         // The formats the toolkit decodes. A RAW or a HEIC has no decoder here.
         Some(Viewer::Photo) if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") => Shows::Picture,
+        // 095: a HEIC or a RAW is a picture too (decoded by the confined helper) unless this PC is known to have
+        // no decoder for it: then nothing is downloaded and the notice says so.
+        Some(Viewer::Photo)
+            if super::media::HelperPicture::of_name(name).is_some_and(|kind| !kind.decoder_missing()) =>
+        {
+            Shows::Picture
+        }
         Some(Viewer::Pdf) => Shows::Pdf,
         _ => Shows::Nothing,
     }
+}
+
+/// Whether the Office renderer's sandbox exists on this platform: `beebeeb-office-sandbox` has a module only on
+/// Windows today. Elsewhere a list's Open of an Office file goes to its own app.
+pub(super) const fn office_sandbox_here() -> bool {
+    cfg!(windows)
 }
 
 /// "Markdown" of "Markdown · 1.4 KB": the kind in a word, by the name.
@@ -493,6 +695,29 @@ fn picture_body(bytes: &[u8], cancel: &AtomicBool) -> Content {
         picture: None,
         origin: Origin::Beebeeb,
     };
+    // 095: a HEIC or a RAW never reaches a decoder of this process: the confined helper decodes it. No decoder for
+    // it on this PC: the notice a HEIC always had, and Open in another app.
+    if let Some(kind) = super::media::HelperPicture::of_bytes(bytes) {
+        if cancel.load(Ordering::SeqCst) {
+            return nothing(NoPreview::Unreadable);
+        }
+        return match super::media::helper_pixels(bytes) {
+            Ok(pixels) => Content {
+                body: Some(Body::Photo(PhotoDoc {
+                    pill: None,
+                    note: String::new(),
+                    strip: Vec::new(),
+                })),
+                picture: Some(pixels),
+                origin: Origin::Beebeeb,
+            },
+            Err(super::media::ImageRefusal::NoDecoder) => nothing(match kind {
+                super::media::HelperPicture::Heif => NoPreview::Heic,
+                super::media::HelperPicture::Raw => NoPreview::NoViewer,
+            }),
+            Err(_) => nothing(NoPreview::Unreadable),
+        };
+    }
     match viewer_picture::check(bytes) {
         Err(viewer_picture::Refused::NotAPicture) => return nothing(NoPreview::Unreadable),
         Err(viewer_picture::Refused::TooBig(declared)) => {
@@ -570,23 +795,26 @@ fn content_of(shows: Shows, bytes: &[u8], cancel: &AtomicBool) -> Content {
     }
 }
 
-/// Open the PDF in `bytes` (taken: the document reads the engine's buffer and wipes it when it is dropped). The
-/// view's body, and the document for its pages when it opened.
-fn open_pdf(bytes: zeroize::Zeroizing<Vec<u8>>, size: &str) -> (Body, Option<viewer_pdf::Document>) {
-    match viewer_pdf::Document::open(bytes) {
-        Ok(document) => (
+/// Open the PDF in `bytes` in the confined helper (a copy stays with the session, for find; both are wiped when
+/// they are let go). The view's body, and the session for its pages when it opened.
+fn open_pdf(bytes: zeroize::Zeroizing<Vec<u8>>, size: &str, cancel: &AtomicBool) -> (Body, Option<viewer_pdf::Session>) {
+    match viewer_pdf::Session::open(viewer_pdf::start(bytes.clone()), bytes, cancel) {
+        Ok(session) => (
             Body::Pdf(PdfDoc {
-                pages: document.pages(),
+                pages: session.pages(),
                 page: 1,
                 size: size.to_string(),
             }),
-            Some(document),
+            Some(session),
         ),
+        // The helper, not the file and not its decryption: said as that (RC2-3).
+        Err(viewer_pdf::NotOpened::Stopped) => (Body::Stopped(Stopped::HelperStopped), None),
         Err(why) => (
             Body::NotPreviewable(match why {
                 viewer_pdf::NotOpened::Locked => NoPreview::PdfLocked,
                 viewer_pdf::NotOpened::TooLong { pages } => NoPreview::PdfTooLong { pages },
-                viewer_pdf::NotOpened::Unreadable => NoPreview::PdfUnreadable,
+                viewer_pdf::NotOpened::NoRenderer => NoPreview::NoViewer,
+                _ => NoPreview::PdfUnreadable,
             }),
             None,
         ),
@@ -637,7 +865,11 @@ fn body_of(error: OpenFileError) -> Option<Body> {
         // Refused to this account (403), and a version that kept changing: named, never "not decrypted".
         OpenFileError::NoAccess => Body::Stopped(Stopped::NoAccess),
         OpenFileError::ChangedWhileOpening => Body::Stopped(Stopped::Changed),
-        OpenFileError::Failed => Body::Failed,
+        OpenFileError::Failed => {
+            // The kind only: never the name or the file's id.
+            tracing::warn!("viewer open failed: the file could not be read or decrypted");
+            Body::Failed
+        }
     })
 }
 
@@ -674,6 +906,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             return Err(OpenError::NotNow);
         }
         let (session, account, facts) = self.facts_now(file_id)?;
+        // The bytes of a document just made are for that file's own open, no other.
+        self.office_forget_made_but(file_id);
         // The new opening holds none of the viewer's earlier saves: none of them is its own, however late it lands.
         let epoch = self.engine.begin_opening(session, file_id);
         if let Some(mut before) = self.open.take() {
@@ -732,7 +966,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         } else if let Some(media) = media {
             media
         } else if shows == Shows::Nothing {
-            Body::NotPreviewable(NoPreview::NoViewer)
+            Body::NotPreviewable(heic_or_no_viewer(&facts.name))
         } else if facts.size > IN_MEMORY_MAX {
             Body::NotPreviewable(NoPreview::TooBig {
                 size: facts.size,
@@ -805,13 +1039,13 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     moving.done.store(done, Ordering::SeqCst);
                     moving.total.store(total, Ordering::SeqCst);
                     // The window is woken once per whole percent, not once per chunk.
-                    let percent = if total == 0 { 100 } else { done.min(total) * 100 / total };
+                    let percent = (done.min(total) * 100).checked_div(total).unwrap_or(100);
                     if moving.woken_at.swap(percent, Ordering::SeqCst) != percent {
                         waker.wake();
                     }
                 };
                 // A panic in this worker must not leave the view on "Decrypting" for good: it answers Failed.
-                let (answer, document): (Answer, Option<viewer_pdf::Document>) =
+                let (answer, document): (Answer, Option<viewer_pdf::Session>) =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let (session, bytes, origin) =
                             match read(&*engine, &file_id, recorded, IN_MEMORY_MAX, &report, &cancel) {
@@ -820,7 +1054,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                             };
                         let (mut content, document) = match (&pdf, shows) {
                             (Some(ends), Shows::Pdf) => {
-                                let (body, document) = open_pdf(bytes, &ends.size);
+                                let (body, document) = open_pdf(bytes, &ends.size, &cancel);
                                 let content = Content {
                                     body: Some(body),
                                     picture: None,
@@ -834,7 +1068,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                         content.origin = origin;
                         (Ok((session, content)), document)
                     }))
-                    .unwrap_or((Err(OpenFileError::Failed), None));
+                    .unwrap_or_else(|_| {
+                        tracing::warn!("viewer open failed: worker panic");
+                        (Err(OpenFileError::Failed), None)
+                    });
                 // Nobody waits for the content any more (the file was closed, its session moved on, Cancel): it is
                 // dropped here, its text overwritten, and never queued. What is sent says only "cancelled".
                 let answer = if cancel.load(Ordering::SeqCst) {
@@ -846,9 +1083,9 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 let cancelled = answer.is_err();
                 let _ = answers.send(answer);
                 engine.wake();
-                // An open PDF: this thread keeps the document and renders the pages the view asks for, until
-                // the file is left (the asker goes) or its session moves on (`cancel`). Then the document is
-                // dropped, and the bytes it read from are overwritten.
+                // An open PDF: this thread keeps its helper and asks it for the pages the view asks for, until the
+                // file is left (the asker goes), its session moves on (`cancel`) or the helper stops. Then the
+                // helper is ended, and the bytes kept for find are overwritten.
                 if let (Some(document), Some(ends), false) = (document, pdf, cancelled) {
                     let page = |page, rendered: Option<viewer_pdf::Rendered>| {
                         let lacks_text = rendered.as_ref().is_some_and(|rendered| rendered.lacks_text);
@@ -860,7 +1097,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                         let _ = ends.found.send((serial, matches));
                         engine.wake();
                     };
-                    document.serve_asks(&ends.asks, &cancel, &page, &found);
+                    let stopped = || {
+                        ends.stopped.store(true, Ordering::SeqCst);
+                        engine.wake();
+                    };
+                    document.serve(&ends.asks, &cancel, &page, &found, &stopped);
                 }
             })
             .is_ok()
@@ -972,6 +1213,12 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                     }
                 })
             }
+            // The helper that draws the PDF's pages stopped: nothing more comes of this opening. Try again opens anew.
+            Err(_) if opening.pages.as_ref().is_some_and(Pages::take_stopped) => {
+                tracing::warn!("viewer: the helper stopped after the file was opened");
+                opening.pages = None;
+                Some(Body::Stopped(Stopped::HelperStopped))
+            }
             // A page of the open PDF came back: the same document again, so the view is drawn with the page.
             Err(_) if opening.pages.as_ref().is_some_and(Pages::take_in) => opening
                 .pages
@@ -1033,17 +1280,22 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn previews(&self, name: &str) -> bool {
-        shows(name) != Shows::Nothing || self.media_previews(name) || self.office_route(name).is_some()
+        shows(name) != Shows::Nothing
+            || heic_or_no_viewer(name) == NoPreview::Heic
+            || self.media_previews(name) || self.office_route(name).is_some()
     }
 
     /// An audio or a video file kept on this PC still opens in the player when playback is available (D-MED-13); an
     /// Office file opens in the viewer while its route is on ("Open in another app…" stays one press away).
     fn opens_here_when_kept(&self, name: &str) -> bool {
-        self.media_previews(name) || self.office_route(name).is_some()
+        // A PDF too (W20): a kept one went to the browser; the viewer shows it, the other app stays one press away.
+        self.media_previews(name)
+            || shows(name) == Shows::Pdf
+            || matches!(self.office_route(name), Some(kinds::OfficeRoute::Shows(_)))
     }
 
     fn office_live(&self) -> bool {
-        true
+        office_sandbox_here()
     }
 
     fn office_picture(&self, file_id: &str, which: kinds::OfficePicture) -> Option<rune::Pixels> {
@@ -1134,7 +1386,72 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     }
 
     fn settled(&mut self, file_id: &str) -> Option<Settled> {
-        self.take_settled(file_id)
+        self.office_settled(file_id)
+    }
+
+    fn can_edit(&self, file_id: &str) -> bool {
+        self.office_can_edit(file_id)
+    }
+
+    fn edit_guarded(&self, file_id: &str) -> Vec<beebeeb_office_protocol::office::DroppedPart> {
+        self.office_guarded(file_id)
+    }
+
+    fn default_app(&self, file_id: &str) -> Option<String> {
+        self.office_default_app(file_id)
+    }
+
+    fn edit(&mut self, file_id: &str, op: EditOp) -> bool {
+        self.office_edit(file_id, op)
+    }
+
+    fn hit(&mut self, file_id: &str, page: u32, x_pt: f32, y_pt: f32, mode: HitMode) -> bool {
+        self.office_hit(file_id, page, x_pt, y_pt, mode)
+    }
+
+    fn copy_selection(&mut self, file_id: &str) -> bool {
+        self.office_copy(file_id)
+    }
+
+    fn layouts(&mut self, file_id: &str) -> bool {
+        self.office_layouts(file_id)
+    }
+
+    fn insert_image(&mut self, file_id: &str, bytes: zeroize::Zeroizing<Vec<u8>>, png: bool) -> bool {
+        self.office_insert_image(file_id, bytes, png)
+    }
+
+    fn poll_edit(&mut self, file_id: &str) -> Option<EditAnswer> {
+        self.office_poll_edit(file_id)
+    }
+
+    fn create_document(&mut self, folder: Option<&str>, name: &str, kind: EditKind, template: Template) -> bool {
+        self.office_create(folder, name, kind, template)
+    }
+
+    fn recovery(&self, file_id: &str) -> Option<crate::frames::viewers::source::RecoveryOffer> {
+        self.office_recovery(file_id)
+    }
+
+    fn restore(&mut self, file_id: &str) -> bool {
+        self.office_restore(file_id)
+    }
+
+    fn discard_recovery(&mut self, file_id: &str) {
+        self.office_discard_recovery(file_id)
+    }
+
+    fn recovery_pending(&self) -> Vec<(String, String)> {
+        let pending = self.office_recovery_pending();
+        pending.into_iter().map(|kept| (kept.file_id, kept.at)).collect()
+    }
+
+    fn save_document(&mut self, file_id: &str, base: u32) -> SaveOutcome {
+        self.office_save_document(file_id, base)
+    }
+
+    fn resolve_document(&mut self, file_id: &str, keep: Keep) -> SaveOutcome {
+        self.office_resolve_document(file_id, keep)
     }
 
     fn answers_later(&self) -> bool {
@@ -1158,5 +1475,17 @@ impl<E: ViewerEngine> Drop for EngineViewerSource<E> {
         }
         self.media_closed();
         self.office_left();
+    }
+}
+
+#[cfg(test)]
+mod heic_open_tests {
+    use super::*;
+
+    #[test]
+    fn a_heic_has_its_own_words_and_opens_in_the_viewer() {
+        assert_eq!(heic_or_no_viewer("n.HEIC"), NoPreview::Heic);
+        assert_eq!(heic_or_no_viewer("n.heif"), NoPreview::Heic);
+        assert_eq!(heic_or_no_viewer("n.xyz"), NoPreview::NoViewer);
     }
 }

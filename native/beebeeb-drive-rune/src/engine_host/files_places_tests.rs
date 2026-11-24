@@ -311,8 +311,7 @@ fn places_of_an_earlier_account_answer_nothing() {
         None,
         "nothing of the first account's tree"
     );
-    let held = Some(THIS_PC);
-    assert_eq!(source.backup_entry(&row(held.unwrap(), Some(ROOT), true)), None);
+    assert_eq!(source.backup_entry(&row(THIS_PC, Some(ROOT), true)), None);
 }
 
 #[test]
@@ -490,6 +489,13 @@ fn the_sidebars_backups_opens_the_device_rows_and_nothing_in_the_tree_changes() 
     until_drawn(&mut rt, "note.txt");
     assert_eq!(section_of(&rt), Some(Section::Backups));
     let note = row(NOTE, Some(DOCS), false);
+    // The places of DOCS come from a worker apart from the listing: the rows can be drawn before they land (slower
+    // on Windows), so wait for the answer instead of reading `protection` the moment the rows show.
+    let until = std::time::Instant::now() + WAIT;
+    while rt.state.actions.source.protection(Some(DOCS), Some(&note)).is_none() && std::time::Instant::now() < until {
+        settle(&mut rt);
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(
         rt.state.actions.source.protection(Some(DOCS), Some(&note)),
         Some(Protection::DeviceBackup(THIS_PC.into()))
@@ -532,7 +538,7 @@ fn an_account_with_no_backups_folder_draws_no_backups_yet_and_never_the_dev_card
     until_drawn(&mut rt, "No backups yet");
     let now = drawn(&rt);
     assert!(
-        now.contains("Turn on backups in Settings \u{203A} Backups."),
+        now.contains("Turn on backups in Settings to see your devices here."),
         "the line:\n{now}"
     );
     assert!(!now.contains("NOT BUILT YET"), "the dev card in a real build:\n{now}");
@@ -548,7 +554,7 @@ fn the_backups_id_is_read_again_when_it_first_came_back_none() {
     assert_eq!(backups_root_of_for(&mut source, Duration::from_millis(300)), None);
     // The folder comes to be (a first sync, a first backup).
     {
-        let db = StateDb::open(&world._dir.path().join("state.db")).unwrap();
+        let db = StateDb::open(world._dir.path().join("state.db")).unwrap();
         put(&db, ROOT, "/Backups", None, ItemKind::Folder);
         db.mark_backups_root_for_test(ROOT).unwrap();
     }

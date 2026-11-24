@@ -25,6 +25,7 @@
 //! BLOCKS: every call here is a worker's (the state database, the network, a decode). Must not: log or return a
 //! name, a path, a key or a pixel outside the answer types.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,12 +36,12 @@ use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
 use crate::api_client::ApiClient;
-use crate::drive_v2::model::{is_photo_or_video, leaf_name, live_rows, mime_for_name};
+use crate::drive_v2::model::{is_photo_or_video, leaf_name, live_rows_pinned, mime_for_name};
 use crate::drive_v2::photo_meta::{self, PhotoMeta};
 use crate::engine_bridge::{
     EngineBridge, ThumbnailNotYet, UnknownItem, error_http_status, local_file_path_under_sync_root,
 };
-use crate::state_db::{FileStatus, PinState, StateDb};
+use crate::state_db::{FileStatus, StateDb};
 
 #[cfg(test)]
 #[path = "photos_api_tests.rs"]
@@ -381,6 +382,53 @@ impl<C: CredentialStores> Engine<C> {
         Ok(facts.duration_seconds)
     }
 
+    /// The copy ON THIS PC of the picture `file_id`, for `session`: its version, and a way to read its bytes.
+    /// `None`: it is no picture, it is online only or not wholly here (it is never downloaded for this), it is
+    /// being changed, or it is larger than `max_bytes`. Reads nothing of the file itself. No network.
+    pub fn local_picture_copy_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        max_bytes: u64,
+    ) -> Result<Option<LocalPicture>, LocalStateRefused> {
+        let state = self.local_state()?;
+        if state.session() != session {
+            return Err(LocalStateRefused::SessionChanged);
+        }
+        let entry = state
+            .with(|db| db.get_file(file_id))?
+            .map_err(|_| LocalStateRefused::Unreadable)?;
+        let Some(entry) = entry.filter(|entry| !entry.is_dir() && entry.status == FileStatus::Local) else {
+            return Ok(None);
+        };
+        if !mime_for_name(&leaf_name(&entry)).is_some_and(|mime| mime.starts_with("image/")) {
+            return Ok(None);
+        }
+        let Some(sync_root) = crate::config::DesktopConfig::load_for(self.identity)
+            .ok()
+            .and_then(|config| config.sync_root)
+        else {
+            return Ok(None);
+        };
+        let Ok(path) = local_file_path_under_sync_root(&sync_root, &entry.path) else {
+            return Ok(None);
+        };
+        // Only a copy that is wholly here: opening a placeholder on Windows would start a download.
+        if !copy_is_wholly_here(&path) {
+            return Ok(None);
+        }
+        let fits = std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 0 && metadata.len() <= max_bytes);
+        if !fits {
+            return Ok(None);
+        }
+        state.still_this_session()?;
+        Ok(Some(LocalPicture {
+            version: entry.remote_updated_at.max(0),
+            path,
+            max_bytes,
+        }))
+    }
+
     /// [`Engine::set_kept`] for the session of a press: nothing is changed unless the session in memory is still
     /// `session`. `Err` in the same fixed words.
     pub fn set_kept_for(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), String> {
@@ -388,6 +436,29 @@ impl<C: CredentialStores> Engine<C> {
             return Err(super::kept_api::NOT_SIGNED_IN.to_string());
         }
         self.set_kept_in(Some(session), file_id, kept)
+    }
+}
+
+/// A picture's copy on this PC, found by [`Engine::local_picture_copy_for`]. Holds the path; says only the version.
+pub struct LocalPicture {
+    /// The version the copy was last in step with the account at (a thumbnail made of it is kept under this).
+    pub version: i64,
+    path: std::path::PathBuf,
+    max_bytes: u64,
+}
+
+impl LocalPicture {
+    /// BLOCKS (the disk): the copy's bytes. `None`: it went away, was freed meanwhile, grew past the limit or
+    /// cannot be read. Never downloads.
+    pub fn read(&self) -> Option<Zeroizing<Vec<u8>>> {
+        if !copy_is_wholly_here(&self.path) {
+            return None;
+        }
+        let mut bytes = Zeroizing::new(Vec::new());
+        std::fs::File::open(&self.path)
+            .and_then(|file| file.take(self.max_bytes + 1).read_to_end(&mut bytes))
+            .ok()?;
+        (!bytes.is_empty() && bytes.len() as u64 <= self.max_bytes).then_some(bytes)
     }
 }
 
@@ -447,7 +518,11 @@ pub(crate) fn at_or_under(path: &str, folder: &str) -> bool {
 /// longer exists is ignored). `None`: it could not be read.
 fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
     let roots: Vec<String> = db.backups_roots().ok()?.into_iter().map(|(_, path)| path).collect();
-    let live = live_rows(db).ok()?;
+    let (live, pinned): (Vec<_>, HashSet<String>) = {
+        let rows = live_rows_pinned(db).ok()?;
+        let pinned = rows.iter().filter(|(_, p)| *p).map(|(row, _)| row.file_id.clone()).collect();
+        (rows.into_iter().map(|(row, _)| row).collect(), pinned)
+    };
     // Each hidden folder's path, from its own row.
     let hidden_paths: Vec<String> = if hidden.is_empty() {
         Vec::new()
@@ -472,9 +547,15 @@ fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
             .cmp(&a.0.modified_at)
             .then_with(|| a.0.path.cmp(&b.0.path))
     });
+    // One read of every row's version, not one contract query per photo. Pinned comes with `live_rows`.
+    let versions: HashMap<String, i64> = db
+        .list_tree_rows()
+        .ok()?
+        .into_iter()
+        .map(|row| (row.file_id, row.current_version))
+        .collect();
     let mut photos = Vec::with_capacity(rows.len());
     for (row, name) in rows {
-        let contract = db.get_file_contract_state(&row.file_id).ok()?;
         let mut folders: Vec<String> = row
             .path
             .split('/')
@@ -488,13 +569,11 @@ fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
             folders,
             bytes: u64::try_from(row.size_bytes).unwrap_or(0),
             modified_at: row.modified_at,
-            kept: contract
-                .as_ref()
-                .is_some_and(|contract| contract.effective_pin_state() == PinState::Pinned),
+            kept: pinned.contains(&row.file_id),
             on_this_pc: row.status == FileStatus::Local,
             uploading: row.status == FileStatus::Uploading,
             device: photo_meta::backup_device(&roots, &row.path),
-            versions: contract.as_ref().map_or(1, |contract| contract.current_version.max(1)),
+            versions: versions.get(&row.file_id).copied().unwrap_or(1).max(1),
             id: row.file_id,
         });
     }

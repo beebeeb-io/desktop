@@ -24,6 +24,17 @@ mod hardening_tests;
 // Charts and pictures of a sheet: asked once seen, sized by the protocol.
 #[path = "office_host_tests/anchor_tests.rs"]
 mod anchor_tests;
+// The wait for the launch lock: not the helper's time, and a close during it drops the document (review of #467).
+#[path = "office_host_tests/launch_wait_tests.rs"]
+mod launch_wait_tests;
+// The editing session: checked answers, the save handshake.
+#[path = "office_host_tests/edit_tests.rs"]
+mod edit_tests;
+// A helper that dies mid-edit comes back from the last snapshot; the snapshot timing.
+#[path = "office_host_tests/restart_tests.rs"]
+mod restart_tests;
+#[path = "office_host_tests/spill_tests.rs"]
+mod spill_tests;
 
 /// 100 % on a 96 DPI screen: a Letter page is 816 x 1056.
 fn scale_100() -> f32 {
@@ -163,7 +174,7 @@ fn a_rendered_page_of_another_size_kills() {
 fn an_answer_that_is_not_the_oldest_kills() {
     let registry = Registry::new();
     // Two pages asked (ids 2 and 4, after the Open's 0); the helper answers the id `pick` chooses.
-    let cases: [(&str, fn(u32, u32) -> u32); 3] = [
+    let cases: [Case; 3] = [
         ("an id never sent", |_, _| 1000),
         ("the second of two answered first", |_, second| second),
         ("an odd id", |first, _| first + 1),
@@ -977,7 +988,8 @@ fn a_too_old_windows_needs_a_windows_update() {
 fn no_sandbox_no_helper() {
     // An existing, runnable file of the helper's name: were there an unconfined way, this would start it.
     let exe = runnable_helper("no-sandbox");
-    let mut host = OfficeHost::open(&exe, DocKind::Docx, Zeroizing::new(doc()), noop_wake());
+    let registry = Registry::new();
+    let mut host = OfficeHost::open_in(&registry, &exe, DocKind::Docx, Zeroizing::new(doc()), noop_wake());
     let mut events = Vec::new();
     let ended = |host: &OfficeHost, _: &[Event]| host.worker_ended() && !matches!(host.state(), OfficeState::Opening);
     assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());
@@ -1029,7 +1041,7 @@ fn a_real_confined_helper_renders_page_one() {
     let page_of = |events: &[Event]| -> Option<(RequestId, u32, u32, usize)> {
         events.iter().find_map(|event| match event {
             Event::Page { id, w, h, rgba, .. } => {
-                let colours: HashSet<[u8; 4]> = rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect();
+                let colours: HashSet<[u8; 4]> = rgba.as_chunks::<4>().0.iter().copied().collect();
                 Some((*id, *w, *h, colours.len()))
             }
             _ => None,
@@ -1171,4 +1183,28 @@ fn a_real_confined_helper_renders_page_one() {
         "after Try again: {:?}",
         host.state()
     );
+}
+
+/// A named rule from two sizes to one.
+type Case = (&'static str, fn(u32, u32) -> u32);
+
+/// RC2-3: a PDF's helper answers `Opened` (pages), as a document's does. The worker took that answer for Word and
+/// slides only, so every PDF ended as `Stop::Protocol` and its helper was killed before a page was asked.
+#[test]
+fn viewer_pdf_kind_opens_as_pages_and_its_helper_is_not_killed() {
+    let registry = Registry::new();
+    let sizes = [A4, A4, A4];
+    let (mut host, log, _) = open_fake(Fake::new(move |link| serve(link, &sizes)), &registry, DocKind::Pdf);
+    let mut events = Vec::new();
+    assert!(until_open(&mut host, &mut events), "no answer within 2 s");
+    assert_eq!(
+        &host.state(),
+        &OfficeState::Pages {
+            pages: 3,
+            sizes: sizes.to_vec()
+        }
+    );
+    assert_eq!(log.kills(), 0, "the helper stays for the pages");
+    assert!(host.request_page(0, scale_100(), None).is_some(), "page 1 can be asked");
+    assert!(pump_for(&mut host, &mut events, WITHIN, |_, events| pages_of(events) == 1), "{:?}", host.state());
 }

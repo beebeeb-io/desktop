@@ -1,3 +1,5 @@
+//! Tests: transfer progress accounting.
+
 use super::*;
 
 #[test]
@@ -222,7 +224,7 @@ fn a_failed_transfer_lingers_in_snapshot_after_the_guard_drops() {
     // code and GREEN once recently_failed is introduced.
     let board = TransferBoard::new();
     {
-        let g = board.begin_named("f_fail", "docs/report.pdf", Direction::Down, 500);
+        let _g = board.begin_named("f_fail", "docs/report.pdf", Direction::Down, 500);
         board.mark_failed("f_fail");
     } // guard drops here — before fix, entry is gone; after fix it's in recently_failed
     let dtos = board.snapshot_dtos();
@@ -301,7 +303,7 @@ fn paths_are_kept_for_recently_failed_and_pruned_on_expiry() {
     // but must be gone once the entry expires.
     let board = TransferBoard::new();
     {
-        let g = board.begin_named("fx", "media/clip.mp4", Direction::Stream, 1000);
+        let _g = board.begin_named("fx", "media/clip.mp4", Direction::Stream, 1000);
         board.mark_failed("fx");
     }
     {
@@ -313,10 +315,10 @@ fn paths_are_kept_for_recently_failed_and_pruned_on_expiry() {
     }
     // Expire the entry by setting its timestamp to 0 and calling snapshot_dtos
     {
-        if let Ok(mut inner) = board.inner.lock() {
-            if let Some(t) = inner.recently_failed.get_mut("fx") {
-                t.failed_at_secs = Some(0);
-            }
+        if let Ok(mut inner) = board.inner.lock()
+            && let Some(t) = inner.recently_failed.get_mut("fx")
+        {
+            t.failed_at_secs = Some(0);
         }
     }
     board.snapshot_dtos(); // triggers pruning
@@ -572,4 +574,35 @@ fn ld0105_u1_a_stop_is_no_failure_and_a_new_engine_forgets_failed_rows() {
         board.inner.lock().unwrap().paths.is_empty(),
         "the names go with the rows"
     );
+}
+
+/// w31: the board keeps where the first file list is, rings the window only when that changed, and keeps a Try
+/// again's ask for the runner that is busy (a permit).
+#[test]
+fn w31_the_first_list_state_is_kept_and_rings_on_a_change_only() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let board = TransferBoard::new();
+    assert_eq!(board.first_list(), FirstList::Here);
+    let rings = Arc::new(AtomicUsize::new(0));
+    let counted = rings.clone();
+    board.set_wake(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+    });
+    board.set_first_list(FirstList::Awaited);
+    board.set_first_list(FirstList::Awaited);
+    assert_eq!(board.first_list(), FirstList::Awaited);
+    assert_eq!(rings.load(Ordering::SeqCst), 1);
+    board.set_first_list(FirstList::Failed);
+    assert_eq!(board.first_list(), FirstList::Failed);
+    board.set_first_list(FirstList::Here);
+    assert_eq!(board.first_list(), FirstList::Here);
+    assert_eq!(rings.load(Ordering::SeqCst), 3);
+
+    board.ask_pull_now();
+    let asked = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(5), board.pull_asked()).await });
+    assert!(asked.is_ok(), "an ask made before the runner waits is kept");
 }

@@ -12,8 +12,8 @@ use rune::{Cx, El, el, row};
 use super::AccountUi;
 use super::source::{Answered, CallKind, CallMark, Refused};
 use crate::State;
-use crate::theme::{icons_files, tokens};
-use crate::ui::toast::{self, ToastAction, Tone};
+use crate::theme::tokens;
+use crate::ui::toast::{self, Lead};
 use crate::ui::{global_icons, kit};
 
 /// The answer of one password press, with that press's serial.
@@ -77,16 +77,38 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         return window;
     }
     let t = tokens::theme(cx.system_dark());
-    let (icon, tone) = match late.answer {
-        Ok(()) => (&icons_files::CHECK, Tone::Done),
-        Err(_) => (&icons_files::ALERT, Tone::Failed),
+    let lead = match late.answer {
+        Ok(()) => Lead::Check,
+        Err(_) => Lead::Warn,
     };
-    let show = ToastAction {
-        text: "Show",
-        name: "Show the password change",
-        shortcut: None,
-        run: |s: &mut State, _| super::go(s, "DW-A67"),
-    };
+    // Show: the page the answer belongs to. Dismiss: the notice goes, and nothing of it is said later (#440 review, P3).
+    let show = el()
+        .key("late-change-action")
+        .role("button")
+        .label("Show the password change")
+        .h(24.0)
+        .px(crate::theme::scale::space::S8)
+        .radius(crate::theme::scale::radius::DIALOG)
+        .fill(t.selection)
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .center()
+        .on_press(|s: &mut State| super::go(s, "DW-A67"))
+        .child(kit::label("late-change-action-text", "Show", toast::ACTION, t.text));
+    let dismiss = el()
+        .key("late-change-close")
+        .role("button")
+        .label("Dismiss")
+        .size(24.0, 24.0)
+        .radius(crate::theme::scale::radius::DIALOG)
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .center()
+        .on_press(|s: &mut State| s.account.late_change = None)
+        .child(kit::glyph("late-change-close-icon", &global_icons::CLOSE, 12.0, t.text_secondary));
+    let action = row().key("late-change-buttons").center_y().gap(3.0).child(show).child(dismiss);
     window.child(
         // One toast line above a toast's own place (`ui::toast::layer`: 42 pt): it stands until Show, so it never
         // covers a screen's own toast (Files' Undo, an account page's notice).
@@ -98,27 +120,12 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
             .pb(84.0)
             .justify_center()
             .items_end()
-            .child(
-                toast::toast_keyed("late-change", icon, tone, notice(&late.answer), Some(show), &t).child(
-                    // Dismiss: the notice goes, and nothing of it is said later (#440 review, P3).
-                    el().key("late-change-close")
-                        .role("button")
-                        .label("Dismiss")
-                        .size(24.0, 24.0)
-                        .mr(5.0)
-                        .radius(12.0)
-                        .hover(t.hover)
-                        .press(t.press)
-                        .focusable(true)
-                        .center()
-                        .on_press(|s: &mut State| s.account.late_change = None)
-                        .child(kit::glyph(
-                            "late-change-close-icon",
-                            &global_icons::CLOSE,
-                            12.0,
-                            t.text_secondary,
-                        )),
-                ),
-            ),
+            .child(toast::toast_with(
+                "late-change",
+                notice(&late.answer),
+                lead,
+                Some(action),
+                &t,
+            )),
     )
 }

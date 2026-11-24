@@ -7,13 +7,15 @@
 
 use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::theme::scale::{space as sp, text};
 use crate::theme::tokens::Theme;
+use crate::theme::tokens::radius as rad;
 use crate::ui::kit;
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item};
 use crate::ui::settings_notice::NOTE;
 use crate::ui::settings_shell as shell;
-use rune::tok::Family;
+use crate::ui::view_state::{ViewState, view_state};
 use rune::{El, Shape, Span, canvas, el, rich, row};
 
 use super::drive::Control;
@@ -68,6 +70,8 @@ pub enum Bundle {
         folder: String,
         file: String,
         draft_opened: bool,
+        /// The saved file in full, for "Show in File Explorer" (never drawn: a person's own path).
+        path: std::path::PathBuf,
     },
     /// Not saved: the reason, in the engine's words.
     Failed(String),
@@ -86,7 +90,7 @@ pub struct Diagnostics {
 pub const BUNDLE_SAYS: &str = "Saves a support bundle you can read before you send it: queue counts, an error code and the last error message. Paths, file and folder names and sign-in tokens are removed. Standard error words, numbers, opaque ids and the server address are kept, so a name the app does not recognise can stay only if it is itself a standard word or a number.";
 
 /// 12px/400 mono on a 15px line: a measure's value (`.font-mono.t-sub`).
-const VALUE: rune::TextStyle = rune::TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
+const VALUE: rune::TextStyle = text::MONO;
 
 /// A sparkline (`.kit-spark.tone-ink`), 72 x 20: the samples left to right, the lowest 2 pt
 /// above the foot and the highest 2 pt under the top, a faint wash under the line.
@@ -121,6 +125,7 @@ fn banner(bundle: &Bundle, t: &Theme) -> Option<El> {
             folder,
             file,
             draft_opened,
+            ..
         } => (
             &ic::CHECK,
             "Support bundle saved.",
@@ -162,11 +167,11 @@ fn banner(bundle: &Bundle, t: &Theme) -> Option<El> {
         .label(words.replace('\n', " "))
         .w_full()
         .center_y()
-        .gap(10.0)
-        .py(9.0)
+        .gap(sp::S10)
+        .py(sp::S9)
         .pl(12.0)
         .pr(10.0)
-        .radius(10.0)
+        .radius(rad::LG)
         .fill(t.text.alpha(0.06))
         .child(kit::glyph("note-0-icon", icon, 16.0, t.text_secondary))
         .child(
@@ -183,7 +188,7 @@ fn banner(bundle: &Bundle, t: &Theme) -> Option<El> {
                 .on_press(|s: &mut State| s.settings.ask(Intent::Open("support-bundle"))),
         );
     }
-    Some(el().key("note-0-margin").w_full().pt(10.0).px(14.0).child(line))
+    Some(el().key("note-0-margin").w_full().pt(10.0).px(sp::S14).child(line))
 }
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
@@ -214,7 +219,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 let figure = row()
                     .key(format!("spark-{i}-box"))
                     .center_y()
-                    .gap(12.0)
+                    .gap(sp::S12)
                     .child(spark(&format!("spark-{i}"), &a.samples, t))
                     .child(kit::label(
                         format!("spark-{i}-value"),
@@ -229,26 +234,56 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             0,
             Some("App activity"),
             rows,
-            Some("Beebeeb's own use of this PC, sampled every 2 seconds while this page is open."),
+            Some("Beebeeb's own use of this PC, sampled every 2 seconds while this page is open. Upload and download are the latest bandwidth sample, not a live rate."),
             t,
         ));
     }
 
     if d.activity.is_empty() {
-        // Nothing samples the app's own use of this PC in this version: said, not left out.
+        // The sampler fills this about 2 seconds after the page opens: said, with what will show.
         children.push(lists::list(
             0,
             Some("App activity"),
-            vec![lists::item(
-                0,
-                0,
-                &Item::new(Some(&ic::GAUGE), "Not available in this version yet."),
+            vec![view_state(
+                ViewState::Empty {
+                    key: "activity-empty",
+                    icon: &ic::GAUGE,
+                    title: "No measurements yet",
+                    body: "CPU, memory, upload and download appear here about 2 seconds after this page opens, and stop when you leave it.",
+                    action: None,
+                },
                 t,
             )],
             None,
             t,
         ));
     }
+
+    // The log file (LD-0087): where the rotating, redacted log lives, with Open folder.
+    let log_row = match crate::log_file::dir() {
+        Some(dir) => lists::item_with(
+            3,
+            0,
+            &Item::new(Some(&ic::BOX), "Log file").sub(format!(
+                "{} in {}. Kept to two files of 5 MB; sign-in tokens and file names are removed.",
+                crate::log_file::FILE_NAME,
+                dir.display()
+            )),
+            vec![
+                controls::button(9, "Open folder", None, Emphasis::Plain, t)
+                    .on_press(|s: &mut State| s.settings.ask(Intent::Open("log-folder"))),
+            ],
+            t,
+        ),
+        None => lists::item(
+            3,
+            0,
+            &Item::new(Some(&ic::WARN_CIRCLE), "No log file on this PC")
+                .sub("Beebeeb could not make its log folder when it started, so nothing is being written."),
+            t,
+        ),
+    };
+    children.push(lists::list(3, Some("Log file"), vec![log_row], None, t));
 
     children.push(lists::list(
         1,
@@ -290,7 +325,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             2,
             1,
             &Item::new(Some(&ic::CHAT), "Get help")
-                .sub("Opens our support page in your browser.")
+                .sub("Opens a draft to support in your email app.")
                 .trailing(lists::Trailing::External)
                 .role(lists::Role::Link),
             t,
@@ -299,6 +334,6 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         lists::item(2, 2, &Item::new(Some(&ic::INFO), "Report a problem").opens(), t)
             .on_press(|s: &mut State| super::go(s, "DW-0782")),
     ]);
-    children.push(lists::list(2, Some("Help"), help, None, t));
+    children.push(lists::roving_list(2, Some("Help"), help, None, t));
     (shell::pane(children, t), None)
 }

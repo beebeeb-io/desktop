@@ -15,13 +15,16 @@
 
 #![forbid(unsafe_code)]
 
+mod edit_guard;
+mod edit_map;
 mod engine;
 mod fit;
 mod memory;
+mod save;
 mod serve;
 mod start;
 
-pub use engine::{Engine, Office, OpenDoc, Opening, block_cells, open_code, render_code};
+pub use engine::{EditingDoc, Engine, Office, OpenDoc, Opening, block_cells, open_code, render_code};
 pub use memory::{Granted, Mapped, MappedMut, Memory};
 pub use serve::serve;
 pub use start::start;

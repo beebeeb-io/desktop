@@ -233,3 +233,45 @@ fn office_docs_a_tall_page_brings_the_next_one_as_its_foot_comes() {
         "page 1's top row scrolled far off: {keys:?}"
     );
 }
+
+/// A point of the column is a point of a page and back: the gap goes to the nearer page, a point off the pages is kept
+/// on the nearest one.
+#[test]
+fn a_point_of_the_column_is_a_point_of_a_page() {
+    use beebeeb_office_protocol::office::{PageRect, RectPt};
+    let (mut rt, _log) = live_runtime(doc_of(3, 100, 1), 1.0, None);
+    let d = doc(&mut rt);
+    let k = 520.0 / 595.0;
+    let step = a4_step();
+    // The first page's top-left, and a point 100 / 50 points in.
+    assert_eq!(d.page_point(0.0, PAD_TOP), (0, 0.0, 0.0));
+    let (p, x, y) = d.page_point(100.0 * k, PAD_TOP + 50.0 * k);
+    assert_eq!(p, 0);
+    assert!((x - 100.0).abs() < 0.01 && (y - 50.0).abs() < 0.01, "{x} {y}");
+    // The second page.
+    let (p, _, y) = d.page_point(10.0, PAD_TOP + step + 20.0);
+    assert_eq!(p, 1);
+    assert!((y - 20.0 / k).abs() < 0.01);
+    // The gap: the lower half goes to the page below, the upper half to the one above.
+    let foot = PAD_TOP + step - PAGE_GAP;
+    assert_eq!(d.page_point(10.0, foot + PAGE_GAP * 0.25).0, 0);
+    assert_eq!(d.page_point(10.0, foot + PAGE_GAP * 0.75).0, 1);
+    // Off the pages: kept on the first and the last, inside them.
+    assert_eq!(d.page_point(-30.0, -30.0), (0, 0.0, 0.0));
+    let (p, x, y) = d.page_point(9999.0, 99999.0);
+    assert_eq!(p, 2);
+    assert!((x - 595.0).abs() < 0.01 && (y - 842.0).abs() < 0.01);
+    assert_eq!(d.page_point(f32::NAN, f32::NAN), (0, 0.0, 0.0));
+    // A rectangle of a page is where `page_top` and the scale put it, and a page the file does not have is the last.
+    let r = d.page_rect(&PageRect {
+        page: 1,
+        rect: RectPt { x: 72.0, y: 96.0, w: 1.0, h: 14.0 },
+    });
+    assert!((r[0] - 72.0 * k).abs() < 0.01 && (r[1] - (d.page_top(2) + 96.0 * k)).abs() < 0.01, "{r:?}");
+    assert!((r[2] - k).abs() < 0.01 && (r[3] - 14.0 * k).abs() < 0.01);
+    let last = d.page_rect(&PageRect {
+        page: 99,
+        rect: RectPt { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
+    });
+    assert!((last[1] - d.page_top(3)).abs() < 0.01);
+}

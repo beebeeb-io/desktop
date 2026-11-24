@@ -25,6 +25,9 @@
 // Debug builds retain the console subsystem for developer convenience.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(test)]
+#[path = "../build_version.rs"]
+mod build_version;
 mod engine_host;
 #[cfg(feature = "feedback")]
 mod feedback;
@@ -37,8 +40,10 @@ mod source;
 // outside its tests so far (`--db`, dev builds).
 #[cfg_attr(not(test), allow(dead_code, unused_imports))]
 mod source_engine;
+mod text_kit;
 mod theme;
 mod ui;
+mod uninstall_hook;
 mod windows_floor;
 
 // `ui/**` names these at the crate root.
@@ -54,6 +59,25 @@ fn main() {
     if let Some(refusal) = shell::identity::AppIdentity::CURRENT.start_refusal(std::env::consts::OS) {
         eprintln!("{refusal}");
         std::process::exit(2);
+    }
+    // drive-complete-006b: the uninstaller's sync-folder teardown, before any state, window or control channel.
+    if let Some(code) = uninstall_hook::run(std::env::args().skip(1)) {
+        std::process::exit(code);
+    }
+    // drive-complete-138: a panic leaves one redacted record in the log folder (`log_file::crash`).
+    log_file::crash::install_hook();
+    // Test builds only: a crash on demand, for the installed-build check of the record.
+    if !shell::identity::engine_identity().is_real()
+        && std::env::var_os("BEEBEEB_TEST_CRASH").is_some()
+    {
+        std::thread::spawn(|| {
+            while log_file::dir().is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            // The UI thread panics (`log_file::crash::panic_if_test_crash_due`), so the app ends.
+            log_file::crash::request_test_crash();
+        });
     }
     shell::run();
 }

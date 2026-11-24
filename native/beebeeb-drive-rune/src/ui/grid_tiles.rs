@@ -5,10 +5,13 @@
 //! Keys: `grid` (the padded area), `rows` (the tiles' box: the grid's one Tab stop, as the list's),
 //! `grid-<i>`, `grid-<i>-thumb`, `-icon`, `-badge`, `-badge-icon`, `-badge-text`, `-name`, `-sub`.
 
+use crate::theme::file_icons::FileIcon;
 use crate::theme::tokens::Theme;
 use rune::tok::Family;
-use rune::{Align, Color, El, Icon, TextStyle, col, el, row};
+use rune::{Color, El, TextStyle, col, row};
 
+use super::file_row::RowLook;
+use super::file_tile::{self, TilePicture, TileSize};
 use super::{file_list, global_icons, kit};
 
 /// `.mk-gcell`: 128 x 150 (`grid-template-columns: repeat(auto-fill, 128px)`, `grid-auto-rows: 150px`).
@@ -29,8 +32,8 @@ pub const BADGE: TextStyle = TextStyle::new(10.0, 600.0).family(Family::Mono).lh
 /// What the tile shows.
 #[derive(Clone, Copy)]
 pub enum Thumb {
-    /// A kind's glyph, `size` points across (a folder 44, a document 34).
-    Glyph(&'static Icon, f32),
+    /// A kind's icon and colour from the registry, `size` points across (a folder 44, a document 34).
+    Type(FileIcon, f32),
     /// A picture or a video whose thumbnail has not arrived: a plain tile.
     Plain,
     /// The thumbnail arrived.
@@ -76,101 +79,60 @@ pub fn columns(width: f32) -> usize {
 /// A picture asked for stays held until its tile is this many rows out of view.
 pub const KEEP_ROWS: usize = 3;
 
-/// The items whose tiles are in view, and one row above and below: `offset` is how far the tiles' box is scrolled,
-/// `viewport` the scrolling area's height. Before the first layout (`viewport` 0) the first screenful stands in.
-pub fn items_in_view(offset: f32, viewport: f32, columns: usize, count: usize) -> std::ops::Range<usize> {
-    let pitch = CELL_H + ROW_GAP;
-    let columns = columns.max(1);
-    let viewport = if viewport > 0.0 { viewport } else { 5.0 * pitch };
-    let first = ((offset.max(0.0) / pitch).floor() as usize).saturating_sub(1);
-    let last = (((offset.max(0.0) + viewport) / pitch).ceil() as usize) + 1;
-    (first * columns).min(count)..(last * columns).min(count)
-}
-
-/// One tile (`.mk-gcell`). The caller adds what a press does.
+/// One tile (`.mk-gcell`): the one file tile at its Medium size, with the grid's figures under the
+/// name and a video's length on the picture. The caller adds what a press does, its label and its
+/// position in the set.
 pub fn tile(i: usize, item: &Tile, t: &Theme) -> El {
     let k = format!("grid-{i}");
-    let mut thumb = el()
-        .key(format!("{k}-thumb"))
-        .a11y_hidden()
-        .size(104.0, 96.0)
-        .radius(9.0)
-        .clip_rounded(9.0)
-        .center();
-    thumb = match item.thumb {
-        Thumb::Glyph(ic, size) => {
-            thumb
-                .fill(t.text.alpha(0.06))
-                .child(kit::glyph(format!("{k}-icon"), ic, size, t.text_tertiary))
-        }
-        Thumb::Plain => thumb.fill(t.text.alpha(0.08)),
-        Thumb::Picture => match &item.pixels {
-            // The real picture, covering the tile (the toolkit crops what does not fit).
-            Some(pixels) => thumb.pixels_fit(pixels, rune::SurfaceFit::Fill),
-            None => file_list::thumbnail(thumb),
-        },
-        Thumb::Sample(n) => sample(thumb, n),
-    };
-    if let Some(length) = item.length {
-        thumb = thumb.child(
-            row()
-                .key(format!("{k}-badge"))
-                .pin(None, None, Some(5.0), Some(5.0))
-                .h(18.0)
-                .px(5.0)
-                .gap(3.0)
-                .radius(6.0)
-                .items_center()
-                .fill(Color::BLACK.alpha(0.55))
-                .child(kit::glyph(
-                    format!("{k}-badge-icon"),
-                    &global_icons::PLAY,
-                    9.0,
-                    Color::WHITE,
-                ))
-                .child(kit::label(format!("{k}-badge-text"), length, BADGE, Color::WHITE)),
-        );
-    }
-    col()
-        .key(k.clone())
-        .size(CELL_W, CELL_H)
-        .padding(6.0)
-        .gap(6.0)
-        .radius(10.0)
-        .items_center()
-        .fill(if item.selected {
-            t.selection_row
+    let badge = item.length.map(|length| {
+        row()
+            .key(format!("{k}-badge"))
+            .h(18.0)
+            .px(5.0)
+            .gap(3.0)
+            .radius(6.0)
+            .items_center()
+            .fill(Color::BLACK.alpha(0.55))
+            .child(kit::glyph(
+                format!("{k}-badge-icon"),
+                &global_icons::PLAY,
+                9.0,
+                Color::WHITE,
+            ))
+            .child(kit::label(format!("{k}-badge-text"), length, BADGE, Color::WHITE))
+    });
+    // `.mk-gsub { margin-top: -4px }`: 2 under the name.
+    let sub = kit::label(
+        format!("{k}-sub"),
+        item.sub,
+        SUB,
+        if item.selected {
+            t.text_secondary
         } else {
-            Color::TRANSPARENT
-        })
-        .child(thumb)
-        .child(
-            kit::label(format!("{k}-name"), item.name, NAME, t.text)
-                .max_lines(2)
-                .w_full()
-                .align(Align::Center),
-        )
-        .child(
-            // `.mk-gsub { margin-top: -4px }`: 2 under the name.
-            kit::label(
-                format!("{k}-sub"),
-                item.sub,
-                SUB,
-                if item.selected {
-                    t.text_secondary
-                } else {
-                    t.text_tertiary
-                },
-            )
-            .mt(-4.0),
-        )
+            t.text_tertiary
+        },
+    )
+    .mt(-4.0);
+    file_tile::tile_with(
+        &k,
+        item.name,
+        TilePicture::Thumb(&item.thumb),
+        item.pixels.as_ref(),
+        item.name,
+        Some(sub),
+        badge,
+        RowLook {
+            selected: item.selected,
+            ..RowLook::default()
+        },
+        TileSize::Medium,
+        t,
+    )
 }
 
-/// The grid: `tiles` in rows of as many as fit, scrolling when they do not fit the height.
+/// The grid: `rows` (the listbox holding the realised lines), scrolling when they do not fit the height.
 /// `rows` is the box the caller makes focusable (the grid's one Tab stop).
-pub fn grid(rows: El, tiles: Vec<El>) -> El {
-    // A column, so the tiles' box is as high as its rows and no higher (`align-content: start`):
-    // stretched over the grid's height, wrapped rows would spread apart.
+pub fn grid(rows: El) -> El {
     col()
         .key("grid")
         .grow(1.0)
@@ -180,12 +142,5 @@ pub fn grid(rows: El, tiles: Vec<El>) -> El {
         .py(PAD_Y)
         .px(PAD_X)
         .scroll(rune::ScrollSpec { stick_bottom: false })
-        .child(
-            rows.key("rows")
-                .w_full()
-                .flex_wrap()
-                .items_start()
-                .gaps(ROW_GAP, COL_GAP)
-                .children(tiles),
-        )
+        .child(rows.key("rows").w_full())
 }

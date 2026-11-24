@@ -13,23 +13,24 @@ use super::SortBy;
 use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
-use crate::theme::tokens::{Theme, radius, type_};
-use crate::ui::file_list::{PcState, ROW_H, file_tile, format_date, pc_glyph};
+use crate::theme::scale;
+use crate::theme::tokens::{Theme, type_};
+use crate::ui::file_list::{Fit, PcState, ROW_H, file_tile, format_date, pc_glyph, shared_cell};
+use crate::ui::file_row::{self, RowLook};
 use crate::ui::kit;
-use rune::{Align, Color, Cx, El, PointerPress, Tx, col, el, row};
+use rune::{Align, Cx, El, PointerPress, Tx, col, el};
 
 const COL_DATE_W: f32 = 132.0;
 const COL_SIZE_W: f32 = 84.0;
-const COL_SHARED_W: f32 = 92.0;
 const COL_PC_W: f32 = 34.0;
 const COL_GAP: f32 = 12.0;
-/// `.mk-cols`
-const COLUMN_HEADER_H: f32 = 28.0;
 
 /// The rows, virtualised. Keys as `ui::file_list`: `rows`, `file-list`, `row-<i>` and its parts.
-pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
+pub fn rows(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
     let count = s.listing.items.len();
     let t = *t;
+    // The columns this list has room for, by its own width (`ui::file_list::Fit`).
+    let fit = Fit::of_list(cx);
     let mut table = col()
         .key("rows")
         .role("table")
@@ -44,9 +45,14 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .py(4.0)
-        .px(6.0)
+        .py(scale::space::S4)
+        .px(scale::space::S6)
         .scroll(rune::ScrollSpec { stick_bottom: false })
+        // Where it is scrolled to, for the read after a check (`reread.rs`: the rows in view stay where they are).
+        .on_scroll_offset({
+            let scroll = s.actions.list_scroll.clone();
+            move |at: rune::ScrollPos| scroll.set(at.offset[1])
+        })
         // A right-click on the empty space: the menu of the list (DW-1103). A row's own right-click
         // opens the file menu and is heard first.
         .on_secondary_press(|s: &mut State, at: PointerPress, tx: &mut Tx| {
@@ -112,7 +118,7 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                                     let k = format!("row-{shown}");
                                     let tile = super::long_list::picture_tile(s, &k, item, &t);
                                     let lit = s.is_selected(i) || dropping;
-                                    file_row_full(shown, item, lit, date, field, tile, uploading, downloading, &t)
+                                    file_row_full(shown, item, lit, date, field, tile, uploading, downloading, fit, &t)
                                 }
                             };
                             if dropping {
@@ -179,7 +185,9 @@ pub fn row_name(item: &DriveItem, date: &str, size: &str) -> String {
         (1, _) => "shared with 1 person".to_string(),
         (n, _) => format!("shared with {n} people"),
     });
-    if let Some(state) = PcState::of(item.pc_status.as_deref()) {
+    if let Some(words) = name_shared(item.pc_status.as_deref()) {
+        parts.push(words.to_lowercase());
+    } else if let Some(state) = PcState::of(item.pc_status.as_deref()) {
         parts.push(
             match state {
                 PcState::OnlineOnly => "online only",
@@ -195,58 +203,34 @@ pub fn row_name(item: &DriveItem, date: &str, size: &str) -> String {
 /// The column headers (`.mk-cols`), as `ui::file_list::column_headers` draws them, and each one
 /// sorts: a click sorts by that column, a second click reverses the order (DW-0404). The arrow
 /// stands beside the column the list is sorted by. Shared and PC are not sort keys.
-pub fn column_headers(sort: super::Sort, t: &Theme) -> El {
-    let head = |key: &'static str, text: &'static str| kit::label(key, text, type_::COLUMN_HEADER, t.text_tertiary);
-    let column = |cell: &'static str, key: &'static str, text: &'static str, by: Option<SortBy>| {
-        let mut cell = row().key(cell).role("columnheader").label(text).center_y().gap(3.0);
-        cell = cell.child(head(key, text));
-        if let Some(by) = by {
-            cell = cell.focusable(true).on_press(move |s: &mut State| s.sort_by_column(by));
-            if sort.by == by {
-                // Ascending: A to Z, oldest first, smallest first.
-                let ascending = match by {
-                    SortBy::Name | SortBy::Type => !sort.reversed,
-                    SortBy::DateChanged | SortBy::Size => sort.reversed,
-                };
-                cell = cell.sorted(Some(ascending)).child(kit::glyph(
-                    "sort-arrow",
-                    &icons::CHEVRON_DOWN,
-                    11.0,
-                    t.text_tertiary,
-                ));
-            }
-        }
-        cell
+pub fn column_headers(sort: super::Sort, fit: Fit, t: &Theme) -> El {
+    // Ascending: A to Z, oldest first, smallest first.
+    let by = |i: usize| match i {
+        0 => Some(SortBy::Name),
+        1 => Some(SortBy::DateChanged),
+        2 => Some(SortBy::Size),
+        _ => None,
     };
-    row()
-        .key("column-headers")
-        .role("row")
-        .h(COLUMN_HEADER_H)
-        .w_full()
-        .mt(4.0)
-        .px(20.0)
-        .gap(COL_GAP)
-        .center_y()
-        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-        .border_layout()
-        .child(
-            column("col-name-cell", "col-name", "Name", Some(SortBy::Name))
-                .grow(1.0)
-                .min_w(0.0),
-        )
-        .child(column("col-date-cell", "col-date", "Date changed", Some(SortBy::DateChanged)).w(COL_DATE_W))
-        .child(
-            column("col-size-cell", "col-size", "Size", Some(SortBy::Size))
-                .w(COL_SIZE_W)
-                .justify_end(),
-        )
-        .child(column("col-shared-cell", "col-shared", "Shared", None).w(COL_SHARED_W))
-        .child(
-            column("col-pc-cell", "col-pc", "PC", None)
-                .label("On this PC")
-                .w(COL_PC_W)
-                .justify_center(),
-        )
+    let sorted = [SortBy::Name, SortBy::DateChanged, SortBy::Size, SortBy::Type]
+        .iter()
+        .position(|&b| b == sort.by)
+        .filter(|&i| i < 3)
+        .map(|i| {
+            let ascending = match sort.by {
+                SortBy::Name | SortBy::Type => !sort.reversed,
+                SortBy::DateChanged | SortBy::Size => sort.reversed,
+            };
+            (i, ascending)
+        });
+    file_row::header_with(
+        &fit.columns(),
+        sorted,
+        |i, cell| match by(i) {
+            Some(by) => cell.focusable(true).on_press(move |s: &mut State| s.sort_by_column(by)),
+            None => cell,
+        },
+        t,
+    )
 }
 
 /// One row (`.mk-row`). `date`: the source's own words for the date, else the list's.
@@ -254,6 +238,7 @@ pub fn column_headers(sort: super::Sort, t: &Theme) -> El {
 /// "Two versions" where a date stands (`.mk-row` with `modSans`): 12/400 on a 14.5 pt line.
 pub(super) const TWO_VERSIONS: rune::TextStyle = rune::TextStyle::new(12.0, 400.0).lh(14.5);
 
+#[allow(dead_code)] // kept for the ratchet family and fixtures
 pub fn file_row(
     i: usize,
     item: &DriveItem,
@@ -263,10 +248,11 @@ pub fn file_row(
     uploading: Option<super::uploads::UploadState>,
     t: &Theme,
 ) -> El {
-    file_row_full(i, item, selected, date, renaming, None, uploading, None, t)
+    file_row_full(i, item, selected, date, renaming, None, uploading, None, Fit::ALL, t)
 }
 
 /// [`file_row`], with the tile to draw in place of the kind's own (a fixture's picture).
+#[allow(dead_code)]
 pub fn file_row_with(
     i: usize,
     item: &DriveItem,
@@ -276,7 +262,7 @@ pub fn file_row_with(
     tile: Option<El>,
     t: &Theme,
 ) -> El {
-    file_row_full(i, item, selected, date, renaming, tile, None, None, t)
+    file_row_full(i, item, selected, date, renaming, tile, None, None, Fit::ALL, t)
 }
 
 /// The row with everything it can show: `tile` in place of the kind's own, and `uploading`,
@@ -291,6 +277,7 @@ fn file_row_full(
     tile: Option<El>,
     uploading: Option<super::uploads::UploadState>,
     downloading: Option<super::keeping::Download>,
+    fit: Fit,
     t: &Theme,
 ) -> El {
     let k = format!("row-{i}");
@@ -298,19 +285,14 @@ fn file_row_full(
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
     let surface = t.bg;
 
-    let mut name = row()
-        .key("name-cell")
-        .grow(1.0)
-        .min_w(0.0)
-        .center_y()
-        .gap(8.0)
-        .child(tile.unwrap_or_else(|| file_tile(&k, item, t)))
-        .child(match renaming {
-            Some(field) => field,
-            None => super::long_list::name_label(&k, &item.name, t),
-        });
+    // The lock after the name, and a name being typed: its field stands after the (then empty) name.
+    let marks_has_field = renaming.is_some();
+    let mut marks = Vec::new();
+    if let Some(field) = renaming {
+        marks.push(field);
+    }
     if item.is_protected {
-        name = name.child(
+        marks.push(
             kit::glyph(format!("{k}-lock"), &icons::LOCK, 11.0, t.text_tertiary)
                 .ml(2.0)
                 .role("image")
@@ -370,6 +352,21 @@ fn file_row_full(
                             .w(COL_PC_W)
                             .h(14.0),
                     );
+            } else if let Some(words) = name_shared(item.pc_status.as_deref()) {
+                // Its place on this PC is another item's: its presses on disk are refused. The neutral glyph of the
+                // column, never Amber.
+                pc = pc.child(
+                    kit::state_glyph(
+                        format!("{k}-pc"),
+                        &crate::theme::icons_files::ALERT,
+                        None,
+                        "name-shared",
+                        15.0,
+                        t.text_tertiary,
+                    )
+                    .role("image")
+                    .label(words),
+                );
             } else if let Some(state) = PcState::of(item.pc_status.as_deref()) {
                 pc = pc.child(pc_glyph(format!("{k}-pc"), state, surface, t));
             }
@@ -384,7 +381,7 @@ fn file_row_full(
             col()
                 .key(format!("{k}-upload"))
                 .w(COL_DATE_W + COL_GAP + COL_SIZE_W)
-                .gap(4.0)
+                .gap(scale::space::S4)
                 .child(
                     kit::label(
                         format!("{k}-upload-words"),
@@ -409,24 +406,11 @@ fn file_row_full(
         _ => date,
     };
 
-    let r = row()
-        .key(k.clone())
-        .role("row")
-        .label(row_name(item, &date, &size_text))
-        .h(ROW_H)
-        .w_full()
-        .px(14.0)
-        .gap(COL_GAP)
-        .center_y()
-        .radius(radius::CONTROL)
-        .fill(if selected { t.selection_row } else { Color::TRANSPARENT })
-        .hover(t.hover)
-        .press(t.press)
-        .child(name);
-    let r = match progress {
-        Some(progress) => r.child(progress),
-        None => r
-            .child(
+    let mut cells = Vec::new();
+    match progress {
+        Some(progress) => cells.push(progress),
+        None => {
+            cells.push(
                 kit::label(
                     format!("{k}-date"),
                     date.clone(),
@@ -440,57 +424,47 @@ fn file_row_full(
                 )
                 .w(COL_DATE_W)
                 .truncate(),
-            )
-            .child(
-                kit::label(format!("{k}-size"), size_text, type_::META_MONO, meta)
+            );
+            cells.push(
+                kit::label(format!("{k}-size"), size_text.clone(), type_::META_MONO, meta)
                     .w(COL_SIZE_W)
                     .align(Align::End),
-            ),
+            );
+        }
+    }
+    if fit.shared {
+        cells.push(shared_cell(&k, item, meta, surface, t));
+    }
+    if fit.pc {
+        cells.push(pc);
+    }
+    let tile = tile.unwrap_or_else(|| file_tile(&k, item, t));
+    let look = RowLook {
+        selected,
+        ..RowLook::default()
     };
-    r.child(shared_cell(&k, item, meta, surface, t)).child(pc)
+    let shown = if marks_has_field { "" } else { item.name.as_str() };
+    // The list's one Tab stop is the table (`rows`): a row takes no focus of its own.
+    file_row::row_with(
+        &k,
+        &row_name(item, &date, &size_text),
+        tile,
+        shown,
+        marks,
+        cells,
+        look,
+        t,
+    )
+    .focusable(false)
 }
 
-/// The Shared column: who it is shared with, "Link", or a dash.
-fn shared_cell(k: &str, item: &DriveItem, meta: Color, surface: Color, t: &Theme) -> El {
-    let mut cell = row().key("shared-cell").w(COL_SHARED_W).min_w(0.0).center_y();
-    if !item.shared_badges.is_empty() {
-        let mut stack = row().key("avatars").role("group").label("Shared with");
-        for (j, badge) in item.shared_badges.iter().enumerate() {
-            let mut a = kit::avatar(
-                format!("{k}-avatar-{j}"),
-                &badge.initials,
-                20.0,
-                badge.color,
-                surface,
-                t,
-            );
-            if j > 0 {
-                a = a.ml(-7.0);
-            }
-            stack = stack.child(a);
-        }
-        cell.child(stack)
-    } else if item.shared_type.as_deref() == Some("Link") {
-        cell.child(
-            row()
-                .key("link")
-                .center_y()
-                .gap(4.0)
-                .child(kit::glyph(
-                    format!("{k}-link-icon"),
-                    &icons::LINK,
-                    12.0,
-                    t.text_secondary,
-                ))
-                .child(kit::label(
-                    format!("{k}-link"),
-                    "Link",
-                    type_::STATUS_STRONG.lh(14.0),
-                    t.text_secondary,
-                )),
-        )
-    } else {
-        cell = cell.child(kit::label(format!("{k}-dash"), "\u{2014}", type_::META_MONO, meta));
-        cell
+/// What the PC column says of a row whose place on this PC is another item's (`case_place`, the engine's mark): its
+/// presses on disk are refused, and the message of each says why. `None`: any other row.
+pub(crate) fn name_shared(pc_status: Option<&str>) -> Option<&'static str> {
+    use crate::source_engine::{NAME_SHARED, NAME_SHARED_BUT_CASE};
+    match pc_status {
+        Some(NAME_SHARED) => Some("Same name as another item here"),
+        Some(NAME_SHARED_BUT_CASE) => Some("Same name as another item here, except for capital letters"),
+        _ => None,
     }
 }

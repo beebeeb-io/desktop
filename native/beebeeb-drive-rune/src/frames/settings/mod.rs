@@ -37,6 +37,8 @@ mod tests_bandwidth;
 #[cfg(test)]
 mod tests_drive;
 #[cfg(test)]
+mod tests_keys;
+#[cfg(test)]
 mod tests_more;
 #[cfg(test)]
 mod tests_previews;
@@ -46,9 +48,12 @@ mod tests_update;
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
 use crate::shell::{host, instance, placeholder, registry};
-use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{self, Theme};
-use crate::ui::{caption, settings_controls as controls, settings_shell as shell};
+use crate::ui::{caption, focus, settings_controls as controls, settings_shell as shell};
+
+/// The F6 stops of the settings window: its sidebar and its page.
+pub const SIDEBAR_PANE: &str = "settings-sidebar";
+pub const PAGE_PANE: &str = "settings-page";
 use rune::{Align, Cx, El, Key, KeyEvent, Side, Tx, col, row};
 
 use drive::{DriveSettings, Kept};
@@ -199,6 +204,8 @@ pub struct SettingsUi {
     pub more: more::MoreUi,
     /// What Thumbnails and previews holds open: a drafted choice, the compare view.
     pub previews: previews::PreviewsUi,
+    /// The crash record "Send a report" attached to Report a problem (`shell::crash_notice`), until a bundle holds it.
+    pub crash_record: Option<crate::log_file::crash::CrashRecord>,
 }
 
 impl Default for SettingsUi {
@@ -216,6 +223,7 @@ impl Default for SettingsUi {
             bandwidth: bandwidth::Held::default(),
             more: more::MoreUi::default(),
             previews: previews::PreviewsUi::default(),
+            crash_record: None,
         }
     }
 }
@@ -360,6 +368,23 @@ impl SettingsUi {
     }
 }
 
+/// A pop-up row's keys beyond its press: the Menu key and Shift+F10 open its menu (the row's
+/// choices), as on Windows.
+pub fn menu_keys(row: El, kind: MenuKind) -> El {
+    row.on_key(move |s: &mut State, ev: &KeyEvent, _: &mut Tx| {
+        let m = ev.mods;
+        let asks = match ev.key {
+            Key::ContextMenu => true,
+            Key::Function(10) => m.shift && !m.ctrl && !m.alt && !m.cmd,
+            _ => false,
+        };
+        if asks && s.settings.menu.is_none_or(|open| open.kind != kind) {
+            s.settings.toggle_menu(kind);
+        }
+        asks
+    })
+}
+
 /// The menu `kind`, when it is the open one: its top-left corner on the point its row marks
 /// (`MenuKind::anchor`), so it stays with its pop-up button wherever the row is drawn.
 pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, t: &Theme) -> Option<El> {
@@ -376,6 +401,7 @@ pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, t: &Theme) -> Option<El> {
         .collect();
     Some(
         controls::menu(0, kind.name(), 130.0, items, t)
+            .focus_group()
             .anchored(kind.anchor(), Side::Bottom, Align::Start, 0.0)
             .modal(true, |s: &mut State| s.settings.menu = None),
     )
@@ -383,6 +409,7 @@ pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, t: &Theme) -> Option<El> {
 
 /// The frames of this group that are built: the id, and what shows it on a fresh `State`.
 /// (`main.rs` adds this table to its scenes; the shell lane registers it.)
+#[allow(clippy::type_complexity)]
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0701", |s| open_on(s, "DW-0701")),
     ("DW-0781", |s| {
@@ -589,7 +616,10 @@ pub fn sync(s: &mut State) {
             s.settings.source.opened(section);
             s.settings.drive.opened(section);
         }
-        None => s.settings.reset(),
+        None => {
+            s.settings.reset();
+            s.settings.drive.closed();
+        }
     }
 }
 
@@ -671,6 +701,21 @@ pub fn go(s: &mut State, frame: &'static str) {
         host::dispatch(s, Event::OpenSettings(pane));
         return;
     }
+    // A recent alert's places: Shared holds the shares and the requests, Security the sign-in activity.
+    match frame {
+        "DW-0501" | "DW-0503" => {
+            s.settings.reset();
+            let shared = crate::shell::app::Route::section(crate::shell::app::Section::Shared);
+            host::dispatch(s, Event::Navigate(shared));
+            return;
+        }
+        "DW-A77" => {
+            s.settings.reset();
+            crate::frames::account::go(s, frame);
+            return;
+        }
+        _ => {}
+    }
     // "Show the guide again": settings closes and the guide runs on Files (DW-0701's action).
     if frame == "DW-0380" {
         s.settings.reset();
@@ -742,106 +787,21 @@ impl Pane {
     }
 }
 
-/// One entry of the settings sidebar: its label, its icon, and the frame it shows.
-struct Section {
-    label: &'static str,
-    icon: &'static rune::Icon,
-    frame: &'static str,
-    pane: Option<Pane>,
+/// The sidebar label of the section a pane belongs to. The board draws no item selected on its Sync
+/// and File Explorer frames (DW-0746 and the nine over it), unlike every other section: followed, and flagged.
+fn section_label(section: Pane) -> Option<&'static str> {
+    match section {
+        Pane::General => Some("General"),
+        Pane::Notifications => Some("Notifications"),
+        Pane::Storage => Some("Storage"),
+        Pane::Previews => Some("Thumbnails and previews"),
+        Pane::Bandwidth => Some("Bandwidth"),
+        _ => None,
+    }
 }
 
-const SETTINGS_SECTIONS: &[Section] = &[
-    Section {
-        label: "General",
-        icon: &ic::GEAR,
-        frame: "DW-0701",
-        pane: Some(Pane::General),
-    },
-    Section {
-        label: "Account",
-        icon: &ic::PEOPLE,
-        frame: "DW-A51",
-        pane: None,
-    },
-    Section {
-        label: "Security",
-        icon: &ic::SHIELD,
-        frame: "DW-A52",
-        pane: None,
-    },
-    Section {
-        label: "Devices and sessions",
-        icon: &ic::LAPTOP,
-        frame: "DW-A55",
-        pane: None,
-    },
-    Section {
-        label: "Notifications",
-        icon: &ic::BELL,
-        frame: "DW-0750",
-        pane: Some(Pane::Notifications),
-    },
-];
-
-// The board draws the Drive group's items with a chevron where the other group has a glyph.
-const DRIVE_SECTIONS: &[Section] = &[
-    Section {
-        label: "Storage",
-        icon: &ic::CHEV_RIGHT,
-        frame: "DW-0712",
-        pane: Some(Pane::Storage),
-    },
-    Section {
-        label: "Backups",
-        icon: &ic::CHEV_RIGHT,
-        frame: "DW-0737",
-        pane: None,
-    },
-    Section {
-        label: "Sync and File Explorer",
-        icon: &ic::CHEV_RIGHT,
-        frame: "DW-0746",
-        // The board draws no sidebar item selected on its Sync and File Explorer frames
-        // (DW-0746 and the nine over it), unlike every other section: followed, and flagged.
-        pane: None,
-    },
-    Section {
-        label: "Thumbnails and previews",
-        icon: &ic::CHEV_RIGHT,
-        frame: "DW-0744",
-        pane: Some(Pane::Previews),
-    },
-    Section {
-        label: "Bandwidth",
-        icon: &ic::CHEV_RIGHT,
-        frame: "DW-0785",
-        pane: Some(Pane::Bandwidth),
-    },
-];
-
 fn sidebar(section: Pane, previews: bool, t: &Theme) -> El {
-    let items = |sections: &'static [Section]| -> Vec<El> {
-        sections
-            .iter()
-            // Thumbnails and previews is not listed where nothing answers for it (the engine makes no preview
-            // setting yet): a pane that only says "not built yet" is a dead door.
-            .filter(|sec| previews || sec.pane != Some(Pane::Previews))
-            .map(|sec| {
-                let frame = sec.frame;
-                shell::nav_item(sec.label, sec.icon, 16.0, sec.pane == Some(section), t)
-                    .on_press(move |s: &mut State| go(s, frame))
-            })
-            .collect()
-    };
-    let back = shell::nav_item("Back to Drive", &ic::BACK, 15.0, false, t)
-        .shortcut_hint("Esc")
-        .on_press(|s: &mut State| go(s, "DW-0401"));
-    shell::sidebar(
-        back,
-        vec![("Settings", items(SETTINGS_SECTIONS)), ("Drive", items(DRIVE_SECTIONS))],
-        "Settings open inside the app. Esc goes back.",
-        t,
-    )
+    shell::app_sidebar(section_label(section), previews, go, t)
 }
 
 /// The window while settings is open.
@@ -884,12 +844,19 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(sidebar(
-            pane.section(),
-            ui.drive.photo_previews() != previews::PhotoPreviews::Unavailable,
-            &t,
+        // The sidebar and the page are F6 stops, as in account's sections (`ui::focus::pane`).
+        .child(focus::pane(
+            row().h_full().child(sidebar(
+                pane.section(),
+                ui.drive.photo_previews() != previews::PhotoPreviews::Unavailable,
+                &t,
+            )),
+            SIDEBAR_PANE,
         ))
-        .child(pane_el);
+        .child(focus::pane(
+            row().grow(1.0).min_w(0.0).h_full().child(pane_el),
+            PAGE_PANE,
+        ));
     if let Some(overlay) = overlay {
         body = body.child(overlay);
     }
@@ -947,3 +914,19 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         _ => false,
     }
 }
+
+/// Every `Intent::Open` target the panes can raise, and the file that takes it (`shell::settings_open`).
+#[allow(dead_code)] // the shell lane reads it
+pub const OPEN_TARGETS: [&str; 7] = [
+    "log-folder",
+    "open-source-licences",
+    "privacy",
+    "export-my-data",
+    "file-explorer",
+    "support-bundle",
+    "choose-photo",
+];
+
+/// Frames a pane may hand the shell with `Intent::Show` where the shell has nothing to open: the tray flyout's
+/// states, which follow the sync state that changed in the same press.
+pub const TRAY_FRAMES: [&str; 3] = ["DW-1203", "DW-1204", "DW-1212"];

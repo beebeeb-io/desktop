@@ -5,12 +5,15 @@
 //! Errors are `"<code>: <detail>"` with a `DriveSourceError` code; the detail is a fixed word,
 //! never a path or a name.
 
+pub mod case_place;
 pub mod dto;
 pub mod model;
 pub mod model_shell;
 pub mod photo_meta;
 pub mod status;
 
+#[cfg(test)]
+mod case_place_tests;
 #[cfg(test)]
 mod model_tests;
 #[cfg(test)]
@@ -31,6 +34,9 @@ pub enum DriveError {
     Quota,
     ReadOnly,
     Conflict,
+    /// The entry at the item's place on disk is another item's (`case_place`: two server items with one name, or one
+    /// name but for case on a volume that compares names without case). Refused; the other item's file is untouched.
+    SharedPlace(case_place::Clash),
     TooLarge,
     Locked,
     SignedOut,
@@ -46,7 +52,7 @@ impl DriveError {
             DriveError::NameTaken => "name-taken",
             DriveError::Quota => "quota",
             DriveError::ReadOnly => "read-only",
-            DriveError::Conflict => "conflict",
+            DriveError::Conflict | DriveError::SharedPlace(_) => "conflict",
             DriveError::Locked => "locked",
             DriveError::SignedOut => "signed-out",
             DriveError::InvalidName | DriveError::Failed(_) => "failed",

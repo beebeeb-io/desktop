@@ -380,11 +380,12 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
 
     /// What changed on the account is read again once its answer reaches the page, so the pages say Beebeeb's.
     fn read_again_after(&mut self, kind: CallKind, answered: &Answered) {
-        let changed = match (&kind, answered) {
-            (CallKind::ConfirmEmail, Answered::Done) | (CallKind::TurnOffTwoFactor, Answered::Done) => true,
-            (CallKind::TurnOnTwoFactor, Answered::Codes(_)) => true,
-            _ => false,
-        };
+        let changed = matches!(
+            (&kind, answered),
+            (CallKind::ConfirmEmail, Answered::Done)
+                | (CallKind::TurnOffTwoFactor, Answered::Done)
+                | (CallKind::TurnOnTwoFactor, Answered::Codes(_))
+        );
         if changed {
             crate::frames::account::source::AccountSource::reload(self, Pane::Account);
             if !matches!(kind, CallKind::ConfirmEmail) {

@@ -121,7 +121,7 @@ fn every_step_has_one_caption_bar_and_no_menu_bar() {
         let menus = rt
             .elements()
             .iter()
-            .filter(|e| !e.exiting && matches!(&*e.role, "menubar" | "menu" | "menuitem"))
+            .filter(|e| !e.exiting && matches!(e.role, "menubar" | "menu" | "menuitem"))
             .count();
         assert_eq!(menus, 0, "{frame}: no menu bar");
         // The caption is the first thing in the window and as wide as it.
@@ -330,15 +330,24 @@ fn not_now_and_skip_turn_nothing_on() {
     assert_eq!(ui_step(&mut rt), Step::Lock);
     click(&mut rt, "skip");
     assert_eq!(ui_step(&mut rt), Step::Done);
-    assert!(
-        log.borrow().is_empty(),
-        "nothing was asked of the engine: {:?}",
-        log.borrow()
-    );
+    // "Not now" on the Lock step is "Continue" with the switch off (Windows Hello is asked first); "Skip setup" from
+    // it the same. Nothing else is asked.
+    assert_eq!(*log.borrow(), ["set_app_lock false 5 min"]);
     let values: Vec<String> = (0..3)
         .map(|i| info(&rt, &format!("item-{i}-value")).text.unwrap_or_default())
         .collect();
     assert_eq!(values, ["Not added", "Off", "Off"]);
+}
+
+#[test]
+fn not_now_on_the_lock_step_asks_the_switch_off_like_continue() {
+    let (ui_, log) = fixture(Script::default());
+    let mut rt = runtime_at(ui_, 2.0, false);
+    click(&mut rt, "btn-1"); // passkey: Not now
+    assert_eq!(ui_step(&mut rt), Step::Lock);
+    click(&mut rt, "btn-1"); // lock: Not now
+    assert_eq!(ui_step(&mut rt), Step::Backup);
+    assert_eq!(*log.borrow(), ["set_app_lock false 5 min"]);
 }
 
 #[test]
@@ -385,17 +394,17 @@ fn switches_and_choices_work_from_the_keyboard() {
 #[test]
 fn file_explorer_failing_offers_try_again_and_a_way_on() {
     let mut rt = runtime("DW-0280");
-    assert_eq!(info(&rt, "banner-0").role, "alert");
+    assert_eq!(info(&rt, "explorer-failed").role, "group");
     assert_eq!(
         info(&rt, "side-status").text.as_deref(),
         Some("Couldn't add Beebeeb to File Explorer")
     );
     // Try again: the fixture's second registration works, and setup goes on at this step (DW-0206).
-    click(&mut rt, "btn-0");
+    click(&mut rt, "explorer-failed-retry");
     assert_eq!(ui_step(&mut rt), Step::Explorer);
     assert_eq!(info(&rt, "title").text.as_deref(), Some("Beebeeb is in File Explorer"));
     let mut rt = runtime("DW-0280");
-    click(&mut rt, "btn-1");
+    click(&mut rt, "btn-0");
     assert_eq!(ui_step(&mut rt), Step::Notifications);
 }
 
@@ -540,7 +549,7 @@ fn an_answered_switch_draws_what_the_answer_says_not_what_was_asked() {
         done: false,
         now: None,
     });
-    assert_eq!(ui.answered(Switch::Notifications), Some(Answered::NotKnown));
+    assert_eq!(ui.answered(Switch::Notifications), Some(Answered::Unknown));
     // The next answer for the same switch replaces the last: made, so nothing is left to say.
     ui.take_in(Outcome {
         switch: Switch::OpenAtLogin,
@@ -551,7 +560,7 @@ fn an_answered_switch_draws_what_the_answer_says_not_what_was_asked() {
     assert_eq!(ui.answered(Switch::OpenAtLogin), None);
     assert_eq!(
         ui.answered(Switch::Notifications),
-        Some(Answered::NotKnown),
+        Some(Answered::Unknown),
         "the other one stands"
     );
     // Made, and what is set could not be read back: it was made (the value that was asked for stands).
@@ -706,4 +715,22 @@ fn setup_add_passkey_the_password_is_wiped_after_the_call() {
         assert!(ui_.passkey_password.text.is_empty(), "wiped when step 1 is left");
         assert!(log.borrow().is_empty(), "nothing was sent");
     }
+}
+
+#[test]
+fn the_compare_view_keeps_tab_inside_and_gives_focus_back_to_compare() {
+    let mut rt = runtime("DW-0204");
+    click(&mut rt, "btn-0");
+    assert_eq!(focused(&rt).as_deref(), Some("cmp-done"));
+    let inside = |rt: &Runtime<State>| {
+        let key = focused(rt).unwrap_or_default();
+        key.starts_with("cmp") || key.starts_with("sheet")
+    };
+    for _ in 0..40 {
+        press(&mut rt, Key::Tab);
+        assert!(inside(&rt), "Tab left the compare view: {:?}", focused(&rt));
+    }
+    press(&mut rt, Key::Escape);
+    assert_eq!(count(&rt, "sheet"), 0);
+    assert_eq!(focused(&rt).as_deref(), Some("btn-0"), "focus returns to Compare");
 }

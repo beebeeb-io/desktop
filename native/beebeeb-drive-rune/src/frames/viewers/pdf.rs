@@ -5,14 +5,15 @@
 //! The page's pixels are the source's (rendered on this PC from the decrypted file). A source
 //! with no picture of a page gets a blank page, never a sample.
 
-use rune::tok::Family;
 use rune::{Color, El, SurfaceFit, TextStyle, col, el, row, text_input};
 
-use super::chrome::{ButtonKind, Dot, Head, Status, button};
+use super::chrome::{Dot, Head, Status};
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::media::{FIND_KEY, ZOOMS};
 use super::source::{PdfDoc, Picture};
 use super::{Intent, Ui, details, media_icons, style, ui};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::toolbar::{ToolState, tool_button};
@@ -27,7 +28,7 @@ pub const PAGE_LACKS_TEXT: &str = "Some text on this page may be missing: the PD
 /// The page at 100 %: 420 points wide (the board's `MPage`).
 const PAGE_W: f32 = 420.0;
 /// The zoom's figure: mono 11px on 17px.
-const ZOOM: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(17.0);
+const ZOOM: TextStyle = crate::theme::scale::text::MONO_SM;
 
 fn with_ui(act: impl Fn(&mut Ui) + 'static) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
@@ -87,9 +88,9 @@ pub fn tools(ui: &Ui, t: &Theme) -> Vec<El> {
         .key("zoom-group")
         .role("group")
         .label("Zoom")
-        .padding(2.0)
-        .gap(1.0)
-        .radius(9.0)
+        .padding(scale::space::S2)
+        .gap(scale::space::S1)
+        .radius(scale::radius::TILE)
         .fill(t.field)
         .box_shadow(kit::ring_inset(t.separator))
         .child(also(
@@ -178,7 +179,7 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
         .pl(9.0)
         .pr(6.0)
         .center_y()
-        .radius(8.0)
+        .radius(scale::radius::FIELD)
         .fill(t.card)
         // The focused field: Amber's ring at 30 %, the deep Amber line inside.
         .box_shadow(kit::ring(3.0, t.accent.alpha(0.3)))
@@ -233,7 +234,7 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
             .shortcut_hint(hint)
             .size(28.0, 28.0)
             .center()
-            .radius(7.0)
+            .radius(crate::theme::tokens::radius::CONTROL)
             .hover(t.hover)
             .press(t.press)
             .focusable(true)
@@ -248,8 +249,8 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
             .label("Find")
             .w_full()
             .h(40.5)
-            .px(14.0)
-            .gap(8.0)
+            .px(scale::space::S14)
+            .gap(scale::space::S8)
             .center_y()
             .fill(bar_ground(t))
             .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
@@ -260,7 +261,7 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
             .child(nav("find-nav-0", "Next match", 1, "Enter", false))
             .child(nav("find-nav-1", "Previous match", -1, "Shift+Enter", true))
             .child(el().key("find-spacer").grow(1.0))
-            .child(button("find-done", "Done", ButtonKind::Ghost, true, t).on_press(with_ui(Ui::close_find))),
+            .child(button(keys("find-done"), "Done", None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t).on_press(with_ui(Ui::close_find))),
     )
 }
 
@@ -288,7 +289,7 @@ fn thumbs(doc: &PdfDoc, t: &Theme) -> El {
         .w(120.0)
         .h_full()
         .min_h(0.0)
-        .py(16.0)
+        .py(scale::space::S16)
         .items_center()
         .fill(t.sidebar_bg)
         .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
@@ -299,7 +300,7 @@ fn thumbs(doc: &PdfDoc, t: &Theme) -> El {
             col()
                 .key("thumb-list")
                 .items_center()
-                .gap(12.0)
+                .gap(scale::space::S12)
                 .growth(rune::GrowthSpec::default())
                 .virtual_rows(
                     doc.pages as usize,
@@ -330,7 +331,7 @@ fn thumb(s: &State, i: usize, t: &Theme) -> El {
         .label(format!("Page {n}"))
         .checked(current)
         .items_center()
-        .gap(4.0)
+        .gap(scale::space::S4)
         .focusable(true)
         .cursor(rune::Cursor::Pointer)
         .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| {
@@ -410,6 +411,10 @@ fn page(ui: &Ui) -> El {
 }
 
 pub fn body(ui: &Ui, doc: &PdfDoc, t: &Theme) -> El {
+    if doc.pages == 0 {
+        // No page to draw: said, never a blank page area.
+        return super::states::empty_file(&ui.file.name, t);
+    }
     row()
         .key("viewer-body")
         .grow(1.0)

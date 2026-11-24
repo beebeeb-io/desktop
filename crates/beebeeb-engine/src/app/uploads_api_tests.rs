@@ -8,7 +8,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, OperationKind, PendingOperation, StateDb};
@@ -26,7 +26,7 @@ fn engine(slot: &str) -> (Arc<TestEngine>, Arc<TransferBoard>) {
         api_base: "http://127.0.0.1:9".into(),
     };
     (
-        Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens")),
+        Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens")),
         board,
     )
 }
@@ -60,6 +60,20 @@ fn file(db: &StateDb, id: &str, path: &str, size: i64) {
         .unwrap();
 }
 
+/// A copy of its own for one queued upload, in a directory that lives as long as the process (the test binary itself
+/// can be replaced by a rebuild during a full run, and a queued upload's copy that is gone is refused).
+fn payload_copy(id: &str) -> String {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = DIR.get_or_init(|| tempfile::tempdir().expect("a directory for the uploads' copies"));
+    let copy = dir.path().join(format!(
+        "{id}-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&copy, b"an invented copy").expect("a copy to upload");
+    copy.to_string_lossy().into_owned()
+}
+
 /// A queued upload of `id`: `new` a new file's, else an edit; `attempts` of 5 is a give-up.
 fn queued(db: &StateDb, id: &str, new: bool, attempts: i64, at: i64) {
     let op = PendingOperation {
@@ -72,7 +86,7 @@ fn queued(db: &StateDb, id: &str, new: bool, attempts: i64, at: i64) {
             r#"{{"operation":"{}"}}"#,
             if new { "create_file" } else { "update_file" }
         )),
-        payload_path: std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()),
+        payload_path: Some(payload_copy(id)),
         base_version: None,
         base_object_version_id: None,
         attempts,
@@ -273,7 +287,7 @@ fn cancel_for_a_session_that_moved_on_changes_nothing() {
     assert_eq!(db.unsent_changes(0, 10, unix_now()).unwrap().total, 3);
 }
 
-/// Review of desktop#423, P1 #2: the runner's own claim, on its own connection, at the moment the copy goes to the
+/// The runner's own claim, on its own connection, at the moment the copy goes to the
 /// bin (the `recycle` closure is the hook between the cancel's steps). It must find nothing it can run: the cancel
 /// holds the queued change, or has dropped it, before the copy moves. A claim that waited would only find it gone,
 /// so the connection waits for nothing (no timing in the test).
@@ -320,7 +334,7 @@ fn on_the_admin_share(path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(format!(r"\\localhost\{drive}${rest}"))
 }
 
-/// Review of desktop#423, P1 #1 (Windows rung): a file whose volume has no Recycle Bin is never deleted for good.
+/// A file whose volume has no Recycle Bin is never deleted for good.
 /// The share is the computer's own `C$`, which the build VM serves; elsewhere it may not be reachable.
 #[cfg(target_os = "windows")]
 #[test]

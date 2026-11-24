@@ -10,7 +10,7 @@ use super::*;
 /// tick from reaching the ops pull. Within five ticks whose snapshot fails, at least one returns `Ok` and has
 /// pulled the ops from the kept cursor; the heal stays pending (it is marked done only after a good snapshot).
 #[cfg(not(target_os = "macos"))]
-#[ignore = "known red (task 2446 heal): a failing forced re-snapshot ends every tick off macOS. Lane H1c fixes it \
+#[ignore = "known red (task 2446 heal): a failing forced re-snapshot ends every tick off macOS. A later task fixes it \
             on hotfix/0.8.25-prep (desktop PR #289); port that change and its tests here, then drop this ignore"]
 #[tokio::test]
 async fn a_heal_whose_snapshot_keeps_failing_does_not_keep_the_tick_from_the_ops_pull() {

@@ -124,7 +124,7 @@ impl EngineBridge {
     /// What every Finder create checks first, and the ids it gets. `None`: the name is
     /// one Finder writes for itself, which is ignored.
     fn start_finder_create(&self, target: &FinderWriteTarget) -> Result<Option<FinderCreateStart>, EngineError> {
-        // Task 1538 Codex P1 (PR #49, lib.rs:1087 thread): refuse a brand-new
+        // refuse a brand-new
         // enqueue once this engine has been asked to stop. Both the Windows
         // upload watcher (`watcher::spawn`'s debounce/scan loops) and the
         // macOS/Linux File Provider extension (via `ipc_socket::handle_connection`'s
@@ -411,7 +411,7 @@ impl EngineBridge {
         progress: Option<&HydrateProgressFn>,
     ) -> anyhow::Result<HydrateSource> {
         if !hydrate_dest_is_allowed(dest, allowed_roots) {
-            return Err(anyhow::anyhow!("hydrate destination is not within an allowed root").into());
+            return Err(anyhow::anyhow!("hydrate destination is not within an allowed root"));
         }
         let (file_id, _) = self.resolve_provisional(id, "hydrate")?;
         // A copy that is gone at the open is decided once more. If the landing unlinked it, the
@@ -455,7 +455,7 @@ impl EngineBridge {
             }
         }
         if copy_missing {
-            return Err(anyhow::Error::new(QueuedCopyMissing).into());
+            return Err(anyhow::Error::new(QueuedCopyMissing));
         }
         self.hydrate_file_with_progress(&file_id, dest, allowed_roots, progress)
             .await?;
@@ -480,7 +480,7 @@ impl EngineBridge {
         self.seam("thumbnail:between_reads");
         let marked = self.thumbnails_pending(&file_id);
         if queued || marked {
-            return Err(anyhow::Error::new(ThumbnailNotYet).into());
+            return Err(anyhow::Error::new(ThumbnailNotYet));
         }
         self.fetch_thumbnail_to_memory(&file_id, variant).await
     }

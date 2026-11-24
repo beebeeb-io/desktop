@@ -15,7 +15,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{BackupLayout, FileEntry, FileStatus, ItemKind, StateDb};
@@ -236,7 +236,7 @@ fn the_old_mirrors_folder_of_this_pc_is_left_out_while_no_layout_names_this_pcs_
     assert_eq!(devices[0].read, DeviceRead::NoStatusFile);
 }
 
-/// Review of desktop#425: while no layout names this PC's folder, a folder of this PC's device-folder name (bare or
+/// While no layout names this PC's folder, a folder of this PC's device-folder name (bare or
 /// suffixed, any case) whose manifest does not name another device may be this PC's: listed as it reads, marked, and
 /// never offered for delete. A name that does not open is marked too. With a layout, no row is.
 #[test]
@@ -479,7 +479,7 @@ fn rig(answers: Answers, cached_layout: bool) -> Rig {
         state_dir,
         api_base: fake.base.clone(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     let dir = tempfile::tempdir().unwrap();
     let state_path = dir.path().join("state.db");
     let db = StateDb::open(&state_path).unwrap();
@@ -705,7 +705,7 @@ fn a_device_this_pc_has_not_synced_yet_and_the_root_are_refused_with_nothing_sen
     assert_eq!(routes(&rig), Vec::<String>::new(), "nothing was sent");
 }
 
-// ---- review of desktop#425: a locked screen, and this PC's own folder ----------------------------------------------
+// ---- a locked screen, and this PC's own folder ----------------------------------------------
 
 /// Red at 073aeafb by the refusal's KIND (and the census in `lock_api_tests`): the base copied the token with
 /// `while_session_is`, which does not ask the screen lock, and only `local_state()` refused after it (the delete as
@@ -760,11 +760,11 @@ fn this_pcs_own_folder_is_never_deleted_when_the_layout_names_it() {
 fn a_folder_that_may_be_this_pcs_is_not_deleted_while_no_layout_names_it() {
     // This PC as the engine sees it on this host: its device identity, else (no machine id: macOS today) its
     // computer name alone.
-    let me = crate::backup::device::device_self(&REAL);
+    let me = crate::backup::device::device_self(&TEST);
     let named = match &me {
         Some(me) => beebeeb_core::backup::device_folder_name(&me.name, &me.device_id, &[]),
         None => {
-            let pc = this_pc_name(&REAL, None).expect("the host gives a computer name");
+            let pc = this_pc_name(&TEST, None).expect("the host gives a computer name");
             beebeeb_core::backup::device_folder_name(&pc, "", &[])
         }
     };
@@ -781,7 +781,7 @@ fn a_folder_that_may_be_this_pcs_is_not_deleted_while_no_layout_names_it() {
         },
         false,
     );
-    let db = StateDb::open(&rig._dir.path().join("state.db")).unwrap();
+    let db = StateDb::open(rig._dir.path().join("state.db")).unwrap();
     row(&db, DEV_NAMED, &format!("Backups/{named}"), Some(GLUE_ROOT));
     drop(db);
     assert!(matches!(

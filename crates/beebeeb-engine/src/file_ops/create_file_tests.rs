@@ -230,3 +230,113 @@ fn create_file_never_truncates_an_entry_that_appeared_after_the_checks() {
     );
     assert_eq!(std::fs::read(&there).unwrap(), b"theirs");
 }
+
+/// The bytes are written under a name the watcher ignores, never at the final name: while the write runs the final
+/// name does not exist, and the name being written is one the scan skips.
+#[test]
+fn create_file_writes_under_a_name_the_watcher_ignores() {
+    let f = fixture();
+    let seen = std::cell::RefCell::new(Vec::new());
+    let look = |file: &mut std::fs::File, bytes: &[u8]| -> io::Result<()> {
+        seen.borrow_mut().extend(names_in(&f.root));
+        io::Write::write_all(file, bytes)
+    };
+    create_file_with(&f.db, &f.root, None, "Plans.md", b"hello", CREATE_FILE_LIMIT, look).unwrap();
+    let seen = seen.into_inner();
+    assert_eq!(seen.len(), 1, "one entry during the write: {seen:?}");
+    assert!(
+        crate::engine_bridge::is_ignored_finder_name(&seen[0]),
+        "the name being written is ignored by the watcher: {seen:?}"
+    );
+    assert_eq!(names_in(&f.root), vec!["Plans.md".to_string()], "only the file stays");
+    assert_eq!(std::fs::read(f.root.join("Plans.md")).unwrap(), b"hello");
+}
+
+/// A write that fails half way leaves nothing: not at the final name, and not under the partial name either.
+#[test]
+fn create_file_that_fails_half_way_leaves_nothing_for_the_watcher() {
+    let f = fixture();
+    let full = |file: &mut std::fs::File, bytes: &[u8]| -> io::Result<()> {
+        io::Write::write_all(file, &bytes[..bytes.len() / 2])?;
+        Err(io::Error::from(io::ErrorKind::StorageFull))
+    };
+    assert_eq!(
+        create_file_with(
+            &f.db,
+            &f.root,
+            None,
+            "Plans.md",
+            b"half a file",
+            CREATE_FILE_LIMIT,
+            full
+        )
+        .unwrap_err(),
+        DriveError::Quota
+    );
+    assert_eq!(names_in(&f.root), Vec::<String>::new(), "no entry of any name is left");
+}
+
+/// A name taken after the checks is refused and keeps its bytes, and the partial file goes.
+#[test]
+fn create_file_does_not_replace_a_name_taken_after_the_checks() {
+    let f = fixture();
+    let theirs = f.root.join("raced.txt");
+    let take = |file: &mut std::fs::File, bytes: &[u8]| -> io::Result<()> {
+        io::Write::write_all(file, bytes)?;
+        std::fs::write(&theirs, b"theirs")
+    };
+    assert_eq!(
+        create_file_with(&f.db, &f.root, None, "raced.txt", b"ours", CREATE_FILE_LIMIT, take).unwrap_err(),
+        DriveError::NameTaken
+    );
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"theirs");
+    assert_eq!(
+        names_in(&f.root),
+        vec!["raced.txt".to_string()],
+        "the partial file was removed"
+    );
+}
+
+/// w36 (the Windows test machine, bff1af87): New file made a 0-byte file that no list showed until the folder scan found it, and a
+/// second New file of that name was refused by the file on disk. The file is listed and queued by the call itself:
+/// its row is in its folder's rows with no scan, and a second New file of the name is refused as a taken name.
+/// Mutant: `list_new_file` returning `false` without the dispatch -> red (no row).
+#[test]
+fn new_file_is_listed_and_queued_at_once_without_a_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Beebeeb");
+    std::fs::create_dir(&root).unwrap();
+    let db = std::sync::Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+    let api = std::sync::Arc::new(crate::api_client::ApiClient::new(
+        "https://api.beebeeb.io".into(),
+        "token".into(),
+        [17u8; 32],
+    ));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::TEST, db.clone(), api);
+
+    let rel = create_file(&db, &root, None, "Beebeeb typing test.txt", &[]).unwrap();
+    assert!(db.get_file_by_path(&rel).unwrap().is_none(), "made on disk only so far");
+    assert!(super::list_new_file(&bridge, &root, &rel), "queued by the call");
+
+    let (rows, _) = db.children_paged(None, 0, i64::MAX).unwrap();
+    let listed: Vec<&str> = rows.iter().map(|(entry, _, _)| entry.path.as_str()).collect();
+    assert_eq!(
+        listed,
+        ["Beebeeb typing test.txt"],
+        "the folder's rows hold it, with no scan"
+    );
+    assert_eq!(rows[0].0.status, FileStatus::Uploading);
+    assert_eq!(rows[0].0.size_bytes, 0, "an empty file is a file");
+    let queued = db.list_due_operations(i64::MAX).unwrap();
+    assert_eq!(queued.len(), 1, "its upload is queued once: {queued:?}");
+    assert_eq!(queued[0].target_path.as_deref(), Some("Beebeeb typing test.txt"));
+
+    // The scan that comes later queues nothing more for it.
+    crate::watcher::run_one_scan(&bridge, &root);
+    assert_eq!(db.list_due_operations(i64::MAX).unwrap().len(), 1, "never queued twice");
+    // A second New file of the name: a taken name, and the first file is as it was.
+    assert_eq!(
+        create_file(&db, &root, None, "Beebeeb typing test.txt", &[]),
+        Err(DriveError::NameTaken)
+    );
+}

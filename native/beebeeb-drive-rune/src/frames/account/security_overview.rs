@@ -25,12 +25,13 @@ const SCORE_HEAD: TextStyle = TextStyle::new(20.0, 650.0).lh(24.0).tracking(-0.3
 
 /// What a part says when nobody read it.
 pub(super) const NOT_KNOWN: &str = "Not known";
-/// What a function says when this build has not bound it.
-pub(super) const NOT_YET: &str = "Not available yet";
-/// The Approve a sign-in row of a source that does not have it (0.9.0).
-pub(super) const APPROVE_ON_WEB: &str = "Not available in this version yet. Approve on the web.";
-/// The name the shell holds the web's delete-account page under (`Intent::Web`).
-pub const DELETE_PAGE: &str = "delete-account";
+/// What a part read from Beebeeb says when Beebeeb could not be reached to read it (`AccountSource::offline`).
+pub(super) const OFFLINE: &str = "Offline";
+
+/// The words for a part read from Beebeeb that nobody read: offline, or not known.
+fn unread(source: &dyn AccountSource) -> &'static str {
+    if source.offline() { OFFLINE } else { NOT_KNOWN }
+}
 
 fn factor_icon(kind: FactorKind) -> &'static rune::Icon {
     match kind {
@@ -70,10 +71,8 @@ enum State_ {
     Marked(Tail),
 }
 
-/// A row that opens `frame`. While nothing answers for that page it is the row alone: no press, no chevron
-/// (never a row that leads to a page that is not there). A row with a READ state then says that state and
-/// nothing more; "Not available yet" is only on a row that has none (never both, which would read as the
-/// state itself not being available).
+/// A row that opens `frame`. While nothing answers for that page the row is not drawn: a row either works or
+/// is not there (never a row that leads to a page that is not there).
 fn leads(
     list: usize,
     index: usize,
@@ -82,17 +81,31 @@ fn leads(
     frame: &'static str,
     source: &dyn AccountSource,
     t: &Theme,
-) -> El {
-    let open = answered(source, frame);
+) -> Option<El> {
+    if !answered(source, frame) {
+        return None;
+    }
     let it = match state {
         State_::Marked(mark) => it.tail(mark),
-        State_::None if !open => it.tail(Tail::Value(NOT_YET.into())),
         State_::Read | State_::None => it,
     };
-    if !open {
-        return set::item(list, index, &it, Vec::new(), t);
-    }
-    set::item(list, index, &it.link(true), Vec::new(), t).on_press(move |s: &mut State| super::go(s, frame))
+    Some(set::item(list, index, &it.link(true), Vec::new(), t).on_press(move |s: &mut State| super::go(s, frame)))
+}
+
+/// A list of the rows that are drawn; none drawn, no list. `roving`: every row is the control (it opens a
+/// page or a confirm), so the list is one Tab stop with the arrows and type-to-jump (`settings_list::roving_list`);
+/// a list with a switch or a text row in it stays a plain list.
+fn list_of(
+    list: usize,
+    head: Option<&str>,
+    rows: Vec<Option<El>>,
+    foot: Option<&str>,
+    roving: bool,
+    t: &Theme,
+) -> Option<El> {
+    let rows: Vec<El> = rows.into_iter().flatten().collect();
+    let build = if roving { lists::roving_list } else { lists::list };
+    (!rows.is_empty()).then(|| build(list, head, rows, foot, t))
 }
 
 /// The factors, when there is a score to say: known and not empty.
@@ -122,7 +135,7 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
             .key("score-words")
             .grow(1.0)
             .min_w(0.0)
-            .gap(2.0)
+            .gap(crate::theme::scale::space::S2)
             .child(
                 kit::label("ring-head", head, SCORE_HEAD, t.text)
                     .role("heading")
@@ -135,13 +148,13 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
         .role("group")
         .label("Security score")
         .w_full()
-        .padding(18.0)
-        .gap(12.0)
-        .radius(10.0)
+        .padding(crate::theme::scale::space::S18)
+        .gap(crate::theme::scale::space::S12)
+        .radius(crate::theme::scale::radius::PANEL)
         .fill(t.card)
         .box_shadow(kit::ring(kit::HAIR, t.separator))
         .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)));
-    let line = row().key("score").w_full().center_y().gap(14.0);
+    let line = row().key("score").w_full().center_y().gap(crate::theme::scale::space::S14);
     let Some(factors) = scored(facts) else {
         return card.child(line.child(ring(1.0, "?".into(), t.separator)).child(words(
             "Security score not known yet".into(),
@@ -166,7 +179,7 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
             .label(format!("To do: {}. {}", f.says, why(f.kind)))
             .w_full()
             .center_y()
-            .gap(10.0)
+            .gap(crate::theme::scale::space::S10)
             .pt(12.0)
             .child(
                 el().key(format!("todo-{i}-rule"))
@@ -212,13 +225,6 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
                 .label(format!("{}, {}", f.kind.fix_label(), f.says))
                 .on_press(move |s: &mut State| super::go(s, frame)),
             );
-        } else {
-            todo = todo.child(kit::label(
-                format!("todo-{i}-value"),
-                NOT_YET,
-                set::SUB,
-                t.text_tertiary,
-            ));
         }
         card = card.child(todo);
     }
@@ -235,7 +241,7 @@ fn checked(known: bool, good: bool) -> State_ {
     }
 }
 
-fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
+fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> Option<El> {
     let password = Row::new(Lead::Icon(&icons::PADLOCK), "Password").sub(match &facts.password_changed {
         Some(when) => format!("Changed {when}"),
         None => "Last change not known".into(),
@@ -249,7 +255,7 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
             (Some(true), Some((left, of))) => format!("On · {left} of {of} backup codes left"),
             (Some(true), None) => "On".into(),
             (Some(false), _) => "Off: your password alone signs you in".into(),
-            (None, _) => NOT_KNOWN.into(),
+            (None, _) => unread(source).into(),
         },
     );
     let two_ok = checked(facts.two_factor.is_some(), facts.two_factor == Some(true));
@@ -260,7 +266,7 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
         None => NOT_KNOWN.into(),
     });
     let passkeys_ok = checked(facts.passkeys.is_some(), facts.passkeys.is_some_and(|n| n > 0));
-    lists::list(
+    list_of(
         0,
         Some("Sign-in"),
         vec![
@@ -269,6 +275,7 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
             leads(0, 2, passkeys, passkeys_ok, "DW-A73", source, t),
         ],
         None,
+        true,
         t,
     )
 }
@@ -276,17 +283,10 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
 /// App lock is Drive's own row (the board's `securityExtra` slot, DW-0716): its switch and delay are here,
 /// not on a page behind it. A source that gives no delay (an empty one: nothing acts on it in this version)
 /// gets no delay control and no "locks again after".
-fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
+fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> Option<El> {
     let it = Row::new(Lead::Icon(&icons::APP_LOCK), "Lock Beebeeb");
-    let Some((on, after)) = &facts.app_lock else {
-        return set::item(
-            1,
-            0,
-            &it.sub("Windows Hello").tail(Tail::Value(NOT_YET.into())),
-            Vec::new(),
-            t,
-        );
-    };
+    // No facts: nothing acts on it in this build, so the row is not drawn.
+    let (on, after) = facts.app_lock.as_ref()?;
     let on = *on;
     let delay = on && !after.is_empty();
     let mut controls = Vec::new();
@@ -296,7 +296,7 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
                 .role("combobox")
                 .label(format!("Locks again after, {after}"))
                 .mr(8.0)
-                .radius(6.0)
+                .radius(crate::theme::tokens::radius::MD)
                 .focusable(true)
                 .on_press(|s: &mut State| super::go(s, "DW-0716"))
                 .child(lists::pop_button("item-1-0", after, t)),
@@ -314,13 +314,13 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
         controls.push(super::app_lock_password::link(t));
     }
     controls.push(
-        lists::switch("item-1-0", "Lock Beebeeb", on, t).on_press(move |s: &mut State| {
+        crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-0"), "", on, true, crate::ui::button::Size::Md, t).label("Lock Beebeeb").on_press(move |s: &mut State| {
             if let Some(source) = s.account.source.as_mut() {
                 source.set_app_lock(!on);
             }
         }),
     );
-    set::item(
+    Some(set::item(
         1,
         0,
         &it.sub(if delay {
@@ -332,52 +332,73 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
         }),
         controls,
         t,
+    ))
+}
+
+/// "Hide Beebeeb from screen capture and remote desktop": a per-PC switch, off by default (`shell::capture_setting`).
+/// Off, the windows show in screenshots, screen shares and remote desktop; on, every window is left out of them.
+fn capture_row(on: bool, t: &Theme) -> El {
+    let it = Row::new(Lead::Icon(&icons::EYE_OFF), "Hide Beebeeb from screen capture and remote desktop").sub(
+        if on {
+            "On: screenshots, recordings and remote desktop show nothing of Beebeeb"
+        } else {
+            "Off: Beebeeb shows in screenshots, screen shares and remote desktop"
+        },
+    );
+    set::item(
+        1,
+        3,
+        &it,
+        vec![
+            crate::ui::switch::switch_sized(&format!("{}-switch", "item-1-3"), "", on, true, crate::ui::button::Size::Md, t).label("Hide Beebeeb from screen capture and remote desktop").on_press(
+                move |s: &mut State| s.shell.set_hide_from_capture(!on),
+            ),
+        ],
+        t,
     )
 }
 
-/// Approving a sign-in from another device. A source that has it opens it; one that has not says so, with the
-/// way that works (the web), and no code field behind the row.
-fn approve_row(source: &dyn AccountSource, t: &Theme) -> El {
+/// Approving a sign-in from another device. A source that has it opens it; one that has not draws no row.
+fn approve_row(source: &dyn AccountSource, t: &Theme) -> Option<El> {
     let it = Row::new(Lead::Icon(&icons::SCAN), "Approve a sign-in");
-    if answered(source, "DW-A12") {
-        return leads(
-            1,
-            2,
-            it.sub("Let another device sign in"),
-            State_::None,
-            "DW-A12",
-            source,
-            t,
-        );
-    }
-    set::item(1, 2, &it.sub(APPROVE_ON_WEB), Vec::new(), t)
+    leads(
+        1,
+        2,
+        it.sub("Let another device sign in"),
+        State_::None,
+        "DW-A12",
+        source,
+        t,
+    )
 }
 
-fn devices(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
+fn devices(facts: &SecurityFacts, source: &dyn AccountSource, hide_capture: bool, t: &Theme) -> Option<El> {
     // "N signed in": true of devices and of sessions alike (a source lists one or the other).
     let sessions =
         Row::new(Lead::Icon(&icons::DEVICE_PHONE), "Devices and sessions").sub("Where your account is signed in");
     let signed_in = Tail::Value(match facts.sessions {
         Count::Known(n) => format!("{n} signed in"),
         Count::Reading => "Loading".into(),
-        Count::NotKnown => NOT_KNOWN.into(),
+        Count::NotKnown => unread(source).into(),
     });
-    lists::list(
+    list_of(
         1,
         Some("This PC and your devices"),
         vec![
             app_lock_row(facts, t),
             leads(1, 1, sessions, State_::Marked(signed_in), "DW-A55", source, t),
             approve_row(source, t),
+            Some(capture_row(hide_capture, t)),
         ],
         None,
+        false,
         t,
     )
 }
 
 /// The last sign-ins and security changes, then the way to all of them. Read as what happened, then when and
 /// where: a country, never a city; never which files were opened.
-fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
+fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> Option<El> {
     let all = |index: usize, sub: &str| {
         leads(
             2,
@@ -391,16 +412,16 @@ fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El 
     };
     let rows = match &facts.activity {
         // Not read: the way to the page stays, when the page answers.
-        None => vec![all(0, NOT_KNOWN)],
+        None => vec![all(0, unread(source))],
         Some(None) => vec![all(0, "Security logging is off: nothing is recorded")],
         Some(Some(events)) if events.is_empty() => vec![all(0, "Recording is on. Nothing recorded yet")],
         Some(Some(events)) => {
-            let mut rows: Vec<El> = events
+            let mut rows: Vec<Option<El>> = events
                 .iter()
                 .take(super::source::RECENT_EVENTS)
                 .enumerate()
                 .map(|(i, e)| {
-                    set::item(
+                    Some(set::item(
                         2,
                         i,
                         &Row::new(Lead::Icon(super::activity::event_icon(e.kind)), e.what.clone())
@@ -408,7 +429,7 @@ fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El 
                             .name(format!("{}, {}", e.what, e.when_where.replace(" · ", ", "))),
                         Vec::new(),
                         t,
-                    )
+                    ))
                 })
                 .collect();
             let index = rows.len();
@@ -416,38 +437,39 @@ fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El 
             rows
         }
     };
-    lists::list(2, Some("Recent sign-in activity"), rows, None, t)
+    list_of(2, Some("Recent sign-in activity"), rows, None, false, t)
 }
 
-/// The two destructive rows open a confirm over the page; neither touches other devices. A source that
-/// cannot sign this app out gets the rows as text: nothing to press that would do nothing.
-fn sign_out(facts: &SecurityFacts, t: &Theme) -> El {
-    let able = facts.can_sign_out;
+/// The two destructive rows open a confirm over the page; neither touches other devices. A row is drawn only
+/// for what the source can do: one that cannot sign this app out draws none, and "all apps" is drawn only when
+/// the source can sign every Beebeeb app on this PC out.
+fn sign_out(facts: &SecurityFacts, t: &Theme) -> Option<El> {
+    if !facts.can_sign_out {
+        return None;
+    }
     let one = |index: usize, it: Row, dialog: Dialog| {
-        if !able {
-            return set::item(3, index, &it.tail(Tail::Value(NOT_YET.into())), Vec::new(), t);
-        }
-        set::item(3, index, &it.danger().link(false), Vec::new(), t).on_press(move |s: &mut State| {
+        Some(set::item(3, index, &it.danger().link(false), Vec::new(), t).on_press(move |s: &mut State| {
             s.account.dialog = Some(dialog.clone());
             arrive(&mut s.account);
-        })
+        }))
     };
-    let mut rows = vec![one(
-        0,
-        Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of Drive"),
-        Dialog::SignOutApp,
-    )];
-    // A source that signs Drive out and has no other Beebeeb app to sign out does not draw "all apps". One that
-    // signs nothing out draws both as text, as before.
-    let all = facts.can_sign_out_all || !facts.can_sign_out;
-    if all {
-        rows.push(one(
-            1,
-            Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of all Beebeeb apps").sub("On this PC"),
-            Dialog::SignOutAllApps,
-        ));
-    }
-    lists::list(
+    let all = facts.can_sign_out_all;
+    let rows = vec![
+        one(
+            0,
+            Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of Drive"),
+            Dialog::SignOutApp,
+        ),
+        all.then(|| {
+            one(
+                1,
+                Row::new(Lead::Icon(&icons::SIGN_OUT), "Sign out of all Beebeeb apps").sub("On this PC"),
+                Dialog::SignOutAllApps,
+            )
+        })
+        .flatten(),
+    ];
+    list_of(
         3,
         Some("Sign out"),
         rows,
@@ -456,24 +478,15 @@ fn sign_out(facts: &SecurityFacts, t: &Theme) -> El {
         } else {
             "Signing out of Drive signs out Drive on this PC only."
         }),
+        true,
         t,
     )
 }
 
-fn delete(source: &dyn AccountSource, t: &Theme) -> El {
-    // A source that has no deletion flow leads to the web's, which does: a link, never a button that is not there.
+fn delete(source: &dyn AccountSource, t: &Theme) -> Option<El> {
+    // A source that has no deletion flow draws no row.
     if !answered(source, "DW-A58") {
-        let it = Row::new(Lead::Icon(&icons::TRASH), "Delete your account on the web").link(true);
-        return lists::list(
-            4,
-            Some("Delete"),
-            vec![
-                set::item(4, 0, &it, Vec::new(), t)
-                    .on_press(|s: &mut State| s.settings.ask(crate::frames::settings::Intent::Web(DELETE_PAGE))),
-            ],
-            Some("Deleting your account is done on the web in this version."),
-            t,
-        );
+        return None;
     }
     let it = Row::new(Lead::Icon(&icons::TRASH), "Delete your Beebeeb account").danger();
     // A deletion this session already knows of opens where it stands: the link sent, or the schedule and its undo.
@@ -482,12 +495,13 @@ fn delete(source: &dyn AccountSource, t: &Theme) -> El {
         super::source::Deletion::LinkSent => "DW-A81",
         super::source::Deletion::None => "DW-A58",
     };
-    lists::list(
+    list_of(
         4,
         Some("Delete"),
         vec![leads(4, 0, it, State_::None, frame, source, t)],
         // How long it can be undone is Beebeeb's: the date is shown once it is scheduled.
         Some("After you confirm by email you can still undo it for a time. After that it cannot be undone."),
+        true,
         t,
     )
 }
@@ -514,7 +528,14 @@ pub fn arrive(ui: &mut super::AccountUi) {
 
 /// The page, and the confirm or the menu over it when one is open. `signing`: where a sign-out asked from the
 /// confirm stands.
-pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, signing: &SigningOut, t: &Theme) -> (El, Option<El>) {
+pub fn pane(
+    source: &dyn AccountSource,
+    dialog: Option<&Dialog>,
+    signing: &SigningOut,
+    unsaved_name: &str,
+    hide_capture: bool,
+    t: &Theme,
+) -> (El, Option<El>) {
     let facts = source.security_facts();
     let over = match dialog {
         Some(Dialog::SignOutApp) if facts.can_sign_out => Some(sign_out_confirm(
@@ -523,6 +544,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, signing: &Signi
             "Sign out",
             false,
             signing,
+            unsaved_name,
             t,
         )),
         Some(Dialog::SignOutAllApps) if facts.can_sign_out_all => Some(sign_out_confirm(
@@ -531,6 +553,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, signing: &Signi
             "Sign out of all",
             true,
             signing,
+            unsaved_name,
             t,
         )),
         Some(Dialog::LockDelay(hot)) => match &facts.app_lock {
@@ -539,15 +562,21 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, signing: &Signi
         },
         _ => None,
     };
-    let children = vec![
+    let mut children = vec![
         set::heading("Sign-in and security", None, None, t),
         score_card(&facts, source, t),
-        sign_in(&facts, source, t),
-        devices(&facts, source, t),
-        activity(&facts, source, t),
-        sign_out(&facts, t),
-        delete(source, t),
     ];
+    children.extend(
+        [
+            sign_in(&facts, source, t),
+            devices(&facts, source, hide_capture, t),
+            activity(&facts, source, t),
+            sign_out(&facts, t),
+            delete(source, t),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     (set::pane(children, t), over)
 }
 
@@ -559,7 +588,16 @@ pub struct SigningOut {
     pub waiting: Option<bool>,
     /// It was refused: the confirm says why, and that nothing was signed out.
     pub refused: Option<&'static str>,
+    /// An open editor holds unsaved changes: the confirm asks Save, Discard and sign out, or Cancel.
+    pub unsaved: bool,
+    /// Save was pressed: the confirm waits for the editor's save, then signs out. A save that did not land says so.
+    pub saving: bool,
+    /// The question is for "Sign out of all" (not this app only).
+    pub all: bool,
 }
+
+/// What the confirm says when the save it waited for did not land.
+pub(super) const NOT_SAVED: &str = "The changes were not saved. Nothing was signed out.";
 
 /// What the confirm says while its sign-out is out.
 pub(super) const SIGNING_OUT: &str = "Signing out. Nothing is signed out until Beebeeb has answered.";
@@ -575,17 +613,113 @@ pub(super) fn settle_sign_out(s: &mut State, all: bool, answer: SignOutAnswer) {
         }
         SignOutAnswer::Refused(why) => {
             s.account.signing_out = SigningOut {
-                waiting: None,
                 refused: Some(why),
+                ..SigningOut::default()
+            };
+        }
+        SignOutAnswer::Unsaved => {
+            // The editor's name, read where the open document is (nothing else says which one holds the changes).
+            s.account.unsaved_name = crate::frames::viewers::unsaved_guard::name(s);
+            s.account.signing_out = SigningOut {
+                unsaved: true,
+                all,
+                ..SigningOut::default()
             };
         }
         SignOutAnswer::Pending => s.account.signing_out.waiting = Some(all),
     }
 }
 
+/// The sign-out met an open editor with changes no save has landed: the shared question (`unsaved_guard`) with
+/// Save (saves, then signs out), Discard and sign out (the only way they are dropped) and Cancel (Enter).
+fn unsaved_confirm(title: &str, name: &str, saving: bool, t: &Theme) -> El {
+    use crate::frames::viewers::unsaved_guard as guard;
+    guard::question(
+        title,
+        &guard::words(name, saving),
+        saving,
+        "Discard and sign out",
+        |s: &mut State, _tx: &mut rune::Tx| {
+            // Save is the editor's own save; the sign-out follows when it landed (`follow_save`).
+            let all = s.account.signing_out.all;
+            if guard::save_open_editor(s) {
+                s.account.signing_out = SigningOut {
+                    saving: true,
+                    all,
+                    ..SigningOut::default()
+                };
+            } else {
+                s.account.signing_out = SigningOut {
+                    refused: Some(NOT_SAVED),
+                    ..SigningOut::default()
+                };
+            }
+        },
+        |s: &mut State, _tx: &mut rune::Tx| {
+            let all = s.account.signing_out.all;
+            let Some(source) = s.account.source.as_mut() else {
+                return;
+            };
+            let answer = if all {
+                source.sign_out_all_apps()
+            } else {
+                source.sign_out_discarding_unsaved()
+            };
+            settle_sign_out(s, all, answer);
+        },
+        |s: &mut State, _tx: &mut rune::Tx| {
+            s.account.signing_out = SigningOut::default();
+            s.account.dialog = None;
+        },
+        t,
+    )
+}
+
+/// While Save waits for the editor: when its save landed the sign-out goes on (the engine asks again, and
+/// refuses if anything is still unsaved); a save that did not land says so and signs out nothing. `true`: changed.
+pub(super) fn follow_save(s: &mut State, tx: &mut rune::Tx) -> bool {
+    if !s.account.signing_out.saving {
+        return false;
+    }
+    let state = s.viewer.ui.as_ref().and_then(|ui| ui.office.edit.as_ref().map(|e| (e.saving, e.unsaved())));
+    match state {
+        Some((true, _)) => {
+            tx.wake_after(std::time::Duration::from_millis(100));
+            false
+        }
+        Some((false, true)) => {
+            s.account.signing_out = SigningOut {
+                refused: Some(NOT_SAVED),
+                ..SigningOut::default()
+            };
+            true
+        }
+        // Saved (or the editor is gone): the engine decides whether anything is still unsaved.
+        _ => {
+            let all = s.account.signing_out.all;
+            s.account.signing_out = SigningOut::default();
+            let Some(source) = s.account.source.as_mut() else { return true };
+            let answer = if all { source.sign_out_all_apps() } else { source.sign_out_this_app() };
+            settle_sign_out(s, all, answer);
+            true
+        }
+    }
+}
+
 /// DW-A57 and DW-A57a: the scope sentence is read before the buttons; Enter is Cancel. While the sign-out is
 /// out the confirm says so and neither button takes a press; it closes only with the answer.
-fn sign_out_confirm(title: &str, words: &str, action: &str, all: bool, signing: &SigningOut, t: &Theme) -> El {
+fn sign_out_confirm(
+    title: &str,
+    words: &str,
+    action: &str,
+    all: bool,
+    signing: &SigningOut,
+    unsaved_name: &str,
+    t: &Theme,
+) -> El {
+    if signing.unsaved || signing.saving {
+        return unsaved_confirm(title, unsaved_name, signing.saving, t);
+    }
     let waiting = signing.waiting.is_some();
     let words = match (waiting, signing.refused) {
         (true, _) => SIGNING_OUT,
@@ -597,6 +731,11 @@ fn sign_out_confirm(title: &str, words: &str, action: &str, all: bool, signing: 
     let mut cancel = set::button("btn-2", "Cancel", None, Look::Plain, Size::Medium, waiting, t).default_button();
     if !waiting {
         act = act.on_press(move |s: &mut State| {
+            // "Sign out of all" ends this app's editors too: the same question as for this app's sign-out.
+            if all && crate::frames::viewers::unsaved_guard::holds(s) {
+                settle_sign_out(s, true, SignOutAnswer::Unsaved);
+                return;
+            }
             let Some(source) = s.account.source.as_mut() else {
                 return;
             };
@@ -615,4 +754,45 @@ fn sign_out_confirm(title: &str, words: &str, action: &str, all: bool, signing: 
             s.account.dialog = None;
         }
     })
+}
+
+/// dc-005: what a sign-out keeps and removes, with counts. Sealed staged copies stay encrypted on this PC and open
+/// again after sign-in; unsaved Office recovery copies are removed. `waiting`: uploads not sent yet.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn sign_out_counts_words(waiting: u64, sealed: u64, office_recovery: u64) -> String {
+    let plural = |n: u64, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let mut out = Vec::new();
+    if waiting > 0 {
+        out.push(format!(
+            "{} not sent yet stay on this PC and send after you sign in again.",
+            plural(waiting, "change is", "changes are")
+        ));
+    }
+    if sealed > 0 {
+        out.push(format!(
+            "{} stay encrypted on this PC and open again after you sign in.",
+            plural(sealed, "saved copy", "saved copies")
+        ));
+    }
+    if office_recovery > 0 {
+        out.push(format!(
+            "{} of unsaved Office work will be removed.",
+            plural(office_recovery, "recovery copy", "recovery copies")
+        ));
+    }
+    out.join(" ")
+}
+
+#[cfg(test)]
+mod sign_out_counts_words_tests {
+    use super::sign_out_counts_words;
+
+    #[test]
+    fn says_each_count_and_what_is_removed() {
+        assert_eq!(sign_out_counts_words(0, 0, 0), "");
+        let w = sign_out_counts_words(1, 2, 1);
+        assert!(w.contains("1 change is not sent yet"), "{w}");
+        assert!(w.contains("2 saved copies stay encrypted"), "{w}");
+        assert!(w.contains("1 recovery copy of unsaved Office work will be removed"), "{w}");
+    }
 }

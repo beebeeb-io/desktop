@@ -97,7 +97,7 @@ fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     assert!(
         texts
             .iter()
-            .any(|t| t == "Turn on backups in Settings \u{203A} Backups."),
+            .any(|t| t == "Turn on backups in Settings to see your devices here."),
         "{texts:?}"
     );
     // The window's real chrome stays: caption and sidebar.
@@ -135,9 +135,13 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         let built = registry::frame(registry::group_for(&rt.state.shell.app)).is_some();
         assert_eq!(rt.find("not-built").is_none(), built, "{gate:?}");
         // Behind the gate there is no list, and no sidebar: nothing of the account. The two states
-        // before Files are the exception the board draws (DW-0009, DW-0014): the sidebar stands
-        // closed (dimmed, nothing in it can be pressed), and still no list and no file name.
-        let before_files = matches!(gate, GateState::Locked | GateState::NoPlan);
+        // before Files are the exception the board draws (DW-0009, DW-0014), and the credential-store card stands in
+        // the same window (`before_files.rs`): the sidebar stands closed (dimmed, nothing in it can be pressed),
+        // and still no list and no file name.
+        let before_files = matches!(
+            gate,
+            GateState::Locked | GateState::NoPlan | GateState::KeyStoreUnavailable
+        );
         assert_eq!(rt.find("sidebar").is_some(), before_files, "{gate:?}");
         assert!(rt.find("file-list").is_none(), "{gate:?}");
     }
@@ -709,132 +713,72 @@ fn the_poll_drains_the_sign_in_queue_and_a_gate_that_opens_reloads_and_starts_sy
 }
 
 // ---------------------------------------------------------------------------
-// Capture exclusion (task 2460): the window is excluded from screen capture
-// while a secret route is on screen. The FakePlatform now receives the call
-// directly (with `window: None` in headless tests); it records every call
-// and can simulate failure.
+// Capture exclusion (w30): windows can be captured by default (screenshots, screen shares, remote
+// desktop). The person's switch "Hide Beebeeb from screen capture and remote desktop" excludes every
+// window, on every screen. The FakePlatform records every call and can simulate failure.
 // ---------------------------------------------------------------------------
 
-/// P1-1 fix: an app that starts on sign-in applies capture exclusion on the first poll.
-/// `capture_excluded` starts `false` ("platform not told"); the first poll sees the secret
-/// route and calls the platform.
+fn hide_from_capture(rt: &mut Runtime<State>, on: bool) {
+    rt.update(|s, _| s.shell.set_hide_from_capture(on));
+}
+
+/// Default: no exclusion on any screen (sign-in, locked, files), whatever the identity (WDA_NONE).
 #[test]
-fn startup_on_sign_in_applies_capture_exclusion_on_the_first_poll() {
+fn by_default_no_window_is_excluded_from_capture() {
     let engine = Arc::new(FixtureEngine::signed_out());
     let platform = Arc::new(FakePlatform::default());
     let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
-    // After the first frame (runtime() calls frame(0.0)), the platform was told "exclude".
-    let calls = platform.capture_exclusions.lock().unwrap().clone();
-    assert_eq!(calls, vec![true], "exactly one exclude call on startup");
-    assert!(
-        rt.state.shell.capture_excluded,
-        "flag tracks what the platform was told"
-    );
-
-    // A second frame with the same state makes no call.
-    rt.frame(1.0);
-    let calls = platform.capture_exclusions.lock().unwrap().clone();
-    assert_eq!(calls, vec![true], "no duplicate call");
+    assert!(!rt.state.shell.hide_from_capture());
+    for (at, gate) in [(1.0, GateState::SignedOut), (2.0, GateState::Locked), (3.0, GateState::Ready)] {
+        engine.set_gate(gate);
+        rt.frame(at);
+    }
+    assert!(platform.capture_exclusions.lock().unwrap().is_empty(), "nothing asked for exclusion");
+    assert!(!rt.state.shell.capture_excluded);
 }
 
-/// Entering a secret route from a non-secret route calls the platform with `true`; leaving
-/// calls it with `false`.
+/// Switch on: the platform is told once to exclude, whatever screen follows; off again: told to clear.
 #[test]
-fn entering_a_secret_route_sets_capture_exclusion_and_leaving_clears_it() {
-    let engine = Arc::new(FixtureEngine::ready());
+fn the_switch_excludes_every_window_on_every_screen_and_off_clears_it() {
+    let engine = Arc::new(FixtureEngine::signed_out());
     let platform = Arc::new(FakePlatform::default());
     let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
-    // Starts on Files (non-secret): capture_excluded starts false, desired is false → no call.
-    assert!(!rt.state.shell.capture_excluded);
-    assert!(platform.capture_exclusions.lock().unwrap().is_empty());
-
-    // Gate → SignedOut → sign-in (secret).
-    engine.set_gate(GateState::SignedOut);
+    hide_from_capture(&mut rt, true);
     rt.frame(1.0);
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true],
-        "entering sign-in calls the platform with exclude"
-    );
+    assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true]);
     assert!(rt.state.shell.capture_excluded);
-
-    // Gate → Ready → Files (non-secret).
     engine.set_gate(GateState::Ready);
     rt.frame(2.0);
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true],
-        "the poll that first sees no secret keeps the window excluded"
-    );
-    // Exclusion drops one poll late: the poll that first sees no secret keeps it and lands the
-    // leaving elements; the next one tells the platform.
-    rt.frame(2.5);
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true, false],
-        "leaving sign-in calls the platform with clear"
-    );
+    rt.frame(3.0);
+    assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true], "Files too, no extra call");
+    hide_from_capture(&mut rt, false);
+    rt.frame(4.0);
+    assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true, false]);
     assert!(!rt.state.shell.capture_excluded);
 }
 
-/// A deck in Present is kept out of captures and screen shares; leaving Present clears it one poll late, as every
-/// secret does.
+/// The switch is stored per PC and read at the next start.
 #[test]
-fn office_present_is_kept_out_of_captures() {
-    use crate::frames::office::slides::slides_fixture;
+fn the_switch_is_stored_and_read_at_start() {
+    let dir = std::env::temp_dir().join(format!("bb-capture-switch-{}", std::process::id()));
+    let file = dir.join(crate::shell::capture_setting::FILE_NAME);
     let engine = Arc::new(FixtureEngine::ready());
     let platform = Arc::new(FakePlatform::default());
-    let mut state = state::init_with(Shell::fixture_on(engine.clone(), platform.clone()));
-    assert!(crate::frames::viewers::open_deck(&mut state, slides_fixture::file()));
-    let mut rt = runtime(state);
-    assert!(
-        platform.capture_exclusions.lock().unwrap().is_empty(),
-        "the deck alone is not a secret"
+    let wiring = Wiring { capture_file: Some(file.clone()), ..Wiring::default() };
+    let mut shell = Shell::new(
+        Arc::new(HostActions::new(engine.clone(), platform.clone())),
+        platform.clone(),
+        wiring,
     );
-    crate::frames::viewers::deck_mut(&mut rt.state)
-        .expect("a deck")
-        .present();
-    rt.frame(1.0);
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true],
-        "Present excludes the window"
-    );
-    crate::frames::viewers::deck_mut(&mut rt.state).expect("a deck").leave();
-    rt.frame(2.0);
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true],
-        "leaving Present keeps it excluded for that poll"
-    );
-    rt.frame(2.5);
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true, false],
-        "and the next poll clears it"
-    );
+    shell.set_hide_from_capture(true);
+    assert!(crate::shell::capture_setting::load(&file));
+    let wiring = Wiring { hide_from_capture: crate::shell::capture_setting::load(&file), ..Wiring::default() };
+    let again = Shell::new(Arc::new(HostActions::new(engine, platform.clone())), platform, wiring);
+    assert!(again.hide_from_capture());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Secret-to-secret (sign-in → locked) keeps exclusion: no false→true gap.
-#[test]
-fn secret_to_secret_keeps_exclusion_without_a_gap() {
-    let engine = Arc::new(FixtureEngine::signed_out());
-    let platform = Arc::new(FakePlatform::default());
-    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
-    // The first poll applied exclude (startup on sign-in).
-    let before = platform.capture_exclusions.lock().unwrap().len();
-    assert_eq!(before, 1, "one call on startup");
-
-    // Sign-in → locked (both secret).
-    engine.set_gate(GateState::Locked);
-    rt.frame(1.0);
-    let after = platform.capture_exclusions.lock().unwrap().len();
-    assert_eq!(after, before, "no transition call when both routes are secret");
-    assert!(rt.state.shell.capture_excluded);
-}
-
-/// P2-1: the failure path is actually exercised. When the platform call fails, the flag stays
-/// `false` (the platform was NOT told), and content stays drawn.
+/// P2-1: when the platform call fails, the flag stays `false` (the platform was NOT told), and content stays drawn.
 #[test]
 fn a_failed_platform_call_keeps_the_flag_false_and_content_draws() {
     use std::sync::atomic::Ordering;
@@ -842,25 +786,15 @@ fn a_failed_platform_call_keeps_the_flag_false_and_content_draws() {
     let platform = Arc::new(FakePlatform::default());
     platform.capture_exclusion_fails.store(true, Ordering::SeqCst);
     let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
-    // Starts on Files, desired false, applied false → no call.
     assert!(!rt.state.shell.capture_excluded);
-
-    // Enter sign-in (secret): the platform call fails.
-    engine.set_gate(GateState::SignedOut);
+    hide_from_capture(&mut rt, true);
     rt.frame(1.0);
-    // The flag stays false (the platform was NOT successfully told).
     assert!(!rt.state.shell.capture_excluded, "flag stays false on failure");
-    assert!(
-        rt.state.shell.capture_exclusion_retries > 0,
-        "retry counter incremented"
-    );
-    // Content stays drawn.
-    assert_eq!(rt.state.shell.app.screen(), Screen::SignIn);
-    // The platform was called (and failed): no successful record.
+    assert!(rt.state.shell.capture_exclusion_retries > 0, "retry counter incremented");
     assert!(platform.capture_exclusions.lock().unwrap().is_empty());
 }
 
-/// P2-2: after a failed call, subsequent polls retry (bounded at 3).
+/// P2-2: after a failed call, subsequent polls retry (bounded at 3); turning the switch again resets it.
 #[test]
 fn after_failure_subsequent_polls_retry_bounded() {
     use std::sync::atomic::Ordering;
@@ -868,42 +802,22 @@ fn after_failure_subsequent_polls_retry_bounded() {
     let platform = Arc::new(FakePlatform::default());
     platform.capture_exclusion_fails.store(true, Ordering::SeqCst);
     let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
-
-    // Enter sign-in: first call fails.
-    engine.set_gate(GateState::SignedOut);
+    hide_from_capture(&mut rt, true);
     rt.frame(1.0);
     assert_eq!(rt.state.shell.capture_exclusion_retries, 1);
-
-    // Second and third poll: still failing.
     rt.frame(2.0);
     assert_eq!(rt.state.shell.capture_exclusion_retries, 2);
     rt.frame(3.0);
     assert_eq!(rt.state.shell.capture_exclusion_retries, 3);
-
-    // Fourth poll: retries exhausted, no more calls.
     rt.frame(4.0);
     assert_eq!(rt.state.shell.capture_exclusion_retries, 3, "capped at 3");
     assert!(!rt.state.shell.capture_excluded, "still not applied");
-
-    // Fix the platform: the user navigates away and back, resetting the counter.
     platform.capture_exclusion_fails.store(false, Ordering::SeqCst);
-    engine.set_gate(GateState::Ready);
+    hide_from_capture(&mut rt, false);
+    hide_from_capture(&mut rt, true);
     rt.frame(5.0);
-    // Exclusion drops one poll late: the poll that first sees no secret keeps it and lands the
-    // leaving elements; the next one tells the platform.
-    rt.frame(5.5);
-    // Desired false, applied false → match → retries reset.
-    assert_eq!(rt.state.shell.capture_exclusion_retries, 0);
-
-    // Re-enter sign-in: now the call succeeds.
-    engine.set_gate(GateState::SignedOut);
-    rt.frame(6.0);
     assert!(rt.state.shell.capture_excluded, "applied after recovery");
-    assert_eq!(
-        platform.capture_exclusions.lock().unwrap().clone(),
-        vec![true],
-        "one successful call"
-    );
+    assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true]);
 }
 
 /// `route_shows_secret` checks both the frame behind and the dialog in front.
@@ -1139,5 +1053,44 @@ mod files;
 mod flows;
 #[path = "host_tests_owned_state.rs"]
 mod owned_state;
+#[path = "host_tests_packets.rs"]
+mod packets;
+#[path = "host_tests_reread.rs"]
+mod reread;
 #[path = "host_tests_session_gate.rs"]
 mod session_gate;
+
+/// the window's close reaches sign-in. Closed to the notification area, the window keeps
+/// no typed password or code, and a code step is left as Back leaves it, the engine told (`frames::signin::wipe`).
+#[test]
+fn signin_wipe_closing_the_window_to_the_tray_wipes_what_sign_in_holds() {
+    use crate::frames::signin::source::{FixtureSignInSource, Script};
+    use crate::frames::signin::{Screen as SignInScreen, Ui as SignInUi};
+
+    let mut shell = Shell::fixture_on(Arc::new(FixtureEngine::ready()), Arc::new(FakePlatform::default()));
+    shell.attach_tray(no_events());
+    assert!(
+        !shell.close_quits(),
+        "the premise: closing keeps Beebeeb in the notification area"
+    );
+    let mut rt = runtime(state::init_with(shell));
+    let source = FixtureSignInSource::new(Script::default());
+    let calls = source.calls.clone();
+    let mut signin = SignInUi::new(Box::new(source));
+    signin.password.replace_text("an invented password");
+    signin.code.replace_text("48");
+    signin.screen = SignInScreen::TwoFactor { backup: false };
+    rt.state.signin = Some(signin);
+
+    rt.update(on_close);
+
+    let signin = rt.state.signin.as_ref().expect("the sign-in state stays");
+    assert!(
+        signin.password.text.is_empty() && signin.code.text.is_empty(),
+        "nothing typed stays"
+    );
+    assert_eq!(signin.screen, SignInScreen::SignIn, "the code step is left");
+    assert_eq!(*calls.borrow(), ["discard_partial_sign_in"], "the engine is told");
+}
+#[path = "host_tests_storage.rs"]
+mod storage;

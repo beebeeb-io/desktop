@@ -17,7 +17,6 @@ use crate::ui::account_form::{self as fm, Field};
 use crate::ui::account_set::{self as set, Lead, Look, Row};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
 use crate::ui::kit;
-use crate::ui::settings_list as lists;
 use rune::{Cx, El, col};
 
 use super::form::{self, Form, Problem};
@@ -63,7 +62,7 @@ fn what_goes(f: &Form, t: &Theme) -> El {
                 t,
             ),
             fm::steps(1, 4, "What goes", t),
-            lists::list(
+            crate::ui::settings_list::list(
                 0,
                 Some("What gets deleted"),
                 vec![
@@ -493,7 +492,7 @@ pub fn undone(name: &str, t: &Theme, cx: &mut Cx<State>) -> El {
             t,
         ))
         .child(
-            col().key("au-actions").w_full().gap(6.0).mt(6.0).child(
+            col().key("au-actions").w_full().gap(crate::theme::scale::space::S6).mt(6.0).child(
                 au::button(
                     &mut keys,
                     "Continue to Drive",

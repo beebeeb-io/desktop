@@ -234,7 +234,7 @@ fn another_folder_can_be_chosen_after_a_refused_start_only_when_none_was_kept() 
             explorer == Explorer::NotSyncing
         );
         assert!(has_button(&rt, "Try again") && has_button(&rt, "Continue without File Explorer"));
-        click(&mut rt, "btn-1");
+        click(&mut rt, "btn-0");
         assert_eq!(log.borrow().clone(), ["choose_folder"], "{explorer:?}");
 
         let (mut ui_, log) = fixture(Script {

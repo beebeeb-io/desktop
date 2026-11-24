@@ -23,7 +23,7 @@ use rune::{Env, Runtime, TextEdit};
 
 use super::*;
 use crate::State;
-use crate::frames::search::source::RECENT_KEPT;
+use crate::frames::search::source::{Loading, RECENT_KEPT};
 use crate::frames::shared::parts::table::Kind;
 
 const ME: &str = "search-me@example.eu";
@@ -45,12 +45,18 @@ struct Host {
     db: PathBuf,
     /// The list cannot be read.
     broken: AtomicBool,
+    /// Nothing has synced on this computer yet.
+    nothing_synced: AtomicBool,
+    /// How far the first listing has come, as the engine says it: (listed, total); `None`: not known.
+    listing: Mutex<Option<(u64, u64)>>,
     builds: AtomicUsize,
     woken: AtomicUsize,
     /// The recent searches each account keeps on this computer (the engine's row per account).
     recents: Mutex<HashMap<String, Vec<String>>>,
     /// How often the recent searches were asked of the host (read, kept or cleared).
     recent_calls: AtomicUsize,
+    /// What the account's shares say of an item (the engine's Shared lists): id to words.
+    shared: Mutex<HashMap<String, String>>,
 }
 
 impl Host {
@@ -128,6 +134,9 @@ impl SearchHost for Host {
         if self.broken.load(Ordering::SeqCst) {
             return Err(LocalStateRefused::Unreadable);
         }
+        if self.nothing_synced.load(Ordering::SeqCst) {
+            return Err(LocalStateRefused::NothingSynced);
+        }
         // As the engine's handle: the list of the account it is recorded for, with the vault open; another account's
         // is refused with the engine's own word.
         if !self.unlocked() {
@@ -150,6 +159,10 @@ impl SearchHost for Host {
         index
     }
 
+    fn listing(&self) -> Option<Loading> {
+        (*self.listing.lock().unwrap()).map(|(listed, total)| Loading { listed, total })
+    }
+
     fn recent_searches(&self, turn: u64) -> Result<Vec<String>, ()> {
         let account = self.recents_of(turn)?;
         Ok(self.recents.lock().unwrap().get(&account).cloned().unwrap_or_default())
@@ -169,6 +182,10 @@ impl SearchHost for Host {
         let account = self.recents_of(turn)?;
         self.recents.lock().unwrap().remove(&account);
         Ok(())
+    }
+
+    fn shared_words(&self) -> HashMap<String, String> {
+        self.shared.lock().unwrap().clone()
     }
 
     fn wake(&self) {
@@ -243,17 +260,21 @@ fn host(account: Option<&str>) -> Arc<Host> {
         moved: Condvar::new(),
         db: path,
         broken: AtomicBool::new(false),
+        nothing_synced: AtomicBool::new(false),
         builds: AtomicUsize::new(0),
         woken: AtomicUsize::new(0),
         recents: Mutex::new(HashMap::new()),
         recent_calls: AtomicUsize::new(0),
+        shared: Mutex::default(),
+        listing: Mutex::new(None),
     })
 }
 
 /// Pump until no build and no query is on its way (at most 30 s).
 fn settle(source: &mut EngineSearchSource<Host>) {
     let began = Instant::now();
-    while source.pump().busy {
+    // A refusal that waits to be built again is not an answer on its way.
+    while source.pump().busy && (source.building.is_some() || source.shared_out || source.asked.is_some() || source.recent_out.is_some()) {
         assert!(began.elapsed() < HOLD_FOR, "an answer did not come back");
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -274,7 +295,7 @@ fn found(source: &mut EngineSearchSource<Host>, query: &str, narrow: Narrow) -> 
     match source.search(query, narrow) {
         Answer::Found { hits, loading } => {
             assert_eq!(loading, None);
-            hits
+            hits.to_vec()
         }
         Answer::Searching => panic!("the query was not answered"),
         Answer::Unavailable => panic!("search answered Unavailable"),
@@ -376,14 +397,13 @@ fn a_list_that_cannot_be_read_is_unavailable_never_no_results() {
     assert_eq!(source.details("f-draft"), None);
     for _ in 0..20 {
         source.search("contract", Narrow::All);
-        source.opened();
         source.ask("contract", Narrow::All);
+        source.pump();
     }
-    settle(&mut source);
     assert_eq!(
         host.builds.load(Ordering::SeqCst),
         1,
-        "no retry loop: not built again within FRESH_FOR"
+        "no retry loop: not built again before RETRY_AFTER"
     );
 }
 
@@ -870,10 +890,12 @@ fn the_engine_handle_is_a_search_host() {
 /// before Search opens: signed out, it says it is not available, builds no index and reads no recent search.
 #[test]
 fn a_real_build_shell_gets_the_engine_search_and_nothing_runs_before_it_opens() {
-    assert!(
-        crate::shell::state::SEARCH_ON_ENGINE,
-        "task 2488 is fixed: Search reads the engine"
-    );
+    const {
+        assert!(
+            crate::shell::state::SEARCH_ON_ENGINE,
+            "task 2488 is fixed: Search reads the engine"
+        );
+    }
     let (channel, _messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
         account_id: "search-shell-slot".into(),
@@ -981,7 +1003,7 @@ fn a_result_and_the_index_print_no_name() {
 
 /// The ways the turn moves on after A searched: a lock; a lock and an unlock (the same account in another turn, with
 /// no pump between them); another account's sign-in; a sign-out.
-fn turn_moves() -> [(&'static str, fn(&Host)); 4] {
+fn turn_moves() -> [TurnMove; 4] {
     [
         ("a lock", Host::lock as fn(&Host)),
         ("a lock and an unlock", |host: &Host| {
@@ -1137,3 +1159,101 @@ fn a_build_landing_under_a_new_turn_is_dropped() {
         );
     }
 }
+
+/// A first refusal while the first sync runs (NothingSynced), then sync is done: Search says what is true meanwhile
+/// (not "Not available yet": the files are being got ready), and the next pump after the wait builds again, so
+/// results appear without reopening Search.
+#[test]
+fn a_refusal_during_the_first_sync_is_built_again_when_sync_is_done() {
+    let host = host(Some(ME));
+    host.nothing_synced.store(true, Ordering::SeqCst);
+    let mut source = EngineSearchSource::new(host.clone());
+    source.opened();
+    source.ask("contract", Narrow::All);
+    settle(&mut source);
+    assert_eq!(host.builds.load(Ordering::SeqCst), 1);
+    source.retry_after = Duration::ZERO;
+    assert!(source.held.is_none());
+    assert!(source.wired(), "getting ready is not \"not available\"");
+    assert_eq!(source.search("contract", Narrow::All), Answer::Searching);
+
+    host.nothing_synced.store(false, Ordering::SeqCst);
+    let began = Instant::now();
+    while source.held.is_none() {
+        source.pump();
+        assert!(began.elapsed() < HOLD_FOR, "no build after sync was done");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    settle(&mut source);
+    assert_eq!(ids(&found(&mut source, "contract", Narrow::All)).len(), 4);
+}
+
+/// Reopening Search after a refusal builds at once, even within FRESH_FOR; a refusal is not "fresh".
+#[test]
+fn reopening_search_after_a_refusal_builds_again() {
+    let host = host(Some(ME));
+    host.nothing_synced.store(true, Ordering::SeqCst);
+    let mut source = opened(&host);
+    assert!(source.held.is_none());
+    host.nothing_synced.store(false, Ordering::SeqCst);
+    source.opened();
+    settle(&mut source);
+    assert_eq!(found(&mut source, "draft", Narrow::All).len(), 1);
+}
+
+/// While the first sign-in still lists the files, the answer says how far it is (DW-0802b): the note shows with the
+/// live count, never "Searching" forever and never "No results" without the note.
+#[test]
+fn while_the_first_listing_runs_the_answer_carries_how_far_it_is() {
+    let host = host(Some(ME));
+    host.nothing_synced.store(true, Ordering::SeqCst);
+    *host.listing.lock().unwrap() = Some((0, 40_112));
+    let mut source = EngineSearchSource::new(host.clone());
+    source.opened();
+    source.ask("contract", Narrow::All);
+    settle(&mut source);
+    assert_eq!(
+        source.search("contract", Narrow::All),
+        Answer::Found {
+            hits: Vec::new().into(),
+            loading: Some(Loading { listed: 0, total: 40_112 })
+        }
+    );
+    // Part of the list is in: the matches so far come with the count; a complete list carries none.
+    host.nothing_synced.store(false, Ordering::SeqCst);
+    *host.listing.lock().unwrap() = Some((10, 40_112));
+    source.retry_after = Duration::ZERO;
+    let began = Instant::now();
+    while source.held.is_none() {
+        source.pump();
+        assert!(began.elapsed() < HOLD_FOR, "no build after the list came");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    settle(&mut source);
+    source.ask("contract", Narrow::All);
+    settle(&mut source);
+    match source.search("contract", Narrow::All) {
+        Answer::Found { hits, loading } => {
+            assert!(!hits.is_empty());
+            assert_eq!(loading, Some(Loading { listed: 10, total: 40_112 }));
+        }
+        other => panic!("{other:?}"),
+    }
+    *host.listing.lock().unwrap() = Some((40_112, 40_112));
+    assert!(matches!(source.search("contract", Narrow::All), Answer::Found { loading: None, .. }));
+}
+
+#[test]
+fn a_results_shared_line_says_how_it_is_shared_once_the_shares_are_read() {
+    let host = host(Some(ME));
+    host.shared
+        .lock()
+        .unwrap()
+        .insert("f-signed".into(), "Anyone with the link".into());
+    let source = opened(&host);
+    assert_eq!(source.details("f-signed").unwrap().shared, "Anyone with the link");
+    assert_eq!(source.details("f-draft").unwrap().shared, "", "not shared, or not known: never invented");
+}
+
+/// A named move of the host's turn.
+type TurnMove = (&'static str, fn(&Host));

@@ -170,6 +170,7 @@ pub struct Pumped {
 /// What became of a "Stop and move the backup to Trash" a source answered late. Each refusal is a fixed sentence that
 /// says whether anything changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum Stopped {
     /// The folder is no longer backed up and its backup is in Trash.
     Done,
@@ -178,6 +179,9 @@ pub enum Stopped {
     /// The folder is no longer backed up, but the move to Trash was not confirmed: said in the section.
     StoppedOnly(&'static str),
 }
+
+/// What "Other devices" says when its list could not be read (an older list, if any, stays).
+pub const DEVICES_NOT_READ: &str = "Couldn't read your other devices. Try again in a moment.";
 
 #[cfg_attr(not(test), allow(dead_code))] // the defaulted methods are for the view lane's poll (PR body)
 pub trait BackupsSource {
@@ -192,6 +196,10 @@ pub trait BackupsSource {
     }
     /// The section opened: a source that reads late reads again when what it holds is old.
     fn opened(&mut self) {}
+    /// "Try again": read now, even when what is held is fresh.
+    fn read_again(&mut self) {
+        self.opened();
+    }
     /// Nothing is held yet and a read is out: the section's loading state.
     fn loading(&self) -> bool {
         false
@@ -205,6 +213,11 @@ pub trait BackupsSource {
     /// every device listed. A fixed sentence; `None`: nothing to say.
     fn devices_note(&self) -> Option<&'static str> {
         None
+    }
+    /// The "Other devices" list could not be read: the section draws the failed state with Try again
+    /// ([`BackupsSource::read_again`]) in the list's place, or Try again under an older list.
+    fn devices_failed(&self) -> bool {
+        self.devices_note() == Some(DEVICES_NOT_READ)
     }
     /// A "Delete this backup" is on its way (a source that answers late): the dialog says so and sends nothing more.
     fn deleting(&self) -> bool {

@@ -86,23 +86,54 @@ fn office_sheets_the_wheel_and_shift_wheel_move_the_top_left() {
     );
 }
 
+/// An arrow that takes the cell cursor past the view scrolls the sheet to it, and the viewports stand there too; a
+/// control elsewhere with the keyboard keeps the arrows as a scroll.
+#[test]
+fn office_sheets_an_arrow_moves_the_cell_cursor_and_the_viewports_follow_it() {
+    let mut view = big();
+    view.selection = None;
+    view.current = Cell { row: 0, col: 0 };
+    let (mut rt, _log) = live_runtime(Body::Sheet(view), 1.0, None);
+    rt.on_key = Some(crate::shell::host::on_key);
+    for _ in 0..60 {
+        press(&mut rt, Key::Down);
+    }
+    let view = sheet(&mut rt);
+    assert_eq!(view.current, Cell { row: 60, col: 0 }, "sixty rows down");
+    assert!(view.top_left.row > 0 && view.top_left.row <= 60, "the view followed: {:?}", view.top_left);
+    assert!(
+        (offsets(&rt).0 - view.top_left.row as f32 * ROW_Q).abs() < 0.6,
+        "the viewport stands where the view is: {}",
+        offsets(&rt).0
+    );
+    assert_eq!(view.selection, None);
+    // The keyboard on a control outside the grid: an arrow moves what is in view, the cursor stays.
+    let top = view.top_left.row;
+    rt.update(|_, tx| tx.focus(crate::frames::office::PANE_STATUS, true));
+    settle(&mut rt);
+    press(&mut rt, Key::Down);
+    let view = sheet(&mut rt);
+    assert_eq!(view.current, Cell { row: 60, col: 0 }, "the cursor stayed");
+    assert_eq!(view.top_left.row, top + 1, "the view moved one row");
+}
+
 #[test]
 fn office_sheets_keys_move_the_viewports_too() {
     let (mut rt, _log) = live_runtime(Body::Sheet(big()), 1.0, None);
     rt.on_key = Some(crate::shell::host::on_key);
-    press(&mut rt, Key::Down);
-    press(&mut rt, Key::Right);
-    assert_eq!(sheet(&mut rt).top_left, Cell { row: 1, col: 1 });
+    // Page Down moves what is in view (an arrow moves the cell cursor: `cursor_key_tx`, tested with the window's keys).
+    press(&mut rt, Key::PageDown);
+    assert_eq!(sheet(&mut rt).top_left, Cell { row: 20, col: 0 });
     let (down, across) = offsets(&rt);
     assert!(
-        (down - ROW_Q).abs() < 0.6 && (across - COL_Q).abs() < 0.6,
+        (down - 20.0 * ROW_Q).abs() < 0.6 && across.abs() < 0.6,
         "{down}, {across}"
     );
     // The next wheel turn starts where the keys left it.
     let (x, y) = middle(&rt);
     rt.wheel(x, y, -100.0);
     settle(&mut rt);
-    assert_eq!(sheet(&mut rt).top_left.row, 6);
+    assert_eq!(sheet(&mut rt).top_left.row, 25);
     // End reaches the last row, and the viewport can stand there (it does not snap back).
     press(&mut rt, Key::End);
     settle(&mut rt);

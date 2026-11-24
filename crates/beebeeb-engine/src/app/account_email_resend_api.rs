@@ -144,10 +144,10 @@ impl<C: CredentialStores> Engine<C> {
         if let Ok(mut label) = self.acct.auth_email.lock() {
             *label = Some(email.to_string());
         }
-        if let Ok(mut current) = self.acct.session.lock() {
-            if let Some(held) = current.as_mut() {
-                held.email = Some(email.to_string());
-            }
+        if let Ok(mut current) = self.acct.session.lock()
+            && let Some(held) = current.as_mut()
+        {
+            held.email = Some(email.to_string());
         }
         Some(moved_to)
     }

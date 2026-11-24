@@ -19,7 +19,10 @@
 param(
   [ValidateSet('test', 'release')][string]$Mode = 'test',
   [Parameter(Mandatory = $true)][string]$Version,
-  [ValidateSet('installed', 'uninstalled')][string]$Phase = 'installed'
+  [ValidateSet('installed', 'uninstalled')][string]$Phase = 'installed',
+  # Test hooks (verify-install.tests.ps1): check another folder, read another installer script.
+  [string]$InstallDir = '',
+  [string]$InstallerScript = (Join-Path $PSScriptRoot 'installer.nsi')
 )
 
 Set-StrictMode -Version Latest
@@ -28,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 if ($Mode -eq 'release') { $product = 'Beebeeb'; $bundleId = 'io.beebeeb.app'; $binary = 'beebeeb-desktop.exe' }
 else { $product = 'Beebeeb Test'; $bundleId = 'io.beebeeb.app.test'; $binary = 'beebeeb-desktop-test.exe' }
 
-$installDir = Join-Path $env:LOCALAPPDATA $product
+$installDir = if ($InstallDir) { $InstallDir } else { Join-Path $env:LOCALAPPDATA $product }
 $exe = Join-Path $installDir $binary
 $uninstKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$product"
 $manuKey = "HKCU:\Software\beebeeb\$product"
@@ -74,12 +77,27 @@ function FileContains([string]$Path, [string]$Text) {
   return ($latin.IndexOf($Text, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($latin.IndexOf($wide, [StringComparison]::OrdinalIgnoreCase) -ge 0)
 }
 
+# The files the installer puts in the install folder: the `Delete "$INSTDIR\<name>"` lines of installer.nsi's
+# uninstall section, the one list that names each file the installer writes (the binary as ${MAINBINARYNAME}.exe).
+# Lines that name a variable other than the binary (the old binary of an update) are not part of it.
+function InstalledFileList([string]$Script, [string]$Binary) {
+  $names = @()
+  foreach ($line in Get-Content -LiteralPath $Script) {
+    if ($line -match '^\s*Delete\s+"\$INSTDIR\\([^"]+)"\s*$') {
+      $name = $Matches[1].Replace('${MAINBINARYNAME}', [IO.Path]::GetFileNameWithoutExtension($Binary))
+      if ($name -notmatch '[$]') { $names += $name }
+    }
+  }
+  return @($names | Sort-Object -Unique)
+}
+
 if ($Phase -eq 'installed') {
   $expected = 14
   Check 'the app binary is installed' (Test-Path -LiteralPath $exe)
   Check 'the uninstaller is installed' (Test-Path -LiteralPath (Join-Path $installDir 'uninstall.exe'))
+  $want = @(InstalledFileList $InstallerScript $binary)
   $files = @(Get-ChildItem -LiteralPath $installDir -Force -ErrorAction SilentlyContinue | ForEach-Object Name | Sort-Object)
-  Check 'the install folder holds exactly the binary and the uninstaller' (($files -join ',') -eq "$binary,uninstall.exe") ($files -join ',')
+  Check 'the install folder holds exactly the files the installer writes' ($want.Count -gt 0 -and ($files -join ',') -eq ($want -join ',')) "found: $($files -join ',') expected: $($want -join ',')"
   Check 'uninstall entry: DisplayName' ((RegValue $uninstKey 'DisplayName') -eq $product)
   Check 'uninstall entry: DisplayVersion' ((RegValue $uninstKey 'DisplayVersion') -eq $Version) "$(RegValue $uninstKey 'DisplayVersion')"
   Check 'uninstall entry: Publisher' ((RegValue $uninstKey 'Publisher') -eq 'beebeeb')

@@ -181,7 +181,7 @@ async fn a_session_reaped_during_an_outage_lands_on_a_fresh_upload() {
     );
 }
 
-/// Spec §8.4 (fix round 5): a resumed session the server answers with 400 is abandoned, so the
+/// Spec §8.4 : a resumed session the server answers with 400 is abandoned, so the
 /// next attempt starts a fresh upload, but the 400 is counted: one attempt. Only a reaped
 /// session (404, 410) is not. The resumed step is `complete` (chunk format v2: a session with
 /// chunks still to send is never resumed).
@@ -251,7 +251,7 @@ async fn a_resumed_sessions_400_is_counted_and_the_next_attempt_starts_fresh() {
     );
 }
 
-/// Spec §8.4 (fix round 5): a server that answers 400 to every fresh session still parks the
+/// Spec §8.4 : a server that answers 400 to every fresh session still parks the
 /// write when its attempts are used up.
 #[tokio::test]
 async fn a_server_that_refuses_every_session_with_400_parks_the_write() {
@@ -304,7 +304,7 @@ async fn a_server_that_refuses_every_session_with_400_parks_the_write() {
     );
 }
 
-/// Spec §8.4 (fix round 6): only a session resumed from its persisted row can be reaped. A
+/// Spec §8.4 : only a session resumed from its persisted row can be reaped. A
 /// 404 at the chunk of a session opened in the same attempt is counted (the session is still
 /// abandoned, so the next attempt opens a new one), so a server that answers 404 to every new
 /// session parks the write when its attempts are used up.
@@ -360,7 +360,7 @@ async fn a_404_on_every_new_session_parks_the_write() {
     );
 }
 
-/// Spec §11 (fix round 5): the gone-session line logs ids and a category, never the error's
+/// Spec §11 : the gone-session line logs ids and a category, never the error's
 /// text (it carries the request URL with the session id).
 #[tokio::test]
 async fn the_gone_session_line_logs_a_category_not_its_text() {

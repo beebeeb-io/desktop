@@ -964,14 +964,49 @@ fn the_hand_off_starts_nothing_outside_windows() {
 /// the channel chosen when the app started.
 #[test]
 fn the_saved_channel_and_the_one_the_build_came_from() {
-    assert_eq!(channels(None), (Channel::Stable, Channel::Stable));
-    let mut config = DesktopConfig::default();
-    config.release_channel = ReleaseChannel::Stable;
-    config.installed_release_channel = Some(ReleaseChannel::Beta);
-    assert_eq!(channels(Some(&config)), (Channel::Stable, Channel::Beta));
+    assert_eq!(channels(None, None), (Channel::Stable, Channel::Stable));
+    let mut config = DesktopConfig {
+        release_channel: ReleaseChannel::Stable,
+        installed_release_channel: Some(ReleaseChannel::Beta),
+        ..DesktopConfig::default()
+    };
+    assert_eq!(channels(Some(&config), None), (Channel::Stable, Channel::Beta));
     config.release_channel = ReleaseChannel::Alpha;
     config.installed_release_channel = None;
-    assert_eq!(channels(Some(&config)), (Channel::Alpha, Channel::Alpha));
+    assert_eq!(channels(Some(&config), None), (Channel::Alpha, Channel::Alpha));
+}
+
+/// A fresh alpha install starts on alpha: the build's channel is both the chosen and the installed one, written once;
+/// a choice made afterwards (About's menu) is never taken back, and a stable build changes nothing.
+#[test]
+fn a_fresh_install_starts_on_the_channel_its_build_was_cut_on() {
+    let alpha = Some(ReleaseChannel::Alpha);
+    let fresh = DesktopConfig::default();
+    assert_eq!(channels(Some(&fresh), alpha), (Channel::Alpha, Channel::Alpha));
+    assert_eq!(channels(Some(&fresh), None), (Channel::Stable, Channel::Stable));
+    assert_eq!(parse_built(Some("alpha")), alpha);
+    assert_eq!(parse_built(Some("nightly")), None);
+    assert_eq!(parse_built(None), None);
+
+    let folder = tempfile::tempdir().expect("a temp dir");
+    let path = folder.path().join("desktop.toml");
+    assert!(seed_first_run(&path, alpha));
+    let seeded = DesktopConfig::load_from(&path).expect("the file");
+    assert_eq!(seeded.release_channel, ReleaseChannel::Alpha);
+    assert_eq!(seeded.installed_release_channel, alpha);
+    assert_eq!(channels(Some(&seeded), alpha), (Channel::Alpha, Channel::Alpha));
+
+    // The person moves to stable: that stays, over a restart (the seed is not run again over it).
+    DesktopConfig::update_at(&path, |c| {
+        c.release_channel = ReleaseChannel::Stable;
+        (true, ())
+    })
+    .expect("saved");
+    assert!(seed_first_run(&path, alpha));
+    let kept = DesktopConfig::load_from(&path).expect("the file");
+    assert_eq!(kept.release_channel, ReleaseChannel::Stable);
+    assert_eq!(channels(Some(&kept), alpha), (Channel::Stable, Channel::Alpha));
+    assert!(!seed_first_run(&path, None));
 }
 
 #[path = "updates_handoff_tests.rs"]

@@ -28,7 +28,7 @@ pub const PAGE: u64 = 4096;
 /// own check right before `CfExecute`, so a cutter bug fails closed instead of reaching Windows.
 pub fn piece_is_transferable(offset: u64, len: u64, file_size: u64) -> bool {
     len > 0
-        && offset % PAGE == 0
+        && offset.is_multiple_of(PAGE)
         && offset
             .checked_add(len)
             .is_some_and(|end| end <= file_size && (end % PAGE == 0 || end == file_size))
@@ -53,7 +53,7 @@ pub const REQUEST_KEY_DEFAULT: i64 = 0;
 /// withholds a piece that still finds none (and closes the session, [`StreamSink::withheld`]).
 pub const READ_AHEAD_ON_DEFAULT_KEY: bool = false;
 
-/// The streaming kill switch (lead ruling 2026-11-06, desktop #225), read once at engine start
+/// The streaming kill switch, read once at engine start
 /// ([`fetch_route`]). On: a pinned file's fetches are demands on its W2 range session. Off: every
 /// fetch takes the whole-file path (S0/S2 on the PROGRESSIVE root), as before W2. ON in dev builds;
 /// release builds ship it OFF until the robocopy failure (QA F2b) is fixed and natively verified.
@@ -409,7 +409,7 @@ impl<P: PieceOut, R: IdentityRecords> RangeSink for StreamSink<P, R> {
         };
         match self.out.transfer(keys, offset, plain) {
             Ok(()) => {}
-            // Desktop #225 (lead ruling, 2026-11-06): a request that was cancelled, timed out or whose
+            // Desktop #225: a request that was cancelled, timed out or whose
             // key is no longer valid is not corruption. It ends that request; the session leaves if no
             // other request is live, and never poisons: the bytes on disk are authenticated bytes of
             // the recorded version (I4).
@@ -643,7 +643,7 @@ pub fn clear_missing(kind: SweepKind) -> bool {
     kind == SweepKind::ProcessStart
 }
 
-/// Desktop #225 (review P2, lead rulings 2026-11-06): the range session's transport. Two rules on top
+/// Desktop #225: the range session's transport. Two rules on top
 /// of the desktop's own transport:
 ///
 /// - **Demand-first (S4):** a chunk a pending request needs is fetched at once; while one of those is
@@ -654,11 +654,11 @@ pub fn clear_missing(kind: SweepKind) -> bool {
 ///   a storage link is read from the grant replies this transport passes on.
 /// - **The gate:** a fetched chunk reaches the session (and so the sink) only while a request is
 ///   pending. Core reads
-/// ahead with no request pending (between a player's reads, and after its close); with
-/// [`READ_AHEAD_ON_DEFAULT_KEY`] off its chunks wait here, booked against the process budget (S8),
-/// until the next `FETCH_DATA` of the file, and go out under that request's keys. A closing session's
-/// chunks are never released. Only chunk bodies wait (storage GETs and the pinned `/chunks/` route);
-/// discovery and grant requests go through at once.
+///   ahead with no request pending (between a player's reads, and after its close); with
+///   [`READ_AHEAD_ON_DEFAULT_KEY`] off its chunks wait here, booked against the process budget (S8),
+///   until the next `FETCH_DATA` of the file, and go out under that request's keys. A closing session's
+///   chunks are never released. Only chunk bodies wait (storage GETs and the pinned `/chunks/` route);
+///   discovery and grant requests go through at once.
 pub struct GatedIo<I> {
     inner: I,
     book: Arc<Mutex<DemandBook>>,
@@ -1019,7 +1019,7 @@ pub fn covers_whole(ranges: &[(u64, u64)], size: u64) -> bool {
     end >= size
 }
 
-/// Desktop #225 review P1 (lead ruling 2026-11-06): W3 declines an open only when the file can
+/// Desktop #225 review P1: W3 declines an open only when the file can
 /// stream: state.db holds the version its placeholder was minted from (the session's pin, S3; a
 /// legacy file has none), and the direct range route is there (not forced to the API, and the server
 /// offers direct downloads). Any other file gets the whole file through S0/S2, never declined.

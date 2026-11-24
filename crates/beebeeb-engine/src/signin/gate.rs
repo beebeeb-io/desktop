@@ -1,4 +1,4 @@
-//! The rules the auth gate and the sign-in screens share (task 2445, Guus 2026-11-11: "every rule
+//! The rules the auth gate and the sign-in screens share (task 2445, the owner 2026-11-11: "every rule
 //! in Rust, not in TSX"). A non-Tauri caller (a future native UI) calls these directly; the TSX
 //! calls them through the `auth_gate_state` and `auth_sign_in_problem` commands.
 //!
@@ -287,7 +287,8 @@ pub fn decide_gate(logged_in: bool, vault_unlocked: bool, stored_key: StoredKey,
     GateState::Ready
 }
 
-/// No plan yet: the server's `plan_state` says `none`. An older server without
+/// No active plan: the server's `plan_state` says `none` or `lapsed` (trial or subscription ended, payment failed
+/// past grace). An older server without
 /// it: no plan or no quota. Same logic as plan.ts `hasNoPlan`, in Rust.
 pub fn has_no_plan(
     plan_state: Option<&str>,
@@ -297,7 +298,7 @@ pub fn has_no_plan(
 ) -> bool {
     // The server's `plan_state` field (server #422) is the authority when present.
     if let Some(state) = plan_state.filter(|s| !s.is_empty()) {
-        return state == "none";
+        return state == "none" || state == "lapsed";
     }
     // Older server: check the plan name, then the status, then the quota.
     if let Some(p) = plan.filter(|s| !s.is_empty()) {
@@ -448,6 +449,7 @@ mod tests {
     #[test]
     fn has_no_plan_with_plan_state_none() {
         assert!(has_no_plan(Some("none"), None, None, None));
+        assert!(has_no_plan(Some("lapsed"), None, None, None));
         assert!(!has_no_plan(Some("active"), None, None, None));
     }
 

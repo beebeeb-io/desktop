@@ -21,10 +21,10 @@ pub fn more(n: usize, m: usize, title: &str, t: &Theme) -> El {
     el().key(more_key(n, m))
         .role("button")
         .label(format!("More actions for {title}"))
-        .padding(4.0)
+        .padding(crate::theme::scale::space::S4)
         .mx(-4.0)
         .my(-4.0)
-        .radius(6.0)
+        .radius(crate::theme::tokens::radius::MD)
         .center()
         .hover(t.hover)
         .press(t.press)
@@ -53,11 +53,11 @@ pub fn item(
         Some(ic) => el()
             .key(format!("{k}-tile"))
             .size(28.0, 28.0)
-            .radius(7.0)
+            .radius(crate::theme::tokens::radius::CONTROL)
             .fill(t.tile)
             .center()
             .child(kit::glyph(format!("{k}-tile-icon"), ic, 17.0, t.text_secondary)),
-        None => tile(&k, format!("{k}-tile-icon"), kind, 28.0, 7.0, 17.0, t),
+        None => tile(&k, format!("{k}-tile-icon"), title, kind, 28.0, 7.0, 17.0, t),
     };
     let words = col()
         .key("item-text")
@@ -80,8 +80,8 @@ pub fn item(
         .label(title)
         .h(40.0)
         .w_full()
-        .px(10.0)
-        .gap(8.0)
+        .px(crate::theme::scale::space::S10)
+        .gap(crate::theme::scale::space::S8)
         .center_y()
         .fill(if selected {
             super::item_selected(t)
@@ -103,7 +103,7 @@ pub fn list(n: usize, name: &str, items: Vec<El>, t: &Theme) -> El {
     let inner = col()
         .key(format!("list-{n}-items"))
         .w_full()
-        .radius(10.0)
+        .radius(crate::theme::tokens::radius::LG)
         .clip_rounded(10.0)
         .children(items.into_iter().enumerate().flat_map(|(m, item)| {
             // `.kit-item + .kit-item::before`: a hairline over the item's top edge, from the tile's edge on.
@@ -117,13 +117,13 @@ pub fn list(n: usize, name: &str, items: Vec<El>, t: &Theme) -> El {
             rule.into_iter().chain(std::iter::once(item))
         }));
     // The ring is outside the card's box, so the card that carries it does not clip; the items' well does.
-    el().key(format!("list-{n}-wrap")).w_full().px(16.0).child(
+    el().key(format!("list-{n}-wrap")).w_full().px(crate::theme::scale::space::S16).child(
         col()
             .key(format!("list-{n}"))
             .role("list")
             .label(name)
             .w_full()
-            .radius(10.0)
+            .radius(crate::theme::tokens::radius::LG)
             .fill(t.card)
             .box_shadow(kit::ring(kit::HAIR, t.separator))
             .child(inner),

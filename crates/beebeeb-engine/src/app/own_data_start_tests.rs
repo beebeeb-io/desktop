@@ -1,4 +1,4 @@
-//! Slice S2a's tests (plan wave 3: task 2267 and R10 ruling 8 in the engine), at the engine: the upgrade's candidate
+//! Tests of task 2267 in the engine, at the engine: the upgrade's candidate
 //! fixed at the first startup and adopted inside the start, the ownership proof a refused start owes, the Lock and
 //! the sign-out stopping it, an interrupted keep settled before an engine exists, and the card's decisions.
 //!
@@ -17,7 +17,7 @@ use super::*;
 use crate::account::SessionTransition;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, OperationKind, PendingOperation};
@@ -27,6 +27,22 @@ use crate::sync_root_port::SyncRootPort;
 /// Row S4 race: a stop that comes right after the proof was spawned, or before it read the keys.
 #[path = "own_data_start_race_tests.rs"]
 mod race;
+
+/// Row fx-stop-timeout: a stopped proof that does not let go of its client within the stop's wait.
+#[path = "own_data_start_stop_tests.rs"]
+mod stop;
+
+/// w26-account-switch: A signed out, B starts (v5 bug 6).
+#[path = "own_data_start_switch_tests.rs"]
+mod switch;
+
+/// dc-111: "Discard and switch" over another account's unsent files.
+#[path = "account_switch_discard_tests.rs"]
+mod account_switch_discard;
+
+/// dc-RC-b: "Keep them aside" over files the previous account left.
+#[path = "account_switch_keep_aside_tests.rs"]
+mod account_switch_keep_aside;
 
 type TestEngine = Engine<MemoryCredentials>;
 type Answer = std::pin::Pin<Box<dyn std::future::Future<Output = Listing> + Send>>;
@@ -100,7 +116,7 @@ impl Pc {
         };
         let opened = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(
             state_paths::STATE_DIR_OVERRIDE.scope(state_dir, async move {
-                Engine::open(&REAL, config, host, MemoryCredentials::default())
+                Engine::open(&TEST, config, host, MemoryCredentials::default())
             }),
         );
         let engine = Arc::new(opened.expect("the handle opens on a state folder of its own"));
@@ -295,6 +311,8 @@ fn due(db: &StateDb) -> Vec<String> {
 }
 
 /// A node of this account's tree, its name sealed under `key` as every client seals it.
+// The fixture needs the name sealed under a chosen id; the new sealers mint the id themselves.
+#[allow(deprecated)]
 fn node(key: [u8; 32], file_id: &str) -> serde_json::Value {
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(key);
     serde_json::json!({
@@ -378,11 +396,18 @@ fn a_windows_refusal_over_unowned_data_asks_for_the_proof_and_only_an_adoption_s
     let rows = db.list_files().unwrap().len();
     drop(db);
     pc.sign_in(&owner());
-    pc.seams(|seams| seams.listing = Some(answering(Listing::Nodes(tree(MINE)))));
+    // The listing is held until the refused start has been checked: an answer at once lets the proof adopt and start
+    // sync again by itself before the check below runs (it did on a fast Windows PC: "asked Windows nothing: 1 vs 0").
+    let (asked, listing_asked) = mpsc::channel();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    pc.seams(|seams| seams.listing = Some(gated(asked, gate.clone(), tree(MINE))));
     pc.engine.serve_own_data_proofs();
 
     assert_eq!(pc.start(), Err(SyncStartRefused::OtherAccountsData));
     assert_eq!(pc.port.registers(), 0, "the refused start asked Windows nothing");
+    listing_asked.recv_timeout(WAIT).expect("the refusal asked for the proof");
+    assert_eq!(pc.port.registers(), 0, "and nothing starts while the proof waits for its answer");
+    gate.notify_one();
     pc.wait_for_outcomes(1);
 
     assert_eq!(pc.outcomes(), vec!["adopted"]);
@@ -843,7 +868,7 @@ fn every_decision_refuses_another_accounts_data_and_a_moved_turn() {
     assert!(pc.root().join("Trip").is_dir(), "nothing moved");
 }
 
-// ---- the upgrade from a release before the binding (R10 ruling 8; lead rulings 2026-11-15 17:35) ----
+// ---- the upgrade from a release before the binding (The binding rule) ----
 
 /// Ruling (1) (mutant MU1: the startup hook returns at once; MU2: the window's mark not written). The first startup,
 /// with this account's key loaded, fixes the candidate and shuts the window on disk, and writes nothing else: no owner,
@@ -1011,7 +1036,7 @@ fn the_upgrade_candidate_rule() {
     }
 }
 
-/// For the lead's VM 401 rung R-UP-owner: the statements that read, remove and shut a 0.8.25 `state.db`'s owner record
+/// For the lead's the Windows test machine rung R-UP-owner: the statements that read, remove and shut a 0.8.25 `state.db`'s owner record
 /// and adoption window, run on a copy of the release's own image (`tests/fixtures/state-db-0.8.25/closed`).
 #[test]
 fn the_r_up_owner_statements_work_on_a_0_8_25_state_db() {
@@ -1150,4 +1175,56 @@ fn a_replaced_session_stops_a_running_proof_and_its_client_is_released() {
     );
     pc.wait_for_outcomes(1);
     assert_eq!(pc.outcomes(), vec!["stopped"]);
+}
+
+/// dc-144b: a corrupt `state.db` at the startup and the start is moved aside (never deleted), the start goes on past
+/// the binding on a fresh one, and the window is told once.
+#[test]
+fn a_corrupt_state_db_at_start_is_moved_aside_the_start_goes_on_and_the_notice_is_shown_once() {
+    let pc = Pc::new();
+    std::fs::write(pc.state_db(), vec![0xABu8; 8192]).unwrap();
+    pc.sign_in(&owner());
+
+    pc.engine.fix_upgrade_candidate_at_startup();
+    let aside = pc.engine.config.state_dir.join("state.db.corrupt");
+    assert!(aside.exists(), "moved aside at the startup, never deleted");
+    assert_eq!(std::fs::read(&aside).unwrap(), vec![0xABu8; 8192]);
+
+    assert_eq!(
+        pc.start(),
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) }),
+        "the start goes past the binding to the registration"
+    );
+    assert_eq!(
+        pc.db().owner().unwrap(),
+        Some(owner()),
+        "a fresh state.db, bound to this account"
+    );
+    assert_eq!(
+        pc.engine.take_local_list_rebuilt_notice(),
+        Some(super::LOCAL_LIST_REBUILT_NOTICE)
+    );
+    assert_eq!(pc.engine.take_local_list_rebuilt_notice(), None, "said once");
+}
+
+/// dc-144b: a state.db that goes corrupt while the app runs is moved aside by the next start itself.
+#[test]
+fn a_corrupt_state_db_found_by_a_start_is_moved_aside_and_the_start_goes_on() {
+    let pc = Pc::new();
+    pc.sign_in(&owner());
+    pc.engine.fix_upgrade_candidate_at_startup();
+    assert_eq!(
+        pc.engine.take_local_list_rebuilt_notice(),
+        None,
+        "nothing to say without a move"
+    );
+    std::fs::write(pc.state_db(), vec![0xCDu8; 8192]).unwrap();
+
+    assert_eq!(
+        pc.start(),
+        Err(SyncStartRefused::RegistrationFailed { code: Some(CODE) })
+    );
+    assert!(pc.engine.config.state_dir.join("state.db.corrupt").exists());
+    assert!(pc.engine.take_local_list_rebuilt_notice().is_some());
+    assert_eq!(pc.engine.take_local_list_rebuilt_notice(), None);
 }

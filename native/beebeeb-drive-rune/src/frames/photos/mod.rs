@@ -10,8 +10,21 @@ mod chrome;
 mod grid;
 mod icons;
 mod overlay;
+mod route;
+mod route_chrome;
+#[cfg(test)]
+mod route_chrome_tests;
+mod route_items;
+mod route_original;
+mod route_save_send;
+mod route_share;
+#[cfg(test)]
+#[path = "route_share_tests.rs"]
+mod route_share_tests;
 mod session;
 pub mod source;
+#[cfg(test)]
+mod original_tests;
 #[cfg(test)]
 mod tests;
 mod viewer;
@@ -21,6 +34,7 @@ use std::collections::BTreeMap;
 use rune::{Cx, El, Key, KeyEvent, Tx};
 
 use crate::State;
+use crate::frames::files::actions_data::LinkExpiry;
 use crate::shell::app::{Event, Route, Section};
 use crate::theme::tokens;
 use source::{FixturePhotos, Kind, Photo, PhotoId, PhotosSource, SourceRef, Viewing};
@@ -48,10 +62,10 @@ pub enum Intent {
     Rename(PhotoId),
     Duplicate(PhotoId),
     /// Copy link in Share (DW-0107 says so afterwards).
+    /// The password, when `password`, is in `Ui::share_password`: an intent never carries a secret.
     CopyLink {
         id: PhotoId,
-        can_edit: bool,
-        days: Option<u32>,
+        expires: LinkExpiry,
         password: bool,
     },
     /// Link expires, pressed: the choices are the Files share dialog's.
@@ -69,6 +83,11 @@ pub enum Intent {
     RememberAcross(usize),
     /// Play or pause the video (DW-0611).
     PlayPause(PhotoId),
+    /// The open photo, shown in its folder on this PC with it selected (`frames::show_in_folder`).
+    ShowInFolder(PhotoId),
+    /// w31: a photo this PC cannot show (HEIC, RAW), opened in the app the system has for it
+    /// (`frames::open_file::open_outside_app`).
+    OpenInOsApp(PhotoId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,10 +114,12 @@ pub struct SourcesDraft {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShareDraft {
-    pub can_edit: bool,
-    /// Days until the link expires; `None`: never.
-    pub days: Option<u32>,
+    pub expires: LinkExpiry,
+    /// The expiry choices are open.
+    pub menu: bool,
     pub password: bool,
+    /// Copy link was pressed with Password on and nothing typed.
+    pub password_missing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +127,8 @@ pub enum Dialog {
     Sources(SourcesDraft),
     Share(ShareDraft),
     Details,
+    /// Rename: the name dialog of an open photo's menu (`route_items::rename`).
+    Rename(Box<route_items::rename::Draft>),
 }
 
 /// Which rendition of an open photo shows.
@@ -147,6 +170,8 @@ pub enum Toast {
     NotYet,
     /// Something asked for could not be done, in these words (Add a folder…, Move…).
     Words(&'static str),
+    /// The end of a copy saved from Photos, in the words the save gave (they name no file).
+    Said(String),
 }
 
 /// One row of the grid: a day's heading, if this is its first row, and up to `across` tiles.
@@ -170,6 +195,8 @@ pub struct Ui {
     pub cursor: Option<(usize, usize)>,
     pub menu: Option<OpenMenu>,
     pub dialog: Option<Dialog>,
+    /// The password of the Share dialog's link: a secure field, wiped when the dialog closes and once Copy link used it.
+    pub share_password: rune::TextEdit,
     pub viewer: Option<Viewer>,
     /// The video this window started in the shell's player, and its handle (`PhotosSource::play_video`). The stage
     /// is live only for this item (`viewer::live_for`); it is stopped when the item is left.
@@ -198,6 +225,7 @@ impl Ui {
             cursor: None,
             menu: None,
             dialog: None,
+            share_password: rune::TextEdit::new("").secure(),
             viewer: None,
             playing: None,
             playing_file: None,
@@ -237,6 +265,13 @@ impl Ui {
         }
     }
 
+    /// Where a photo is in the timeline as it shows now: (day, index). `None`: not in it.
+    fn place_of(&self, id: PhotoId) -> Option<(usize, usize)> {
+        (0..self.days.len())
+            .flat_map(|day| (0..self.days[day].len).map(move |index| (day, index)))
+            .find(|&(day, index)| self.source.photo(self.filter, day, index).is_some_and(|p| p.id == id))
+    }
+
     pub fn set_width(&mut self, width: f32) {
         if (width - self.width).abs() > 0.25 && width > 0.0 {
             self.width = width;
@@ -247,6 +282,41 @@ impl Ui {
     pub fn tile_side(&self) -> f32 {
         let n = self.across as f32;
         ((self.width - 32.0 - (n - 1.0) * 3.0) / n).max(8.0)
+    }
+
+    /// A photo's place (1-based) among every photo of the timeline, not only the lines in view.
+    pub fn position_of(&self, day: usize, index: usize) -> usize {
+        self.days.iter().take(day).map(|d| d.len).sum::<usize>() + index + 1
+    }
+
+    /// How many photos the timeline holds.
+    pub fn total(&self) -> usize {
+        self.days.iter().map(|d| d.len).sum()
+    }
+
+    /// Home, End, PageUp and PageDown: the first or last tile, or a screen of lines up or down.
+    fn jump_cursor(&mut self, key: &Key) {
+        if self.lines.is_empty() {
+            return;
+        }
+        let at = self.cursor.and_then(|(day, index)| {
+            self.lines.iter().position(|l| l.day == day && l.start <= index && index < l.start + l.len)
+        });
+        let page = 5isize;
+        let line = match key {
+            Key::Home => 0,
+            Key::End => self.lines.len() - 1,
+            Key::PageUp => (at.unwrap_or(0) as isize - page).max(0) as usize,
+            _ => (at.unwrap_or(0) as isize + page).min(self.lines.len() as isize - 1) as usize,
+        };
+        let l = self.lines[line];
+        let column = match (key, self.cursor, at) {
+            (Key::Home, ..) => 0,
+            (Key::End, ..) => l.len - 1,
+            (_, Some((_, index)), Some(from)) => (index - self.lines[from].start).min(l.len - 1),
+            _ => 0,
+        };
+        self.cursor = Some((l.day, l.start + column));
     }
 
     pub fn photo_at(&self, day: usize, index: usize) -> Option<Photo> {
@@ -458,10 +528,12 @@ impl Ui {
     pub fn open_share(&mut self) {
         if self.viewer.is_some() {
             self.menu = None;
+            self.wipe_share_password();
             self.dialog = Some(Dialog::Share(ShareDraft {
-                can_edit: false,
-                days: Some(30),
+                expires: LinkExpiry::default(),
+                menu: false,
                 password: false,
+                password_missing: false,
             }));
         }
     }
@@ -476,6 +548,21 @@ impl Ui {
     /// Cancel, Esc, or Done where Done changes nothing (Details).
     pub fn close_dialog(&mut self) {
         self.dialog = None;
+        self.wipe_share_password();
+    }
+
+    /// Forget what was typed as a link's password.
+    pub fn wipe_share_password(&mut self) {
+        self.share_password = rune::TextEdit::new("").secure();
+    }
+
+    /// The Password switch: on shows the field; off wipes what was typed.
+    pub fn toggle_share_password(&mut self) {
+        if let Some(Dialog::Share(draft)) = &mut self.dialog {
+            draft.password = !draft.password;
+            draft.password_missing = false;
+        }
+        self.wipe_share_password();
     }
 
     /// The dialog's first button: Done in Photo sources and Details, Copy link in Share.
@@ -496,18 +583,24 @@ impl Ui {
                 }
                 self.relayout();
             }
-            Some(Dialog::Share(draft)) => {
+            Some(Dialog::Share(mut draft)) => {
+                // A link that should ask for a password never goes out without one (as in Files).
+                if draft.password && self.share_password.text.trim().is_empty() {
+                    draft.password_missing = true;
+                    self.dialog = Some(Dialog::Share(draft));
+                    return;
+                }
                 if let Some(viewer) = &self.viewer {
                     let id = viewer.id;
                     self.ask(Intent::CopyLink {
                         id,
-                        can_edit: draft.can_edit,
-                        days: draft.days,
+                        expires: draft.expires,
                         password: draft.password,
                     });
                 }
             }
-            Some(Dialog::Details) | None => {}
+            // Its own button and Enter in its field ask for the rename (`route_items::rename::commit`).
+            Some(Dialog::Rename(_)) | Some(Dialog::Details) | None => {}
         }
     }
 
@@ -529,7 +622,7 @@ impl Ui {
     pub fn close_viewer(&mut self) {
         self.stop_playing();
         if let Some(viewer) = self.viewer.take()
-            && matches!(viewer.original, Original::Downloading { .. })
+            && viewer.original != Original::Preview
         {
             self.ask(Intent::StopOriginal(viewer.id));
         }
@@ -567,11 +660,15 @@ impl Ui {
         if viewer.id == id && viewer.gone.is_none() {
             return;
         }
-        // A download carries on in the background (DW-0605b); the next photo shows its preview.
+        // The original is memory only and belongs to the open photo: another photo stops and wipes it.
+        if viewer.original != Original::Preview {
+            self.source.stop_original(viewer.id);
+        }
         // A video this window started stops when another item is shown.
         if let Some((_, handle)) = self.playing.take() {
             handle.stop(crate::media::StopReason::Closed);
         }
+        self.playing_file = None;
         viewer.id = id;
         viewer.original = Original::Preview;
         viewer.playing = true;
@@ -583,6 +680,7 @@ impl Ui {
     pub fn show_preview(&mut self) {
         let Some(viewer) = &mut self.viewer else { return };
         let was = std::mem::replace(&mut viewer.original, Original::Preview);
+        // A whole original already here is wiped when the viewer closes or another photo shows (memory only).
         if matches!(was, Original::Downloading { .. }) {
             let id = viewer.id;
             self.ask(Intent::StopOriginal(id));
@@ -614,8 +712,29 @@ impl Ui {
 
     /// Stops the video this window started, if one is held (Esc, close, another item).
     pub fn stop_playing(&mut self) {
+        self.playing_file = None;
         if let Some((_, handle)) = self.playing.take() {
             handle.stop(crate::media::StopReason::Closed);
+        }
+    }
+
+    /// The window's poll for the video it started: the player names its file when it has opened it, which can be after
+    /// `play_pause` returned. Until then the stage has no file to read the state of and shows its own picture; this
+    /// takes the file the moment the player's state names it. `(changed, waiting)`: `waiting` is true only while the
+    /// player has said nothing yet, so the poll ends on the player's own state and never runs on after it.
+    pub fn settle_playing(&mut self) -> (bool, bool) {
+        let Some((_, handle)) = &self.playing else {
+            return (false, false);
+        };
+        if self.playing_file.is_some() {
+            return (false, false);
+        }
+        match handle.state() {
+            Some(state) => {
+                self.playing_file = Some(state.file_id);
+                (true, false)
+            }
+            None => (false, true),
         }
     }
 
@@ -663,6 +782,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     if !s.photos.source.wired() {
         return crate::shell::placeholder::window(s, cx, crate::shell::registry::group_for(&s.shell.app));
     }
+    cx.web_focus();
     let t = tokens::theme(cx.system_dark());
     let ui = &s.photos;
     let mut front = Vec::new();
@@ -673,8 +793,16 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         front.push(overlay::scrim(&t));
         front.push(overlay::dialog(ui, dialog, cx.env().scale, &t));
     }
+    if let Some(menu) = overlay::expiry_menu(ui, &t) {
+        front.push(menu);
+    }
     // The folder dialog of Files, opened by Add a folder… / Move…: its own layer, in front of all of it.
     front.extend(crate::frames::files::dialogs::layer(s, &t));
+    // "Link copied" from the engine's source is said by Files' poll, in Files' toast: over Photos it is drawn here.
+    if let Some(toast) = session::link_toast(s) {
+        let viewing = ui.viewing().is_some();
+        front.push(overlay::toast_layer(&toast, if viewing { 118.0 } else { 24.0 }, !viewing, &t));
+    }
     match ui.viewing() {
         Some(viewing) => chrome::window(
             s,
@@ -693,7 +821,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             grid::bar(ui, &t),
             ui.selecting.then(|| grid::bulk(ui, &t)),
             // While there is no library: why, in words; never an empty library that is not one.
-            session::not_here_body(ui, &t).unwrap_or_else(|| grid::body(ui, &t)),
+            // w31: nor "No photos yet" while the account's file list has not arrived on this PC.
+            session::not_here_body(ui, &t).unwrap_or_else(|| grid::body(ui, grid::list_state(s), &t)),
             &ui.source.origin(),
             front,
         ),
@@ -778,6 +907,21 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 ui.trash_open();
                 true
             }
+            Key::Function(2) => {
+                if let Some(id) = ui.viewer.as_ref().map(|v| v.id) {
+                    ui.ask(Intent::Rename(id));
+                }
+                true
+            }
+            // The menu key and Shift+F10 open More, the photo's menu.
+            Key::ContextMenu => {
+                ui.toggle_menu(Menu::More);
+                true
+            }
+            Key::Function(10) if ev.mods.shift => {
+                ui.toggle_menu(Menu::More);
+                true
+            }
             // Space closes a photo and plays or pauses a video (DW-0605, DW-0611).
             _ if space && video => {
                 ui.play_pause();
@@ -791,6 +935,41 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         };
     }
     match ev.key {
+        Key::Home | Key::End | Key::PageUp | Key::PageDown if plain => {
+            ui.jump_cursor(&ev.key);
+            true
+        }
+        // Shift+arrow extends: the tile moved onto is checked. Ctrl+Space toggles the tile under the cursor.
+        Key::Left | Key::Right | Key::Up | Key::Down if ev.mods.shift && !ev.mods.cmd && !ev.mods.alt => {
+            let (dx, dy) = match ev.key {
+                Key::Left => (-1, 0),
+                Key::Right => (1, 0),
+                Key::Up => (0, -1),
+                _ => (0, 1),
+            };
+            if ui.cursor.is_none() {
+                ui.move_cursor(0, 0);
+            }
+            if let Some((day, index)) = ui.cursor
+                && !ui.selected.contains_key(&ui.photo_at(day, index).map_or(PhotoId(u64::MAX), |p| p.id))
+            {
+                ui.check_tile(day, index);
+            }
+            ui.move_cursor(dx, dy);
+            if let Some((day, index)) = ui.cursor
+                && !ui.selected.contains_key(&ui.photo_at(day, index).map_or(PhotoId(u64::MAX), |p| p.id))
+            {
+                ui.check_tile(day, index);
+            }
+            true
+        }
+        _ if space && ev.mods.ctrl => match ui.cursor {
+            Some((day, index)) => {
+                ui.check_tile(day, index);
+                true
+            }
+            None => false,
+        },
         Key::Escape if ui.selecting => {
             ui.end_selecting();
             true

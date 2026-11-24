@@ -10,7 +10,7 @@ use crate::account::SessionTransition;
 use crate::account_binding::Identity;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
-use crate::identity::REAL;
+use crate::identity::TEST;
 use crate::session::Session;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
@@ -93,7 +93,7 @@ fn rig() -> Rig {
         state_dir,
         api_base: fake.base.clone(),
     };
-    let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
+    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens"));
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("sync");
     std::fs::create_dir_all(&root).unwrap();
@@ -161,7 +161,7 @@ fn only_conflict_rows_are_listed_with_both_sides_read() {
 fn nothing_is_asked_of_the_server_when_no_file_waits() {
     let rig = rig();
     {
-        let db = StateDb::open(&rig.root.parent().unwrap().join("state.db")).unwrap();
+        let db = StateDb::open(rig.root.parent().unwrap().join("state.db")).unwrap();
         db.set_status(WAITING, FileStatus::Local).unwrap();
         db.set_status(GONE, FileStatus::Local).unwrap();
     }
@@ -331,9 +331,9 @@ fn names_in(root: &std::path::Path) -> Vec<String> {
     names
 }
 
-/// Review of desktop#423, P2 #8: a Keep there that fails (here the server has no bytes to send for the file) leaves
+/// A Keep there that fails (here the server has no bytes to send for the file) leaves
 /// the sync folder as it was, every time it is tried: no safety copy stays behind to be uploaded as a new file. The
-/// copy is kept in the engine's own folder (lead decision 2026-11-14: data safety over disk), one per file.
+/// copy is kept in the engine's own folder, one per file.
 #[test]
 fn a_keep_there_that_fails_leaves_the_sync_folder_as_it_was_every_time() {
     let rig = rig();
@@ -341,7 +341,7 @@ fn a_keep_there_that_fails_leaves_the_sync_folder_as_it_was_every_time() {
     for _ in 0..2 {
         // A failed download marks the row; the file waits for a choice again when the conflict is found again.
         put(
-            &StateDb::open(&rig._dir.path().join("state.db")).unwrap(),
+            &StateDb::open(rig._dir.path().join("state.db")).unwrap(),
             WAITING,
             "Invented draft.txt",
             FileStatus::Conflict,
@@ -371,7 +371,7 @@ fn a_keep_there_that_fails_leaves_the_sync_folder_as_it_was_every_time() {
     );
 }
 
-/// Review of desktop#424, P1: a Keep there that fails never deletes an EARLIER kept copy. Two failed tries with two
+/// A Keep there that fails never deletes an EARLIER kept copy. Two failed tries with two
 /// different edits of one file leave both edits on disk (one copy per different edit); the same edit tried twice is
 /// one copy.
 #[test]
@@ -379,7 +379,7 @@ fn two_failed_keep_there_tries_with_different_edits_keep_both_edits() {
     let rig = rig();
     let try_keep_there = |rig: &Rig| {
         put(
-            &StateDb::open(&rig._dir.path().join("state.db")).unwrap(),
+            &StateDb::open(rig._dir.path().join("state.db")).unwrap(),
             WAITING,
             "Invented draft.txt",
             FileStatus::Conflict,
@@ -410,7 +410,7 @@ fn two_failed_keep_there_tries_with_different_edits_keep_both_edits() {
 
 const WITH_BYTES: &str = "a0000000-0000-4000-8000-000000000904";
 
-/// Review of desktop#423, P2 #8: Keep there that works ends as Keep there, not as Keep both: the sync folder holds
+/// Keep there that works ends as Keep there, not as Keep both: the sync folder holds
 /// the server's version under the file's name and no second file (which would be uploaded as a new one).
 #[test]
 fn keep_there_never_leaves_a_second_file_in_the_sync_folder() {
@@ -419,7 +419,7 @@ fn keep_there_never_leaves_a_second_file_in_the_sync_folder() {
         .add_file_with_content(WITH_BYTES, None, "Invented plan.txt", b"the server's version");
     std::fs::write(rig.root.join("Invented plan.txt"), b"this PC's edit, never sent").unwrap();
     {
-        let db = StateDb::open(&rig._dir.path().join("state.db")).unwrap();
+        let db = StateDb::open(rig._dir.path().join("state.db")).unwrap();
         put(&db, WITH_BYTES, "Invented plan.txt", FileStatus::Conflict);
     }
     let before = names_in(&rig.root);

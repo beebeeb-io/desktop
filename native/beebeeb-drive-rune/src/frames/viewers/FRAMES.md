@@ -40,7 +40,7 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
 | DW-1514 | A CSV or TSV as a table; a selected cell; sort by a column | built; open reds: the toolbar's |
 | DW-1515 | An archive's list, without unpacking; a folder's row steps into it | built; open reds: the toolbar's |
 | DW-1503 | The audio player with the folder as the queue | built; open reds: the toolbar's |
-| DW-1504 | Playback in Windows' media controls (Windows draws Quick Settings) | not built |
+| DW-1504 | Playback in Windows' media controls (Windows draws Quick Settings) | built (`media/os_controls.rs`, D-MED-8; no artwork in 0.9.0) |
 | DW-1507e | A text document in the editor's frame | built as a frame: see "The office editor's frame" |
 
 ## The photo, audio, PDF, table and archive viewers (lane b19-viewers, 2026-11-12)
@@ -93,14 +93,16 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
 ## The office editor's frame: a text document (lane gbb-d, 2026-11-14)
 
 The FRAME of the editor, drawn from `ViewerSource` (`office.rs`, `office_over.rs`; the board's samples in
-`office_board.rs`, the gate's keys in `scripts/keymap-office.js`). No editing engine stands behind it: a save is asked
-of `ViewerSource::save_document`, a conflict's answer of `resolve_document`, the command search of `commands`; the
-trait's defaults answer "not saved" and "nothing found", and the frame draws exactly that. Every other control says
-"Not built yet". Gate at the lane's last run, light and dark: geometry 0 failing in 18 of 18 runs.
+`office_board.rs`, the gate's keys in `scripts/keymap-office.js`). When this lane wrote it, no editing engine stood
+behind it; one does now (office epic, 2026-11-16 to 18): `frames::office::edit` holds the live editor for Word, Sheets
+and Slides on the desktop-office engines, and `engine_host::viewer_office` runs the helper, the save, the recovery blobs
+and the lock snapshot. A save is asked of `ViewerSource::save_document`, a conflict's answer of `resolve_document`, the
+command search of `commands`. The board's sample document (a window with no engine) still answers "not saved" and
+"nothing found", and its other controls say "Not built yet". Gate at the lane's last run, light and dark: geometry 0 failing in 18 of 18 runs.
 
 | Frame | What it is | State |
 |---|---|---|
-| DW-1507e | A text document: ribbon, outline, page, a selection with its tools, status line | built; open: light `pg-3`, `rib`, `rib-tools` (tile), dark `float` (edge) |
+| DW-1507e | A text document: ribbon, outline, page, a selection with its tools, status line | built (live: `office/edit/word.rs`, `word_ribbon.rs`, `word_insert.rs`); open: light `pg-3`, `rib`, `rib-tools` (tile), dark `float` (edge) |
 | DW-1511 | An older Word file (.doc): the banner, saved in its own format | built; open: light `rib`, `rib-tools` (tile) and 2 frame tiles; dark 0 |
 | DW-1550 | The Insert tab, a table on the page | built; open: `crumb-dot` (edge) in both themes |
 | DW-1551 | The command search (Ctrl+K) with "head" typed | built; open: light `rt-11`, `ft-0`, `rt-12`; dark `pal-caret`, `ol-4-row`, `ol-6-row`, `rt-11` (covered by the search) |
@@ -109,9 +111,12 @@ trait's defaults answer "not saved" and "nothing found", and the frame draws exa
 | DW-1554 | Someone else saved first: four ways on | built; open: light `crumb-dot`; dark 0 |
 | DW-1556 | The editor did not start | built; open: text `empty-text` both themes (the export records the paragraph's colour, the words inside are a shade darker and drawn so; pixels 0 on it), light `status-dot` (edge) |
 | DW-1234 | Commands and keyboard shortcuts over the document | built (scene in `tray/`); open: `ol-close` both themes, dark `ol-4-row` to `ol-6-row` (covered by the dialog) |
-| DW-1555, DW-1557 | "Preparing the editor" (a 257 MB download) and the licence notice of a bundled office suite | NOT built, held for a ruling: the board draws a downloaded third-party editor, the merged contract builds on in-house engines with nothing to download |
-| DW-1508, DW-1509, DW-1559, DW-1560, DW-1561 | Sheets and Slides | NOT built |
-| DW-1558, DW-1562 | New document from a template; Open With | DW-1558 NOT built (its four templates differ from the contract's "Blank only": needs a ruling). DW-1562 built in the Files window (D-OV-14: `files/open_with_menu.rs`, scene `office/open_with.rs`), offered once Word's switch is on (`kinds::office_route`); the board's DW-1562 menu runs to Move to Trash like DW-0402 (R-OW2 (a), board fixed and recaptured at O-CP3) |
+| DW-1555 | "Preparing the editor" (a 257 MB download) | retired: the engines ship inside the app, nothing downloads (no scene) |
+| DW-1557 | The licence notice (About, in the status bar) | built (`office/dialogs.rs`, scene `viewers::scene_licence`; the words say viewer and editor, and the MPL-2.0 media crates are listed in `THIRD-PARTY-NOTICES.md`) |
+| DW-1508e, DW-1559 | A workbook in the editor; the Data tab (sort, filter, jump to a cell) | built (`office/edit/sheet_ribbon.rs`; grid state in `edit/sheet.rs`); gate numbers: see the vm-recording run |
+| DW-1509e, DW-1560 | A deck in the editor; the slide's layout (the Design tab) | built (`office/edit/slide_ribbon.rs`, `edit/slide.rs`); gate numbers: see the vm-recording run |
+| DW-1508, DW-1509, DW-1561 | Sheets, Slides (viewer) and Present | built (`office/sheets.rs`, `office/slides.rs`) |
+| DW-1558, DW-1562 | New document from a template; Open With | DW-1558 built (`office/edit/new_document.rs`; the New menu's "New document…" and New file's Continue on an office type open it; Blank only, as contract Q7 recommended). DW-1562 built in the Files window (D-OV-14: `files/open_with_menu.rs`, scene `office/open_with.rs`), offered once Word's switch is on (`kinds::office_route`); the board's DW-1562 menu runs to Move to Trash like DW-0402 (R-OW2 (a), board fixed and recaptured at O-CP3) |
 
 Why the open lines stay:
 - `rib` / `rib-tools` (light), `pg-3`: the board's Italic "I" is a serif italic the app does not ship, and a text
@@ -244,3 +249,11 @@ when a document with changes is left (there is no edit to lose until an editor e
 ## DW-0611, the video player (lane mb2-surface, 2026-11-15)
 
 - **D-MED-4:** Rune draws the player controls in the board's geometry; the board says Windows' own player.
+
+## Wired since (waves 16 to 18, 2026-11)
+
+The open file's own controls act: Share, Version history, Move to Trash, Report a problem, Free up space, Keep on this PC,
+Open in Files, the links and New (w17-viewer-actions); Save a copy and Download to, with progress
+(w17-viewer-save, `shell/viewer_save.rs`; the Save dialog is `Platform::pick_save_path`). Edit on a file the editor does not take says why in a toast
+(`why_not_edit`). DW-1504 is `media/os_controls.rs`.
+Edit in Sheets and Open in another app are still not taken by the shell.

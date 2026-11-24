@@ -739,7 +739,6 @@ fn a_kind_without_a_viewer_here_is_said_so_and_nothing_is_downloaded() {
         ("Invented take.m4a", "Audio"),
         ("Invented export.zip", "Archive"),
         ("Invented shot.arw", "Picture"),
-        ("Invented shot.heic", "Picture"),
         // An Office file opens in the Office viewer since O-CP3 (`viewer_office_tests`).
         ("Invented letter.odt", "File"),
         ("Invented sheet.numbers", "File"),
@@ -757,6 +756,12 @@ fn a_kind_without_a_viewer_here_is_said_so_and_nothing_is_downloaded() {
         // A list's Open leaves such a file to its own app.
         assert!(!source.previews(name), "{name}");
     }
+    // A HEIC is said as that, opens in the viewer, and is not downloaded either.
+    fake.put("f-heic", "Invented shot.heic", b"some invented bytes");
+    let mut source = Source::on(fake.clone());
+    let file = source.open("f-heic").expect("it is a file of the account");
+    assert_eq!(file.body, Body::NotPreviewable(NoPreview::Heic));
+    assert!(source.previews("Invented shot.heic"));
     assert!(fake.s().fetches.is_empty(), "nothing was downloaded");
     let source = Source::on(fake.clone());
     for shown in ["a.txt", "a.md", "a.csv", "a.PNG", "a.jpeg", "a.gif", "a.webp", "a.log"] {

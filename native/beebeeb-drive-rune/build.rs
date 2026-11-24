@@ -4,6 +4,8 @@
 
 use std::process::Command;
 
+mod build_version;
+
 fn git(args: &[&str]) -> Option<String> {
     let out = Command::new("git").args(args).output().ok()?;
     out.status
@@ -64,8 +66,66 @@ fn emit_core_rev() {
     }
 }
 
+/// Windows targets only: the exe's version resource and icon (what Explorer, the uninstall entry and the installer's
+/// release check read). `BEEBEEB_RELEASE_VERSION` when set, else the crate version (a test build). The resource
+/// compiler is `embed-resource`, a build dependency of a Windows host (the release and CI builds are Windows hosts).
+fn emit_windows_resource() {
+    println!("cargo:rerun-if-changed=build_version.rs");
+    println!("cargo:rerun-if-changed=../../packaging/windows/icon.ico");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    embed_windows_resource();
+}
+
+#[cfg(windows)]
+fn embed_windows_resource() {
+    let release = std::env::var("BEEBEEB_RELEASE_VERSION").ok();
+    let crate_version = std::env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
+    let version = build_version::version_string(release.as_deref(), &crate_version);
+    let icon = std::fs::canonicalize("../../packaging/windows/icon.ico")
+        .expect("packaging/windows/icon.ico is missing: the exe's icon");
+    let icon = icon.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+    let rc = build_version::render_rc(&version, "beebeeb-drive.exe", &icon);
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR")).join("beebeeb.rc");
+    std::fs::write(&out, rc).expect("writing the version resource source");
+    embed_resource::compile(&out, embed_resource::NONE)
+        .manifest_required()
+        .expect("embedding the version resource");
+}
+
+#[cfg(not(windows))]
+fn embed_windows_resource() {
+    println!(
+        "cargo:warning=building for Windows from a non-Windows host: the exe carries no version resource, so a release installer would refuse it"
+    );
+}
+
+/// The source offer's two addresses, derived here so no source link is typed by hand: the commit of desktop-office
+/// that `../beebeeb-office-render/Cargo.lock` pins (`BEEBEEB_OFFICE_REV`) and the version the desktop release tag
+/// carries (`BEEBEEB_SOURCE_VERSION`: the release version, else the crate version).
+fn emit_source_offer() {
+    let lock = "../beebeeb-office-render/Cargo.lock";
+    println!("cargo:rerun-if-changed={lock}");
+    println!("cargo:rerun-if-env-changed=BEEBEEB_RELEASE_VERSION");
+    let text = std::fs::read_to_string(lock).expect("reading the office-render lock");
+    let marker = "desktop-office?rev=";
+    let at = text.find(marker).expect("the office-render lock has a desktop-office git source") + marker.len();
+    let rev: String = text[at..].chars().take_while(char::is_ascii_hexdigit).collect();
+    assert!(rev.len() == 40, "the desktop-office rev in the lock is not a full commit: {rev:?}");
+    println!("cargo:rustc-env=BEEBEEB_OFFICE_REV={rev}");
+    let release = std::env::var("BEEBEEB_RELEASE_VERSION").ok().filter(|v| !v.trim().is_empty());
+    let version = release.unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION"));
+    println!("cargo:rustc-env=BEEBEEB_SOURCE_VERSION={}", version.trim());
+}
+
 fn main() {
+    // The optimisation level, for the large-account budget test: its budgets are an optimised build's
+    // (`tests/large_account_budget.rs`); an unoptimised `cargo test` prints the numbers and does not hold them.
+    println!("cargo:rustc-env=BEEBEEB_OPT_LEVEL={}", std::env::var("OPT_LEVEL").unwrap_or_default());
+    emit_source_offer();
     emit_app_identifier();
+    emit_windows_resource();
     emit_core_rev();
     println!("cargo:rerun-if-env-changed=BEEBEEB_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=BEEBEEB_BUILD_KIND");

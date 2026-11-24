@@ -18,50 +18,19 @@ use super::source::BoardDrive;
 use crate::State;
 use crate::frames::global::grid::ThumbSource;
 use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary};
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::Theme;
 use crate::ui::{global_icons, grid_tiles, kit};
 use rune::{Color, El, Tx, el};
 
-/// Names up to this many characters are written whole (the board's `midCut`).
-pub const NAME_MAX: usize = 58;
-
-/// A name longer than [`NAME_MAX`] characters, shortened in the middle: its first 32 characters,
-/// an ellipsis, its last 23. `None`: it is written whole.
-pub fn shortened(name: &str) -> Option<String> {
-    let chars: Vec<char> = name.chars().collect();
-    if chars.len() <= NAME_MAX {
-        return None;
-    }
-    // ceil(58 x 0.55) and floor(58 x 0.4)
-    let (head, tail) = (32, 23);
-    let mut out: String = chars[..head].iter().collect();
-    out.push('\u{2026}');
-    out.extend(&chars[chars.len() - tail..]);
-    Some(out)
-}
-
-/// A row's name (`.mk-row`'s name): shortened in the middle when it is long, the whole name under
-/// the pointer.
-pub fn name_label(k: &str, name: &str, t: &Theme) -> El {
-    let short = shortened(name);
-    let label = kit::label(
-        format!("{k}-name"),
-        short.clone().unwrap_or_else(|| name.to_string()),
-        type_::LIST_ITEM,
-        t.text,
-    )
-    .truncate_middle()
-    .min_w(0.0);
-    match short {
-        Some(_) => label.help(name),
-        None => label.help_when_truncated(name),
-    }
-}
+#[cfg(test)]
+pub use crate::ui::file_row::{NAME_MAX, shortened};
 
 /// A file's size in the list: one decimal under 10 ("4.0 MB"), and no ".0" from 10 up ("112 MB").
 pub fn size_words(bytes: i64) -> String {
     let words = crate::source::format_size(bytes);
-    match words.split_once(".0 ") {
+    // ".0" or ",0", as the regional format writes it (`ui::region`).
+    let zero = format!("{}0 ", crate::ui::region::current().decimal);
+    match words.split_once(zero.as_str()) {
         Some((whole, unit)) if whole.len() >= 2 => format!("{whole} {unit}"),
         _ => words,
     }
@@ -121,7 +90,9 @@ impl State {
         self.select_only(row);
         // A grid's tiles have their own keys.
         if crate::frames::global::grid::on(self) {
-            tx.scroll_into_view(format!("grid-{row}"));
+            // Tiles are realised by line (dc-038): scroll to the line's key, the tile itself may not exist yet.
+            let first = row - row % self.global.grid.columns.max(1);
+            tx.scroll_into_view(format!("grid-line-{}", self.listing.items[first].id));
         } else {
             tx.scroll_into_view(format!("row-{}", row.wrapping_sub(self.actions.board_first_row)));
         }
@@ -141,7 +112,7 @@ pub fn picture_tile(s: &State, k: &str, item: &DriveItem, t: &Theme) -> Option<E
     let mut tile = grid_tiles::sample(
         el().key(format!("{k}-tile"))
             .size(22.0, 22.0)
-            .radius(6.0)
+            .radius(crate::theme::tokens::radius::MD)
             .clip_rounded(6.0)
             .center(),
         sample,

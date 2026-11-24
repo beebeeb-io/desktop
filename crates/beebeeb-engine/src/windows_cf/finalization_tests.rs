@@ -112,7 +112,7 @@ fn callbacks(prefix: &str) -> usize {
 }
 
 /// Task 2284 (CI fix): the refusal half of a dehydration test. Whether the data open of a dehydrated placeholder
-/// reaches the provider at all depends on the platform: on the Legion (probe K0) the open alone asks for the file,
+/// reaches the provider at all depends on the platform: on the Windows test machine (probe K0) the open alone asks for the file,
 /// and the no-fetch scope refuses it (os 389); on the GitHub Windows runner the open did not call FETCH_DATA (run
 /// 41032979318), so there was nothing to refuse. Either way nothing may be served (the caller asserts
 /// `fetches(prefix) == 0` first), and every callback that did fire must be a refusal.
@@ -1055,12 +1055,22 @@ struct DeniedFolder {
 
 impl Drop for DeniedFolder {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("icacls")
+        match std::process::Command::new("icacls")
             .arg(&self.dir)
             .arg("/remove:d")
             .arg("*S-1-1-0")
             .arg("/T")
-            .output();
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => eprintln!(
+                "LD-0070: icacls /remove:d on {:?} failed ({}): {}",
+                self.dir,
+                output.status,
+                String::from_utf8_lossy(&output.stdout)
+            ),
+            Err(error) => eprintln!("LD-0070: icacls could not run on {:?}: {error}", self.dir),
+        }
         for (path, descriptor) in &self.saved {
             // Never panic in a drop (it may run while a failed assert unwinds); a DACL not written back is caught by
             // the test's own I1 comparison.
@@ -1086,10 +1096,10 @@ fn walk(path: &Path, into: &mut Vec<PathBuf>) {
 ///
 /// LD-0066: `SetFileSecurityW` keeps `SE_DACL_AUTO_INHERITED` only when the descriptor written also carries
 /// `SE_DACL_AUTO_INHERIT_REQ`, and a read does not return that bit. Under a temp folder whose DACL is auto-inherited
-/// (a Windows 11 user profile, the Legion: the file read control 0x8404) the DACL came back with the same ACEs under
+/// (a Windows 11 user profile, the Windows test machine: the file read control 0x8404) the DACL came back with the same ACEs under
 /// control 0x8004, so I1 failed on the harness's own write. A descriptor with no auto-inherited bit comes back byte
 /// for byte (the probe's lineage B; that the GitHub runner's file is one is inferred from it, not observed there). So
-/// an auto-inherited descriptor is written from a copy with the request bit raised. On the Legion that wrote every
+/// an auto-inherited descriptor is written from a copy with the request bit raised. On the Windows test machine that wrote every
 /// saved descriptor back byte for byte, its inherited ACEs included: also when the folder no longer propagates one of
 /// them, and when the inherited deny was still on the file (the LD-0066 probe, runs 2 and 3).
 fn set_dacl(path: &Path, descriptor: &[u8]) -> Result<(), String> {
@@ -1362,6 +1372,31 @@ fn a_dehydration_before_the_data_open_fetches_nothing_and_stays_pending() {
     crate::windows_cf::upload_finalization::retry(&db, &root.path);
     assert!(db.upload_finalizations().unwrap().is_empty(), "the next tick is done");
     assert_eq!(fetches("t20-"), 0, "still nothing served");
+}
+
+/// Task 2199 N4: the hash is read through a shared handle, so another reader's open does not fail the pass; the
+/// exclusive open that marks the file is refused while that reader holds it (`Ok(false)`, tried again next pass), and
+/// the file is marked once it lets go.
+#[test]
+fn stamp_if_agreed_hashes_beside_another_reader_and_marks_after_it_lets_go() {
+    use crate::unknown_check::OnDisk;
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = Root::new();
+    let db = root.db();
+    let bytes = b"n4 agreed content".as_slice();
+    let path = root.path.join("n4.txt");
+    std::fs::write(&path, bytes).unwrap();
+    placeholders::convert_to_unsynced_placeholder(&path, "n4-id").unwrap();
+    track(&db, "n4-id", Some(sha256(bytes)));
+    let reader = std::fs::OpenOptions::new().read(true).share_mode(7).open(&path).unwrap();
+    assert!(
+        !placeholders::stamp_if_agreed(&db, "n4-id", &path).unwrap(),
+        "not marked while another reader holds the file"
+    );
+    drop(reader);
+    assert!(placeholders::stamp_if_agreed(&db, "n4-id", &path).unwrap());
+    assert_eq!(placeholders::platform_view(&path), placeholder(OnDisk::Wholly, true, "n4-id"));
+    settle();
 }
 
 /// Task 2284 A1.2 / S1: a mark in sync by another pass and a dehydration between the state check and the data open are

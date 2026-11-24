@@ -5,11 +5,13 @@ use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::account_set::{self as set, Lead, Look, Row, Size, Tail};
 use crate::ui::au::Tone;
-use crate::ui::settings_list as lists;
 use rune::{El, row};
 
 use super::source::{AccountSource, DeviceKind, Session};
 use super::{Dialog, icons};
+
+/// The device list's key (`settings_list::list` 0): where focus goes when a confirm's opener went with its row.
+const LIST: &str = "list-0";
 
 fn device_icon(kind: DeviceKind) -> &'static rune::Icon {
     match kind {
@@ -26,8 +28,10 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
     let confirm = match dialog {
         Some(Dialog::SignOutDevice(id)) => sessions
             .iter()
-            .find(|s| s.id == *id && !s.this_device)
-            .map(|s| device_confirm(s, &sessions, t)),
+            .filter(|s| !s.this_device)
+            .enumerate()
+            .find(|(_, s)| s.id == *id)
+            .map(|(button, s)| device_confirm(s, &sessions, button, t)),
         Some(Dialog::SignOutElsewhere) => Some(elsewhere_confirm(&sessions, t)),
         _ => None,
     };
@@ -68,7 +72,19 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
                 );
                 button += 1;
             }
-            set::item(0, i, &it, extra, t)
+            let row = set::item(0, i, &it, extra, t);
+            if session.this_device {
+                return row;
+            }
+            // Delete on the row (its Sign out button has the focus: the row itself is text) asks the same
+            // confirm as the button. A device has no rename and no menu here.
+            let id = session.id.clone();
+            super::row_keys(row, move |s: &mut State, k| {
+                k == super::RowKey::Remove && {
+                    super::confirm_device(s, id.clone());
+                    true
+                }
+            })
         })
         .collect();
     // DW-A56 draws the pane behind the confirm without its second line and without the button
@@ -81,7 +97,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
             None,
             t,
         ),
-        lists::list(0, None, rows, None, t),
+        crate::ui::settings_list::list(0, None, rows, None, t),
     ];
     if !behind && sessions.iter().any(|s| !s.this_device) {
         children.push(
@@ -146,7 +162,10 @@ fn foot(
 
 /// Sign out one device (DW-A56). Honest about timing: a revoked session ends the next time
 /// the app talks to the server, not instantly on the device.
-fn device_confirm(session: &Session, all: &[Session], t: &Theme) -> El {
+///
+/// The opener is the row's Sign out button (`btn-<button>`). Once the device is signed out its row is gone and
+/// the next device's button has that key: focus goes there, else into the list.
+fn device_confirm(session: &Session, all: &[Session], button: usize, t: &Theme) -> El {
     let others = all.iter().filter(|s| !s.this_device).count();
     let apps = if session.apps_sentence.contains(" and ") {
         session.apps_sentence.clone()
@@ -154,7 +173,7 @@ fn device_confirm(session: &Session, all: &[Session], t: &Theme) -> El {
         "The Beebeeb apps".into()
     };
     let id = session.id.clone();
-    set::dialog(
+    let card = set::dialog(
         &format!("Sign out {}?", session.name),
         440.0,
         &format!("Sign out {}?", session.name),
@@ -169,14 +188,14 @@ fn device_confirm(session: &Session, all: &[Session], t: &Theme) -> El {
             s.account.dialog = None;
         }),
         t,
-    )
-    .modal(false, |s: &mut State| s.account.dialog = None)
+    );
+    super::modal_back(card, &format!("btn-{button}"), LIST, |s: &mut State| s.account.dialog = None)
 }
 
 /// Sign out every device but this one: the same confirm, in the plural.
 fn elsewhere_confirm(all: &[Session], t: &Theme) -> El {
     let others = all.iter().filter(|s| !s.this_device).count();
-    set::dialog(
+    let card = set::dialog(
         "Sign out everywhere else?",
         440.0,
         "Sign out everywhere else?",
@@ -189,6 +208,7 @@ fn elsewhere_confirm(all: &[Session], t: &Theme) -> El {
             s.account.dialog = None;
         }),
         t,
-    )
-    .modal(false, |s: &mut State| s.account.dialog = None)
+    );
+    // Its opener, "Sign out everywhere else", goes once nothing else is signed in: then focus goes into the list.
+    super::modal_back(card, &format!("btn-{others}"), LIST, |s: &mut State| s.account.dialog = None)
 }

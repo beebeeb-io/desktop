@@ -1,10 +1,11 @@
-//! Task 2240 slice 2: the placeholder reconcile through folder listings, on real Windows.
+//! The placeholder reconcile through folder listings, on real Windows.
 //!
 //! Spec: `docs/superpowers/specs/2026-10-28-2240-reconcile-from-listing-design.md` (workspace repo), T10–T16, T18,
 //! and the source pins on the wiring. Registered roots are confined to a fresh temporary directory and revoked on
 //! drop, as in `signout_tests.rs`. A root is connected (with no callbacks) only where a test dehydrates: T12, T15 and
 //! T18 (spec premise P5's outcome).
 use super::*;
+use std::os::windows::ffi::OsStrExt;
 use crate::os_state_reconcile::{Delta, OS_STATE_MASK};
 use crate::source_pin::squeeze;
 use crate::state_db::{FileContractState, FileEntry, FileStatus, ItemKind, Namespace, PinState, StateDb};
@@ -339,13 +340,13 @@ fn t16_populate_counts_created_and_already_existing() {
     let r = Root::new();
     r.track("one.bin", FileStatus::CloudOnly, PinState::Inherit);
     r.track("two.bin", FileStatus::CloudOnly, PinState::Inherit);
-    let first = populate_placeholders(&r.db, &r.root);
-    assert_eq!((first.create_calls, first.created), (2, 2), "{first:?}");
+    let first = populate_placeholders(&r.db, &r.root, &mut Default::default());
+    assert_eq!((first.create_calls, first.created), (1, 2), "{first:?}"); // dc-164: one folder, one create call
     r.track("three.bin", FileStatus::CloudOnly, PinState::Inherit);
-    let second = populate_placeholders(&r.db, &r.root);
+    let second = populate_placeholders(&r.db, &r.root, &mut Default::default());
     assert_eq!(
         (second.rows, second.create_calls, second.created, second.already_existed),
-        (3, 3, 1, 2),
+        (3, 1, 1, 2), // w36: an existing placeholder gets no create call
         "{second:?}"
     );
     assert_eq!(
@@ -362,7 +363,7 @@ fn ld0105_review_a_placeholder_minted_without_an_identity_gains_it_at_the_next_r
     let r = Root::new();
     r.track("old.bin", FileStatus::CloudOnly, PinState::Inherit);
     r.db.set_versions_for_test("old.bin", Some(A), None);
-    let first = populate_placeholders(&r.db, &r.root);
+    let first = populate_placeholders(&r.db, &r.root, &mut Default::default());
     assert_eq!(first.created, 1, "{first:?}");
     assert_eq!(
         r.db.minted_version("old.bin").unwrap().as_deref(),
@@ -371,7 +372,7 @@ fn ld0105_review_a_placeholder_minted_without_an_identity_gains_it_at_the_next_r
     );
     // As a 0.8.21 database holds it: the placeholder exists, no identity.
     r.db.set_versions_for_test("old.bin", Some(A), None);
-    let second = populate_placeholders(&r.db, &r.root);
+    let second = populate_placeholders(&r.db, &r.root, &mut Default::default());
     assert_eq!(second.already_existed, 1, "{second:?}");
     assert_eq!(
         r.db.minted_version("old.bin").unwrap().as_deref(),
@@ -391,7 +392,7 @@ fn task_2240_refresh_and_seed_log_no_path() {
     }
 }
 
-/// The lead's ruling on self-review #1 (2026-10-28): D2's rule applied to eviction. A pin made in Explorer reaches the
+/// D2's rule applied to eviction. A pin made in Explorer reaches the
 /// DB only when the listing shows it; while the listing lags, the DB still says unpinned. "Free up space" picks its
 /// files from the DB, so it reads the file's own attributes before dehydrating and keeps a file pinned on disk.
 #[test]
@@ -416,7 +417,7 @@ fn t18_free_up_space_keeps_a_file_pinned_on_disk_the_db_thinks_unpinned() {
         "pinned and hydrated on disk"
     );
 
-    crate::free_up_space_windows(&crate::identity::REAL, &r.db, &r.root).unwrap();
+    crate::free_up_space_windows(&crate::identity::TEST, &r.db, &r.root).unwrap();
 
     assert_eq!(direct_bits(&free) & RECALL, RECALL, "the control is freed");
     assert_eq!(r.status_in_db("b/free.txt"), FileStatus::CloudOnly);

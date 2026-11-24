@@ -6,8 +6,10 @@ use rune::{El, col, el, row};
 
 use super::view::actions;
 use super::{Intent, Ui, act, icons};
+use crate::theme::scale::space;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone, type_au};
+use crate::ui::view_state::{ViewState, try_again, view_state};
 use crate::ui::{au_entry, kit};
 
 fn back_to(label: &str, to: fn(&mut Ui), t: &Theme) -> El {
@@ -49,7 +51,7 @@ fn option(
         .label(title)
         .child(
             row()
-                .gap(10.0)
+                .gap(space::S10)
                 .center_y()
                 .child(kit::glyph(format!("{key}-icon"), icon, 16.0, t.text))
                 .child(kit::label(format!("{key}-title"), title, type_::HEAD, t.text)),
@@ -122,15 +124,15 @@ fn paragraph(k: &mut Keys, words: &str, t: &Theme) -> El {
 }
 
 pub fn cannot_recover(k: &mut Keys, t: &Theme) -> El {
-    let banner = au::banner(
-        k,
-        Tone::Neutral,
-        &icons::SHIELD,
-        Some("Beebeeb is zero-knowledge by design"),
-        Some(
-            "We never see your password or your encryption keys. Without your recovery phrase or a signed-in device, we have no way to restore access to your data.",
-        ),
-        false,
+    // The honest end of this road: nothing failed to load, there is simply no way back in. "Try again" goes
+    // back to the recovery options, where the phrase or another device can be tried.
+    let banner = view_state(
+        ViewState::Failed {
+            key: "cannot-recover",
+            title: "Beebeeb is zero-knowledge by design",
+            why: "We never see your password or your encryption keys. Without your recovery phrase or a signed-in device, we have no way to restore access to your data.",
+            retry: Some(try_again("cannot-recover", t).on_press_tx(act(|ui| ui.cannot_recover(false)))),
+        },
         t,
     );
     let why = paragraph(
@@ -150,7 +152,7 @@ pub fn cannot_recover(k: &mut Keys, t: &Theme) -> El {
     // The support address opens a message to it in the person's mail app.
     let address = row()
         .h(15.0)
-        .gap(6.0)
+        .gap(space::S6)
         .center_y()
         .child(kit::glyph("mail-icon", &icons::MAIL, 14.0, t.text_tertiary))
         // 12px Inter on a 15px line, as `au::link` draws one; the at sign dips below the line.
@@ -175,7 +177,7 @@ pub fn cannot_recover(k: &mut Keys, t: &Theme) -> El {
             col()
                 .key("au-stack")
                 .w_full()
-                .gap(8.0)
+                .gap(space::S8)
                 .child(head)
                 .child(what)
                 .child(address)
@@ -206,8 +208,8 @@ fn exit_row(
         .key(key.clone())
         .w_full()
         .h(40.0)
-        .px(10.0)
-        .gap(8.0)
+        .px(space::S10)
+        .gap(space::S8)
         .center_y()
         .child(
             el().w(30.0)

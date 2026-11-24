@@ -39,11 +39,7 @@ fn reconcile_on_a_copy() {
     let sync_root = std::env::var("BB_RECONCILE_SYNC_ROOT")
         .ok()
         .map(std::path::PathBuf::from);
-    let keep = |rel: &str| {
-        sync_root
-            .as_ref()
-            .map_or(true, |root| tree_holds_a_file(&root.join(rel)))
-    };
+    let keep = |rel: &str| sync_root.as_ref().is_none_or(|root| tree_holds_a_file(&root.join(rel)));
     let now = chrono::Utc::now().timestamp();
 
     let runs: Vec<(usize, bool)> = match std::env::var("BB_RECONCILE_RUNS").as_deref() {

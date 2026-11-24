@@ -1,10 +1,10 @@
 # 2026-09-30 — macOS menu-bar popover redesign (task 1683)
 
-**Status:** design ruling APPROVED. Guus accepted **all seven recommendations** on 2026-10-01.
+**Status:** design ruling APPROVED. the owner accepted **all seven recommendations** on 2026-10-01.
 **Hi-fi source:** [`design/hifi/macos-menubar-popover.html`](../../design/hifi/macos-menubar-popover.html) (authored by the Claude Cloud design lane, 2026-09-30, as the task-1683 design review; recovered from `~/Downloads` and committed here 2026-10-01 — it was never committed at design time).
-**Implementation plan:** nine slices, each ships tests that are seen failing first; the last rung is a manual pass by Guus on the next macOS alpha. Slice 4 (the macOS Settings window, 4 tabs) already shipped via PR #85 + notes amendment #86.
+**Implementation plan:** nine slices, each ships tests that are seen failing first; the last rung is a manual pass by the owner on the next macOS alpha. Slice 4 (the macOS Settings window, 4 tabs) already shipped via PR #85 + notes amendment #86.
 **Amended 2026-10-06 (ruling R5, [spec A](2026-10-06-macos-finder-setup-reconciler.md) §12):** the "finder not added" state and its "Add to Finder" action are removed: Beebeeb adds itself to Finder after sign-in. "Finder add failed" shows one sentence and one action per reason (spec A §6.2), and "Try again" survives only inside a failure. The `States:` bullet below keeps its original wording for the record.
-**Amended 2026-10-24 (Guus's ruling: at most two surfaces, [two-surface spec](2026-10-24-macos-two-surface-app.md)):** the popover stays as designed here (size, placement, states, footer, rulings 1, 3, 5, 7). Settings, onboarding and review are no longer windows: they live in one Beebeeb window, and the gear menu's "Settings…" opens that window on Settings. The struck lines below are replaced as marked. — two-surface design, 2026-10-24
+**Amended 2026-10-24 (the owner's ruling: at most two surfaces, [two-surface spec](2026-10-24-macos-two-surface-app.md)):** the popover stays as designed here (size, placement, states, footer, rulings 1, 3, 5, 7). Settings, onboarding and review are no longer windows: they live in one Beebeeb window, and the gear menu's "Settings…" opens that window on Settings. The struck lines below are replaced as marked. — two-surface design, 2026-10-24
 
 ## Popover shape
 - 372×488 pt popover anchored under the menu-bar icon.
@@ -14,7 +14,7 @@
 - ~~Gear menu: Settings… / Pause sync / Help / Quit.~~
 - Gear menu: Open Beebeeb / Settings… / Pause Sync / Check for Updates… / Help / Quit Beebeeb; "Settings…" opens the Beebeeb window on Settings (two-surface spec §6.4). — two-surface design, 2026-10-24
 - ~~Settings shrinks to 4 tabs: General / Account / Sync / About (shipped, slice 4).~~
-- Settings is a ~~pane~~ mode of the Beebeeb window, not a window: General / Account / Sync / Security / About (two-surface spec §7.8), drawn in System Settings style, as a sidebar list of sections that replaces the window's sidebar while it shows (Guus's ruling 1, two-surface spec §0). — two-surface design, 2026-10-24; rulings amendment, 2026-10-24
+- Settings is a ~~pane~~ mode of the Beebeeb window, not a window: General / Account / Sync / Security / About (two-surface spec §7.8), drawn in System Settings style, as a sidebar list of sections that replaces the window's sidebar while it shows (the owner's ruling 1, two-surface spec §0). — two-surface design, 2026-10-24; rulings amendment, 2026-10-24
 - ~~Fewer windows: 6→4 window kinds, 4→1 idle webviews; conflicts no longer auto-open windows.~~
 - Fewer windows: on a Mac 7→2 window kinds (popover, main), 1 idle webview; conflicts no longer auto-open windows (two-surface spec §4). — two-surface design, 2026-10-24
 

@@ -1,4 +1,4 @@
-//! LD-0105 D2, ruled "Yes, per app" (Guus, 2026-11-05 22:55 CET): which open may stream.
+//! LD-0105 D2, ruled "Yes, per app" (owner, 2026-11-05 22:55 CET): which open may stream.
 //!
 //! Cloud Files has no "stream or whole file" handshake. An ordinary open makes ONE fetch for the
 //! whole file and waits for it (P1 spike (a)); only when the provider declines that open-time fetch
@@ -15,7 +15,7 @@
 //! **Switched on** ([`STREAMING_ENABLED`]) with the streaming callback (plan W2): a declined player's
 //! reads become range demands on the file's one range session (`windows_cf::streaming`).
 
-/// OFF for 0.8.22 (lead ruling 2026-11-06, desktop #225: D2-2 failed natively, VLC's open was served
+/// OFF for 0.8.22 (D2-2 failed natively, VLC's open was served
 /// whole and never declined; per Amendment 5 the per-app decline ships switched off). The code stays.
 pub const STREAMING_ENABLED: bool = false;
 
@@ -37,7 +37,7 @@ pub struct Player {
     pub matches: PlayerMatch,
 }
 
-/// The allowlist. Each entry was checked against an installed copy on the Legion (Windows 11,
+/// The allowlist. Each entry was checked against an installed copy on the Windows test machine (Windows 11,
 /// 2026-11-05, read-only `Test-Path` / `Get-AppxPackage`); spec §6.4's unverified candidates (Films &
 /// TV, MPC-HC, MPC-BE, mpv, PotPlayer) stay out until someone verifies one on a real install.
 pub const PLAYERS: &[Player] = &[
@@ -153,7 +153,7 @@ pub struct Target<'a> {
     pub name: &'a str,
     pub mime: Option<&'a str>,
     /// A file-request upload or shared-with-me content: always the whole file (the lead's
-    /// conservative default, spec §6.4; Guus may lift it).
+    /// conservative default, spec §6.4; the owner may lift it).
     pub excluded_origin: bool,
 }
 
@@ -246,9 +246,10 @@ mod tests {
         }
     }
 
-    /// Lead ruling 2026-11-06 (desktop #225): W3 ships off for 0.8.22. Red on the mutant "the switch
+    /// W3 ships off for 0.8.22. Red on the mutant "the switch
     /// is on".
     #[test]
+    #[allow(clippy::assertions_on_constants)] // the shipped value is what is checked
     fn the_switch_is_off_for_0822() {
         assert!(!STREAMING_ENABLED, "W3 ships switched off");
         assert!(

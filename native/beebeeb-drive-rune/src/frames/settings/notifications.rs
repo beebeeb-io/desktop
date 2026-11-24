@@ -65,7 +65,7 @@ pub fn standing(source: &dyn super::source::SettingsSource) -> Option<&'static s
 }
 
 /// Ask Beebeeb again. What the last toast said is over: the answer says what is so now.
-fn ask_again(s: &mut State) {
+pub(super) fn ask_again(s: &mut State) {
     s.settings.toast = None;
     s.settings.source.reload_notifications();
 }
@@ -107,11 +107,6 @@ pub fn said_over(ui: &SettingsUi, standing: Option<&'static str>, t: &Theme) -> 
     }
 }
 
-/// "Try again" in a pane's own card (Recent notifications that could not be read): asks Beebeeb again.
-pub fn try_again(index: usize, t: &Theme) -> El {
-    controls::button(index, "Try again", None, Emphasis::Plain, t).on_press(ask_again)
-}
-
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let n = ui.source.notifications();
     let mut children = vec![shell::heading("Notifications", None, t)];
@@ -119,7 +114,16 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 
     if n.allowed_in_windows {
         let on = n.allow;
-        let switch = lists::switch("item-0-0", "Allow notifications", on, t).on_press(move |s: &mut State| {
+        let switch = crate::ui::switch::switch_sized(
+            &format!("{}-switch", "item-0-0"),
+            "",
+            on,
+            true,
+            crate::ui::button::Size::Md,
+            t,
+        )
+        .label("Allow notifications")
+        .on_press(move |s: &mut State| {
             s.settings.toast = None;
             s.settings.source.set_allow_notifications(!on)
         });
@@ -157,7 +161,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     if n.new_recent > 0 {
         recent = recent.trailing(Trailing::Value(format!("{} new", n.new_recent)));
     }
-    children.push(lists::list(
+    children.push(lists::roving_list(
         list,
         None,
         vec![lists::item(list, 0, &recent.opens(), t).on_press(|s: &mut State| super::go(s, "DW-0791"))],
@@ -204,7 +208,15 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     return lists::item(list, i, &it.trailing(Trailing::Value(words.into())), t).disabled(true);
                 };
                 let key = format!("item-{list}-{i}");
-                let mut switch = lists::switch(&key, &alert.title, on, t);
+                let mut switch = crate::ui::switch::switch_sized(
+                    &format!("{}-switch", key),
+                    "",
+                    on,
+                    true,
+                    crate::ui::button::Size::Md,
+                    t,
+                )
+                .label(&alert.title);
                 switch = if n.allowed_in_windows {
                     // What the last toast said is over with this press: its own answer is said next.
                     switch.on_press(move |s: &mut State| {
