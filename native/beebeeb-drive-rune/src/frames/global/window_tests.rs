@@ -395,7 +395,7 @@ fn a_preview_without_a_connection_opens_the_panel() {
     let here = row_of(&rt, "on_this_pc");
     click(&mut rt, &format!("row-{here}-date"), NONE);
     press(&mut rt, Key::Text(" ".into()));
-    assert!(find(&rt, "preview-card").is_none(), "it is on this PC");
+    assert!(find(&rt, "preview-card").is_none(), concat!("it is on ", beebeeb_engine::device_word!()));
     assert_eq!(rt.state.actions.intents, [FilesIntent::Frame("DW-0408")]);
 
     let mut rt = super::tests::runtime_of(init());

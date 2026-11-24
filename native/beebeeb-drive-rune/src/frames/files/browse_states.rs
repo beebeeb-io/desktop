@@ -11,12 +11,12 @@
 //! listed so far work at once. Once something is opened the card gives way to the slim strip
 //! (DW-0118, the global lane's).
 
-use crate::State;
 use crate::frames::global::source::Loading;
 use crate::source::DriveItem;
-use crate::ui::view_state::{ViewState, view_state};
 use crate::theme::tokens::Theme;
-use crate::ui::status_bar::{Dot, bar};
+use crate::ui::status_bar::{bar, Dot};
+use crate::ui::view_state::{view_state, ViewState};
+use crate::State;
 use rune::El;
 
 /// DW-1108 against DW-0101 and DW-0121 (the same state, two pictures on the board): offline, does
@@ -83,7 +83,11 @@ pub fn status_words(s: &State) -> Option<String> {
             .count()
     };
     Some(format!(
-        "{} on this PC \u{00B7} {} available offline \u{00B7} {} need a connection",
+        concat!(
+            "{} on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} {} available offline \u{00B7} {} need a connection"
+        ),
         count("on_this_pc"),
         count("available_offline"),
         count("online_only")
@@ -111,7 +115,11 @@ pub fn card(s: &State, t: &Theme) -> Option<El> {
     let words = match figure(&loading) {
         Some(figure) => format!(
             "Getting your files ready: {figure}{}",
-            loading.left.as_ref().map(|left| format!(" \u{00B7} {left} left")).unwrap_or_default()
+            loading
+                .left
+                .as_ref()
+                .map(|left| format!(" \u{00B7} {left} left"))
+                .unwrap_or_default()
         ),
         None => "Getting your files ready".to_string(),
     };
@@ -139,14 +147,14 @@ impl crate::source::DriveSource for ListedSoFar {
 pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
     // DW-1108: no connection; the list is from today at 09:12.
     ("DW-1108", |s| {
-        use crate::frames::global::{GlobalFixture, Ui, source::board};
+        use crate::frames::global::{source::board, GlobalFixture, Ui};
         s.clear_selection();
         s.show_detail_pane = false;
         s.global = Ui::new(Box::new(GlobalFixture::of(board::offline())));
     }),
     // DW-1107: the first sign-in on this PC: 18,240 of 40,112 listed.
     ("DW-1107", |s| {
-        use crate::frames::global::{GlobalFixture, Ui, source::board};
+        use crate::frames::global::{source::board, GlobalFixture, Ui};
         s.source = Box::new(ListedSoFar(super::source::BoardDrive::new()));
         (s.listing, s.list_error) = crate::load(s.source.as_ref(), None);
         s.clear_selection();

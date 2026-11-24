@@ -207,7 +207,7 @@ impl BoardSearch {
             "Documents \u{203A} Legal",
             PcState::AvailableOffline,
         );
-        let signed_facts = facts(&signed, "PDF document", "Kept on this PC \u{00B7} 840 KB", true);
+        let signed_facts = facts(&signed, "PDF document", concat!("Kept on ", beebeeb_engine::device_word!(), " \u{00B7} 840 KB"), true);
         let contractors = hit(
             "board-search-3",
             "Contractors",

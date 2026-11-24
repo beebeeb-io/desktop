@@ -1085,7 +1085,7 @@ impl FixtureViewerSource {
                     size: "1.4 KB".into(),
                     facts: vec![
                         ("Changed", "Today, 09:20".into(), true),
-                        ("Changed on", "This PC".into(), false),
+                        ("Changed on", concat!(beebeeb_engine::device_word_cap!()).into(), false),
                         ("Where", "Files \u{203A} Documents".into(), false),
                         ("Version history", "3 versions".into(), true),
                         ("Encryption", "AES-256-GCM".into(), true),

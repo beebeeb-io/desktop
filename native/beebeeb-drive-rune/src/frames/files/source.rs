@@ -154,20 +154,20 @@ impl Action {
             Action::Trash => "move to Trash",
             Action::Restore => "put it back",
             Action::Duplicate => "duplicate",
-            Action::KeepOffline => "keep on this PC",
-            Action::RemoveOffline => "remove from this PC",
+            Action::KeepOffline => concat!("keep on ", beebeeb_engine::device_word!()),
+            Action::RemoveOffline => concat!("remove from ", beebeeb_engine::device_word!()),
             Action::CopyLink => "copy the link",
             Action::ShareLink => "make the link",
             Action::Share => "share this",
             Action::Open => "open",
-            Action::ShowInFileExplorer => "show in File Explorer",
+            Action::ShowInFileExplorer => concat!("show in ", beebeeb_engine::file_manager!()),
             Action::Upload => "upload",
             Action::Rename => "rename",
             Action::NewFolder => "make the folder",
             Action::NewFile => "make the file",
             Action::Move => "move",
             Action::FreeUpSpace => "free up space",
-            Action::OpenInFileExplorer => "open File Explorer",
+            Action::OpenInFileExplorer => concat!("open ", beebeeb_engine::file_manager!()),
             Action::RestoreVersion => "go back to that version",
             Action::OpenWith => "open it in another app",
             Action::KeepVersion => "keep that version",
@@ -766,7 +766,12 @@ impl FilesSource for FilesFixture {
         let row = details_of_row(item, folder);
         // The facts the board draws for the rows it selects; for any other row only what the row itself says.
         let (changed_on, added, versions, shared) = if self.copies.contains(&item.id) {
-            ("This PC", "28 Oct 2026", "1 version", "Only you")
+            (
+                concat!(beebeeb_engine::device_word_cap!()),
+                "28 Oct 2026",
+                "1 version",
+                "Only you",
+            )
         } else {
             match item.id.as_str() {
                 "contract" => ("Anna's iPhone", "28 Oct 2026", "3 versions", "Sam Okafor, pending"),
@@ -821,7 +826,10 @@ impl FilesSource for FilesFixture {
     }
 
     fn set_pinned(&mut self, folder: &DriveItem, pin: bool) -> Result<(), ActionError> {
-        self.refuse(if pin { Action::Pin } else { Action::Unpin }, std::slice::from_ref(folder))?;
+        self.refuse(
+            if pin { Action::Pin } else { Action::Unpin },
+            std::slice::from_ref(folder),
+        )?;
         self.record(Call::Pin(folder.id.clone(), pin));
         self.pins.retain(|item| item.id != folder.id);
         if pin {

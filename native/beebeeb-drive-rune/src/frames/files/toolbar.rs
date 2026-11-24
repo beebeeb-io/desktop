@@ -2,13 +2,13 @@
 //! Sort and New open their menus (and show pressed, ringed while open), the title follows the
 //! selection, tooltips name only shortcuts that exist.
 
-use crate::State;
 use crate::theme::icons;
 use crate::theme::scale;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::kit;
-use crate::ui::toolbar::{self as tb, Bar, Details, New, Sort, View, press};
-use rune::{El, TextStyle, col, row, text_input};
+use crate::ui::toolbar::{self as tb, press, Bar, Details, New, Sort, View};
+use crate::State;
+use rune::{col, row, text_input, El, TextStyle};
 
 use super::{Intent, MenuKind};
 
@@ -82,7 +82,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         text_input(&s.search, type_::SEARCH)
             .key("search-input")
             .label("Search names")
-            .shortcut_hint("Ctrl+F")
+            .shortcut_hint(crate::frames::files::key_label("F"))
             .single_line()
             .color(t.text)
             .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)

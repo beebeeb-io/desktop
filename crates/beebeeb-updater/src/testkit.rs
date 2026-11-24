@@ -56,6 +56,24 @@ impl TestKey {
     }
 }
 
+pub const DARWIN_TARGET: &str = "darwin-aarch64";
+
+/// A Mac's trust: the same, with the `darwin-aarch64` target alone.
+pub fn darwin_trust(key: &TestKey) -> Trust {
+    Trust {
+        targets: vec![DARWIN_TARGET.to_string()],
+        ..trust(key)
+    }
+}
+
+pub fn darwin_artifact_name(version: &str) -> String {
+    format!("Beebeeb_{version}_aarch64.app.tar.gz")
+}
+
+pub fn darwin_artifact_url(version: &str) -> String {
+    format!("{BASE}/desktop/artifacts/{version}/{}", darwin_artifact_name(version))
+}
+
 pub fn trust(key: &TestKey) -> Trust {
     Trust {
         // For every version, so that the floor and the scope are each tested by their own rule.
@@ -111,6 +129,8 @@ pub struct Publish {
     pub claimed_channel: Option<&'static str>,
     /// The file name the manifest's signature signs. `None`: the channel's manifest file.
     pub signed_manifest_name: Option<&'static str>,
+    /// The platform keys the manifest lists the artefact under, with the file name it signs. Default: Windows'.
+    pub darwin: bool,
 }
 
 impl Publish {
@@ -126,6 +146,24 @@ impl Publish {
             product: Some("desktop"),
             claimed_channel: Some(channel.as_str()),
             signed_manifest_name: None,
+            darwin: false,
+        }
+    }
+
+    /// The release a Mac reads: `darwin-aarch64`, a `.app.tar.gz` under its own name.
+    pub fn for_darwin(channel: Channel, version: &str, artifact: Vec<u8>) -> Self {
+        Self {
+            url: darwin_artifact_url(version),
+            darwin: true,
+            ..Self::new(channel, version, artifact)
+        }
+    }
+
+    fn signed_artifact_name(&self) -> String {
+        if self.darwin {
+            darwin_artifact_name(&self.version)
+        } else {
+            artifact_name(&self.version)
         }
     }
 
@@ -134,14 +172,15 @@ impl Publish {
         let signature = self
             .artifact_signature
             .clone()
-            .unwrap_or_else(|| key.sign(&self.artifact, self.manifest_time - 60, &artifact_name(&self.version)));
+            .unwrap_or_else(|| key.sign(&self.artifact, self.manifest_time - 60, &self.signed_artifact_name()));
         let mut platform = serde_json::json!({ "url": self.url, "signature": signature });
         if let Some(size) = self.size {
             platform["size"] = size.into();
         }
+        let target = if self.darwin { DARWIN_TARGET } else { TARGET };
         let mut manifest = serde_json::json!({
             "version": self.version, "notes": "What changed.", "pub_date": "2026-11-20T10:00:00Z",
-            "platforms": { TARGET: platform },
+            "platforms": { target: platform },
         });
         if let Some(product) = self.product {
             manifest["product"] = product.into();
@@ -290,6 +329,8 @@ pub enum Did {
     Launched(PathBuf, Version),
     LaunchFailed,
     ResumedEngine,
+    OpenedDownloadPage(Version),
+    DownloadPageFailed,
 }
 
 /// Runs inside `launch`, with the staged installer's path.
@@ -300,6 +341,8 @@ pub struct FakeApply {
     pub did: Vec<Did>,
     pub refuse: bool,
     pub engine_will_not_stop: bool,
+    /// A Mac's browser hand-off fails.
+    pub page_will_not_open: bool,
     /// Runs inside `launch`, while the updater still holds the staged file.
     pub during_launch: Option<DuringLaunch>,
 }
@@ -342,6 +385,15 @@ impl Apply for FakeApply {
     fn resume_engine(&mut self) {
         self.did.push(Did::ResumedEngine);
     }
+
+    fn open_download_page(&mut self, offer: &Offer) -> bool {
+        self.did.push(if self.page_will_not_open {
+            Did::DownloadPageFailed
+        } else {
+            Did::OpenedDownloadPage(offer.version)
+        });
+        !self.page_will_not_open
+    }
 }
 
 pub type TestUpdater = Updater<FakeHttp, FakeClock, MemStore, FakeApply>;
@@ -349,6 +401,17 @@ pub type TestUpdater = Updater<FakeHttp, FakeClock, MemStore, FakeApply>;
 pub fn updater(key: &TestKey, installed: &str, staging: &Path, http: FakeHttp, store: MemStore) -> TestUpdater {
     let config = Config {
         trust: trust(key),
+        base_url: BASE.to_string(),
+        installed: version(installed),
+        staging_dir: staging.to_path_buf(),
+    };
+    Updater::new(config, http, FakeClock(Cell::new(NOW)), store, FakeApply::default())
+}
+
+/// A Mac's install of `installed`: the `darwin-aarch64` trust, the same fakes.
+pub fn darwin_updater(key: &TestKey, installed: &str, staging: &Path, http: FakeHttp, store: MemStore) -> TestUpdater {
+    let config = Config {
+        trust: darwin_trust(key),
         base_url: BASE.to_string(),
         installed: version(installed),
         staging_dir: staging.to_path_buf(),

@@ -105,7 +105,7 @@ pub fn over_body(s: &State, window: (f32, f32), t: &Theme) -> Option<El> {
         name,
         &global_icons::OFFLINE,
         "Needs a connection",
-        &format!("{name} isn't on this PC yet. Connect to open it."),
+        &format!("{name} isn't on {device} yet. Connect to open it.", device = beebeeb_engine::device_word!()),
         ("Try again", retry_preview),
         close_preview,
         t,

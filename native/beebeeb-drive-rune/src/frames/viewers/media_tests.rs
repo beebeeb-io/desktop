@@ -7,12 +7,12 @@ use std::rc::Rc;
 
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
-use super::kinds::{Viewer, viewer_of};
-use super::source::{Body, FixtureViewerSource, Match, OpenError, OpenFile, Picture, ViewerSource, board};
-use super::{Intent, open_from, open_item, set_scene};
+use super::kinds::{viewer_of, Viewer};
+use super::source::{board, Body, FixtureViewerSource, Match, OpenError, OpenFile, Picture, ViewerSource};
+use super::{open_from, open_item, set_scene, Intent};
 use crate::shell::app::Screen;
 use crate::source::DriveItem;
-use crate::{State, init, view};
+use crate::{init, view, State};
 
 type Calls = Rc<RefCell<Vec<String>>>;
 
@@ -394,7 +394,10 @@ fn a_photos_actions_share_keep_offline_show_details_and_trash() {
     assert_eq!(words(&rt, "action-1-label"), "Offline");
     click(&mut rt, "action-1");
     assert_eq!(*calls.borrow(), [format!("offline {} true", board::RAW)]);
-    assert_eq!(words(&rt, "action-1-label"), "On this PC");
+    assert_eq!(
+        words(&rt, "action-1-label"),
+        concat!("On ", beebeeb_engine::device_word!())
+    );
     // Details: the panel with the RAW's facts (DW-1502); the photo stands alone beside it.
     click(&mut rt, "action-2");
     assert!(viewer(&rt).show_details);
@@ -560,9 +563,7 @@ fn a_table_selects_a_cell_moves_it_and_sorts_by_a_column() {
     let amounts = |rt: &Runtime<State>| (0..8).map(|r| words(rt, &format!("csv-{r}-5"))).collect::<Vec<_>>();
     assert_eq!(
         amounts(&rt),
-        [
-            "0.00", "385.00", "440.00", "475.00", "617.50", "660.00", "665.00", "760.00"
-        ]
+        ["0.00", "385.00", "440.00", "475.00", "617.50", "660.00", "665.00", "760.00"]
     );
     assert_eq!(words(&rt, "csv-0-1"), "Studio", "a row moves whole");
     click(&mut rt, "csv-th-5");
@@ -838,7 +839,11 @@ fn an_archives_list_jumps_by_typed_names_and_keeps_its_keys() {
     let (mut rt, _) = recording(board::ZIP);
     typed(&mut rt, "s");
     typed(&mut rt, "e");
-    assert_eq!(viewer(&rt).media.entry, Some(3), "\"se\": selects-list.csv, by its name");
+    assert_eq!(
+        viewer(&rt).media.entry,
+        Some(3),
+        "\"se\": selects-list.csv, by its name"
+    );
     typed(&mut rt, "C");
     assert_eq!(viewer(&rt).media.entry, Some(3), "\"sec\" matches none: focus stays");
 }
@@ -921,6 +926,13 @@ fn home_and_end_go_to_the_first_and_last_photo_of_the_strip() {
 fn media_look_zoom_group_gap_is_one_pixel() {
     let rt = scene("DW-1506");
     let group = info(&rt, "zoom-group").rect;
-    let tools: f32 = ["tool-0", "tool-1", "tool-2"].iter().map(|k| info(&rt, k).rect[2]).sum();
-    assert_eq!(group[2], tools + 2.0 * 2.0 + 2.0 * 1.0, "padding 2 each side, gap 1 twice");
+    let tools: f32 = ["tool-0", "tool-1", "tool-2"]
+        .iter()
+        .map(|k| info(&rt, k).rect[2])
+        .sum();
+    assert_eq!(
+        group[2],
+        tools + 2.0 * 2.0 + 2.0 * 1.0,
+        "padding 2 each side, gap 1 twice"
+    );
 }

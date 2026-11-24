@@ -16,6 +16,8 @@ mod control_socket;
 mod autostart;
 #[path = "macos_tray.rs"]
 mod tray;
+#[path = "macos_fp/mod.rs"]
+mod fp;
 
 pub struct MacPlatform;
 
@@ -37,6 +39,9 @@ impl Platform for MacPlatform {
     }
     fn adopt_autostart(&self) -> Result<bool, PlatformError> {
         autostart::adopt_autostart()
+    }
+    fn file_provider(&self) -> Option<std::sync::Arc<dyn beebeeb_engine::file_provider_port::FileProviderPort>> {
+        Some(std::sync::Arc::new(fp::FileProviderBridgePort))
     }
     fn show_start_refusal(&self, title: &str, message: &str) {
         eprintln!("{title}: {message}");

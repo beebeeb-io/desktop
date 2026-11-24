@@ -168,7 +168,7 @@ fn found_in_row(row: &Row, origin: Origin) -> Found {
             };
             add(&mut facts, "From", Fact::Words(from));
             if let Some(fact) = on_this_pc(row.pc) {
-                facts.push(("On this PC", fact));
+                facts.push((concat!("On ", beebeeb_engine::device_word!()), fact));
             }
         }
     }
@@ -220,7 +220,7 @@ pub fn found(s: &State, origin: Origin, id: &str) -> Option<Found> {
             add(&mut facts, "Changed", Fact::Figure(hit.changed.clone()));
             add(&mut facts, "Where", Fact::Words(hit.place.clone()));
             if let Some(fact) = on_this_pc(hit.pc) {
-                facts.push(("On this PC", fact));
+                facts.push((concat!("On ", beebeeb_engine::device_word!()), fact));
             }
             facts.push(("Encrypted", Fact::Words(ENCRYPTED.into())));
             Some(Found {

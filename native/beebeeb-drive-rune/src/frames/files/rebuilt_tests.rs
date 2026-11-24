@@ -2,13 +2,13 @@
 //! window shows it as a calm banner with Dismiss, and once dismissed it does not come back, also not in a new window
 //! over the same engine (a restart: the engine has said it already).
 
-use super::protected::{REBUILT_WORDS, poll};
-use crate::State;
+use super::protected::{poll, REBUILT_WORDS};
 use crate::frames::files::source::{
     Account, ActionError, Change, Counts, Details, FilesSource, NoEngine, StorageSplit,
 };
 use crate::frames::files::tests::{click, find, runtime_of, settle};
 use crate::source::DriveItem;
+use crate::State;
 use rune::Runtime;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -72,7 +72,11 @@ fn rebuilt_notice_shows_once_and_dismissed_stays_gone_across_restart() {
     assert!(find(&rt, "banner").is_some(), "the notice is shown");
     assert_eq!(
         REBUILT_WORDS,
-        "Beebeeb rebuilt its list of your files on this PC. Nothing was lost; your files are on the server."
+        concat!(
+            "Beebeeb rebuilt its list of your files on ",
+            beebeeb_engine::device_word!(),
+            ". Nothing was lost; your files are on the server."
+        )
     );
     click(&mut rt, "banner-dismiss");
     frame(&mut rt);

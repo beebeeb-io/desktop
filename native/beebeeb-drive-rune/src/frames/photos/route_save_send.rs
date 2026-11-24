@@ -26,10 +26,10 @@ mod tests;
 
 /// What Send a copy says when the photo's file is not in the Beebeeb folder on this PC.
 const NEEDS_SYNC_ELSEWHERE: &str =
-    "Couldn\u{2019}t send a copy. It sends from your Beebeeb folder, so sync has to be on for this PC.";
+    concat!("Couldn\u{2019}t send a copy. It sends from your Beebeeb folder, so sync has to be on for ", beebeeb_engine::device_word!(), ".");
 const SHEET_FAILED: &str = "Couldn\u{2019}t open the share sheet.";
 const NOT_AVAILABLE: &str = "Not saved: saving a copy is not available here";
-const NOT_HERE: &str = "Couldn\u{2019}t find that file on this PC";
+const NOT_HERE: &str = concat!("Couldn\u{2019}t find that file on ", beebeeb_engine::device_word!());
 
 /// Takes the intent it can; `Err` hands it back and Photos says "Not available in this version yet".
 pub fn handle(s: &mut State, tx: &mut Tx, intent: Intent) -> Result<(), Intent> {

@@ -526,7 +526,7 @@ fn an_office_file_opens_in_the_editor_and_a_save_is_a_new_version_on_the_server(
         Some(2),
         "the fake server holds a new version"
     );
-    assert_eq!(w.local_version(), 2, "and this PC's record moved to it");
+    assert_eq!(w.local_version(), 2, concat!("and ", beebeeb_engine::device_word!(), "'s record moved to it"));
     assert!(w.account.stored_frames(DOC).is_some_and(|frames| !frames.is_empty()));
 }
 

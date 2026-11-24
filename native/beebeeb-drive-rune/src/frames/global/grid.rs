@@ -398,7 +398,7 @@ pub fn scene(s: &mut State) {
     s.global.board_crop_bottom = true;
     // Under the crop the board's status line repeats the root's words (DW-0401) for this folder;
     // DW-0420 counts the folder itself ("1 on this PC ..."), which is what the app says.
-    s.global.board_status_words = Some("4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only".to_string());
+    s.global.board_status_words = Some(concat!("4 on ", beebeeb_engine::device_word!(), " \u{00B7} 3 available offline \u{00B7} 4 online only").to_string());
     set(s, true);
 }
 
