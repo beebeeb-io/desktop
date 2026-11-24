@@ -1010,7 +1010,7 @@ fn the_phrase_hint_names_another_device_only_where_the_source_has_the_door() {
         ..phrase_script()
     });
     let page = a11y(&rt);
-    assert!(page.contains("Enter your 12 words"), "the hint is there: {page}");
+    assert!(page.contains("Enter your master key (12 words"), "the hint is there: {page}");
     assert!(
         !page.contains("approve from another device"),
         "no clause without the door: {page}"

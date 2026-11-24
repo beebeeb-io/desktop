@@ -216,15 +216,15 @@ fn paste_hint(k: &mut Keys, doors: bool, t: &Theme) -> El {
     if !doors {
         return kit::label(
             k.next("note"),
-            "Your password is right. Enter your 12 words (paste all 12 into any box).",
+            "Your password is right. Enter your master key (12 words; paste all 12 into any box).",
             type_::CAPTION,
             t.text_tertiary,
         )
         .wrap()
         .w_full();
     }
-    const LINE_1: &str = "Your password is right. Enter your 12 words (paste all 12 into any";
-    const LINE_2: &str = "box), or ";
+    const LINE_1: &str = "Your password is right. Enter your master key (12 words; paste all 12 into";
+    const LINE_2: &str = "any box), or ";
     const LINK: &str = "approve from another device";
     let note = k.next("note");
     let note_box = format!("{note}-box");
@@ -353,7 +353,7 @@ pub(super) fn word_grid(ui: &Ui, t: &Theme) -> El {
 pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let mut c = au::column().child(back(t)).child(au::heading(
         "Set up this device",
-        Some("This PC doesn't have your encryption keys yet. Restore them to continue."),
+        Some("This PC doesn't have your master key yet. Enter it to continue."),
         false,
         t,
     ));
