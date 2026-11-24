@@ -1382,11 +1382,24 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError> {
-        self.local(|db, sync_root| {
-            let parent_entry = file_ops::resolve_folder(db, parent).map_err(map_drive_err)?;
-            file_ops::create_folder(db, sync_root, parent_entry.as_ref(), name).map_err(map_drive_err)?;
+        // RD-b: every refusal is told in the log (never the name: it is the person's).
+        let at_root = parent.is_none();
+        let done = self.local(|db, sync_root| {
+            let parent_entry = file_ops::resolve_folder(db, parent).map_err(|why| {
+                tracing::warn!(at_root, ?why, "new folder: the parent folder was not found");
+                map_drive_err(why)
+            })?;
+            file_ops::create_folder(db, sync_root, parent_entry.as_ref(), name).map_err(|why| {
+                tracing::warn!(at_root, ?why, "new folder: refused");
+                map_drive_err(why)
+            })?;
             Ok(())
-        })
+        });
+        match &done {
+            Ok(()) => tracing::info!(at_root, "new folder: made"),
+            Err(why) => tracing::warn!(at_root, ?why, "new folder: failed"),
+        }
+        done
     }
 
     fn new_file(&mut self, folder: Option<&str>, name: &str) -> Result<(), ActionError> {
