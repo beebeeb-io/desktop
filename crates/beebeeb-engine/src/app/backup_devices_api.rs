@@ -39,13 +39,13 @@
 use std::sync::Arc;
 
 use beebeeb_core::backup::{
-    DeviceFolderCandidate, DeviceFolderChoice, DeviceManifest, DeviceSelf, FolderManifest, MANIFEST_NAME, TakenName,
-    device_folder_name, find_device_folder, fold_name, parse_manifest, same_device_id,
+    device_folder_name, find_device_folder, fold_name, parse_manifest, same_device_id, DeviceFolderCandidate,
+    DeviceFolderChoice, DeviceManifest, DeviceSelf, FolderManifest, TakenName, MANIFEST_NAME,
 };
 use beebeeb_types::backup::Platform;
 use zeroize::Zeroizing;
 
-use super::settings_api::{AccountCallError, kind_of};
+use super::settings_api::{kind_of, AccountCallError};
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
 use crate::api_client::ApiClient;
@@ -61,7 +61,11 @@ mod tests;
 const MODEL_MAX: usize = 64;
 
 /// Why a delete of this PC's own device folder is refused (shown, never logged; no name in it).
-const THIS_PC: &str = "This may be this PC's own backup. Nothing was deleted.";
+const THIS_PC: &str = concat!(
+    "This may be ",
+    crate::device_word!(),
+    "'s own backup. Nothing was deleted."
+);
 
 /// What kind of device a manifest describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

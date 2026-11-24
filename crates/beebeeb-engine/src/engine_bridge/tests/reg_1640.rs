@@ -596,7 +596,7 @@ fn regression_1640_assert_kept_as_a_copy(db: &StateDb, sync_root: &Path) {
         "the original and its emptied folder are removed"
     );
     assert_eq!(
-        std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(),
+        std::fs::read(sync_root.join(concat!("notes (", crate::device_word!(), ").txt"))).unwrap(),
         b"edited, never sent",
         "the edit is kept as a copy where it can upload"
     );
@@ -608,7 +608,7 @@ fn regression_1640_assert_kept_as_a_copy(db: &StateDb, sync_root: &Path) {
             kept[0].copy_path.as_str(),
             kept[0].original_removed
         ),
-        ("docs/notes.txt", "notes (this PC).txt", true)
+        ("docs/notes.txt", concat!("notes (", crate::device_word!(), ").txt"), true)
     );
     assert_eq!(kept[0].copied_hash, sha256_hex(b"edited, never sent"));
     let feed: Vec<(String, String, String)> = version_conflict_feed_from_db(db)
@@ -620,7 +620,7 @@ fn regression_1640_assert_kept_as_a_copy(db: &StateDb, sync_root: &Path) {
         feed,
         vec![(
             "kept_copy".to_string(),
-            "notes (this PC).txt".to_string(),
+            concat!("notes (", crate::device_word!(), ").txt").to_string(),
             "dismiss".to_string()
         )],
         "one review entry"
@@ -701,7 +701,7 @@ fn task_2191_a_remote_deletion_copies_an_unknown_file_the_platform_calls_in_sync
         !sync_root.join("docs").exists(),
         "known content in sync: removed as before"
     );
-    assert!(!sync_root.join("notes (this PC).txt").exists());
+    assert!(!sync_root.join(concat!("notes (", crate::device_word!(), ").txt")).exists());
 }
 
 /// Desktop 0.8.15: the start-up guard now runs beside the engine, so a remote deletion can
@@ -752,7 +752,7 @@ fn task_2191_the_retry_never_removes_an_unknown_file_unread() {
         }
     });
     assert_eq!(
-        std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(),
+        std::fs::read(sync_root.join(concat!("notes (", crate::device_word!(), ").txt"))).unwrap(),
         b"edited, never sent",
         "copied before the original went"
     );
@@ -863,7 +863,7 @@ fn regression_1640_an_agreed_plain_file_is_removed_without_a_copy() {
     remove_pruned_entries(&db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
     assert!(!sync_root.join("docs").exists(), "removed, folder and all");
     assert!(
-        !sync_root.join("notes (this PC).txt").exists(),
+        !sync_root.join(concat!("notes (", crate::device_word!(), ").txt")).exists(),
         "no copy of the agreed bytes"
     );
     assert!(db.list_kept_copies().unwrap().is_empty());
@@ -882,7 +882,7 @@ fn regression_1640_a_file_with_no_or_only_some_local_bytes_is_not_read() {
         b"edited, never sent",
         "partly on disk: kept in place"
     );
-    assert!(!sync_root.join("notes (this PC).txt").exists(), "and not copied");
+    assert!(!sync_root.join(concat!("notes (", crate::device_word!(), ").txt")).exists(), "and not copied");
     let kept = db.list_kept_copies().unwrap();
     assert_eq!(
         (kept.len(), kept[0].copy_path.as_str(), kept[0].original_removed),
@@ -927,7 +927,7 @@ fn regression_1640_a_file_partly_on_disk_is_listed_once_and_resolved_later() {
         "the original is removed"
     );
     assert_eq!(
-        std::fs::read(sync_root.join("notes (this PC).txt")).unwrap(),
+        std::fs::read(sync_root.join(concat!("notes (", crate::device_word!(), ").txt"))).unwrap(),
         b"edited, never sent",
         "its bytes are kept as a copy where it can upload"
     );
@@ -945,7 +945,7 @@ fn regression_1640_a_file_partly_on_disk_is_listed_once_and_resolved_later() {
         .collect();
     assert_eq!(
         feed,
-        vec![("kept as a copy".to_string(), "notes (this PC).txt".to_string())]
+        vec![("kept as a copy".to_string(), concat!("notes (", crate::device_word!(), ").txt").to_string())]
     );
 }
 
@@ -973,15 +973,15 @@ fn regression_1640_a_this_pc_copy_never_overwrites_a_file() {
     let dir = tempfile::tempdir().unwrap();
     let original = dir.path().join("notes.txt");
     std::fs::write(&original, b"mine").unwrap();
-    std::fs::write(dir.path().join("notes (this PC).txt"), b"an earlier copy").unwrap();
+    std::fs::write(dir.path().join(concat!("notes (", crate::device_word!(), ").txt")), b"an earlier copy").unwrap();
     let (copy, hash) = copy_as_this_pc(&original, dir.path()).unwrap();
-    assert_eq!(copy, dir.path().join("notes (this PC 2).txt"));
+    assert_eq!(copy, dir.path().join(concat!("notes (", crate::device_word!(), " 2).txt")));
     assert_eq!(
         (std::fs::read(&copy).unwrap(), hash),
         (b"mine".to_vec(), sha256_hex(b"mine"))
     );
     assert_eq!(
-        std::fs::read(dir.path().join("notes (this PC).txt")).unwrap(),
+        std::fs::read(dir.path().join(concat!("notes (", crate::device_word!(), ").txt"))).unwrap(),
         b"an earlier copy",
         "the earlier copy is untouched"
     );
@@ -989,7 +989,7 @@ fn regression_1640_a_this_pc_copy_never_overwrites_a_file() {
     std::fs::write(&bare, b"all:").unwrap();
     assert_eq!(
         copy_as_this_pc(&bare, dir.path()).unwrap().0,
-        dir.path().join("Makefile (this PC)")
+        dir.path().join(concat!("Makefile (", crate::device_word!(), ")"))
     );
     assert!(
         std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry
@@ -1011,7 +1011,7 @@ async fn regression_1640_a_kept_copy_from_a_trashed_folder_uploads_where_it_can(
     regression_1640_edited_file_in_a_folder_in(&bridge.db, &sync_root);
     let rows = bridge.db.mark_subtree_trashing("folder-docs").unwrap();
     remove_pruned_entries(&bridge.db, &sync_root, &rows, &|_, _| LocalEntry::WhollyLocal);
-    let copy = sync_root.join("notes (this PC).txt");
+    let copy = sync_root.join(concat!("notes (", crate::device_word!(), ").txt"));
     assert!(crate::watcher::dispatch_local_create(
         &bridge, &sync_root, &copy, "scan"
     ));
@@ -1073,7 +1073,7 @@ fn regression_1640_an_original_in_use_is_removed_later_and_never_copied_twice() 
                     .unwrap()
                     .file_name()
                     .to_string_lossy()
-                    .contains("(this PC")
+                    .contains(concat!("(", crate::device_word!()))
             })
             .count()
     };

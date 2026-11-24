@@ -40,9 +40,9 @@ impl ExplorerChangeRefused {
         match self {
             Self::NotSignedIn => "Unlock Beebeeb to change this.",
             Self::NoFolder => "Beebeeb has no sync folder yet.",
-            Self::ChangesWait => "Changes on this PC have not uploaded yet. Wait for them, then turn it off.",
+            Self::ChangesWait => concat!("Changes on ", crate::device_word!(), " have not uploaded yet. Wait for them, then turn it off."),
             Self::CannotTellChanges => "Couldn't check for changes that have not uploaded yet. Try again.",
-            Self::Failed => "Couldn't change Beebeeb in File Explorer. Nothing was changed that you need to undo.",
+            Self::Failed => concat!("Couldn't change Beebeeb in ", crate::file_manager!(), ". Nothing was changed that you need to undo."),
             Self::SyncStopped => {
                 "Sync is stopped. Choose Repair in Settings > Sync, or restart Beebeeb, to start it again."
             }

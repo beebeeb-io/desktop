@@ -47,7 +47,7 @@ use beebeeb_core::backup::custom_category_name;
 use sha2::{Digest, Sha256};
 
 use crate::account::SessionGeneration;
-use crate::account_binding::{Identity, canonical_email};
+use crate::account_binding::{canonical_email, Identity};
 use crate::app::backups_api::BackupsError;
 use crate::app::{CredentialStores, Engine, LocalStateRefused, OwnedState};
 use crate::backup::kfm::{self, KnownFolderPaths};
@@ -55,7 +55,7 @@ use crate::backup::sources::{self, ChosenFolder, SourceRefusal};
 use crate::backup_delete::DeleteBackupError;
 use crate::config::{DesktopConfig, KnownFolderSource};
 use crate::identity::EngineIdentity;
-use crate::known_folder::{KNOWN_FOLDERS, known_folder_by_key};
+use crate::known_folder::{known_folder_by_key, KNOWN_FOLDERS};
 use crate::state_db::StateDb;
 
 #[cfg(test)]
@@ -101,7 +101,7 @@ impl AddRefused {
                 "This folder holds a folder that is backed up already. Choose one of them, not both."
             }
             Self::KnownFolderOff => "This folder is in the list already. Switch it on there to back it up.",
-            Self::NotAFolder => "This isn't a folder on this PC.",
+            Self::NotAFolder => concat!("This isn't a folder on ", crate::device_word!(), "."),
             Self::Backups(_) => "Couldn't add this folder. Try again in a moment.",
         }
     }
@@ -145,7 +145,7 @@ impl RemoveRefused {
         match self {
             Self::NotChosen => "This folder is no longer in the list. Nothing was changed.",
             Self::NoCopyFound => {
-                "This PC hasn't found this folder's backup yet, so it can't be moved to Trash. Nothing was changed."
+                concat!(crate::device_word_cap!(), " hasn't found this folder's backup yet, so it can't be moved to Trash. Nothing was changed.")
             }
             Self::Backups(_) => "Couldn't stop backing up this folder. Nothing was changed.",
             Self::PasswordRefused(DeleteBackupError::WrongPassword) => {

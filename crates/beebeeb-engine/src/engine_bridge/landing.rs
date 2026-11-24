@@ -188,9 +188,15 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
             kind: "held_edit".to_string(),
             status: "needs a decision".to_string(),
             updated_at: Some(detected_at),
-            detail: "Changed on this PC, but Beebeeb doesn't know which version it was based on, so it \
-                     isn't sent. Both versions are kept: yours on this PC, the other in the file's history."
-                .to_string(),
+            detail: concat!(
+                "Changed on ",
+                crate::device_word!(),
+                ", but Beebeeb doesn't know which version it was based on, so it \
+                     isn't sent. Both versions are kept: yours on ",
+                crate::device_word!(),
+                ", the other in the file's history."
+            )
+            .to_string(),
             action: "review_upload".to_string(),
             op_id: None,
             version_id: None,
@@ -218,8 +224,12 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
             status: "not checked yet".to_string(),
             updated_at: Some(first_at),
             detail: format!(
-                "A change to one of them stays on this PC and isn't sent until a later update checks it. \
-                 Nothing is lost. {}{}",
+                concat!(
+                    "A change to one of them stays on ",
+                    crate::device_word!(),
+                    " and isn't sent until a later update checks it. \
+                 Nothing is lost. {}{}"
+                ),
                 names.join(", "),
                 if more > 0 {
                     format!(" and {more} more")
@@ -278,30 +288,31 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
                 let original = if kept.original_removed {
                     ""
                 } else {
-                    " The original stays on this PC until it can be removed."
+                    concat!(" The original stays on ", crate::device_word!(), " until it can be removed.")
                 };
                 (
                     copy_name.clone(),
                     "kept as a copy",
                     format!(
-                        "Deleted elsewhere while it held changes not sent from this PC. Those changes are kept as {copy_name}, {place}.{original}"
+                        "Deleted elsewhere while it held changes not sent from {device}. Those changes are kept as {copy_name}, {place}.{original}",
+                        device = crate::device_word!()
                     ),
                 )
             }
             KeptReason::InUse => (
                 original_name,
                 "waiting to close",
-                "Deleted elsewhere while it was open on this PC. It is removed from this PC once it is closed.".to_string(),
+                concat!("Deleted elsewhere while it was open on ", crate::device_word!(), ". It is removed from ", crate::device_word!(), " once it is closed.").to_string(),
             ),
             KeptReason::PartlyLocal => (
                 original_name,
                 "kept in place",
-                "Deleted elsewhere while only part of it was on this PC, so it could not be checked for changes. It stays where it is, as it is. Dismiss this once you have dealt with it.".to_string(),
+                concat!("Deleted elsewhere while only part of it was on ", crate::device_word!(), ", so it could not be checked for changes. It stays where it is, as it is. Dismiss this once you have dealt with it.").to_string(),
             ),
             KeptReason::CopyFailed => (
                 original_name,
                 "kept in place",
-                "Deleted elsewhere while it held changes not sent from this PC, and they could not be copied. It stays where it is; the copy is tried again.".to_string(),
+                concat!("Deleted elsewhere while it held changes not sent from ", crate::device_word!(), ", and they could not be copied. It stays where it is; the copy is tried again.").to_string(),
             ),
         };
         entries.push(VersionConflictEntry {
@@ -764,9 +775,9 @@ pub fn copy_as_this_pc(path: &Path, dir: &Path) -> std::io::Result<(PathBuf, Str
     };
     for n in 1..=99 {
         let suffix = if n == 1 {
-            " (this PC)".to_string()
+            concat!(" (", crate::device_word!(), ")").to_string()
         } else {
-            format!(" (this PC {n})")
+            format!(concat!(" (", crate::device_word!(), " {n})"))
         };
         let name = match ext {
             Some(ext) => format!("{stem}{suffix}.{ext}"),

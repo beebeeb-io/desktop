@@ -285,7 +285,7 @@ async fn the_engines_own_rename_inside_an_own_backup_is_never_put_back() {
         }],
     });
 
-    let (temp, kept) = (pictures.join(".a.tmp"), pictures.join("a (this PC).jpg"));
+    let (temp, kept) = (pictures.join(".a.tmp"), pictures.join(concat!("a (", crate::device_word!(), ").jpg")));
     std::fs::write(&kept, b"kept").unwrap();
     handle_rename_with(&bridge, &sync_root, &temp, &kept, ProtectionCheck::Skip).await;
     let engine_kept = kept.exists() && !temp.exists();
