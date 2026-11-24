@@ -1,18 +1,18 @@
 //! The sign-in screens, drawn from [`Ui`] with the account kit (`ui::au`). Every string is the
 //! board's; every measurement is the board's computed CSS (see the goldens).
 
-use rune::{Color, Cx, El, col, el, row};
+use rune::{col, el, row, Color, Cx, El};
 
 use super::source::{SharedSession, SignInProblem};
 use super::{
-    EMAIL_KEY, HelloFailure, Intent, PASSWORD_KEY, REQUEST_SECONDS, Screen, Ui, act, icons, qr, view_recover,
-    view_recovery, view_steps,
+    act, icons, qr, view_recover, view_recovery, view_steps, HelloFailure, Intent, Screen, Ui, EMAIL_KEY, PASSWORD_KEY,
+    REQUEST_SECONDS,
 };
-use crate::State;
 use crate::theme::scale::space;
-use crate::theme::tokens::{self, Theme, type_};
-use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, FieldSpec, FieldState, Keys, Tone, type_au};
+use crate::theme::tokens::{self, type_, Theme};
+use crate::ui::au::{self, type_au, ButtonKind, ButtonSize, ButtonState, FieldSpec, FieldState, Keys, Tone};
 use crate::ui::kit;
+use crate::State;
 
 const PRODUCT: &str = "Drive";
 const ONE_ACCOUNT: &str = "One Beebeeb account for Drive, Pass, VPN, Chat and Mail.";
@@ -200,7 +200,10 @@ fn continue_card(session: &SharedSession, ui: &Ui, k: &mut Keys, t: &Theme) -> E
                 ))
                 .child(kit::label(
                     format!("{key}-line-1"),
-                    format!("Signed in to {} on this PC", session.held_by),
+                    format!(
+                        concat!("Signed in to {} on ", beebeeb_engine::device_word!()),
+                        session.held_by
+                    ),
                     type_::CAPTION,
                     t.text_tertiary,
                 )),
@@ -212,7 +215,7 @@ fn continue_card(session: &SharedSession, ui: &Ui, k: &mut Keys, t: &Theme) -> E
     };
     let mut hello = au::button(
         k,
-        "Continue with Windows Hello",
+        concat!("Continue with ", beebeeb_engine::unlock_name!()),
         Some(&icons::FINGERPRINT),
         ButtonKind::Primary,
         ButtonSize::Lg,
@@ -421,7 +424,13 @@ fn continue_as(ui: &Ui, failure: Option<HelloFailure>, k: &mut Keys, t: &Theme) 
         .child(au::hero_ring(&icons::FINGERPRINT, fraction, tone, t))
         .child(au::heading(
             &format!("Continue as {}", session.display_name),
-            Some("Drive joins your Beebeeb account on this PC. Confirm with Windows Hello first: it never happens silently."),
+            Some(concat!(
+                "Drive joins your Beebeeb account on ",
+                beebeeb_engine::device_word!(),
+                ". Confirm with ",
+                beebeeb_engine::unlock_name!(),
+                " first: it never happens silently."
+            )),
             true,
             t,
         ))
@@ -432,8 +441,21 @@ fn continue_as(ui: &Ui, failure: Option<HelloFailure>, k: &mut Keys, t: &Theme) 
                 .h(28.0)
                 .gap(space::S10)
                 .center()
-                .child(au::avatar("who-avatar", "who-initials", &session.initials, 28.0, 250.0, t.surface, t))
-                .child(kit::label("who-email", session.email.clone(), type_::KBD, t.text_tertiary)),
+                .child(au::avatar(
+                    "who-avatar",
+                    "who-initials",
+                    &session.initials,
+                    28.0,
+                    250.0,
+                    t.surface,
+                    t,
+                ))
+                .child(kit::label(
+                    "who-email",
+                    session.email.clone(),
+                    type_::KBD,
+                    t.text_tertiary,
+                )),
         );
     c = match failure {
         None => c,
@@ -441,7 +463,7 @@ fn continue_as(ui: &Ui, failure: Option<HelloFailure>, k: &mut Keys, t: &Theme) 
             k,
             Tone::Red,
             &icons::INFO,
-            Some("Windows Hello did not recognize you"),
+            Some(concat!(beebeeb_engine::unlock_name!(), " did not recognize you")),
             Some("Nothing was signed in. Try again, or sign in another way."),
             true,
             t,
@@ -451,16 +473,16 @@ fn continue_as(ui: &Ui, failure: Option<HelloFailure>, k: &mut Keys, t: &Theme) 
             k,
             Tone::Neutral,
             &icons::INFO,
-            Some("You cancelled Windows Hello"),
+            Some(concat!("You cancelled ", beebeeb_engine::unlock_name!())),
             Some("Nothing was signed in. You can try again or choose another way."),
             false,
             t,
         )),
     };
     let label = if failure.is_some() {
-        "Try Windows Hello again"
+        concat!("Try ", beebeeb_engine::unlock_name!(), " again")
     } else {
-        "Continue with Windows Hello"
+        concat!("Continue with ", beebeeb_engine::unlock_name!())
     };
     c.child(
         actions(6.0)
@@ -538,7 +560,13 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
     }
     let status = if expired {
         let words = if ui.lost() { "Lost" } else { "Expired" };
-        row().child(crate::ui::pill::pill("status-pill", words, crate::ui::pill::Tone::Neutral, false, t))
+        row().child(crate::ui::pill::pill(
+            "status-pill",
+            words,
+            crate::ui::pill::Tone::Neutral,
+            false,
+            t,
+        ))
     } else {
         row()
             .gap(space::S10)
@@ -639,9 +667,11 @@ fn approved(by: &str, k: &mut Keys, t: &Theme) -> El {
         .child(au::hero_tile(&icons::CHECK, Tone::Green, 8.0, t))
         .child(au::heading(
             "Approved",
-            Some(&format!(
-                "{by} approved this PC. Drive is opening with your account. Nothing was typed, and your password stayed with you."
-            )),
+            Some(&format!(concat!(
+                "{by} approved ",
+                beebeeb_engine::device_word!(),
+                ". Drive is opening with your account. Nothing was typed, and your password stayed with you."
+            ))),
             true,
             t,
         ))
@@ -657,8 +687,16 @@ fn approved(by: &str, k: &mut Keys, t: &Theme) -> El {
         ))
         .child(
             actions(6.0).child(
-                au::button(k, "Open Drive", None, ButtonKind::Primary, ButtonSize::Lg, ButtonState::Enabled, t)
-                    .on_press_tx(act(Ui::open_drive)),
+                au::button(
+                    k,
+                    "Open Drive",
+                    None,
+                    ButtonKind::Primary,
+                    ButtonSize::Lg,
+                    ButtonState::Enabled,
+                    t,
+                )
+                .on_press_tx(act(Ui::open_drive)),
             ),
         )
 }
@@ -669,9 +707,11 @@ fn denied(by: &str, k: &mut Keys, t: &Theme) -> El {
         .child(au::hero_tile(&icons::CROSS, Tone::Neutral, 8.0, t))
         .child(au::heading(
             "Denied",
-            Some(&format!(
-                "{by} said no. Nothing was signed in on this PC, and no keys were shared."
-            )),
+            Some(&format!(concat!(
+                "{by} said no. Nothing was signed in on ",
+                beebeeb_engine::device_word!(),
+                ", and no keys were shared."
+            ))),
             true,
             t,
         ))
@@ -700,12 +740,20 @@ fn denied(by: &str, k: &mut Keys, t: &Theme) -> El {
 fn not_signed_in(other_account: bool, k: &mut Keys, t: &Theme) -> El {
     let (title, words) = if other_account {
         (
-            "Approved, but this PC holds another account",
-            "Nothing was signed in on this PC, and no keys were kept.",
+            concat!(
+                "Approved, but ",
+                beebeeb_engine::device_word!(),
+                " holds another account"
+            ),
+            concat!(
+                "Nothing was signed in on ",
+                beebeeb_engine::device_word!(),
+                ", and no keys were kept."
+            ),
         )
     } else {
         (
-            "Approved, but this PC did not sign in",
+            concat!("Approved, but ", beebeeb_engine::device_word!(), " did not sign in"),
             "Nothing was signed in. Ask again.",
         )
     };

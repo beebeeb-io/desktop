@@ -49,11 +49,11 @@ pub const TRAY_TEXT: &str = "Windows puts a new icon under ^ at first. Drag the 
 
 /// The words of the five tips (DW-0301 to DW-0305).
 pub const TIPS: [&str; 5] = [
-    "Add files and photos here. They're encrypted before they upload. You can also drop files from File Explorer.",
-    "Right-click a file to share it, move it or keep it on this PC.",
+    concat!("Add files and photos here. They're encrypted before they upload. You can also drop files from ", beebeeb_engine::file_manager!(), "."),
+    concat!("Right-click a file to share it, move it or keep it on ", beebeeb_engine::device_word!(), "."),
     "Files and folders you've shared, or that others shared with you.",
     "Photos your iPhone and iPad backed up. New ones arrive on their own.",
-    "Storage, devices, backups and app lock. Ctrl+, opens them, and you can see this guide again there.",
+    concat!("Storage, devices, backups and app lock. ", beebeeb_engine::primary_key!(), ", opens them, and you can see this guide again there."),
 ];
 
 /// The card (`.mk-coach`), its ring (`.mk-ring`), and the two buttons.

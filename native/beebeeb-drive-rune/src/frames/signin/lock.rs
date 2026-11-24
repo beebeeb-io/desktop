@@ -12,7 +12,7 @@
 //! A lock that goes (the engine opened it, a sign-out) takes everything typed here with it.
 
 use super::source::{GateState as SourceGate, HelloOutcome, ScreenPasswordOutcome};
-use super::{PASSWORD_KEY, Screen, Ui};
+use super::{Screen, Ui, PASSWORD_KEY};
 
 /// The key of the lock screen's Unlock button (`before_files`).
 pub const UNLOCK_KEY: &str = "gate-btn-0";
@@ -36,8 +36,16 @@ pub enum Said {
 impl Said {
     pub fn words(self) -> &'static str {
         match self {
-            Said::NotRecognized => "Windows Hello didn't recognise you. Try again, or use your password.",
-            Said::Unavailable => "Windows Hello isn't available on this PC. Use your password to unlock.",
+            Said::NotRecognized => concat!(
+                beebeeb_engine::unlock_name!(),
+                " didn't recognise you. Try again, or use your password."
+            ),
+            Said::Unavailable => concat!(
+                beebeeb_engine::unlock_name!(),
+                " isn't available on ",
+                beebeeb_engine::device_word!(),
+                ". Use your password to unlock."
+            ),
         }
     }
 }
@@ -109,8 +117,22 @@ impl Ui {
             ScreenPasswordOutcome::ServerLimit { wait_ms: None } => {
                 "Beebeeb is checking too many passwords right now. Try again in a moment.".to_string()
             }
-            ScreenPasswordOutcome::LocalCheckOff => "That password isn't right. This PC no longer checks your password offline: connect to the internet or use Windows Hello.".to_string(),
-            ScreenPasswordOutcome::OfflineNoRecord => "Beebeeb can't be reached, and this PC can't check your password offline yet. Connect to the internet or use Windows Hello.".to_string(),
+            ScreenPasswordOutcome::LocalCheckOff => concat!(
+                "That password isn't right. ",
+                beebeeb_engine::device_word_cap!(),
+                " no longer checks your password offline: connect to the internet or use ",
+                beebeeb_engine::unlock_name!(),
+                "."
+            )
+            .to_string(),
+            ScreenPasswordOutcome::OfflineNoRecord => concat!(
+                "Beebeeb can't be reached, and ",
+                beebeeb_engine::device_word!(),
+                " can't check your password offline yet. Connect to the internet or use ",
+                beebeeb_engine::unlock_name!(),
+                "."
+            )
+            .to_string(),
             // These two move to the vault level, whose screen carries the sentence (`lock_notice`).
             ScreenPasswordOutcome::AccountUpgradeNeeded | ScreenPasswordOutcome::SessionEnded => return None,
             ScreenPasswordOutcome::Failed => "Beebeeb couldn't check that password. Nothing was unlocked.".to_string(),

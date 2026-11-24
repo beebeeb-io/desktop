@@ -7,22 +7,22 @@
 //! no element label, no accessibility text, no shared layout cache, no `String`. The three
 //! words typed back are secure fields shown as typed, and the suggestions are secure text too.
 
-use rune::{El, el, row};
+use rune::{el, row, El};
 
-use super::create::{DEVICE_KEY, Pictured, WORD_KEYS};
-use super::create_kit::{self as ck, Field, cact};
+use super::create::{Pictured, DEVICE_KEY, WORD_KEYS};
+use super::create_kit::{self as ck, cact, Field};
 use super::create_source::CreateProblem;
 use super::view::actions;
 use super::view_create::{head, primary, state};
 use super::view_steps::{escape_first, open};
-use super::{Intent, Ui, icons};
-use crate::State;
+use super::{icons, Intent, Ui};
 use crate::theme::icons::{DOC_GENERIC, FILES};
 use crate::theme::scale::space;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
-use crate::ui::au_entry::{self, WORD_WIDTH, type_entry};
+use crate::ui::au_entry::{self, type_entry, WORD_WIDTH};
 use crate::ui::kit;
+use crate::State;
 
 // ---------------------------------------------------------------------------
 // DW-A39
@@ -72,7 +72,11 @@ fn phrase_grid(ui: &Ui, t: &Theme) -> El {
         .gap(space::S6);
     let mut boxes = boxes.into_iter().peekable();
     while boxes.peek().is_some() {
-        grid = grid.child(row().gap(space::S6).children(boxes.by_ref().take(3).collect::<Vec<_>>()));
+        grid = grid.child(
+            row()
+                .gap(space::S6)
+                .children(boxes.by_ref().take(3).collect::<Vec<_>>()),
+        );
     }
     grid
 }
@@ -217,7 +221,7 @@ pub fn device(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let c = ui.create_state();
     head("Back", 6, "This device", t)
         .child(au::heading(
-            "Name this PC",
+            concat!("Name ", beebeeb_engine::device_word!()),
             Some("You'll see this name in Devices and sessions, and when you approve a sign-in on another device."),
             false,
             t,
@@ -273,7 +277,11 @@ pub fn creating(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         // No Back and no Cancel while it runs.
         None | Some(CreateProblem::CodeExpired) => au::column().child(ck::hero_ring(0.55, t)).child(au::heading(
             "Creating your account",
-            Some("Setting up account encryption on this PC. This takes a few seconds."),
+            Some(concat!(
+                "Setting up account encryption on ",
+                beebeeb_engine::device_word!(),
+                ". This takes a few seconds."
+            )),
             true,
             t,
         )),
@@ -322,18 +330,22 @@ fn first_name(email: &str) -> String {
 pub fn ready(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let email = ui.email.text.trim();
     let line = format!(
-        "{email} works in Drive, Pass, VPN, Chat and Mail. Sign in once on this PC; the other apps can continue as {}.",
+        concat!(
+            "{email} works in Drive, Pass, VPN, Chat and Mail. Sign in once on ",
+            beebeeb_engine::device_word!(),
+            "; the other apps can continue as {}."
+        ),
         first_name(email)
     );
     au::column()
         .child(au::hero_tile(&icons::CHECK, Tone::Green, 0.0, t))
         .child(au::heading("Your account is ready", Some(&line), true, t))
-        .child(ck::next_card(&FILES, "Set up Drive on this PC", t))
+        .child(ck::next_card(&FILES, concat!("Set up Drive on ", beebeeb_engine::device_word!()), t))
         .child(au::banner(
             k,
             Tone::Amber,
             &icons::LOCK,
-            Some("Encrypted on this PC"),
+            Some(concat!("Encrypted on ", beebeeb_engine::device_word!())),
             Some("Your recovery phrase was shown once and can't be shown again. It is the way back in if you lose your password and have no other signed-in device."),
             false,
             t,

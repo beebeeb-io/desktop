@@ -3,23 +3,27 @@
 //! them. Every string is the board's; a state the board gives a rule and no drawing for uses
 //! the rule's own words.
 
-use rune::{El, col, el};
+use rune::{col, el, El};
 
-use super::create::{CODE_KEY, EmailProblem, Step};
-use super::create_kit::{self as ck, Field, cact, changed};
+use super::create::{EmailProblem, Step, CODE_KEY};
+use super::create_kit::{self as ck, cact, changed, Field};
 use super::create_source::{CodeProblem, PasswordProblem, SendProblem};
 use super::steps::CONFIRM_KEY;
 use super::view::actions;
 use super::view_steps::{escape_first, open};
-use super::{EMAIL_KEY, Intent, PASSWORD_KEY, Ui, icons, view_create_phrase as later};
-use crate::State;
+use super::{icons, view_create_phrase as later, Intent, Ui, EMAIL_KEY, PASSWORD_KEY};
 use crate::theme::scale::space;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys};
 use crate::ui::kit;
+use crate::State;
 
 const NOT_SENT: &str = "We could not send the email. Check your connection and try again.";
-const BREACH_NOTE: &str = "Checked against known breaches on Beebeeb's own servers. Only a short hash prefix leaves this PC, never the password.";
+const BREACH_NOTE: &str = concat!(
+    "Checked against known breaches on Beebeeb's own servers. Only a short hash prefix leaves ",
+    beebeeb_engine::device_word!(),
+    ", never the password."
+);
 const BREACH_UNREACHABLE: &str = "We could not check this password against known breaches, and we do not let you continue without that check. Try again.";
 
 pub fn view(ui: &Ui, step: Step, k: &mut Keys, t: &Theme) -> El {
@@ -94,7 +98,7 @@ fn email(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     head(back, 1, "Email", t)
         .child(au::heading(
             "Create your Beebeeb account",
-            Some("Start with your email. Everything you store is encrypted on this PC before it leaves it, so we can't read any of it. The same account works in Drive, Pass, VPN, Chat and Mail."),
+            Some(concat!("Start with your email. Everything you store is encrypted on ", beebeeb_engine::device_word!(), " before it leaves it, so we can't read any of it. The same account works in Drive, Pass, VPN, Chat and Mail.")),
             false,
             t,
         ))
@@ -366,7 +370,11 @@ fn password(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let mut column = head("Back", 4, "Password", t)
         .child(au::heading(
             "Set a password",
-            Some("It unlocks your vault on this PC. Your recovery phrase stays the ultimate backup."),
+            Some(concat!(
+                "It unlocks your vault on ",
+                beebeeb_engine::device_word!(),
+                ". Your recovery phrase stays the ultimate backup."
+            )),
             false,
             t,
         ))
