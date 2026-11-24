@@ -51,6 +51,12 @@ pub fn file_menu(s: &State) -> Vec<Entry> {
         entries.push(details);
     }
     entries.push(Entry::Sep);
+    // A single folder can join the sidebar (the account's pins, as on the web).
+    match s.pin_state() {
+        Some(true) => entries.push(Entry::item("pin", "Unpin from sidebar")),
+        Some(false) => entries.push(Entry::item("pin", "Pin to sidebar")),
+        None => {}
+    }
     if !several {
         entries.push(Entry::keyed("rename", "Rename", "F2"));
     }

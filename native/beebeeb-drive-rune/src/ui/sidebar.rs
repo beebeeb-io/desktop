@@ -101,7 +101,7 @@ pub fn side_item(
         16.0,
         if on { t.text } else { t.text_tertiary },
     );
-    side_row(label, glyph, count, on, shortcut, t)
+    side_row(label, label, glyph, count, on, shortcut, t)
 }
 
 /// A sidebar place: the folder art in its tint (a selected row keeps the tint), or the line
@@ -117,11 +117,23 @@ pub fn section_item(
         return side_item(label, section.icon(), count, on, section.shortcut(), t);
     };
     let glyph = file_icon(format!("{label}-icon"), fi, 16.0, t);
-    side_row(label, glyph, count, on, section.shortcut(), t)
+    side_row(label, label, glyph, count, on, section.shortcut(), t)
+}
+
+/// A pinned folder (`Pinned`): its art, its name. Keys: `pin-<id>-row`, `pin-<id>-icon`, `pin-<id>`.
+pub fn pinned_item(id: &str, name: &str, t: &Theme) -> El {
+    let key = format!("pin-{id}");
+    let fi = FileIcon {
+        id: IconId::Folder,
+        tint: Tint::Folder,
+    };
+    let glyph = file_icon(format!("{key}-icon"), fi, 16.0, t);
+    side_row(&key, name, glyph, None, false, "", t)
 }
 
 fn side_row(
-    label: &'static str,
+    key: &str,
+    label: &str,
     glyph: El,
     count: Option<Count>,
     on: bool,
@@ -129,11 +141,11 @@ fn side_row(
     t: &Theme,
 ) -> El {
     let mut item = row()
-        .key(format!("{label}-row"))
+        .key(format!("{key}-row"))
         .role("button")
         .label(label)
         .shortcut_hint(shortcut)
-        .help(format!("{label}  {shortcut}"))
+        .help(if shortcut.is_empty() { label.to_string() } else { format!("{label}  {shortcut}") })
         .h(28.0)
         .px(9.0)
         .gap(9.0)
@@ -146,7 +158,7 @@ fn side_row(
         .child(glyph)
         .child(
             kit::label(
-                label,
+                key,
                 label,
                 type_::LIST_ITEM,
                 if on { t.text } else { t.text_secondary },
@@ -157,7 +169,7 @@ fn side_row(
     match count {
         Some(Count::Pill(n)) => {
             item = item.child(
-                el().key(format!("{label}-pill"))
+                el().key(format!("{key}-pill"))
                     .min_w(18.0)
                     .h(18.0)
                     .px(5.0)
@@ -165,7 +177,7 @@ fn side_row(
                     .fill(t.badge)
                     .center()
                     .child(kit::label(
-                        format!("{label}-badge"),
+                        format!("{key}-badge"),
                         n.to_string(),
                         type_::BADGE,
                         t.text,
@@ -174,7 +186,7 @@ fn side_row(
         }
         Some(Count::Plain(n)) => {
             item = item.child(kit::label(
-                format!("{label}-badge"),
+                format!("{key}-badge"),
                 n.to_string(),
                 type_::KBD,
                 t.text_tertiary,

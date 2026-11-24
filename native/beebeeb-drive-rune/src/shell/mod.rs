@@ -566,7 +566,10 @@ pub(crate) fn main_app(spec: AppSpec<State>) -> App<State> {
     App::new(spec)
         .on_open_url(host::on_open_url)
         .on_reopen(host::on_reopen)
-        .on_focus(|s: &mut State, focused, _| crate::frames::signin::on_window_focus(s, focused))
+        .on_focus(|s: &mut State, focused, _| {
+            crate::frames::signin::on_window_focus(s, focused);
+            crate::frames::files::pins::on_focus(s, focused);
+        })
         .on_ime(on_ime)
 }
 
