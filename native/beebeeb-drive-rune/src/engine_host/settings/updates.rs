@@ -55,7 +55,7 @@
 #![cfg_attr(not(any(windows, test)), allow(dead_code))]
 
 use std::cell::Cell;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,7 +67,7 @@ use beebeeb_engine::app::SyncStop;
 use beebeeb_engine::app::{CredentialStores, Engine};
 use beebeeb_engine::config::{DesktopConfig, ReleaseChannel};
 use beebeeb_engine::identity::EngineIdentity;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 use beebeeb_updater::{Apply, EngineStopped, Offer, VerifiedInstaller};
 use beebeeb_updater::{
     Clock, Event, Failure, Freshness, Http, Intent, Persisted, Refusal, State, Store, Updater, Version,
@@ -109,6 +109,10 @@ pub const NO_DISK: &str = "The update could not be saved on this PC. Nothing was
 /// that it stopped, only what is known. A new start of sync needs a restart of Beebeeb in both cases.
 pub const SYNC_UNCONFIRMED: &str =
     "Beebeeb could not confirm that sync stopped, so the update was not started. Restart Beebeeb, then update.";
+/// A Mac's button, and what it says when it cannot do its one thing. A Mac never installs in place and never offers
+/// "Restart to update" (`beebeeb_updater::INSTALL_UNSUPPORTED`).
+pub const DOWNLOAD_UPDATE: &str = "Download update";
+pub const PAGE_NOT_OPENED: &str = "The download page did not open. Nothing was downloaded.";
 pub const INSTALLER_DID_NOT_START: &str = "The installer did not start. Nothing was installed.";
 /// The press was taken; the worker has not reported its first step yet.
 pub const STARTING: &str = "Starting the update…";
@@ -322,6 +326,9 @@ pub(crate) struct UpdatesPart {
     presence: Arc<Presence>,
     /// `Restarting` was seen and the quit asked for: once.
     quit_asked: bool,
+    /// A Mac: the one button is "Download update" (opens the download page); nothing is downloaded or installed here,
+    /// and "Restart to update" is never offered nor taken.
+    download_only: bool,
 }
 
 fn channel_of(channel: ReleaseChannel) -> Channel {
@@ -357,7 +364,7 @@ fn busy(state: &State) -> bool {
 
 #[path = "updates_worker.rs"]
 mod worker;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 use worker::work;
 
 #[path = "updates_presence.rs"]
@@ -416,7 +423,35 @@ impl UpdatesPart {
                 }
             }
         }
-        #[cfg(not(all(windows, not(test))))]
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            use beebeeb_updater::host::{BUILD_MARK, BUILD_NOT_BEFORE};
+            std::hint::black_box(BUILD_MARK);
+            let (channel, from) = channels(config, None);
+            let folder = rune::dirs::AppDirs::new(crate::shell::identity::AppIdentity::CURRENT.state_dir_id())
+                .map(|dirs| crate::shell::local_data_of(&dirs, "macos"));
+            match mac_release_setup(BUILD_NOT_BEFORE, option_env!("BEEBEEB_RELEASE_VERSION"), folder) {
+                ReleaseSetup::NotARelease => None,
+                ReleaseSetup::Broken => {
+                    log("settings: this release build could not set its updater up");
+                    Some(
+                        Self::with_mode(Mode::NoWorker, identity, channel, from, super::version_words())
+                            .download_only(),
+                    )
+                }
+                ReleaseSetup::Ready { config, record } => {
+                    let presence = Presence::of_engine(engine.clone());
+                    let make = mac_release::updater(config, record);
+                    let woken = engine.clone();
+                    let tuning = Tuning::standard(Box::new(move || woken.wake_host()));
+                    Some(
+                        Self::live_tuned(make, identity, channel, from, super::version_words(), tuning, presence)
+                            .download_only(),
+                    )
+                }
+            }
+        }
+        #[cfg(not(any(all(windows, not(test)), all(target_os = "macos", not(test)))))]
         {
             let _ = (engine, identity, config);
             None
@@ -445,7 +480,7 @@ impl UpdatesPart {
 
     /// The part on an updater `make` builds on the worker's thread, paced and waking as `tuning` says; the press is
     /// taken with `presence` (the hand-off `make` builds asks the same one).
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, target_os = "macos", test))]
     pub(crate) fn live_tuned(
         make: MakeDrive,
         identity: &'static EngineIdentity,
@@ -503,7 +538,30 @@ impl UpdatesPart {
             sync_back: SyncBack::default(),
             presence: Presence::closed(),
             quit_asked: false,
+            download_only: false,
         }
+    }
+
+    /// This part serves a Mac: it only offers "Download update".
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn download_only(mut self) -> Self {
+        self.download_only = true;
+        self
+    }
+
+    /// The words of the update's button now: a Mac's is always "Download update"; elsewhere the press's own.
+    pub(crate) fn button(&self) -> &'static str {
+        if self.download_only { DOWNLOAD_UPDATE } else { self.press().label() }
+    }
+
+    /// A Mac's "Download update": opens the download page of the newer version on offer, in the browser, and nothing
+    /// else (the app stays as it is; no sync stops, nothing is downloaded here). Not while an order or a channel is
+    /// out, and never for an older version.
+    pub(crate) fn download_update(&mut self) {
+        if !self.download_only || self.asked.is_some() || self.saving.is_some() || self.upgrade().is_none() {
+            return;
+        }
+        self.send(Work::Event(Event::OpenDownloadPage));
     }
 
     /// Sends `work` to the worker as the order the window waits on. `false`: no worker takes it.
@@ -567,7 +625,8 @@ impl UpdatesPart {
     /// nothing here sends). The press is taken in the session of now ([`Presence::press`]): the hand-off runs only in
     /// that one, with its lock open.
     pub(crate) fn restart_to_update(&mut self) {
-        if self.press() == Press::Wait {
+        // A Mac never restarts to update: it downloads (`download_update`).
+        if self.download_only || self.press() == Press::Wait {
             return;
         }
         let Some(version) = self.upgrade().map(|offer| offer.version).or_else(|| self.retry()) else {
@@ -922,6 +981,8 @@ pub(crate) fn failed(failure: Failure, freshness: Freshness) -> UpdateCheck {
         Failure::Disk => NO_DISK,
         Failure::EngineStillRunning => SYNC_UNCONFIRMED,
         Failure::InstallerDidNotStart => INSTALLER_DID_NOT_START,
+        Failure::InstallUnsupported => beebeeb_updater::INSTALL_UNSUPPORTED,
+        Failure::DownloadPageDidNotOpen => PAGE_NOT_OPENED,
     };
     match (words, freshness) {
         ("", Freshness::Verified) => UpdateCheck::Failed,
@@ -1001,11 +1062,13 @@ pub(crate) fn seed_first_run(path: &std::path::Path, built: Option<ReleaseChanne
     .is_ok()
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 #[path = "updates_apply.rs"]
 mod apply;
 #[cfg(any(windows, test))]
 pub(crate) use apply::EngineApply;
+#[cfg(any(target_os = "macos", test))]
+pub(crate) use apply::MacApply;
 #[cfg(test)]
 pub(crate) use apply::StartInstaller;
 
@@ -1029,8 +1092,44 @@ pub(crate) fn release_config(
     })
 }
 
+/// A Mac's release config: the same key, host and floor, the `darwin-aarch64` target.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn mac_release_config(
+    build_time: Option<u64>,
+    version: Option<&str>,
+    folder: &std::path::Path,
+) -> Option<beebeeb_updater::Config> {
+    let not_before = build_time?;
+    let installed = beebeeb_updater::Version::parse(version?)?;
+    let trust = beebeeb_updater::host::darwin_trust_built_at(not_before).ok()?;
+    Some(beebeeb_updater::Config {
+        trust,
+        base_url: beebeeb_updater::host::RELEASE_BASE_URL.to_string(),
+        installed,
+        staging_dir: folder.join("updates"),
+    })
+}
+
+/// [`release_setup`] for a Mac.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn mac_release_setup(build_time: Option<u64>, version: Option<&str>, folder: Option<PathBuf>) -> ReleaseSetup {
+    if build_time.is_none() || version.is_none() {
+        return ReleaseSetup::NotARelease;
+    }
+    let Some(folder) = folder else {
+        return ReleaseSetup::Broken;
+    };
+    match mac_release_config(build_time, version, &folder) {
+        Some(config) => ReleaseSetup::Ready {
+            config,
+            record: folder.join("updater.json"),
+        },
+        None => ReleaseSetup::Broken,
+    }
+}
+
 /// What a build sets its updater up with, or why it has none.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 #[allow(clippy::large_enum_variant)] // one value per answer, moved once through a channel: boxing would only add a hop
 pub(crate) enum ReleaseSetup {
     /// Not a release build (no build time, or no release version): no updater, and not one request.
@@ -1116,6 +1215,46 @@ mod release {
     }
 }
 
+/// A Mac's updater: the check on the release host; the hand-off only opens the download page (`MacApply`).
+#[cfg(all(target_os = "macos", not(test)))]
+mod mac_release {
+    use std::path::PathBuf;
+
+    use beebeeb_updater::host::{FileStore, SystemClock};
+    use beebeeb_updater::net::HttpsClient;
+    use beebeeb_updater::{Http, Response, Unreachable};
+
+    use super::{Drive, MacApply, MakeDrive, Watching};
+    use crate::engine_host::log;
+
+    enum Client {
+        Https(HttpsClient),
+        None,
+    }
+
+    impl Http for Client {
+        fn get(&mut self, url: &str, from: u64) -> Result<Response, Unreachable> {
+            match self {
+                Client::Https(client) => client.get(url, from),
+                Client::None => Err(Unreachable),
+            }
+        }
+    }
+
+    pub(super) fn updater(config: beebeeb_updater::Config, record: PathBuf) -> MakeDrive {
+        Box::new(move |_sync_back| {
+            let client = HttpsClient::new().map_or_else(
+                |_| {
+                    log("settings: the updater's https client could not be built");
+                    Client::None
+                },
+                Client::Https,
+            );
+            Box::new(Watching::new(config, client, SystemClock, FileStore::new(record), MacApply::new())) as Box<dyn Drive>
+        })
+    }
+}
+
 #[cfg(test)]
 impl UpdatesPart {
     /// Sends any single event to the worker, as an order the window waits on (never the press's chain).
@@ -1127,6 +1266,10 @@ impl UpdatesPart {
         self.last.as_ref().map(|report| &report.state)
     }
 }
+
+#[cfg(test)]
+#[path = "updates_mac_tests.rs"]
+mod mac_tests;
 
 #[cfg(test)]
 #[path = "updates_tests.rs"]
