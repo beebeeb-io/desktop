@@ -32,9 +32,9 @@ fn clamps_on_the_right_with_the_margin() {
 }
 #[test]
 fn clamps_at_the_bottom_with_the_margin() {
-    let d = disp(0.0, 0.0, 1440.0, 520.0, 25.0, true);
-    let p = pop(icon_at(700.0), &[d]);
-    assert_eq!(p.y + p.h, 520.0 - 8.0);
+    let d = disp(0.0, 0.0, 1440.0, 560.0, 25.0, true);
+    let p = pop(Some(Frame::new(689.0, 100.0, 22.0, 24.0)), &[d]);
+    assert_eq!(p.y + p.h, 560.0 - 8.0);
 }
 #[test]
 fn clamps_at_the_top_to_the_visible_frame_under_the_notch() {
