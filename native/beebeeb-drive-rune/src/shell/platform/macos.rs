@@ -10,6 +10,9 @@ use crate::shell::instance::Delivery;
 use crate::shell::tray::TrayModel;
 use crate::shell::tray_icon::TaskbarTheme;
 
+#[path = "macos_control.rs"]
+mod control_socket;
+
 pub struct MacPlatform;
 
 impl Platform for MacPlatform {
@@ -33,14 +36,16 @@ impl Platform for MacPlatform {
     }
     fn serve_control(
         &self,
-        _identity: AppIdentity,
-        _handler: ControlHandler,
+        identity: AppIdentity,
+        handler: ControlHandler,
     ) -> Result<Box<dyn ControlServer>, ServeError> {
-        Err(ServeError::NotBuilt(
-            "the control channel (one instance) on this platform",
-        ))
+        let dir = control_socket::state_dir(identity).map_err(ServeError::Os)?;
+        control_socket::serve_in(&dir, identity, handler)
     }
-    fn send_control(&self, _identity: AppIdentity, _request: &Request, _timeout: Duration) -> Delivery {
-        Delivery::Unreachable
+    fn send_control(&self, identity: AppIdentity, request: &Request, timeout: Duration) -> Delivery {
+        match control_socket::state_dir(identity) {
+            Ok(dir) => control_socket::send_in(&dir, request, timeout),
+            Err(_) => Delivery::Unreachable,
+        }
     }
 }
