@@ -82,6 +82,8 @@ pub use tracking::{MyActivity, MyActivityEvent};
 mod two_factor;
 pub use two_factor::TwoFactorStatus;
 mod previews;
+mod pins;
+pub use pins::{MAX_PINS, pinned_ids_of};
 mod upload;
 pub use previews::{PreviewPutError, preview_retry_wait};
 
@@ -255,6 +257,7 @@ mod tests {
     mod errors;
     mod ids;
     mod link;
+    mod pins;
     mod provenance;
     mod proxy;
     mod region;
