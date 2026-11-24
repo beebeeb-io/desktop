@@ -469,7 +469,7 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
         drawn.contains(&format!(concat!(
             "Decrypting {NOTE_NAME} on ",
             beebeeb_engine::device_word!()
-        ))),
+        ), NOTE_NAME = NOTE_NAME)),
         "{drawn}"
     );
     assert!(
@@ -485,7 +485,7 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     assert!(!drawn.contains(&format!(concat!(
         "Decrypting {NOTE_NAME} on ",
         beebeeb_engine::device_word!()
-    ))));
+    ), NOTE_NAME = NOTE_NAME)));
     assert!(w.chunk_requests() >= 2, "the content came chunk by chunk from Beebeeb");
 
     // The details panel (Alt+Shift+P): where the file is, and the Available offline switch, whose state the local
@@ -591,7 +591,7 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
     assert!(w.drawn().contains(&format!(concat!(
         "Decrypting {NOTE_NAME} on ",
         beebeeb_engine::device_word!()
-    ))));
+    ), NOTE_NAME = NOTE_NAME)));
     w.engine.lock();
     w.settle();
     w.assert_nothing_of_the_file("locked, the download was on its way");
@@ -633,7 +633,7 @@ fn a_kind_with_no_preview_never_opens_the_viewer_from_a_list_and_its_route_says_
     assert!(!drawn.contains(&format!(concat!(
         "Decrypting {NOTE_NAME} on ",
         beebeeb_engine::device_word!()
-    ))));
+    ), NOTE_NAME = NOTE_NAME)));
     w.settle();
     assert_eq!(w.chunk_requests(), 0, "nothing was downloaded");
 

@@ -424,7 +424,8 @@ fn this_pcs_backup_row_says_this_pc_and_others_say_nothing() {
             "exactly one row says it is ",
             beebeeb_engine::device_word!(),
             "'s:\n{now}"
-        )
+        ),
+        now = now
     );
 }
 

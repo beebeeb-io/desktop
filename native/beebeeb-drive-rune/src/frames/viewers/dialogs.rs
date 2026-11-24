@@ -299,7 +299,7 @@ pub fn conflict(file_name: &str, mine: &str, other: &Conflict, t: &Theme) -> El 
                 &format!(concat!(
                     beebeeb_engine::device_word!(),
                     " \u{00B7} not saved \u{00B7} {mine}"
-                )),
+                ), mine = mine),
                 t,
             ))
             .child(side(

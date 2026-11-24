@@ -239,7 +239,9 @@ fn too_large(file: &OpenFile, size: u64, free: u64, t: &Theme) -> El {
                 beebeeb_engine::device_word!(),
                 ", which needs that much free space; there's {free}."
             ),
-            file.name
+            file.name,
+            size = size,
+            free = free
         ),
         vec![
             button(
