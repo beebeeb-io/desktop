@@ -188,7 +188,7 @@ impl<C: CredentialStores> Engine<C> {
     /// local state, so the Files view (which reads it) drops it now instead of waiting for a re-snapshot, and the
     /// snapshot's `Trashing` guard keeps it from coming back. Best effort: no local state, no row: nothing.
     fn mark_trashed_locally(&self, id: &str) {
-        if let Ok(state) = self.local_state() {
+        if let Ok(state) = self.local_state_for_changes() {
             let _ = state.with(|db| db.mark_subtree_trashing(id));
         }
     }
