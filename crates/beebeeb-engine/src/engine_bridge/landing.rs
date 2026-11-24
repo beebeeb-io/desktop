@@ -777,7 +777,7 @@ pub fn copy_as_this_pc(path: &Path, dir: &Path) -> std::io::Result<(PathBuf, Str
         let suffix = if n == 1 {
             concat!(" (", device_word!(), ")").to_string()
         } else {
-            format!(concat!(" (", device_word!(), " {n})"))
+            format!(" ({} {n})", device_word!())
         };
         let name = match ext {
             Some(ext) => format!("{stem}{suffix}.{ext}"),
