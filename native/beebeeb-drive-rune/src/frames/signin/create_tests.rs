@@ -25,8 +25,8 @@ const HEADINGS: [&str; 14] = [
     "Set a password",
     "Set a password",
     "Your master key",
-    "Confirm your phrase",
-    "Confirm your phrase",
+    "Confirm your master key",
+    "Confirm your master key",
     "Name this PC",
     "Creating your account",
     "Your account is ready",
@@ -613,7 +613,7 @@ fn words_that_do_not_match_are_said_without_saying_which_and_the_words_can_be_sh
     assert_eq!(info(&rt, "field-1-msg").role, "alert");
     assert_eq!(
         said(&rt, "field-1-msg").as_deref(),
-        Some("Those words do not match your master key.")
+        Some("These words don't match your master key. Check them against what you saved.")
     );
     assert!(!has(&rt, "field-0-msg") && !has(&rt, "field-2-msg"));
     // The same place whichever word is wrong.
