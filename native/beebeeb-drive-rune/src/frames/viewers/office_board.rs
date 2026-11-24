@@ -178,7 +178,7 @@ pub fn commands(query: &str) -> Vec<CommandGroup> {
             "Styles",
             &[("Heading 1", None), ("Heading 2", None), ("Heading 3", None)],
         ),
-        group("Format", &[("Bold", Some("Ctrl+B"))]),
+        group("Format", &[("Bold", Some(crate::frames::files::key_label("B")))]),
         group("Files", &[("Northwind brand guide.pdf", None)]),
     ]
 }

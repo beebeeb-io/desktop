@@ -14,16 +14,16 @@
 
 use super::actions_data::{Conflict, Device, Keep, Side};
 use super::source::Action;
-use crate::State;
 use crate::shell::app::{Dialog, Event};
 use crate::shell::host;
 use crate::shell::registry::{DialogFrame, FeedbackPolicy, FrameGroup};
-use crate::theme::scale;
 use crate::theme::icons_settings;
-use crate::theme::tokens::{self, Theme, type_};
+use crate::theme::scale;
+use crate::theme::tokens::{self, type_, Theme};
 use crate::ui::settings_dialog::{self, Weight};
 use crate::ui::{banner, button, dialog, kit};
-use rune::{Color, Cx, El, Tx, col, el, row};
+use crate::State;
+use rune::{col, el, row, Color, Cx, El, Tx};
 
 /// What the list says in the date column of a file that waits for a choice.
 pub const ROW_WORDS: &str = "Two versions";
@@ -219,15 +219,21 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
         // history: the line says where it is kept instead (the engine's `conflicts_api::REPLACED_FOLDER`).
         kit::label(
             "dlg-text-0",
-            "Keep both saves the other one next to it with the device's name added. Keeping the other one puts this PC's in Beebeeb's app data, under Replaced on this PC.",
+            concat!(
+                "Keep both saves the other one next to it with the device's name added. Keeping the other one puts ",
+                beebeeb_engine::device_word!(),
+                "'s in Beebeeb's app data, under Replaced on ",
+                beebeeb_engine::device_word!(),
+                "."
+            ),
             type_::CAPTION,
             t.text_tertiary,
         )
         .wrap(),
     ];
     // "Keep this PC's", "Keep Anna's iPad's".
-    let keep_here = if conflict.here.device == "This PC" {
-        "Keep this PC's".to_string()
+    let keep_here = if conflict.here.device == concat!(beebeeb_engine::device_word_cap!()) {
+        concat!("Keep ", beebeeb_engine::device_word!(), "'s").to_string()
     } else {
         format!("Keep {}'s", conflict.here.device)
     };

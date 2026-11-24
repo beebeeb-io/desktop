@@ -5,12 +5,21 @@
 //! over its top edge and 12 px from the screen's right edge, on the display whose taskbar holds
 //! the b that was clicked." "Closes when it loses focus, on Esc, or on a second click on the b."
 
-/// In points; Windows scales them with the display.
+#[path = "macos_anchor.rs"]
+pub mod macos_anchor;
+
+/// In points; Windows scales them with the display. The Mac popover is 372 x 488 pt (docs/macos §4).
+#[cfg(not(target_os = "macos"))]
 pub const SIZE: (f32, f32) = (340.0, 520.0);
+#[cfg(target_os = "macos")]
+pub const SIZE: (f32, f32) = (macos_anchor::POPOVER_WIDTH as f32, macos_anchor::POPOVER_HEIGHT as f32);
 pub const MARGIN: f32 = 12.0;
 /// A click on the b first takes the focus from the flyout, which hides it; the click itself
 /// arrives after. Within this long, that click is the one that closed it, not a new open.
+#[cfg(not(target_os = "macos"))]
 pub const REOPEN_GUARD_MS: u64 = 300;
+#[cfg(target_os = "macos")]
+pub const REOPEN_GUARD_MS: u64 = macos_anchor::BLUR_CLICK_GUARD_MS;
 
 /// A rectangle in physical desktop pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +82,23 @@ pub fn physical_size(a: &Anchor) -> (u32, u32) {
 /// The flyout's top-left: 12 px inside the work area, next to where the b is. A taskbar at the
 /// bottom, the right or hidden: bottom-right. At the top: top-right. At the left: bottom-left.
 /// Never outside the work area's top-left, also on a display smaller than the flyout.
+#[cfg(target_os = "macos")]
+pub fn position(a: &Anchor) -> (i32, i32) {
+    // Logical points. The anchor carries the display the b is on (`monitor` = full frame, `work` = visible frame).
+    let f = |r: Rect| macos_anchor::Frame::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64);
+    let display = macos_anchor::Display {
+        frame: f(a.monitor),
+        visible: f(a.work),
+        primary: true,
+    };
+    let icon = a.icon.map(f);
+    // An icon that is not on this display is "unavailable": the top right of the display.
+    let icon = icon.filter(|i| macos_anchor::icon_display(*i, &[display]).is_some());
+    macos_anchor::place_popover(icon, &[display])
+        .map_or((a.work.x, a.work.y), |p| (p.x.round() as i32, p.y.round() as i32))
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn position(a: &Anchor) -> (i32, i32) {
     let (w, h) = physical_size(a);
     let (w, h) = (w as i32, h as i32);
@@ -121,6 +147,28 @@ pub fn on_tray_click(visible: bool, since_focus_hide_ms: Option<u64>) -> Toggle 
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_a_mac_the_popover_opens_centred_under_the_b() {
+        let r = |x, y, w, h| Rect { x, y, w, h };
+        let a = Anchor {
+            monitor: r(0, 0, 1440, 900),
+            work: r(0, 25, 1440, 875),
+            scale: 2.0,
+            icon: Some(r(689, 0, 22, 24)),
+        };
+        assert_eq!(SIZE, (372.0, 488.0));
+        assert_eq!(position(&a), (700 - 186, 30));
+        let near_edge = Anchor {
+            icon: Some(r(1420, 0, 22, 24)),
+            ..a
+        };
+        assert_eq!(position(&near_edge).0, 1440 - 8 - 372);
+        assert_eq!(on_tray_click(false, Some(249)), Toggle::Ignore);
+        assert_eq!(on_tray_click(false, Some(250)), Toggle::Show);
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn anchor(monitor: (i32, i32, i32, i32), work: (i32, i32, i32, i32), scale: f64) -> Anchor {
         let rect = |(x, y, w, h)| Rect { x, y, w, h };
         Anchor {
@@ -131,6 +179,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn bottom_taskbar_puts_it_bottom_right_at_every_scale() {
         // 1920x1080 at 100%, 48 px taskbar.
@@ -146,6 +195,7 @@ mod tests {
         assert_eq!(position(&a), (3840 + 3840 - 24 - 680, 2064 - 24 - 1040));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn each_taskbar_edge_has_its_corner() {
         let top = anchor((0, 0, 1920, 1080), (0, 48, 1920, 1032), 1.0);
@@ -162,6 +212,7 @@ mod tests {
         assert_eq!(position(&hidden), (1568, 548));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_display_left_of_the_primary_has_negative_coordinates() {
         let a = anchor((-2560, -200, 2560, 1440), (-2560, -200, 2560, 1392), 1.25);
@@ -169,6 +220,7 @@ mod tests {
         assert_eq!(position(&a), (-2560 + 2560 - 15 - 425, -200 + 1392 - 15 - 650));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_display_smaller_than_the_flyout_pins_it_to_the_work_areas_corner() {
         let a = anchor((0, 0, 320, 480), (0, 0, 320, 440), 1.0);
@@ -177,6 +229,7 @@ mod tests {
         assert_eq!(position(&a), (100, 50));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_broken_scale_is_read_as_one() {
         let a = anchor((0, 0, 1920, 1080), (0, 0, 1920, 1032), f64::NAN);
@@ -184,6 +237,7 @@ mod tests {
         assert_eq!(position(&a), (1568, 500));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_click_on_the_b_toggles_and_the_closing_click_does_not_reopen() {
         assert_eq!(on_tray_click(true, None), Toggle::Hide);

@@ -11,17 +11,17 @@
 //! and holds the keyboard while it is open: a key it does not use stops at it, so nothing typed
 //! here reaches the list under it (Delete there would move the selected file to Trash).
 
-use rune::{Color, Cx, El, Key, KeyEvent, Shadow, TextEdit, TextStyle, Tx, col, el, row, text_input};
+use rune::{col, el, row, text_input, Color, Cx, El, Key, KeyEvent, Shadow, TextEdit, TextStyle, Tx};
 
-use super::{Intent, style};
-use crate::State;
+use super::{style, Intent};
 use crate::frames::files::names::{self, NameError};
 use crate::shell::app::{Screen, Section};
 use crate::theme::scale;
-use crate::theme::tokens::{self, Theme, type_};
+use crate::theme::tokens::{self, type_, Theme};
 use crate::ui::dialog::{self, Sub};
-use crate::ui::settings_dialog::{Weight, button};
+use crate::ui::settings_dialog::{button, Weight};
 use crate::ui::{field, kit, pill};
+use crate::State;
 
 /// Whether this build offers the Office editor's way to make a file: "New document…" (DW-1520) and the
 /// Word, Excel and PowerPoint tiles (DW-1521). On since the editor landed (lock 4 of D-OV-3 is off).
@@ -43,7 +43,11 @@ impl Kind {
     /// The types the dialog offers in this build, in the board's order: the office ones only with
     /// [`OFFICE_EDITOR`].
     pub fn offered() -> &'static [Kind] {
-        if OFFICE_EDITOR { &Kind::ALL } else { &Kind::ALL[..2] }
+        if OFFICE_EDITOR {
+            &Kind::ALL
+        } else {
+            &Kind::ALL[..2]
+        }
     }
 
     /// The type's word under its tile.
@@ -128,12 +132,17 @@ pub struct NewFile {
 
 impl NewFile {
     /// The dialog on New document (DW-1558): `kind` is an office type, the name its default.
-    pub(crate) fn document(folder: Option<String>, kind: Kind, doc: crate::frames::office::edit::new_document::Doc) -> NewFile {
+    pub(crate) fn document(
+        folder: Option<String>,
+        kind: Kind,
+        doc: crate::frames::office::edit::new_document::Doc,
+    ) -> NewFile {
         let mut nf = NewFile::new(folder);
         nf.step = Step::Document;
         nf.kind = kind;
         nf.name = TextEdit::new(crate::frames::office::edit::new_document::default_name(kind));
-        nf.name.set_selection(0, crate::frames::office::edit::new_document::UNTITLED.len());
+        nf.name
+            .set_selection(0, crate::frames::office::edit::new_document::UNTITLED.len());
         nf.focus = Some(NAME_INPUT);
         nf.doc = Some(doc);
         nf
@@ -587,7 +596,11 @@ fn pick(nf: &NewFile, t: &Theme) -> El {
         "New file",
         560.0,
         "New file",
-        Some(Sub::Wrap("Encrypted on this PC before it leaves")),
+        Some(Sub::Wrap(concat!(
+            "Encrypted on ",
+            beebeeb_engine::device_word!(),
+            " before it leaves"
+        ))),
         vec![label, tiles],
         foot,
         t,

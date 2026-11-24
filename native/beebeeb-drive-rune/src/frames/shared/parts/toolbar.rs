@@ -34,7 +34,7 @@ fn search_field(s: &State, t: &Theme) -> El {
         text_input(&s.frames.search, type_::SEARCH)
             .key(crate::ui::keys::SEARCH_KEY)
             .label("Search names")
-            .shortcut_hint("Ctrl+F")
+            .shortcut_hint(concat!(beebeeb_engine::primary_key!(), "F"))
             .single_line()
             .color(t.text)
             .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)

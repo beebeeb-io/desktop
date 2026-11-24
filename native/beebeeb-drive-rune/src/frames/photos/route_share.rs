@@ -15,7 +15,7 @@ use crate::frames::files::actions_data::{LinkAccess, LinkExpiry, ShareOptions};
 use crate::frames::files::share::Share;
 use crate::frames::files::source::ActionError;
 
-const NOT_HERE: &str = "Couldn\u{2019}t find that file on this PC";
+const NOT_HERE: &str = concat!("Couldn\u{2019}t find that file on ", beebeeb_engine::device_word!());
 const PROTECTED: &str = "Couldn\u{2019}t share \u{00B7} this is kept safe and can\u{2019}t be shared";
 
 /// Takes the intent it can; `Err` hands it back and Photos says "Not available in this version yet".

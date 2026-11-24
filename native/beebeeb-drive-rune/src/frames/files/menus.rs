@@ -1,8 +1,8 @@
 //! What the Files menus hold: the file menu (DW-0402, DW-1104), Sort (DW-0404), New (DW-0414).
 
 use super::{Sort, SortBy};
-use crate::State;
 use crate::ui::menu::Entry;
+use crate::State;
 
 /// `.wn-menu` of the file menu and of New.
 pub const FILE_MENU_W: f32 = 236.0;
@@ -22,13 +22,13 @@ pub fn file_menu(s: &State) -> Vec<Entry> {
     let several = items.len() > 1;
     let open = Entry::keyed("open", "Open", "Enter");
     let preview = Entry::keyed("preview", "Preview", "Space").dimmed(!s.can_preview());
-    let explorer = Entry::item("show-in-explorer", "Show in File Explorer");
+    let explorer = Entry::item("show-in-explorer", concat!("Show in ", beebeeb_engine::file_manager!()));
     let details = Entry::keyed("details", "Details", "Alt+Enter");
     if items.iter().any(|i| i.is_protected) || s.protects_selection() {
         return vec![open, preview, Entry::Sep, explorer, details];
     }
     let keep = if s.selection_is_kept() {
-        Entry::item("keep-offline", "Remove from this PC")
+        Entry::item("keep-offline", concat!("Remove from ", beebeeb_engine::device_word!()))
     } else {
         Entry::item("keep-offline", "Make available offline")
     };
@@ -97,8 +97,8 @@ pub fn sort_menu(sort: Sort) -> Vec<Entry> {
 /// New: everything that adds to the folder you're in.
 pub fn new_menu() -> Vec<Entry> {
     let mut menu = vec![
-        Entry::keyed("new-folder", "New folder", "Ctrl+Shift+N"),
-        Entry::keyed("new-file", "New file\u{2026}", "Ctrl+N"),
+        Entry::keyed("new-folder", "New folder", crate::frames::files::key_label("Shift+N")),
+        Entry::keyed("new-file", "New file\u{2026}", crate::frames::files::key_label("N")),
     ];
     // New document (DW-1558): a Word, Excel or PowerPoint file from the office editor.
     if crate::frames::viewers::new_file::OFFICE_EDITOR {
@@ -106,7 +106,11 @@ pub fn new_menu() -> Vec<Entry> {
     }
     menu.extend([
         Entry::Sep,
-        Entry::keyed("upload-files", "Upload files\u{2026}", "Ctrl+O"),
+        Entry::keyed(
+            "upload-files",
+            "Upload files\u{2026}",
+            crate::frames::files::key_label("O"),
+        ),
         Entry::item("upload-folder", "Upload a folder\u{2026}"),
     ]);
     menu

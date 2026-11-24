@@ -931,7 +931,7 @@ fn office_focus_palette_close_returns_to_the_sheets_grid() {
         viewers::ui(&mut rig.rt.state).expect("a file").office.over,
         Some(Over::Palette(_))
     );
-    assert!(open, "Ctrl+K from the grid opened the command search");
+    assert!(open, concat!(beebeeb_engine::primary_key!(), "K from the grid opened the command search"));
     assert_ne!(rig.focused().as_deref(), Some(GRID_KEY), "the search took the keyboard");
     rig.key(Key::Escape);
     assert!(

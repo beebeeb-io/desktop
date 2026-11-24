@@ -3,7 +3,6 @@
 //! to the next file and a reset each tell the source to stop and wipe. Every id and name is the board's.
 
 use super::poll;
-use crate::State;
 use crate::frames::files::actions_data::{Page, PreviewOf, Previewed};
 use crate::frames::files::dialogs::Dialog;
 use crate::frames::files::source::{
@@ -11,6 +10,7 @@ use crate::frames::files::source::{
 };
 use crate::frames::files::tests::{runtime_of, settle};
 use crate::source::DriveItem;
+use crate::State;
 use rune::Runtime;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -194,6 +194,9 @@ fn the_panel_head_draws_the_icon_of_the_file_in_its_tint() {
     let note = notes.get("preview-head-icon").expect("no preview-head-icon");
     assert_eq!(
         note.color,
-        Some(crate::theme::file_icon_colors::tint_color(crate::theme::file_icons::Tint::Audio, false))
+        Some(crate::theme::file_icon_colors::tint_color(
+            crate::theme::file_icons::Tint::Audio,
+            false
+        ))
     );
 }

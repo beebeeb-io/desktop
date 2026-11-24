@@ -16,20 +16,20 @@
 use std::fmt;
 
 use rune::tok::Family;
-use rune::{Color, Cx, El, Icon, Span, TextStyle, col, el, rich, row, text_input};
+use rune::{col, el, rich, row, text_input, Color, Cx, El, Icon, Span, TextStyle};
 use zeroize::Zeroize;
 
 use super::office_icons as oi;
 use super::source::OpenFile;
-use super::{Intent, Ui, style};
-use crate::State;
+use super::{style, Intent, Ui};
 use crate::frames::office::docs::DocBody;
 use crate::theme::icons;
 use crate::theme::scale;
-use crate::theme::tokens::{self, Theme, type_};
-use crate::ui::toolbar::{self as tb, Bar, Details, New, Sort, View, press};
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
+use crate::theme::tokens::{self, type_, Theme};
+use crate::ui::button::{button, keys, ButtonState, Size, Variant};
+use crate::ui::toolbar::{self as tb, press, Bar, Details, New, Sort, View};
 use crate::ui::{caption, kit, sidebar, status_bar};
+use crate::State;
 
 /// 12px/600 on 15px: the ribbon's tab that is open.
 const TAB_ON: TextStyle = type_::BODY_SEMI;
@@ -383,7 +383,15 @@ pub(crate) fn small_button(
     hint: Option<&'static str>,
     t: &Theme,
 ) -> El {
-    let mut b = button(keys(key), label, Some(icon), Variant::Secondary, Size::Sm, ButtonState::Enabled, t);
+    let mut b = button(
+        keys(key),
+        label,
+        Some(icon),
+        Variant::Secondary,
+        Size::Sm,
+        ButtonState::Enabled,
+        t,
+    );
     if let Some(hint) = hint {
         b = b.shortcut_hint(hint).child(
             el().key(format!("{key}-hint-box"))
@@ -397,8 +405,17 @@ pub(crate) fn small_button(
 
 /// The ribbon's first row: the tabs, the command search, Share, Save.
 pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
-    let mut r = row().key("rib-tabs").w_full().h(32.0).px(scale::space::S12).gap(scale::space::S4).center_y();
-    for (i, (tab, word)) in Tab::row_of(ui.office.edit.as_ref().map(|e| e.kind)).into_iter().enumerate() {
+    let mut r = row()
+        .key("rib-tabs")
+        .w_full()
+        .h(32.0)
+        .px(scale::space::S12)
+        .gap(scale::space::S4)
+        .center_y();
+    for (i, (tab, word)) in Tab::row_of(ui.office.edit.as_ref().map(|e| e.kind))
+        .into_iter()
+        .enumerate()
+    {
         let on = ui.office.tab == tab;
         let mut cell = el()
             .key(format!("rib-tab-{i}-cell"))
@@ -440,7 +457,7 @@ pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .key("rib-find")
             .role("button")
             .label("Search commands, styles, files")
-            .shortcut_hint("Ctrl+K")
+            .shortcut_hint(crate::frames::files::key_label("K"))
             .h(24.0)
             .pl(9.0)
             .pr(6.0)
@@ -472,7 +489,12 @@ pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
             .box_shadow(kit::ring_inset(t.separator))
             .box_shadow(kit::drop(1.0, 0.0, t.separator))
             .center()
-            .child(style::fitted("rib-find-kbd", "Ctrl+K", type_::KBD, t.text_tertiary)),
+            .child(style::fitted(
+                "rib-find-kbd",
+                crate::frames::files::key_label("K"),
+                type_::KBD,
+                t.text_tertiary,
+            )),
     );
     let share = small_button("rib-btn-0", "Share", &oi::SHARE, None, t)
         .focusable(true)
@@ -481,7 +503,13 @@ pub(crate) fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
                 ui.intent(Intent::Share);
             }
         });
-    let save = small_button("rib-btn-1", "Save", &oi::PADLOCK, Some("Ctrl+S"), t);
+    let save = small_button(
+        "rib-btn-1",
+        "Save",
+        &oi::PADLOCK,
+        Some(crate::frames::files::key_label("S")),
+        t,
+    );
     // Save is off, at 45 %, while there is nothing to save.
     let save = if unsaved {
         el().key("rib-save")
@@ -787,7 +815,7 @@ pub(crate) enum Keeping {
 /// 11.5px/500 on 17px: a state's words at the start of the status line.
 const STATUS_STATE: TextStyle = type_::STATUS_STRONG;
 /// The board's words in the status line of DW-1556.
-pub const PREPARING: &str = "Preparing the editor on this PC\u{2026}";
+pub const PREPARING: &str = concat!("Preparing the editor on ", beebeeb_engine::device_word!(), "\u{2026}");
 pub const OLDER_FORMAT: &str = "An older Word file (.doc). It opens and saves in the same format.";
 
 /// The status line: what the document is, how it is kept, the zoom, About. Its parts are keyed
@@ -807,7 +835,11 @@ pub(crate) fn status_live(ui: &Ui, keeping: Keeping, t: &Theme) -> El {
 fn status_at(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, saved_at: Option<&str>, t: &Theme) -> El {
     // A live document the editor holds: its numbers, never "Preparing".
     let live = match (&file.body, doc, keeping) {
-        (super::source::Body::Doc(d), None, Keeping::Saved | Keeping::Queued | Keeping::Unsaved | Keeping::Saving | Keeping::Conflict) => Some(d),
+        (
+            super::source::Body::Doc(d),
+            None,
+            Keeping::Saved | Keeping::Queued | Keeping::Unsaved | Keeping::Saving | Keeping::Conflict,
+        ) => Some(d),
         _ => None,
     };
     let plain = |key: String, words: &str| style::fitted(key, words, type_::STATUS, t.text_tertiary);
@@ -1052,7 +1084,7 @@ pub(crate) fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
         text_input(&s.search, type_::SEARCH)
             .key("search-input")
             .label("Search names")
-            .shortcut_hint("Ctrl+F")
+            .shortcut_hint(crate::frames::files::key_label("F"))
             .single_line()
             .color(t.text)
             .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)
@@ -1158,7 +1190,15 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: Option<&WordDoc>) -> 
         (Some(_), Some(super::office_over::Over::Conflict(_))) => Keeping::Conflict,
         (Some(_), _) if ui.office.edit.as_ref().is_some_and(|edit| edit.saving) => Keeping::Saving,
         (Some(doc), _) if doc.kept == Kept::Unsaved => Keeping::Unsaved,
-        (Some(_), _) if ui.office.edit.as_ref().is_some_and(|edit| edit.queued == Some(ui.file.version)) => Keeping::Queued,
+        (Some(_), _)
+            if ui
+                .office
+                .edit
+                .as_ref()
+                .is_some_and(|edit| edit.queued == Some(ui.file.version)) =>
+        {
+            Keeping::Queued
+        }
         (Some(_), _) => Keeping::Saved,
     };
     // Save is off while it saves; the dot stays (what is typed meanwhile is still unsaved).

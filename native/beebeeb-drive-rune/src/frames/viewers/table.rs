@@ -3,16 +3,16 @@
 //! it; the rows scroll under the names. Edit opens it in Sheets (DW-1508).
 
 use rune::tok::Family;
-use rune::{Align, El, TextStyle, col, row};
+use rune::{col, row, Align, El, TextStyle};
 
 use super::chrome::{Dot, Status};
 use super::media::TABLE_KEY;
 use super::source::TableDoc;
-use super::{Intent, Ui, details, icons, style, text, ui};
-use crate::State;
+use super::{details, icons, style, text, ui, Intent, Ui};
 use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
+use crate::State;
 
 /// A cell: 12.5px. Its line is as high as the font's own (15.25 for Inter at this size).
 const CELL: TextStyle = TextStyle::new(12.5, 400.0).lh(15.25);
@@ -24,20 +24,28 @@ const ROW_H: f32 = 29.5;
 const PAD: f32 = 12.0;
 
 pub fn tools(t: &Theme) -> Vec<El> {
-    vec![
-        text::tool_action("tb-btn-0", "Edit", Some(&icons::EDIT), Some("Ctrl+E"), t).on_press(|s: &mut State| {
-            if let Some(ui) = ui(s) {
-                ui.intent(Intent::EditInSheets);
-            }
-        }),
-    ]
+    vec![text::tool_action(
+        "tb-btn-0",
+        "Edit",
+        Some(&icons::EDIT),
+        Some(crate::frames::files::key_label("E")),
+        t,
+    )
+    .on_press(|s: &mut State| {
+        if let Some(ui) = ui(s) {
+            ui.intent(Intent::EditInSheets);
+        }
+    })]
 }
 
 pub fn status() -> Status {
     Status {
         dot: Dot::Green,
         text: details::DECRYPTED_HERE.into(),
-        details: "Space for Preview \u{00B7} Ctrl+E to edit".into(),
+        details: format!(
+            "Space for Preview \u{00B7} {} to edit",
+            crate::frames::files::key_label("E")
+        ),
     }
 }
 

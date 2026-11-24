@@ -4,9 +4,9 @@
 use super::source::{Action, ActionError, BoardDrive, Call, FilesFixture};
 use super::tests::*;
 use super::{Intent, MenuKind, SortBy, Toast};
-use crate::State;
 use crate::init;
 use crate::source::DriveSource;
+use crate::State;
 use rune::{Key, Mods, Runtime};
 
 /// A `DriveSource` whose Backups folder opens (the board's fixture does not draw its inside).
@@ -243,7 +243,7 @@ fn a_failed_trash_restore_duplicate_or_keep_offline_says_so_and_changes_nothing(
     assert_eq!(rt.state.listing.items[6].pc_status.as_deref(), Some("online_only"));
     assert_eq!(
         info(&rt, "toast-text").text.as_deref(),
-        Some("Couldn't keep on this PC.")
+        Some(concat!("Couldn't keep on ", beebeeb_engine::device_word!(), "."))
     );
     assert!(asked(&calls).is_empty());
 
@@ -321,7 +321,9 @@ fn duplicate_keep_offline_copy_link_and_open_act_on_every_selected_item() {
     }
     // All of it is kept now: the menu offers to remove it.
     right_click(&mut rt, "row-6-date");
-    assert!(menu_labels(&rt).iter().any(|l| l == "Remove from this PC"));
+    assert!(menu_labels(&rt)
+        .iter()
+        .any(|l| l == concat!("Remove from ", beebeeb_engine::device_word!())));
     press(&mut rt, Key::Escape, NONE);
 
     press(&mut rt, Key::Command('d'), CTRL);
@@ -580,7 +582,10 @@ fn undo_reads_as_undo_with_its_shortcut_apart() {
     press(&mut rt, Key::Delete, NONE);
     let undo = info(&rt, "toast-action");
     assert_eq!(undo.label.as_deref(), Some("Undo"));
-    assert_eq!(info(&rt, "toast-action-text").text.as_deref(), Some("Undo Ctrl+Z"));
+    assert_eq!(
+        info(&rt, "toast-action-text").text.as_deref(),
+        Some(concat!("Undo ", beebeeb_engine::primary_key!(), "Z"))
+    );
 }
 
 // ---- P2.9: the data seam ----

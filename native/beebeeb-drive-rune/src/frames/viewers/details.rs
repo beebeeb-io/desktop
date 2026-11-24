@@ -2,18 +2,22 @@
 //! encryption mark, where it was decrypted, the facts, Available offline, Share and Version
 //! history. Built from `ui::detail_pane`'s parts; the facts are the source's.
 
-use rune::{El, Span, col, row};
+use rune::{col, row, El, Span};
 
 use super::source::OpenFile;
-use super::{Intent, ui};
-use crate::State;
-use crate::theme::scale;
+use super::{ui, Intent};
 use crate::theme::icons;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::scale;
+use crate::theme::tokens::{radius, type_, Theme};
 use crate::ui::{detail_pane, kit};
+use crate::State;
 
 /// The line every open file's panel carries: the content on screen was decrypted here.
-pub const DECRYPTED_HERE: &str = "Decrypted on this PC \u{00B7} the key never left it";
+pub const DECRYPTED_HERE: &str = concat!(
+    "Decrypted on ",
+    beebeeb_engine::device_word!(),
+    " \u{00B7} the key never left it"
+);
 
 fn intent(intent: Intent) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
@@ -24,7 +28,7 @@ fn intent(intent: Intent) -> impl Fn(&mut State) + 'static {
 }
 
 /// The words of decision D-MED-7: what the player decodes is below full quality on this PC.
-pub const REDUCED_QUALITY: &str = "Reduced quality on this PC";
+pub const REDUCED_QUALITY: &str = concat!("Reduced quality on ", beebeeb_engine::device_word!());
 
 /// Whether the file's player (if it has one) decodes below full quality on this PC: `PlayState::reduced_quality`.
 pub fn is_reduced(state: Option<&crate::media::player::PlayState>) -> bool {

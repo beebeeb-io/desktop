@@ -9,8 +9,8 @@ use rune::Pixels;
 
 use super::kinds::clock;
 use super::source::{
-    ArchiveDoc, AudioDoc, Body, Column, Details, Entry, EntryKind, Match, OpenFile, PdfDoc, PhotoDoc, Picture,
-    StripItem, TableDoc, Track, board,
+    board, ArchiveDoc, AudioDoc, Body, Column, Details, Entry, EntryKind, Match, OpenFile, PdfDoc, PhotoDoc, Picture,
+    StripItem, TableDoc, Track,
 };
 
 /// The strip of DW-1501: which of the board's sample photos each place shows; the open one is place 4.
@@ -99,7 +99,7 @@ fn photo(id: &str, place: usize) -> OpenFile {
         size: "61.4 MB".into(),
         facts: vec![
             fact("Taken", "Sunday, 14:20", true),
-            fact("From", "This PC", false),
+            fact("From", concat!(beebeeb_engine::device_word_cap!()), false),
             fact("Camera", "Sony ILCE-7RM5", false),
             fact("Lens", "FE 35mm F1.4 GM", false),
             fact("Exposure", "ISO 200 \u{00B7} 1/250 s \u{00B7} f/2.8", true),
@@ -298,7 +298,8 @@ fn decode(file: &[u8]) -> Pixels {
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf[..count * 4].to_vec(),
         png::ColorType::Rgb => buf[..count * 3]
-            .as_chunks::<3>().0
+            .as_chunks::<3>()
+            .0
             .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),

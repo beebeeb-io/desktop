@@ -400,7 +400,7 @@ fn a_new_account_has_one_way_forward() {
     assert_eq!(info(&rt, "empty").label.as_deref(), Some("Nothing here yet"));
     assert_eq!(
         info(&rt, "status-details").text.as_deref(),
-        Some("Nothing on this PC yet")
+        Some(beebeeb_engine::os_words::for_this_os("Nothing on this PC yet").as_str())
     );
     assert_eq!(info(&rt, "storage-value").text.as_deref(), Some("0 B of 1 TB"));
     assert!(find(&rt, "Shared-badge").is_none() && find(&rt, "Trash-badge").is_none());
@@ -432,7 +432,7 @@ fn a_preview_that_needs_a_connection_says_so() {
     assert_eq!(card.label.as_deref(), Some("Contract draft.pdf: Needs a connection"));
     assert_eq!(
         info(&rt, "blocked-text").text.as_deref(),
-        Some("Contract draft.pdf isn't on this PC yet. Connect to open it.")
+        Some(concat!("Contract draft.pdf isn't on ", beebeeb_engine::device_word!(), " yet. Connect to open it."))
     );
     assert_eq!(info(&rt, "status-text").text.as_deref(), Some("Offline"));
     assert_eq!(info(&rt, "row-6-date").text.as_deref(), Some("Needs a connection"));

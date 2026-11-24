@@ -428,7 +428,12 @@ impl ViewerEngine for Fake {
         }
         Ok(NewCopy {
             id: "f-copy".into(),
-            name: "Invented harbour note (This PC, 09:41).txt".into(),
+            name: concat!(
+                "Invented harbour note (",
+                beebeeb_engine::device_word_cap!(),
+                ", 09:41).txt"
+            )
+            .into(),
         })
     }
 }

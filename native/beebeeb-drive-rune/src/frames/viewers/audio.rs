@@ -2,18 +2,18 @@
 //! title and artist, the scrubber with elapsed and remaining time, previous / pause / next, and
 //! the folder's other recordings as the queue.
 
-use rune::{Align, Color, El, Icon, TextStyle, col, el, row};
+use rune::{col, el, row, Align, Color, El, Icon, TextStyle};
 
 use super::chrome::{Dot, Status};
 use super::kinds::clock;
 use super::source::{AudioDoc, Picture};
-use super::{Intent, Ui, details, media, media_icons, style, video};
-use crate::State;
-use crate::theme::scale;
+use super::{details, media, media_icons, style, video, Intent, Ui};
 use crate::media::player::{PlayState, PlayerHandle};
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
-use crate::ui::toolbar::{self, ToolState, tool_button};
+use crate::ui::toolbar::{self, tool_button, ToolState};
+use crate::State;
 
 /// `.t-cap`: 11px/500 on 14px.
 const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
@@ -26,7 +26,11 @@ const ITEM: TextStyle = TextStyle::new(13.0, 500.0).lh(17.0).tracking(-0.06);
 
 /// The row of what is playing: ink at 6 % (light), at 9 % (dark).
 fn playing_row(t: &Theme) -> Color {
-    if t.dark { style::bar_track(t) } else { style::banner(t) }
+    if t.dark {
+        style::bar_track(t)
+    } else {
+        style::banner(t)
+    }
 }
 
 pub fn tools(can_play: bool, t: &Theme) -> Vec<El> {
@@ -79,7 +83,11 @@ fn skip(key: &'static str, name: &'static str, icon: &'static Icon, delta: isize
     let button = toolbar::tool(key, name, icon, t).on_press(move |s: &mut State| {
         media::step(s, delta);
     });
-    if can { button } else { button.disabled(true).focusable(false) }
+    if can {
+        button
+    } else {
+        button.disabled(true).focusable(false)
+    }
 }
 
 /// What the player says of THIS recording, when the source hands a player whose current item it is. Another
@@ -261,9 +269,17 @@ fn player(ui: &Ui, doc: &AudioDoc, live: Option<&Live>, t: &Theme) -> El {
     let caption = kit::label(
         "audio-caption",
         if ui.can_play() {
-            "Decrypted on this PC \u{00B7} keeps playing when you leave this view \u{00B7} the media keys work"
+            concat!(
+                "Decrypted on ",
+                beebeeb_engine::device_word!(),
+                " \u{00B7} keeps playing when you leave this view \u{00B7} the media keys work"
+            )
         } else {
-            "Decrypted on this PC \u{00B7} playing needs another app: use Open in another app"
+            concat!(
+                "Decrypted on ",
+                beebeeb_engine::device_word!(),
+                " \u{00B7} playing needs another app: use Open in another app"
+            )
         },
         CAP,
         t.text_tertiary,

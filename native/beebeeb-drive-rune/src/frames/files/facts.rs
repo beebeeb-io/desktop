@@ -6,19 +6,19 @@
 //! per press, and the list is read again from the source, so what is drawn afterwards is what
 //! the source has. Restoring deletes nothing: the version that was current stays in the list.
 
-use super::actions_data::{Version, versions_words};
+use super::actions_data::{versions_words, Version};
 use super::dialogs::{self, Dialog};
 use super::share::{big_tile, file_head};
 use super::source::{Action, ActionError, Read};
-use crate::State;
 use crate::source::DriveItem;
 use crate::theme::scale;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Trailing};
 use crate::ui::settings_shell::SUB;
 use crate::ui::{button, kit};
-use rune::{El, Tx, col, el, row};
+use crate::State;
+use rune::{col, el, row, El, Tx};
 
 impl State {
     /// The one selected item, when exactly one is.
@@ -127,7 +127,11 @@ pub fn details(s: &State, item: &DriveItem, t: &Theme) -> El {
         add("Added", Trailing::Mono(added.clone()), &mut rows);
     }
     add("Where", Trailing::Value(d.where_.clone()), &mut rows);
-    add("On this PC", Trailing::Value(on_this_pc(item).to_string()), &mut rows);
+    add(
+        concat!("On ", beebeeb_engine::device_word!()),
+        Trailing::Value(on_this_pc(item).to_string()),
+        &mut rows,
+    );
     // Every item is: there is no other kind of file in Beebeeb.
     add("Encrypted", Trailing::Value("Yes, end to end".to_string()), &mut rows);
     // The versions, counted from the source's own list; else what its details say.

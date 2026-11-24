@@ -352,3 +352,66 @@ mod active_work_tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the download is kept");
     }
 }
+
+/// A Mac only downloads updates: nothing stops, nothing is installed, no installer is started. The one thing it does
+/// is open the release's download page in the browser (NSWorkspace, never `/usr/bin/open`).
+#[cfg(any(target_os = "macos", test))]
+pub(crate) struct MacApply {
+    /// Opens an address in the browser and says whether it opened. A test hands in its own: no test opens a page.
+    open: Box<dyn FnMut(&str) -> bool>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl MacApply {
+    /// The release's hand-off: NSWorkspace.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn new() -> Self {
+        Self::opening_with(Box::new(open_in_browser))
+    }
+
+    pub(crate) fn opening_with(open: Box<dyn FnMut(&str) -> bool>) -> Self {
+        Self { open }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Apply for MacApply {
+    /// Never reached (the machine refuses an install on a Mac first): no proof is minted, so no installer starts.
+    fn stop_engine(&mut self) -> Option<EngineStopped> {
+        None
+    }
+
+    fn launch(&mut self, _installer: &VerifiedInstaller, _offer: &Offer, _stopped: EngineStopped) -> bool {
+        false
+    }
+
+    fn resume_engine(&mut self) {}
+
+    /// The address is the offer's own, which the policy only accepts on the release host over https.
+    fn open_download_page(&mut self, offer: &Offer) -> bool {
+        offer.url.starts_with("https://") && (self.open)(&offer.url)
+    }
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn open_in_browser(address: &str) -> bool {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
+    let Some(url) = NSURL::URLWithString(&NSString::from_str(address)) else {
+        return false;
+    };
+    NSWorkspace::sharedWorkspace().openURL(&url)
+}
+
+/// A test build opens nothing.
+#[cfg(all(test, target_os = "macos"))]
+#[allow(dead_code)]
+fn open_in_browser(_address: &str) -> bool {
+    false
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+#[allow(dead_code)]
+fn open_in_browser(_address: &str) -> bool {
+    false
+}

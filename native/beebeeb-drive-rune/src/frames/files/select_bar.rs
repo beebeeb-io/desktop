@@ -1,14 +1,14 @@
 //! Several rows selected (DW-0403): the bar under the toolbar with what can be done to all of them,
 //! and the details panel counting them (two pages, how many, how big, which, how many on this PC).
 
-use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
 use crate::theme::scale;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{radius, type_, Theme};
 use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, pane, preview};
 use crate::ui::{button, kit};
-use rune::{Color, El, Icon, Span, TextStyle, Tx, col, el, row};
+use crate::State;
+use rune::{col, el, row, Color, El, Icon, Span, TextStyle, Tx};
 
 /// `.mk-selbar` under the toolbar: 34 pt and its hairline.
 const BAR_H: f32 = 34.5;
@@ -67,7 +67,7 @@ pub fn bar(s: &State, t: &Theme) -> Option<El> {
     .on_press(|s: &mut State| s.select_all());
     let kept = s.selection_is_kept();
     let keep_words = if kept {
-        "Remove from this PC"
+        concat!("Remove from ", beebeeb_engine::device_word!())
     } else {
         "Make available offline"
     };
@@ -218,7 +218,7 @@ pub fn panel(items: &[&DriveItem], t: &Theme) -> El {
                 .child(fact("detail-selected", "Selected", names, t))
                 .child(fact(
                     "detail-on-this-pc",
-                    "On this PC",
+                    concat!("On ", beebeeb_engine::device_word!()),
                     format!("{on_pc} of {}", items.len()),
                     t,
                 )),

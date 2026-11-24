@@ -1,13 +1,12 @@
 //! Tests of the session that ended (DW-1109): it is not a sign-out, the list stays as it was,
 //! and everything that needs the session is refused before any source is asked.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use super::source::{BoardDrive, FilesFixture};
 use super::tests::*;
 use super::{Intent, MenuKind};
-use crate::State;
 use crate::frames::global::source::board;
 use crate::frames::global::{GlobalFixture, Ui};
 use crate::shell::actions::{EngineActions, FixtureEngine};
@@ -16,6 +15,7 @@ use crate::shell::host::{self, Shell};
 use crate::shell::platform::fake::FakePlatform;
 use crate::shell::registry;
 use crate::source::{DriveSource, Listing, SourceError, StorageSummary};
+use crate::State;
 use rune::{Env, Key, Mods, Runtime};
 
 /// The board's drive, counting every folder it is asked to read.
@@ -174,7 +174,7 @@ fn everything_that_needs_the_session_is_refused_and_no_source_is_asked() {
         ("menu: Make available offline (download)", |rt| {
             pick(rt, MenuKind::File, "keep-offline")
         }),
-        ("menu: Show in File Explorer", |rt| {
+        (concat!("menu: Show in ", beebeeb_engine::file_manager!()), |rt| {
             pick(rt, MenuKind::File, "show-in-explorer")
         }),
         ("menu: Details", |rt| pick(rt, MenuKind::File, "details")),
@@ -187,7 +187,10 @@ fn everything_that_needs_the_session_is_refused_and_no_source_is_asked() {
         ("New: Upload files", |rt| pick(rt, MenuKind::New, "upload-files")),
         ("New: Upload a folder", |rt| pick(rt, MenuKind::New, "upload-folder")),
         ("free up space", |rt| on_state(rt, State::free_up_space)),
-        ("the toolbar's Open in File Explorer", |rt| click(rt, "open-explorer")),
+        (
+            concat!("the toolbar's Open in ", beebeeb_engine::file_manager!()),
+            |rt| click(rt, "open-explorer"),
+        ),
         ("a drop on the list", |rt| {
             let (x, y) = centre(rt, "rows");
             rt.drop_files(vec![std::path::PathBuf::from("a.txt")], Some((x, y)));
@@ -272,7 +275,10 @@ fn everything_that_needs_the_session_is_refused_and_no_source_is_asked() {
     let mut with_key = app(false);
     click(&mut with_key.rt, "row-9-date");
     press(&mut with_key.rt, Key::Enter, NONE);
-    assert!(asked(&with_key.calls).is_empty(), "the .key file was not handed to another app");
+    assert!(
+        asked(&with_key.calls).is_empty(),
+        "the .key file was not handed to another app"
+    );
     assert!(with_key.rt.state.viewer.ui.is_some(), "the viewer's own frame for .key");
     assert_eq!(with_key.rt.state.actions.session.asked, 0);
 }

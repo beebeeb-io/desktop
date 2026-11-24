@@ -2,13 +2,13 @@
 //! the scroll, the letters that jump, the names shortened in the middle, and where a stand-in
 //! picture may come from. Helpers are `tests.rs`'s.
 
-use super::long_list::{BOARD_FIRST_ROW, LongTrip, NAME_MAX, TripThumbs, shortened, size_words, sort_key};
+use super::long_list::{shortened, size_words, sort_key, LongTrip, TripThumbs, BOARD_FIRST_ROW, NAME_MAX};
 use super::source::FilesFixture;
 use super::tests::*;
 use super::{Actions, Intent};
-use crate::State;
-use crate::frames::global::grid::{self, NoThumbs, ThumbSource, thumb_of};
+use crate::frames::global::grid::{self, thumb_of, NoThumbs, ThumbSource};
 use crate::ui::grid_tiles::Thumb;
+use crate::State;
 use crate::{init, load};
 use rune::{Key, Runtime};
 
@@ -76,7 +76,11 @@ fn the_long_folder_lists_212_items_by_name_and_the_boards_rows_start_at_139() {
     assert_eq!(info(&rt, "item-count").text.as_deref(), Some("212 items"));
     assert_eq!(
         info(&rt, "status-details").text.as_deref(),
-        Some("12 on this PC \u{00B7} 0 available offline \u{00B7} 200 online only")
+        Some(concat!(
+            "12 on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} 0 available offline \u{00B7} 200 online only"
+        ))
     );
     let names = names(&rt);
     let mut sorted = names.clone();
@@ -317,7 +321,11 @@ fn back_selects_the_folder_it_came_from_when_the_read_lands_late() {
     let came_from = rt.state.listing.items.len(); // the 212 of Lisbon trip, still shown while the read is out
     rt.update(|s, _| assert!(s.back()));
     assert!(rt.state.folder_reads.pending.is_some(), "the read is out");
-    assert_eq!(rt.state.listing.items.len(), came_from, "the rows stay until it answers");
+    assert_eq!(
+        rt.state.listing.items.len(),
+        came_from,
+        "the rows stay until it answers"
+    );
     let_one_read.send(()).unwrap();
     // What `host::take_folder_read` does with the answer, once the worker has it.
     let taken = loop {

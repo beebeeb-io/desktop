@@ -9,13 +9,13 @@ use rune::{Env, Runtime};
 use super::super::source::{Action, ActionError, Call, FilesFixture};
 use super::super::tests::{Calls, Fails};
 use super::super::{Actions, Toast};
-use crate::State;
 use crate::frames::viewers::Intent as ViewerIntent;
 use crate::shell::actions::FixtureEngine;
 use crate::shell::app::GateState;
 use crate::shell::host::{self, Shell};
 use crate::shell::platform::fake::FakePlatform;
 use crate::shell::state;
+use crate::State;
 
 /// The board's Files window on an engine the test holds, the shell's keys and poll, its file actions recorded.
 fn app() -> (Runtime<State>, Arc<FixtureEngine>, Calls, Fails) {
@@ -112,7 +112,11 @@ fn create_file_says_a_full_disk_and_a_too_large_file_in_their_own_words() {
     );
     assert_eq!(
         Toast::failure(Action::NewFile, ActionError::NoRoom),
-        "Couldn't make the file. There is not enough space on this PC."
+        concat!(
+            "Couldn't make the file. There is not enough space on ",
+            beebeeb_engine::device_word!(),
+            "."
+        )
     );
     assert_eq!(
         Toast::failure(Action::NewFile, ActionError::TooLarge),
