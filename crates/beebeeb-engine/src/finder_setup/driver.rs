@@ -21,7 +21,7 @@ use super::core::{self, CoreState, Effect, Input, Next, Op, OpResult, Trigger};
 use super::error::{FailureRecord, FpError, app_code};
 use super::launch_location::LaunchLocation;
 use super::policy::RetryPolicy;
-use self::lifecycle_log::{self, LifecycleEvent};
+use self::lifecycle_log::LifecycleEvent;
 use self::removal::{DomainRemoval, KeptFolder, RemovalFailure};
 use crate::surfaces::phase::{FinderFailureReason, FinderSetup};
 

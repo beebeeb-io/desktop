@@ -39,3 +39,8 @@ pub fn token(value: &str) -> String {
         .take(64)
         .collect()
 }
+
+/// The last `n` lines of the lifecycle log. The file-backed log is dm-23's; until it is wired this reads empty.
+pub fn tail(_n: usize) -> Vec<String> {
+    Vec::new()
+}
