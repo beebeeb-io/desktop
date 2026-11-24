@@ -11,7 +11,7 @@ fn rows() -> impl Iterator<Item = &'static Row> {
 fn entries(menu: &str) -> Vec<&'static str> {
     TABLE
         .iter()
-        .filter(|r| r.menu == menu || r.id.is_empty())
+        .take_while(|r| r.menu == menu || r.id.is_empty())
         .map(|r| r.label)
         .collect()
 }
@@ -121,5 +121,5 @@ fn every_item_is_installed_once_and_a_missing_action_is_disabled_not_hidden() {
     assert_eq!(installed.len(), own + lines);
     // Nothing is dropped for being unbuilt: the unbuilt rows are in the table and in the install.
     assert!(rows().any(|r| !r.act.built() && r.act != Act::Native));
-    assert!(!Act::Settings.built() == false && Act::UploadFiles.built() == false);
+    assert!(Act::Settings.built() && !Act::UploadFiles.built());
 }
