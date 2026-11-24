@@ -775,13 +775,12 @@ impl StateDb {
     /// included): the row's path and parent are the local truth, ahead of the server's.
     pub fn has_queued_local_rename(&self, file_id: &str) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        conn.query_row(
+        conn.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM operation_queue
                WHERE file_id = ?1 AND kind IN ('rename_file', 'move_file')
                  AND CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.local_rename') END = 1)",
-            params![file_id],
-            |r| r.get(0),
-        )
+        )?
+        .query_row(params![file_id], |r| r.get(0))
     }
     /// Task 2204 S0.4: `path` was vacated by a Windows rename that is still waiting to be sent
     /// (unclaimed, not parked or paused). A file there waits too: a safe save may still fold

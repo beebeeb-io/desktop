@@ -720,16 +720,50 @@ pub(super) async fn bootstrap_from_snapshot(
     // `now_secs` is captured at tick start, BEFORE this request — so it is the
     // prune freshness cutoff that never prunes a row a concurrent local
     // completion stamps while this snapshot is in flight (see `prune_absent`).
+    let started = std::time::Instant::now();
+    let snapshot = bridge.api().sync_snapshot().await?;
+    tracing::info!(
+        rows = snapshot.nodes.len(),
+        fetch_ms = started.elapsed().as_millis() as u64,
+        "first listing: the server's list arrived"
+    );
+    // RE-a: the bar counts from here (it said "list on its way" through the whole decrypt pass), and the log says
+    // how far it is every LISTING_LOG_EVERY.
+    let mut progress = ListingProgress::start(bridge.transfers().clone(), snapshot.nodes.len() as u64);
+    ingest_snapshot(bridge, sync_root, snapshot, now_secs, conflicts, &mut progress).await
+}
+
+/// RE-a: `bootstrap_from_snapshot` after its fetch: the prepare (decrypt) pass, then the ingest, reporting to
+/// `progress` all along. Split out so the speed test runs it without HTTP.
+pub(crate) async fn ingest_snapshot(
+    bridge: &EngineBridge,
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
+    mut snapshot: crate::api_client::SyncSnapshot,
+    now_secs: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+    progress: &mut ListingProgress,
+) -> Result<Vec<String>, EngineError> {
     let fetched_at = now_secs;
-    let mut snapshot = bridge.api().sync_snapshot().await?;
-    snapshot.nodes = bridge
-        .prepare_owned_rows(&snapshot.nodes)
-        .await?
-        .into_iter()
-        .map(|p| p.row)
-        .collect();
+    let prepared = bridge
+        .prepare_owned_rows_reporting(&snapshot.nodes, &mut |done| progress.decrypted(done))
+        .await;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // RE-a: one row's canonical fetch failing (a 401) failed the whole list, which the next tick fetched
+            // again, with nothing in the log. Its status and category only, never its text.
+            tracing::warn!(
+                status = crate::engine_bridge::error_http_status(&error),
+                reason = error_category(error.as_ref()),
+                "first listing: the decrypt pass failed; the list is fetched again at the next check"
+            );
+            return Err(error.into());
+        }
+    };
+    snapshot.nodes = prepared.into_iter().map(|p| p.row).collect();
+    progress.phase("ingest");
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-    let mut applied = apply_snapshot(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts)?;
+    let mut applied = apply_snapshot_reporting(bridge, sync_root, &snapshot, now_secs, fetched_at, conflicts, progress)?;
     // §6.3.3: an upload still waiting for its base after this successful snapshot counts
     // one more; at the 10th it parks with its bytes. The park changes how its item is
     // presented (spec §9.1), and the snapshot did not list the file, so its id joins the
@@ -739,6 +773,7 @@ pub(super) async fn bootstrap_from_snapshot(
         log_parked(&op_id, file_id.as_deref(), ParkReason::BaseUnknown);
         applied.extend(file_id);
     }
+    progress.whole();
     Ok(applied)
 }
 
@@ -759,11 +794,28 @@ pub(super) async fn bootstrap_from_snapshot(
 /// a synthetic `SyncSnapshot` (no HTTP).
 pub fn apply_snapshot(
     bridge: &EngineBridge,
+    sync_root: &Path,
+    snapshot: &crate::api_client::SyncSnapshot,
+    now_secs: i64,
+    snapshot_fetched_at: i64,
+    conflicts: &mut Vec<ConflictDetected>,
+) -> Result<Vec<String>, EngineError> {
+    let mut progress = ListingProgress::start(bridge.transfers().clone(), snapshot.nodes.len() as u64);
+    progress.phase("ingest");
+    let applied = apply_snapshot_reporting(bridge, sync_root, snapshot, now_secs, snapshot_fetched_at, conflicts, &mut progress)?;
+    progress.whole();
+    Ok(applied)
+}
+
+/// [`apply_snapshot`], counting its rows on `progress` (in the `ingest` phase) and timing its prune.
+fn apply_snapshot_reporting(
+    bridge: &EngineBridge,
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] sync_root: &Path,
     snapshot: &crate::api_client::SyncSnapshot,
     now_secs: i64,
     snapshot_fetched_at: i64,
     conflicts: &mut Vec<ConflictDetected>,
+    progress: &mut ListingProgress,
 ) -> Result<Vec<String>, EngineError> {
     // every ingested and pruned item id flows back
     // to the tick, which signals the File Provider working set with the union.
@@ -782,27 +834,15 @@ pub fn apply_snapshot(
     // Their children are skipped instead of being placed at the root.
     let mut unplaced: HashSet<String> = HashSet::new();
 
-    // DW-0802b: Search says how far the first listing is while this runs.
-    let total = order.len() as u64;
-    let board = bridge.transfers().clone();
-    board.set_first_listing(0, total);
-    let ended = ListingEnd(board.clone());
-    let mut reported = std::time::Instant::now();
-
     // dc-163: the rows commit PULL_BATCH_ROWS at a time (they committed one by one: 2.1 M write calls
     // at 41,510 rows); dc-170: or every BATCH_MAX_TIME (250 ms), whichever comes first. Each batch holds whole rows only; a failure or a crash mid-pull leaves the
     // batches before it, no cursor, and the next tick pulls again over them (every write here is
-    // an upsert). The count is reported between batches, at most every LISTING_REPORT_EVERY, so
-    // the board's wake never runs under the database lock.
+    // an upsert). The count is reported between batches (DW-0802b, RE-a), so the board's wake never
+    // runs under the database lock; the roots come first, so the first batch shows the Files root.
     let mut batch = bridge.db().write_batch(crate::state_db::PULL_BATCH_ROWS)?;
     for (listed, f) in order.into_iter().enumerate() {
         if listed > 0 {
-            batch.row_done(|listed| {
-                if reported.elapsed() >= crate::transfer_progress::LISTING_REPORT_EVERY {
-                    board.set_first_listing(listed as u64, total);
-                    reported = std::time::Instant::now();
-                }
-            })?;
+            batch.row_done(|listed| progress.ingested(listed))?;
         }
         #[cfg(test)]
         first_pull_batch_tests::crash_point(listed);
@@ -868,6 +908,7 @@ pub fn apply_snapshot(
         }
     }
     batch.finish()?;
+    progress.phase("prune");
 
     // Deletion reconciliation: anything in the local own-tree the snapshot did
     // NOT mention was deleted/trashed server-side. `prune_absent` excludes shared
@@ -908,16 +949,130 @@ pub fn apply_snapshot(
     }
 
     bridge.db().set_sync_cursor(snapshot.seq_id)?;
-    drop(ended);
     Ok(applied)
 }
 
-/// Ends the board's first-listing report when the ingest ends, by return or by an error.
-struct ListingEnd(Arc<crate::transfer_progress::TransferBoard>);
+/// RE-a: the least time between two log lines of the first listing's progress.
+pub const LISTING_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
-impl Drop for ListingEnd {
+/// RE-a: how far the first listing is. The board's count (DW-0802b) at most every `LISTING_REPORT_EVERY`, a log
+/// line every [`LISTING_LOG_EVERY`], and each phase's time in one line at the end (decrypt, ingest, prune). The
+/// decrypt pass counts for the first quarter of the bar and the ingest for the rest (41,510 rows on the test rig:
+/// about 0.7 s and 2.5 s), so the bar moves from the moment the list arrives. Dropped, whole or not, it ends the
+/// board's report; not whole, it says in the log where it stopped.
+pub(crate) struct ListingProgress {
+    board: Arc<crate::transfer_progress::TransferBoard>,
+    total: u64,
+    listed: u64,
+    /// Where the ingest's count starts on the bar (after the decrypt pass's share).
+    ingest_from: u64,
+    started: std::time::Instant,
+    phase: &'static str,
+    phase_started: std::time::Instant,
+    /// (phase, milliseconds) of every phase that ended.
+    phases: Vec<(&'static str, u64)>,
+    reported: std::time::Instant,
+    logged: std::time::Instant,
+    whole: bool,
+}
+
+impl ListingProgress {
+    /// A list of `total` rows arrived: the board says "0 of `total`" at once.
+    pub(crate) fn start(board: Arc<crate::transfer_progress::TransferBoard>, total: u64) -> Self {
+        board.set_first_listing(0, total);
+        let now = std::time::Instant::now();
+        Self {
+            board,
+            total,
+            listed: 0,
+            ingest_from: 0,
+            started: now,
+            phase: "decrypt",
+            phase_started: now,
+            phases: Vec::new(),
+            reported: now,
+            logged: now,
+            whole: false,
+        }
+    }
+
+    /// `done` rows of the decrypt pass are done.
+    fn decrypted(&mut self, done: usize) {
+        self.at((done as u64).min(self.total) / 4);
+    }
+
+    /// `done` rows are ingested (called between write batches, with the database lock free).
+    fn ingested(&mut self, done: usize) {
+        let left = self.total - self.ingest_from;
+        let part = (done as u64).min(self.total).saturating_mul(left).checked_div(self.total).unwrap_or(0);
+        self.at(self.ingest_from + part);
+    }
+
+    fn at(&mut self, listed: u64) {
+        self.listed = self.listed.max(listed);
+        if self.reported.elapsed() >= crate::transfer_progress::LISTING_REPORT_EVERY {
+            self.board.set_first_listing(self.listed, self.total);
+            self.reported = std::time::Instant::now();
+        }
+        if self.logged.elapsed() >= LISTING_LOG_EVERY {
+            tracing::info!(
+                listed = self.listed,
+                total = self.total,
+                phase = self.phase,
+                elapsed_ms = self.started.elapsed().as_millis() as u64,
+                "first listing: progress"
+            );
+            self.logged = std::time::Instant::now();
+        }
+    }
+
+    /// The current phase ended; `next` begins. Entering `ingest` puts the bar at the decrypt pass's share.
+    fn phase(&mut self, next: &'static str) {
+        self.phases.push((self.phase, self.phase_started.elapsed().as_millis() as u64));
+        self.phase = next;
+        self.phase_started = std::time::Instant::now();
+        if next == "ingest" {
+            self.ingest_from = self.total / 4;
+            self.listed = self.listed.max(self.ingest_from);
+            self.board.set_first_listing(self.listed, self.total);
+            self.reported = std::time::Instant::now();
+        }
+    }
+
+    /// The list is whole: one line with every phase's time.
+    fn whole(&mut self) {
+        self.phases.push((self.phase, self.phase_started.elapsed().as_millis() as u64));
+        let ms = |name: &str| self.phases.iter().filter(|(phase, _)| *phase == name).map(|(_, ms)| ms).sum::<u64>();
+        tracing::info!(
+            rows = self.total,
+            decrypt_ms = ms("decrypt"),
+            ingest_ms = ms("ingest"),
+            prune_ms = ms("prune"),
+            total_ms = self.started.elapsed().as_millis() as u64,
+            "first listing: whole"
+        );
+        self.whole = true;
+    }
+
+    /// The time each phase took so far, in order (the speed test).
+    #[cfg(test)]
+    pub(crate) fn phases(&self) -> &[(&'static str, u64)] {
+        &self.phases
+    }
+}
+
+impl Drop for ListingProgress {
     fn drop(&mut self) {
-        self.0.end_first_listing();
+        if !self.whole {
+            tracing::warn!(
+                listed = self.listed,
+                total = self.total,
+                phase = self.phase,
+                elapsed_ms = self.started.elapsed().as_millis() as u64,
+                "first listing: stopped before it was whole"
+            );
+        }
+        self.board.end_first_listing();
     }
 }
 

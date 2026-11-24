@@ -205,9 +205,8 @@ impl StateDb {
     pub fn get_owned_key_record(&self, id: &str) -> Result<Option<crate::owner_keys::OwnedKeyRecord>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let record: Option<String> = conn
-            .query_row("SELECT record FROM owned_key_records WHERE file_id = ?1", [id], |r| {
-                r.get(0)
-            })
+            .prepare_cached("SELECT record FROM owned_key_records WHERE file_id = ?1")?
+            .query_row([id], |r| r.get(0))
             .optional()?;
         record
             .map(|s| {

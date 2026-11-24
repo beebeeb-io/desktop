@@ -259,6 +259,7 @@ mod tests {
     mod finder_queue_4;
     mod finder_queue_5;
     mod finder_queue_6;
+    mod first_listing_speed; // RE-a: a 42k-row first listing, its budget and its progress.
     mod hydrate_files;
     mod ipc;
     // S6: a kept file this PC does not hold is fetched again (Linux, through the queue).
