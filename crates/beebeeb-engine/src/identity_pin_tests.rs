@@ -138,6 +138,11 @@ const LITERALS_ALLOWED: &[(&str, &[&str], &str)] = &[
         "the name of the macOS menu bar's first menu (`APP`): the brand, for both builds",
     ),
     (
+        "native/beebeeb-drive-rune/src/shell/platform/macos_fp/lifecycle_log.rs",
+        &["Beebeeb"],
+        "the folder name under ~/Library/Logs for the lifecycle log: the brand, for both builds",
+    ),
+    (
         "native/beebeeb-drive-rune/src/shell/platform/macos_autostart.rs",
         &["io.beebeeb.app.plist"],
         "the 0.8.x LaunchAgent file name to find and remove (legacy, only ever the real build's)",
