@@ -155,10 +155,10 @@ fn sf2279_a_kept_custody_row_does_not_reset_the_first_start_after_a_sign_out() {
 /// The copy a refused Windows start shows never tells a person they have another account.
 #[test]
 fn the_refusal_never_claims_another_account() {
-    for sentence in [OTHER_ACCOUNT_ON_WINDOWS, IDENTITY_UNKNOWN] {
+    for sentence in [OTHER_ACCOUNT_DATA, IDENTITY_UNKNOWN] {
         let lower = sentence.to_lowercase();
         assert!(!lower.contains("another"), "{sentence}");
         assert!(!lower.contains("other account"), "{sentence}");
     }
-    assert!(OTHER_ACCOUNT_ON_WINDOWS.contains("Nothing was uploaded or deleted"));
+    assert!(OTHER_ACCOUNT_DATA.contains("Nothing was uploaded or deleted"));
 }
