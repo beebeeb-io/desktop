@@ -208,7 +208,7 @@ impl StateDb {
     /// Returns the number of rows touched (a row updated for both status and pin
     /// counts the affected-row total across both statements). Empty input is a
     /// fast `Ok(0)` with no transaction opened.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn reconcile_os_state(
         &self,
         deltas: &[(String, Option<FileStatus>, Option<PinState>)],

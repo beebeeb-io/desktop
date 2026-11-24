@@ -28,7 +28,7 @@ profile_check() { # <bundle dir> <bundle id>
   appid="$(printf '%s' "$dec" | plutil -extract Entitlements.com\\.apple\\.application-identifier raw - 2>/dev/null)"
   [[ "$appid" == *".$2" ]] && ok "$2: profile application identifier" || bad "$2: profile application identifier ($appid)"
   groups="$(printf '%s' "$dec" | plutil -extract Entitlements.com\\.apple\\.security\\.application-groups json -o - - 2>/dev/null)"
-  [[ "$groups" == *"io.beebeeb.app.fileprovider"* || "$groups" == *'"*"'* ]] && ok "$2: profile app group" || bad "$2: profile app group"
+  [[ "$groups" == *"io.beebeeb.app.fileprovider"* || "$groups" == *'"*"'* || "$groups" == *'"R8352WDJJR.*"'* ]] && ok "$2: profile app group" || bad "$2: profile app group"
   platform="$(printf '%s' "$dec" | plutil -extract Platform json -o - - 2>/dev/null)"
   [[ "$platform" == *OSX* || "$platform" == *macOS* ]] && ok "$2: profile platform" || bad "$2: profile platform"
 }

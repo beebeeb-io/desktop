@@ -49,7 +49,7 @@ pub mod explorer_command;
 pub mod file_ops;
 pub mod file_provider_port;
 pub mod finder_setup;
-#[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
+#[cfg(any(target_os = "windows", target_os = "macos", any(test, feature = "test-support")))]
 pub mod found_while_paused;
 pub mod free_up_space;
 pub mod held_queue;
@@ -78,7 +78,7 @@ pub mod name_alias;
 pub mod no_fetch_scope;
 pub mod operation_failure;
 pub mod os_state_reconcile;
-#[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
+#[cfg(any(target_os = "windows", target_os = "macos", any(test, feature = "test-support")))]
 pub mod own_data_proof;
 pub mod owner_keys;
 #[cfg(target_os = "windows")]

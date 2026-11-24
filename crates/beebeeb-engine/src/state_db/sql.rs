@@ -640,21 +640,21 @@ pub(super) fn is_content_kind(kind: &OperationKind) -> bool {
 }
 
 /// the `sync_state` keys of "Keep on this PC only" (`found_while_paused.rs`).
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub(super) const KEEP_JOURNAL_KEY: &str = "found_while_paused.keep_journal";
 
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub(super) const KEPT_DIR_KEY: &str = "found_while_paused.kept_dir";
 
 /// an op (aliased `o`) that creates its item on the server: a folder's
 /// create, or an upload whose metadata says it creates the file (`engine_bridge::is_create_file_operation`).
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub(super) const CREATE_OP_SQL: &str = "(o.kind = 'create_folder'
      OR (o.kind IN ('upload_version', 'upload_file')
          AND COALESCE(CASE WHEN json_valid(o.metadata_json) THEN json_extract(o.metadata_json, '$.operation') END = 'create_file', 0)))";
 
 /// A [`ProofOp`] from `op_id, file_id, parent_id, kind`.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub(super) fn proof_op_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProofOp> {
     Ok(ProofOp {
         op_id: row.get(0)?,
