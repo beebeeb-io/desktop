@@ -39,6 +39,8 @@ pub mod flyout_window;
 pub mod host;
 pub mod identity;
 pub mod instance;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub mod macos_menu;
 pub mod intents;
 mod settings_open;
 mod settings_open_pages;
@@ -447,6 +449,11 @@ pub fn run() {
     if !tooling {
         // The app outlives its window: closing it leaves the b running (DW-1231).
         main_app = main_app.keep_running().on_close(host::on_close).on_quit(host::on_quit);
+        // The macOS menu bar (§1): Edit and Window from rune, the app's own items from one table.
+        #[cfg(target_os = "macos")]
+        {
+            main_app = macos_menu::install(main_app, false);
+        }
         flyout_app = flyout_app.keep_running();
         tray_tip_app = tray_tip_app.keep_running();
         if !show_window {
