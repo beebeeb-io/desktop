@@ -16,7 +16,7 @@ const AT_ROOT: usize = 39;
 /// The whole listing, decrypt pass included, in a debug test build: 14.4 s measured on the Legion build host
 /// (2026-11-24, next to another 41k test; decrypt 4.9 s, ingest 9.3 s), so twice that. A release build is several
 /// times faster.
-const BUDGET: Duration = Duration::from_secs(30);
+const BUDGET: Duration = Duration::from_secs(60); // debug build on a loaded shard: 14 s alone, 35 s under 8 shards
 /// The longest the bar may stand still.
 const MOST_BETWEEN_REPORTS: Duration = Duration::from_secs(1);
 
