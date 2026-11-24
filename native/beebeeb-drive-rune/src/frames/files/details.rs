@@ -124,22 +124,7 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, pin: Option<bool>, t: &
 
     let pin_row = pin.map(|pinned| {
         let words = if pinned { "Unpin from sidebar" } else { "Pin to sidebar" };
-        row()
-            .key("pin-box")
-            .role("button")
-            .label(words)
-            .description("Shows this folder in the sidebar's Pinned list, on every device.")
-            .w_full()
-            .h(22.0)
-            .gap(scale::space::S7)
-            .center()
-            .radius(radius::MD)
-            .hover(t.hover)
-            .press(t.press)
-            .focusable(true)
-            .child(kit::glyph("pin-icon", &icons::PIN, 14.0, t.text_secondary))
-            .child(kit::label("pin-btn", words, type_::BUTTON_SM, t.text_secondary))
-            .on_press_tx(|s: &mut State, tx: &mut Tx| s.toggle_pin(tx))
+        action_button("pin", words, &icons::PIN, t).on_press_tx(|s: &mut State, tx: &mut Tx| s.toggle_pin(tx))
     });
 
     pane(t)
