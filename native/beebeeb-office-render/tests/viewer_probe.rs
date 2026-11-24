@@ -34,3 +34,65 @@ fn viewer_probe_through_serve() {
     helper.close();
     eprintln!("PROBE exit {}", helper.exit_code());
 }
+
+#[cfg(windows)]
+mod win {
+    use std::fs::File;
+    use std::path::Path;
+    use std::sync::mpsc::{self, Receiver};
+    use std::time::Duration;
+    use beebeeb_office_protocol::check::{self, Limits as Contract};
+    use beebeeb_office_protocol::frame::{Frame, Ids, Side, read_frame, write_frame};
+    use beebeeb_office_protocol::office::{DocKind, GrantRef, Message, Open, Render, KIND_OPEN, KIND_RENDER};
+    use beebeeb_office_sandbox::{Access, Child, Limits as SandboxLimits, Sandbox, Section};
+
+    const HELPER: &str = env!("CARGO_BIN_EXE_beebeeb-office-render");
+
+    fn run(name: &str, bytes: &[u8]) {
+        let sandbox = Sandbox::new(SandboxLimits::default()).expect("the sandbox starts");
+        let mut child: Child = sandbox.spawn(Path::new(HELPER)).expect("the confined helper starts");
+        let pipes = child.take_pipes().expect("pipes");
+        let (tx, rx): (_, Receiver<Result<Frame, String>>) = mpsc::channel();
+        let mut from = pipes.from_helper;
+        std::thread::spawn(move || loop {
+            match read_frame(&mut from) {
+                Ok(f) => { if tx.send(Ok(f)).is_err() { break; } }
+                Err(e) => { let _ = tx.send(Err(e.to_string())); break; }
+            }
+        });
+        let mut to: File = pipes.to_helper;
+        let mut ids = Ids::new(Side::App);
+        let mut doc = Section::new(bytes.len()).expect("section");
+        doc.as_mut_slice().copy_from_slice(bytes);
+        let g = child.grant(&doc, Access::Read).expect("grant");
+        let open = Message::Open(Open { kind: DocKind::Docx, doc: GrantRef { wire: g.wire, len: g.len } });
+        let id = ids.next_id();
+        write_frame(&mut to, KIND_OPEN, id, &open.encode().expect("fits")).expect("write");
+        let a = rx.recv_timeout(Duration::from_secs(60));
+        let ans = match &a { Ok(Ok(f)) => format!("kind={:#06x} {:?}", f.kind, Message::decode(f.kind, &f.payload)), other => format!("{other:?}") };
+        eprintln!("PROBE-WIN {name} open: {ans}");
+        if let Ok(Ok(f)) = a {
+            if let Ok(Message::Opened(opened)) = Message::decode(f.kind, &f.payload) {
+                let ask = Render { page: 0, scale: check::render_scale(1.0, 96.0), region: None, out: GrantRef { wire: 0, len: 0 } };
+                let (w, h) = check::asked_size(&ask, &opened.sizes[0], &Contract::CONTRACT).expect("size");
+                let out = Section::new(w as usize * h as usize * 4).expect("out");
+                let og = child.grant(&out, Access::ReadWrite).expect("grant out");
+                let r = Message::Render(Render { out: GrantRef { wire: og.wire, len: og.len }, ..ask });
+                let id = ids.next_id();
+                write_frame(&mut to, KIND_RENDER, id, &r.encode().expect("fits")).expect("write");
+                let a = rx.recv_timeout(Duration::from_secs(60));
+                let ans = match &a { Ok(Ok(f)) => format!("kind={:#06x} {:?}", f.kind, Message::decode(f.kind, &f.payload)), other => format!("{other:?}") };
+                eprintln!("PROBE-WIN {name} render: {ans}");
+            }
+        }
+        eprintln!("PROBE-WIN {name} exit: {:?}", child.wait_timeout(Duration::from_millis(500)));
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn viewer_probe_windows_sandbox() {
+        run("letter", include_bytes!("fixtures/letter-1.docx"));
+        run("probe-lo", super::PROBE);
+        run("system-font", include_bytes!("fixtures/system-font.docx"));
+    }
+}
