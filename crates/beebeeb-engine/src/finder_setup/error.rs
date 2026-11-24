@@ -9,8 +9,9 @@ pub const POSIX_DOMAIN: &str = "NSPOSIXErrorDomain";
 /// mirrored by the `BeebeebBridge*` enum in the bridge.
 pub const BRIDGE_DOMAIN: &str = "io.beebeeb.bridge";
 /// Errors the Rust side synthesizes (engine start, saving the sync folder, a bridge
-/// return code the bridge does not document, a refused launch location).
-pub const APP_DOMAIN: &str = "io.beebeeb.app";
+/// return code the bridge does not document, a refused launch location). Only this
+/// process's own error label: the bridge never emits it, so it carries no app identity.
+pub const APP_DOMAIN: &str = "beebeeb-engine.finder-setup";
 
 // The codes the bridge synthesizes. Only `STABILIZATION_TIMEOUT` is classified; the rest mirror the
 // ObjC enum so a test pins the two sets against each other (`the_bridge_error_codes_are_the_rust_constants`).
