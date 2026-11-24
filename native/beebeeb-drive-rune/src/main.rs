@@ -45,6 +45,7 @@ mod theme;
 mod ui;
 mod uninstall_hook;
 mod windows_floor;
+mod office_log;
 
 // `ui/**` names these at the crate root.
 pub use shell::registry::view;

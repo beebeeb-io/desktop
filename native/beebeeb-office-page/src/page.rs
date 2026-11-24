@@ -3,6 +3,20 @@
 #[path = "../../beebeeb-drive-rune/src/engine_host/office_host.rs"]
 mod office_host;
 
+/// The app's `office_log` (why the helper stopped or did not start) logs through `tracing`; here the same fixed words
+/// go to standard error.
+mod office_log {
+    pub fn helper_stopped(why: &str, mode: &str, exit: Option<u32>, at: &str, line: u32) {
+        let exit = exit.map_or_else(|| String::from("running"), |code| format!("{code:#010x}"));
+        let at = at.rsplit(['/', '\\']).next().unwrap_or(at);
+        eprintln!("office_page: helper stopped why={why} mode={mode} exit={exit} at={at}:{line}");
+    }
+
+    pub fn helper_not_started(reason: &str, detail: &str) {
+        eprintln!("office_page: helper not started reason={reason} detail={detail}");
+    }
+}
+
 /// The app's `windows_floor` logs through `tracing`, which this tool does not link. The host calls only this function of
 /// it, on a Windows older than the sandbox needs; the tool prints `state=NoPreview(NeedsWindowsUpdate)` anyway.
 mod windows_floor {

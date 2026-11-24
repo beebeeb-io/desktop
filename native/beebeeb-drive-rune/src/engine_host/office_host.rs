@@ -430,6 +430,11 @@ pub(crate) trait Helper: Send + Sync + 'static {
     fn process_id(&self) -> Option<u32>;
     /// The handles it holds open, where the system can say ([`HANDLE_SLACK`]).
     fn handle_count(&self) -> Option<u32>;
+    /// Its exit code once it has ended (waits a moment for one that is ending), for the log. `None`: still running,
+    /// or the system cannot say.
+    fn exit_code(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// A started helper and its two pipes.
@@ -548,6 +553,14 @@ impl Helper for sandbox::Child {
         // The inherent call (the trait method has the same name). An error (the process is gone, or the count could
         // not be read) bounds nothing; a helper that is gone is noticed by its pipe.
         sandbox::Child::handle_count(self).ok()
+    }
+
+    fn exit_code(&self) -> Option<u32> {
+        // A helper whose pipe closed is ending: a short wait sees its code.
+        sandbox::Child::wait_timeout(self, Duration::from_millis(200))
+            .ok()
+            .flatten()
+            .map(|status| status.code())
     }
 }
 
