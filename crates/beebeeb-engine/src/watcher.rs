@@ -225,7 +225,9 @@ pub(crate) fn run_scan(
             // folder was minted by the engine from a server row, so it is never a new local folder, even while no
             // row is found at its path (the first pull still writing, a remote rename or a prune not reconciled
             // yet, a name that differs only in case). Only a plain folder, one made on this PC, is created.
-            if is_placeholder_dir(dir_path, stamp) {
+            let has_row = crate::engine_bridge::relative_db_path(sync_root, dir_path)
+                .is_some_and(|rel| matches!(bridge.db().get_file_by_path(&rel), Ok(Some(_))));
+            if !has_row && is_placeholder_dir(dir_path, stamp) {
                 tracing::debug!("enumeration scan: a folder from the server (placeholder); not created again");
                 return;
             }
