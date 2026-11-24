@@ -7,13 +7,13 @@
 //! come answers nothing, and the row then shows no bar: never a made-up one.
 
 use super::source::{Action, FilesFixture};
-use crate::State;
 use crate::source::DriveItem;
-use crate::theme::scale;
 use crate::theme::icons_settings;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::scale;
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::kit;
-use rune::{El, col, el};
+use crate::State;
+use rune::{col, el, El};
 
 /// One copy on its way down.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +65,29 @@ impl Download {
 /// The status line's word: "Syncing" while a copy comes down.
 pub fn sync_word(downloads: &[Download]) -> String {
     if downloads.is_empty() { "Up to date" } else { "Syncing" }.into()
+}
+
+/// The status bar's right-hand words while kept copies come down: "Downloading 3 files, 120 MB left".
+/// Only copies this PC keeps count; `None` when none comes down.
+pub fn status_words(downloads: &[Download]) -> Option<String> {
+    let kept: Vec<&Download> = downloads.iter().filter(|d| d.kept).collect();
+    if kept.is_empty() {
+        return None;
+    }
+    let left: u64 = kept.iter().map(|d| d.total.saturating_sub(d.done)).sum();
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * KB;
+    const GB: f64 = MB * KB;
+    let size = match left as f64 {
+        l if l >= GB => format!("{:.1} GB", l / GB),
+        l if l >= MB => format!("{:.0} MB", l / MB),
+        l => format!("{:.0} KB", (l / KB).ceil()),
+    };
+    let n = kept.len();
+    Some(format!(
+        "Downloading {n} {}, {size} left",
+        if n == 1 { "file" } else { "files" }
+    ))
 }
 
 impl State {
@@ -128,6 +151,10 @@ pub fn scene(s: &mut State) {
     s.actions.toast = Some(super::Toast::Keeping);
     let _ = Action::KeepOffline;
 }
+
+#[cfg(test)]
+#[path = "offline_progress_tests.rs"]
+mod offline_progress_tests;
 
 /// The bar of a copy coming down (`.mk-prog`): the ink's own grey on the faint track. Amber is for
 /// encryption state and primary actions, and an upload's bar (`uploads::bar`); a download is neither.
