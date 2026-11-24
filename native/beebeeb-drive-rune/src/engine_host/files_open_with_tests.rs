@@ -15,7 +15,7 @@ use beebeeb_engine::runner::EngineRunner;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
 use beebeeb_engine::sync_view::Start;
-use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, start_fake};
+use beebeeb_engine::test_api::fake_account::{start_fake, FakeAccount, TEST_PHRASE};
 use zeroize::Zeroizing;
 
 use super::*;
@@ -39,6 +39,7 @@ struct Set {
     source: Source,
     _dir: tempfile::TempDir,
     _fake: beebeeb_engine::test_api::FakeApi,
+    account: Arc<FakeAccount>,
 }
 
 fn put(db: &StateDb, id: &str, name: &str, kind: ItemKind) {
@@ -102,6 +103,7 @@ fn set(tag: &str, signed_in: bool, owner_is_account: bool) -> Set {
         source,
         _dir: dir,
         _fake: fake,
+        account,
     }
 }
 
@@ -249,9 +251,17 @@ fn open_with_an_app_hands_over_any_file() {
         label: "Invented".into(),
     };
     let notes = row(NOTES, "Invented notes.txt", false);
-    assert_eq!(set.source.open_in_app(&notes, &app), Err(ActionError::NotOnThisSystem), "online only");
+    assert_eq!(
+        set.source.open_in_app(&notes, &app),
+        Err(ActionError::NotOnThisSystem),
+        "online only"
+    );
     put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Local, true);
-    assert_eq!(set.source.open_in_app(&notes, &app), Err(ActionError::NotOnThisSystem), "kept and here");
+    assert_eq!(
+        set.source.open_in_app(&notes, &app),
+        Err(ActionError::NotOnThisSystem),
+        "kept and here"
+    );
     assert_eq!(
         set.source.open_in_app(&row(FOLDER, "Invented folder", true), &app),
         Err(ActionError::Failed)
@@ -295,6 +305,8 @@ fn files_open_never_waits_on_the_launch_lock() {
         })
     });
     held.recv().unwrap();
+    // The file is on this PC (a placeholder or a copy): nothing is fetched, the app is handed its own path.
+    std::fs::write(root.join("Invented notes.txt"), b"here").unwrap();
     let notes = row(NOTES, "Invented notes.txt", false);
     let asked_at = Instant::now();
     assert_eq!(set.source.open(std::slice::from_ref(&notes)), Ok(()));
@@ -323,4 +335,57 @@ fn files_open_never_waits_on_the_launch_lock() {
     assert!(started[0].1.ends_with("Invented notes.txt") && started[0].1.starts_with(&root));
     assert!(started[1].1.ends_with("Invented notes.txt"));
     assert_eq!(started[2].1, root, "Open in File Explorer: the sync folder");
+}
+
+/// What the download-first stand-in saw: the path it was handed and the bytes that were at it then.
+static OPENED_COPY: std::sync::Mutex<Vec<(PathBuf, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+
+fn reading_open(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    launch::locked(|| {
+        still().then(|| {
+            OPENED_COPY
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), std::fs::read(path).unwrap_or_default()))
+        })
+    });
+    Ok(())
+}
+
+/// DC-RD-e: double-clicking a file that is not on this PC (no file at its path) downloads it first and hands the app
+/// the downloaded copy; it never hands over the missing path ("<root>/x does not exist").
+#[test]
+fn open_file_downloads_a_cloud_only_file_before_it_opens() {
+    use std::time::{Duration, Instant};
+    let mut set = set("rd-e-open", true, true);
+    let _running = hold_running(&set.engine);
+    let root = set.engine.sync_root().expect("a sync folder");
+    set.account
+        .add_file_with_content(NOTES, None, "Invented notes.txt", b"invented bytes of the notes");
+    set.source.starts = files_launch::Starts {
+        open: reading_open,
+        reveal: reveal_stand_in,
+        has_default_app: |_| true,
+        app: None,
+    };
+    assert!(!root.join("Invented notes.txt").exists());
+    let notes = row(NOTES, "Invented notes.txt", false);
+    assert_eq!(set.source.open(std::slice::from_ref(&notes)), Ok(()));
+    let waited = Instant::now();
+    let seen = loop {
+        let seen = OPENED_COPY
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(p, _)| p.ends_with(format!("{NOTES}/Invented notes.txt")))
+            .cloned();
+        if let Some(seen) = seen {
+            break seen;
+        }
+        assert!(waited.elapsed() < Duration::from_secs(10), "the app was never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(!seen.0.starts_with(&root), "the copy is outside the Beebeeb folder");
+    assert_eq!(seen.1, b"invented bytes of the notes", "the app sees the whole file");
+    assert!(set.source.changes().is_empty(), "no failure was said");
 }
