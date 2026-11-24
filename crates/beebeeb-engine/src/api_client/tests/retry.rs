@@ -177,3 +177,86 @@ fn transport_retry_decision_is_bounded_and_method_aware() {
     assert!(transport_retry_decision(0, false, true, true).is_some());
     assert!(transport_retry_decision(MAX_TRANSPORT_RETRIES, true, true, true).is_none());
 }
+
+// ── bulk GET (the whole-tree snapshot of a large account) ──────────────────
+
+/// A snapshot body of `nodes` rows, about 250 bytes each (a 41,510-item account is about 10 MB).
+fn snapshot_body(nodes: usize) -> Vec<u8> {
+    let rows: Vec<serde_json::Value> = (0..nodes)
+        .map(|i| {
+            serde_json::json!({
+                "id": format!("00000000-0000-0000-0000-{i:012}"), "parent_id": null, "is_folder": false,
+                "name_encrypted": "x".repeat(120), "size_bytes": i, "updated_at": "2026-11-24T10:00:00Z",
+            })
+        })
+        .collect();
+    serde_json::to_vec(&serde_json::json!({ "seq_id": 7, "nodes": rows })).unwrap()
+}
+
+/// Serve `body` on one connection in `pieces` pieces, `gap` apart; with `stall_after` it stops after that many
+/// pieces and holds the connection open without finishing.
+fn slow_body_server(body: Vec<u8>, pieces: usize, gap: Duration, stall_after: Option<usize>) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else { return };
+        let mut buf = [0u8; 4096];
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        let _ = stream.read(&mut buf);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let size = body.len().div_ceil(pieces);
+        for (i, piece) in body.chunks(size).enumerate() {
+            if stall_after == Some(i) {
+                std::thread::sleep(Duration::from_secs(10));
+                return;
+            }
+            if stream.write_all(piece).is_err() || stream.flush().is_err() {
+                return;
+            }
+            std::thread::sleep(gap);
+        }
+    });
+    url
+}
+
+#[test]
+fn a_snapshot_that_arrives_slowly_but_steadily_is_not_cut_off_by_a_total_cap() {
+    // 41,510 rows, served over ~2 s in 20 pieces. A total cap of 1 s (the app's 30 s, shrunk) cuts it off,
+    // as it did on the 0.9.0 account; the bulk GET, with 500 ms of allowed silence, reads all of it.
+    let body = snapshot_body(41_510);
+    let base = slow_body_server(body.clone(), 20, Duration::from_millis(100), None);
+    let mut capped = link_client(base);
+    capped.client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let err = run_async(capped.get_typed::<crate::api_client::SyncSnapshot>("/x")).unwrap_err();
+    assert!(err.to_string().contains("decoding"), "{err}");
+
+    let base = slow_body_server(body, 20, Duration::from_millis(100), None);
+    let client = link_client(base);
+    let snap =
+        run_async(client.get_typed_bulk_with::<crate::api_client::SyncSnapshot>("/x", Duration::from_millis(500)))
+            .expect("a steady body is read to the end");
+    assert_eq!(snap.nodes.len(), 41_510);
+}
+
+#[test]
+fn a_snapshot_whose_body_stalls_fails_in_bounded_time() {
+    let base = slow_body_server(snapshot_body(2_000), 10, Duration::from_millis(50), Some(3));
+    let client = link_client(base);
+    let started = std::time::Instant::now();
+    let result =
+        run_async(client.get_typed_bulk_with::<crate::api_client::SyncSnapshot>("/x", Duration::from_millis(400)));
+    assert!(result.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "bounded: {:?}",
+        started.elapsed()
+    );
+}
