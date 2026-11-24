@@ -1,4 +1,4 @@
-//! Account (DW-A51): who is signed in, what became of the recovery phrase, which Beebeeb
+//! Account (DW-A51): who is signed in, what became of the master key, which Beebeeb
 //! products this account uses, and Drive's own part of the page (the plan).
 
 use crate::State;
@@ -68,9 +68,9 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
         vec![set::item(
             1,
             0,
-            &Row::new(Lead::Tile(&icons::KEY, Tone::Neutral), "Recovery phrase")
+            &Row::new(Lead::Tile(&icons::KEY, Tone::Neutral), "Master key")
                 .sub("Shown once at sign-up")
-                .name("Recovery phrase, shown once at sign-up"),
+                .name("Master key, shown once at sign-up"),
             Vec::new(),
             t,
         )],
@@ -117,7 +117,7 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
         2,
         Some("This account uses"),
         products,
-        Some("State on this PC. One account and one phrase; each product keeps its own keys."),
+        Some("State on this PC. One account and one master key; each product keeps its own keys."),
         t,
     );
 

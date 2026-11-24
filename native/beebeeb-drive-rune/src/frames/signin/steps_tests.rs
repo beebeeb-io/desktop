@@ -24,8 +24,8 @@ const BUILT: [(&str, &str); 15] = [
     ("DW-A30", "Unlock your vault"),
     ("DW-A45", "Trouble signing in?"),
     ("DW-A46", "We cannot recover your account"),
-    ("DW-A47", "Recover with your phrase"),
-    ("DW-A48", "Recover with your phrase"),
+    ("DW-A47", "Enter your master key (12 words)"),
+    ("DW-A48", "Enter your master key (12 words)"),
     ("DW-A49", "Set a new password"),
     ("DW-A50", "Password updated"),
     ("DW-A63", "Sign in to Drive"),
@@ -247,7 +247,7 @@ fn twelve_named_boxes_take_lowercase_letters_and_tab_moves_word_to_word() {
     assert_eq!(ui(&mut rt).screen, Screen::Phrase);
     assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
     for (i, key) in WORD_KEYS.iter().enumerate() {
-        assert_eq!(info(&rt, key).label, Some(format!("Recovery word {}", i + 1)));
+        assert_eq!(info(&rt, key).label, Some(format!("Master key word {}", i + 1)));
     }
     type_(&mut rt, "Har-bor 1");
     assert_eq!(ui(&mut rt).words[0].text, "harbor", "lowercased, letters only");
@@ -338,7 +338,7 @@ fn the_other_device_and_the_lost_phrase_are_reachable_from_the_keyboard() {
     assert_eq!(a11y(&rt).matches("Destructive.").count(), 2);
     tab_to(&mut rt, "btn-0");
     space(&mut rt);
-    assert_eq!(ui(&mut rt).screen, Screen::Phrase, "I found my phrase");
+    assert_eq!(ui(&mut rt).screen, Screen::Phrase, "I found my master key");
     press(&mut rt, Key::Escape);
     assert_eq!(ui(&mut rt).screen, Screen::SignIn);
 }
@@ -347,7 +347,7 @@ fn the_other_device_and_the_lost_phrase_are_reachable_from_the_keyboard() {
 // Secrets
 // ---------------------------------------------------------------------------
 
-/// A code and recovery words typed into the PRODUCT's fields (`Ui::new`) are in no element
+/// A code and the 12 words of your master key typed into the PRODUCT's fields (`Ui::new`) are in no element
 /// text, no label, no accessibility tree and no `Debug`, although the screen shows them as
 /// typed. The same search finds what is not secret (a box's name), so it can find.
 #[test]
@@ -388,7 +388,7 @@ fn a_typed_code_and_typed_words_are_in_no_tree_and_no_label() {
     for (name, dump) in &dumps {
         assert!(!dump.contains(WORD), "the word is in the {name}");
     }
-    assert!(dumps[1].1.contains("Recovery word 1"), "the search finds a name");
+    assert!(dumps[1].1.contains("Master key word 1"), "the search finds a name");
     assert_eq!(info(&rt, WORD_KEYS[0]).text, None, "a secure field reports no text");
 }
 
@@ -507,7 +507,7 @@ fn forgot_password_offers_three_honest_options_from_the_keyboard() {
     let tree = a11y(&rt).to_lowercase();
     assert!(!tree.contains("reset"), "the copy never says reset");
     for (card, title) in [
-        ("card-0", "I have my recovery phrase"),
+        ("card-0", "I have my master key"),
         ("card-1", "I have another device signed in"),
         ("card-2", "I have neither"),
     ] {
@@ -515,7 +515,7 @@ fn forgot_password_offers_three_honest_options_from_the_keyboard() {
     }
     tab_to(&mut rt, "btn-0");
     press(&mut rt, Key::Enter);
-    assert_eq!(ui(&mut rt).screen, Screen::Recover, "Recover with phrase");
+    assert_eq!(ui(&mut rt).screen, Screen::Recover, "Enter your master key");
     press(&mut rt, Key::Escape);
     assert_eq!(ui(&mut rt).screen, Screen::Forgot, "Escape is the back link");
     tab_to(&mut rt, "btn-2");
@@ -745,7 +745,7 @@ fn the_gate_that_needs_the_phrase_puts_the_twelve_words_in_front_and_discards_no
         "the session is kept"
     );
 
-    // Already there: the words being typed stay, and "I've lost my recovery phrase" stays open.
+    // Already there: the words being typed stay, and "I've lost my master key" stays open.
     ui(&mut rt).words[0].replace_text("harbor");
     assert!(!ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
     assert_eq!(ui(&mut rt).words[0].text, "harbor");
@@ -990,7 +990,7 @@ fn where_the_source_has_no_in_app_doors_no_door_to_another_device_is_drawn() {
         "no card that promises approval from another device"
     );
     // The doors that are true stay: the phrase's page on the web, and what neither means.
-    assert!(page.contains("I have my recovery phrase") && page.contains("I have neither"));
+    assert!(page.contains("I have my master key") && page.contains("I have neither"));
     assert!(calls.borrow().is_empty(), "nothing was asked of the engine");
 }
 
@@ -1102,7 +1102,7 @@ fn each_word_box_says_its_place_of_twelve() {
     for (i, key) in WORD_KEYS.iter().enumerate() {
         let nodes = a11y_nodes(&rt, key);
         assert_eq!(nodes.len(), 1, "{key}");
-        assert_eq!(nodes[0]["name"], format!("Recovery word {}", i + 1));
+        assert_eq!(nodes[0]["name"], format!("Master key word {}", i + 1));
         assert_eq!(nodes[0]["position"], i + 1, "{} of 12", i + 1);
         assert_eq!(a11y_set_size_of(&rt, key), Some(12), "{key}");
     }

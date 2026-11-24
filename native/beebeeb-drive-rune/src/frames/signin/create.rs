@@ -1,11 +1,11 @@
-//! Create an account (DW-A31 to DW-A44): email, verify, terms, password, the recovery phrase
+//! Create an account (DW-A31 to DW-A44): email, verify, terms, password, the master key
 //! shown and confirmed, this device. State and rules only; `view_create.rs` and
 //! `view_create_phrase.rs` draw them.
 //!
 //! Secrets. The password is typed into the group's ONE password field and "Confirm password"
 //! (`Ui::password`, `Ui::confirm`), handed to the source as a borrowed `&str` for the breach
 //! check, and cleared here the moment the check passes: the engine keeps it from then on. The
-//! recovery phrase is never in this state: the view borrows it for one draw
+//! master key is never in this state: the view borrows it for one draw
 //! (`SignInSource::with_sign_up_phrase`). The email code and the three words typed back are
 //! secure fields made ONCE in [`Create::new`], shown as typed, cleared when their step is over.
 //!
@@ -44,7 +44,7 @@ pub enum Step {
     Terms,
     /// DW-A36, DW-A37, DW-A38.
     Password,
-    /// DW-A39. The one screen that shows the recovery phrase.
+    /// DW-A39. The one screen that shows the master key.
     Phrase,
     /// DW-A40, DW-A41.
     Confirm,
@@ -680,7 +680,7 @@ impl Ui {
         self.pump();
     }
 
-    /// "Show the words again": back to the phrase, its box unticked. Always available.
+    /// "Show my master key": back to the phrase, its box unticked. Always available.
     pub fn show_words_again(&mut self) {
         if !self.at(Step::Confirm) || self.create.confirming {
             return;

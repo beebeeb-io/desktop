@@ -256,7 +256,7 @@ fn phrase_banner(k: &mut Keys, problem: &PhraseProblem, t: &Theme) -> El {
             k,
             Tone::Red,
             &icons::INFO,
-            Some("That phrase doesn't open this account"),
+            Some("That master key doesn't open this account"),
             Some("Check the words against what you wrote down. Nothing was restored."),
             true,
             t,
@@ -304,7 +304,7 @@ pub(super) fn word_grid(ui: &Ui, t: &Theme) -> El {
     let mut grid = col()
         .key("secure-words")
         .role("group")
-        .label("Recovery phrase")
+        .label("Master key")
         .w_full()
         .gap(space::S6);
     for line in 0..4 {
@@ -369,7 +369,7 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     } else {
         ButtonState::Disabled
     };
-    let lost = au::link(k, "I've lost my recovery phrase", None, t).on_press_tx(act(|ui| ui.lost_phrase(true)));
+    let lost = au::link(k, "I've lost my master key", None, t).on_press_tx(act(|ui| ui.lost_phrase(true)));
     // The button comes first in the board's markup, so it takes `btn-0` before the link's key.
     c.child(grid).child(
         actions(6.0)

@@ -1,7 +1,7 @@
 //! Sign-up's part of [`super::source::SignInSource`] (DW-A31 to DW-A44): the answers, the
 //! problems, and what the board's fixture says to each call.
 //!
-//! Where the secrets live. The password and the recovery phrase belong to the ENGINE for the
+//! Where the secrets live. The password and the master key belong to the ENGINE for the
 //! length of sign-up: the window hands the password over once (`begin_sign_up_password`, a
 //! borrowed `&str`) and forgets it, and it never holds the phrase at all. The phrase is lent for
 //! one draw (`with_sign_up_phrase`) and the three typed words are compared in the engine

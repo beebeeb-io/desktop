@@ -10,7 +10,7 @@
 //! No per-app name is spelled here: the sync folder, the settings file and the state folder come from the
 //! identity the handle was opened with.
 //!
-//! Secrets: the password, codes and recovery phrase arrive as `&str` from a secure `TextEdit`
+//! Secrets: the password, codes and master key arrive as `&str` from a secure `TextEdit`
 //! (wiped on drop) and go into the engine call as `Zeroizing<String>`, then nowhere else: not
 //! into the element tree, not into a label, not into a log line, not into the feedback mode's
 //! capture. The engine events that cross to the UI use the redacting `Debug`.

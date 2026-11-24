@@ -114,7 +114,7 @@ impl Pane {
         }
     }
     /// Whether this pane shows key material: a password field, a 2FA secret/QR, backup codes,
-    /// or a recovery phrase. Used for screen-capture exclusion (task 2460). A new variant is a
+    /// or a master key. Used for screen-capture exclusion (task 2460). A new variant is a
     /// compile error (exhaustive match).
     pub fn shows_secret(self) -> bool {
         match self {

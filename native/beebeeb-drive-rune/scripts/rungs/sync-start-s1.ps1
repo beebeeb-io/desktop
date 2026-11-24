@@ -330,7 +330,7 @@ function Type-Into($hwnd, $el, [string]$keys) {
 }
 # The 12 words through the clipboard into the first box: a pasted phrase fills all twelve.
 function Paste-Phrase($hwnd, [string]$words) {
-    $group = Wait-For $hwnd 'Recovery phrase' $T::Group
+    $group = Wait-For $hwnd 'Master key' $T::Group
     if (-not $group) { return $false }
     $edit = New-Object System.Windows.Automation.PropertyCondition($UIA::ControlTypeProperty, $T::Edit)
     try { $first = $group.FindFirst($Scope, $edit) } catch { return $false }
@@ -425,7 +425,7 @@ try {
     $typed = (Type-Into $hwnd (Wait-For $hwnd 'Email' $T::Edit) (Keys $email)) -and
         (Type-Into $hwnd (Wait-For $hwnd 'Password' $T::Edit) "$(Keys $password){ENTER}")
     Check $typed "R1.4 the email and the password are typed"
-    Check ($null -ne (Wait-For $hwnd 'Recovery phrase' $T::Group)) "R1.4 the recovery phrase screen (DW-A23) after the password"
+    Check ($null -ne (Wait-For $hwnd 'Master key' $T::Group)) "R1.4 the master key screen (DW-A23) after the password"
     $credsBefore = Count-Credentials; $checksBefore = Requests $verify
     Check ($credsBefore -gt 0) "R1.4 the count sees the TEST app's entries after the password ($credsBefore)"
     Paste-Phrase $hwnd 'zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong' | Out-Null
@@ -521,7 +521,7 @@ try {
     $app = Start-App
     $hwnd = Window-Of $app.Proc
     Root-Rows $hwnd 'R1.7'
-    Check ($null -eq (Find-Now $hwnd 'Recovery phrase' $T::Group) -and $null -eq (Find-Now $hwnd 'Email' $T::Edit)) "R1.7 no sign-in and no phrase screen"
+    Check ($null -eq (Find-Now $hwnd 'Master key' $T::Group) -and $null -eq (Find-Now $hwnd 'Email' $T::Edit)) "R1.7 no sign-in and no phrase screen"
     $word = Running-Word $hwnd
     Check ($null -ne $word) "R1.7 the status line says a running engine's word ($word)"
     Check ((Test-Roots).Count -eq 1) "R1.7 still 1 Explorer registration of BeebeebTest"

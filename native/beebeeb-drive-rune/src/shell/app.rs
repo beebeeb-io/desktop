@@ -188,7 +188,7 @@ pub enum GateState {
     SignedOut,
     /// Signed in, the vault key is on this PC: the lock screen (DW-0009).
     Locked,
-    /// Signed in, no vault key on this PC: the recovery phrase (DW-A23).
+    /// Signed in, no vault key on this PC: the master key (DW-A23).
     NeedsRecoveryPhrase,
     /// Signed in and unlocked, the account has no plan (DW-0014).
     NoPlan,

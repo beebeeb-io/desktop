@@ -83,7 +83,7 @@ fn put(db: &StateDb, id: &str, path: &str, parent: Option<&str>, folder: bool) {
 }
 
 /// The native start path on the test build: the handle opens for THIS binary's identity under the host's
-/// folder, the stored session is read (signed in, no key on this computer: the recovery phrase), the shell's
+/// folder, the stored session is read (signed in, no key on this computer: the master key), the shell's
 /// session says the same, and a folder of the local state is served through the engine host with its crumbs.
 #[test]
 fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() {

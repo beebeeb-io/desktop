@@ -45,12 +45,12 @@ fn comment_mode_is_denied_unless_the_frame_opted_in() {
     rt.state.feedback.frame_override = Some(super::FrameInfo::denied(
         "DW-0102",
         "recovery",
-        "it shows your recovery phrase",
+        "it shows your master key",
     ));
     plain(&mut rt, Key::Enter);
     assert_eq!(rt.state.feedback.mode, Mode::Off);
     assert!(model::scan(&inbox, &[]).is_empty(), "nothing was written");
-    assert!(shown_text(&rt).contains("recovery phrase"));
+    assert!(shown_text(&rt).contains("master key"));
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn phrase_view(s: &Phrase, _: &mut Cx<Phrase>) -> El {
         .fill(rune::Color::WHITE)
         .padding(20.0)
         .gap(12.0)
-        .child(text("Your recovery phrase").key("title"))
+        .child(text("Your master key").key("title"))
         .child(words)
 }
 

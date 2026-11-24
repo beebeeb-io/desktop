@@ -45,7 +45,7 @@ impl FrameGroup {
         match self {
             FrameGroup::SignIn => "Sign in".into(),
             FrameGroup::Locked => "Locked".into(),
-            FrameGroup::RecoveryPhrase => "Recovery phrase".into(),
+            FrameGroup::RecoveryPhrase => "Master key".into(),
             FrameGroup::NoPlan => "No plan yet".into(),
             FrameGroup::KeyStoreUnavailable => "Credential store unavailable".into(),
             FrameGroup::FirstRun => "First run".into(),
@@ -65,7 +65,7 @@ impl FrameGroup {
         match self {
             FrameGroup::SignIn => "First run and Sign in, in the 960 x 640 window (DW-A01, DW-A02)",
             FrameGroup::Locked => "Before Files: locked (DW-0009)",
-            FrameGroup::RecoveryPhrase => "Email and password: the recovery phrase (DW-A23)",
+            FrameGroup::RecoveryPhrase => "Email and password: the master key (DW-A23)",
             FrameGroup::NoPlan => "Before Files: no plan yet (DW-0014)",
             FrameGroup::KeyStoreUnavailable => "no board frame (the auth gate's KeyStoreUnavailable)",
             FrameGroup::FirstRun => "First run on Windows: a window of its own, 960 x 640 (DW-0201 to DW-0208)",
@@ -87,10 +87,10 @@ impl FrameGroup {
 }
 
 impl FrameGroup {
-    /// Whether this frame group shows a secret: a password entry, a recovery phrase (shown or
+    /// Whether this frame group shows a secret: a password entry, a master key (shown or
     /// typed), 2FA codes, backup codes, or any key material. The list is derived from the
     /// registry's denied-feedback reasons and the board's content: sign-in and locked take a
-    /// password, recovery phrase takes the phrase, first-run shows the phrase and backup codes.
+    /// password, master key takes the phrase, first-run shows the phrase and backup codes.
     ///
     /// A new variant of [`FrameGroup`] causes a compile error here (exhaustive match); the
     /// [`tests::every_frame_group_is_classified`] test pins the count and the exact set.
@@ -99,9 +99,9 @@ impl FrameGroup {
         match self {
             // Password entry.
             FrameGroup::SignIn | FrameGroup::Locked => true,
-            // Recovery phrase shown or typed.
+            // Master key shown or typed.
             FrameGroup::RecoveryPhrase => true,
-            // First-run setup shows the recovery phrase and backup codes.
+            // First-run setup shows the master key and backup codes.
             FrameGroup::FirstRun => true,
             // Everything else: user content, device info, empty states or navigation.
             FrameGroup::NoPlan
@@ -262,7 +262,7 @@ pub const FRAMES: &[Frame] = &[
         group: FrameGroup::RecoveryPhrase,
         view: crate::frames::signin::frame,
         on_key: Some(crate::frames::signin::on_key),
-        feedback: FeedbackPolicy::Denied("it takes your recovery phrase"),
+        feedback: FeedbackPolicy::Denied("it takes your master key"),
     },
     Frame {
         group: FrameGroup::FirstRun,
@@ -351,7 +351,7 @@ pub fn dialog_frame(group: FrameGroup) -> Option<&'static DialogFrame> {
 /// The main window is drawn as the lock screen over its content: after a wake Windows may not have announced, at once,
 /// until the engine said whether the wake locks (`shell::away`, the owner's ruling D-B2-3). Keys then reach only the
 /// lock screen (`host::shell_keys`) and the flyout shows the lock's state (`frames::tray::Ui::cover`). Only over the
-/// gates of an open engine: a closed one's own screen (the lock, sign-in, the recovery phrase, an unreadable key store)
+/// gates of an open engine: a closed one's own screen (the lock, sign-in, the master key, an unreadable key store)
 /// holds nothing of the account's and is never hidden by a lock screen that cannot unlock.
 pub fn covered(s: &State) -> bool {
     covered_over(&s.shell.away, &s.shell.app)

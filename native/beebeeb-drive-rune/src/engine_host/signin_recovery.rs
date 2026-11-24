@@ -76,7 +76,7 @@ fn strength_words(level: u8, meets_minimum: bool, min_length: u32, missing: u32)
 }
 
 impl<C: CredentialStores> EngineSignInSource<C> {
-    /// "Verify phrase" (DW-A47): the email and the twelve words, for the session turn of this press.
+    /// "Verify master key" (DW-A47): the email and the twelve words, for the session turn of this press.
     pub(super) fn recovery_begin_verify(&mut self, email: &str, words: &[&str]) {
         let turn = self.engine.session_turn();
         // Each box's word without the spaces around it, so the joined words split back into the boxes one to one and

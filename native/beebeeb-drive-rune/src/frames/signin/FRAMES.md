@@ -34,7 +34,7 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-A36 | Step 4: the password, strong | built; tree gate 0, pixels owed (PR body) |
 | DW-A37 | Step 4: the password is two characters short | built; tree gate 0, pixels owed (PR body) |
 | DW-A38 | Step 4: the password is known from a breach | built; tree gate 0, pixels owed (PR body) |
-| DW-A39 | Step 5: the recovery phrase, shown once | built; tree gate 0, pixels owed (PR body) |
+| DW-A39 | Step 5: the master key, shown once | built; tree gate 0, pixels owed (PR body) |
 | DW-A40 | Step 5: three words typed back, with suggestions | built; tree gate 0, pixels owed (PR body) |
 | DW-A41 | Step 5: the words do not match | built; tree gate 0, pixels owed (PR body) |
 | DW-A42 | Step 6: this device's name | built; tree gate 0, pixels owed (PR body) |
@@ -206,7 +206,7 @@ Sign-up is a set of screens of this window (`Screen::Create(Step)`). "Create a B
 changes nothing when it has not (the engine-backed source, until phase 2). A build that ships opens it on
 no fixture: `start()` sets the fixture's `available` to `DEV_BUILD`.
 
-Secret-bearing screens: DW-A36, DW-A37, DW-A38 (the password, typed twice), DW-A39 (the recovery phrase,
+Secret-bearing screens: DW-A36, DW-A37, DW-A38 (the password, typed twice), DW-A39 (the master key,
 shown), DW-A40, DW-A41 (three of its words, typed, and the suggestions that complete them). All are screens
 of `FrameGroup::SignIn`, which is excluded from capture as a whole (`shell/host_tests.rs`:
 `sign_up_opens_in_the_sign_in_window_and_every_screen_of_it_stays_excluded_from_capture`).

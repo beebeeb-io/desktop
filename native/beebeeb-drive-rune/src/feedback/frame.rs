@@ -3,7 +3,7 @@
 //!
 //! **Default deny.** Comment mode runs only where the frame group's ONE registry line says
 //! `feedback: FeedbackPolicy::Allowed`. A group with no line (the placeholder is on screen) is
-//! denied; the groups that show a password, a recovery phrase or a code say so in the reason.
+//! denied; the groups that show a password, a master key or a code say so in the reason.
 //! With a dialog open, the dialog's line and the line of the frame behind it must both allow it.
 
 use super::{FrameInfo, Policy};
@@ -14,8 +14,8 @@ use crate::shell::registry::{self, FrameGroup};
 pub fn unregistered(group: FrameGroup) -> &'static str {
     match group {
         FrameGroup::SignIn => "sign-in shows your email and takes your password",
-        FrameGroup::FirstRun => "first-run setup can show your recovery phrase and codes",
-        FrameGroup::RecoveryPhrase => "it takes your recovery phrase",
+        FrameGroup::FirstRun => "first-run setup can show your master key and codes",
+        FrameGroup::RecoveryPhrase => "it takes your master key",
         FrameGroup::Locked => "the locked screen takes your password",
         _ => "this screen has not opted in",
     }

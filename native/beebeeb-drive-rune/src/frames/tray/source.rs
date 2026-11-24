@@ -64,7 +64,7 @@ pub enum Status {
     /// Locked while nothing syncs: DW-1211's title, with the sentence that is true for an app
     /// whose sync stops while its keys are not in memory (DW-1211 says "Sync keeps running").
     LockedSyncOff,
-    /// Signed in, and this PC holds no key of the account: the recovery phrase restores it
+    /// Signed in, and this PC holds no key of the account: the master key restores it
     /// (the window's DW-A23). Nothing syncs until then.
     NeedsRecoveryPhrase,
     /// Signed in, and Windows did not say whether the key is on this PC.
@@ -80,7 +80,7 @@ pub enum Hidden {
     /// DW-1211.
     Locked,
     SignedOut,
-    /// The account's keys are not in memory on this PC (the recovery phrase, an unreadable
+    /// The account's keys are not in memory on this PC (the master key, an unreadable
     /// credential store).
     NoKeys,
 }
@@ -170,7 +170,7 @@ impl Status {
             Status::AddingToExplorer => format!("Adding {name} to File Explorer\u{2026}"),
             Status::ExplorerFailed { .. } => format!("Couldn't add {name} to File Explorer"),
             Status::SignedOut => "Signed out".into(),
-            Status::NeedsRecoveryPhrase => "Recovery phrase needed".into(),
+            Status::NeedsRecoveryPhrase => "Master key needed".into(),
             Status::KeysUnreadable => "Can't read your keys".into(),
             Status::NotSyncing => "Sync isn't running".into(),
         }
@@ -303,7 +303,7 @@ impl Status {
             Status::AddingToExplorer => "adding to File Explorer",
             Status::ExplorerFailed { .. } => "not in File Explorer",
             Status::SignedOut => "signed out",
-            Status::NeedsRecoveryPhrase => "needs the recovery phrase",
+            Status::NeedsRecoveryPhrase => "needs the master key",
             Status::KeysUnreadable => "can't read the keys",
             Status::NotSyncing => "not syncing",
         }

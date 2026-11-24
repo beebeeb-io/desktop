@@ -149,7 +149,7 @@ if (auMac) {
     text('steps-count', q(':scope > .au-mono', steps));
     text('steps-name', q(':scope > .au-dim', steps));
   }
-  // A checkbox with its sentence (the terms, "I have saved my recovery phrase offline.").
+  // A checkbox with its sentence (the terms, "I have saved my master key offline.").
   each('label > button[role="checkbox"]', col, (b, i) => {
     box(`check-${i}`, b);
     icon(`check-${i}-icon`, q('svg', b));

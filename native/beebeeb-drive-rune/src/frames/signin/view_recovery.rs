@@ -82,9 +82,9 @@ pub fn forgot(k: &mut Keys, doors: bool, t: &Theme) -> El {
         .child(option(
             k,
             &icons::KEY,
-            "I have my recovery phrase",
+            "I have my master key",
             "The 12 words from account setup. Use them to set a new password.",
-            "Recover with phrase",
+            "Enter your master key",
             ButtonKind::Primary,
             Ui::recover_with_phrase,
             t,
@@ -94,7 +94,7 @@ pub fn forgot(k: &mut Keys, doors: bool, t: &Theme) -> El {
                 k,
                 &icons::PHONE,
                 "I have another device signed in",
-                "Approve this PC from a device where you're already signed in. No phrase needed.",
+                "Approve this PC from a device where you're already signed in. No master key needed.",
                 "Sign in with another device",
                 ButtonKind::Outline,
                 Ui::ask_other_device,
@@ -130,7 +130,7 @@ pub fn cannot_recover(k: &mut Keys, t: &Theme) -> El {
         ViewState::Failed {
             key: "cannot-recover",
             title: "Beebeeb is zero-knowledge by design",
-            why: "We never see your password or your encryption keys. Without your recovery phrase or a signed-in device, we have no way to restore access to your data.",
+            why: "We never see your password or your encryption keys. Without your master key or a signed-in device, we have no way to restore access to your data.",
             retry: Some(try_again("cannot-recover", t).on_press_tx(act(|ui| ui.cannot_recover(false)))),
         },
         t,
@@ -162,7 +162,7 @@ pub fn cannot_recover(k: &mut Keys, t: &Theme) -> El {
         );
     let warning = kit::label(
         k.next("note"),
-        "Include the account email. Do not send us your recovery phrase: it is useless to us and dangerous to send.",
+        "Include the account email. Do not send us your master key: it is useless to us and dangerous to send.",
         type_::CAPTION,
         t.text_tertiary,
     )
@@ -296,7 +296,7 @@ pub fn no_phrase(k: &mut Keys, t: &Theme) -> El {
         .child(au::heading(
             "We can't restore your keys",
             Some(
-                "Beebeeb never holds your keys, so without the phrase nothing here can be opened. This is what we can do.",
+                "Beebeeb never holds your keys, so without your master key nothing here can be opened. This is what we can do.",
             ),
             false,
             t,
@@ -307,9 +307,9 @@ pub fn no_phrase(k: &mut Keys, t: &Theme) -> El {
             Tone::Neutral,
             &icons::MAIL,
             Some("Questions about billing or closing the account"),
-            Some("Write to support@beebeeb.io with the account email. Never send your phrase."),
+            Some("Write to support@beebeeb.io with the account email. Never send your master key."),
             false,
             t,
         ))
-        .child(actions(6.0).child(outline(k, "I found my phrase", |ui| ui.lost_phrase(false), t)))
+        .child(actions(6.0).child(outline(k, "I found my master key", |ui| ui.lost_phrase(false), t)))
 }

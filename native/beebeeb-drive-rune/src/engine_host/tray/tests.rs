@@ -515,7 +515,7 @@ fn a_real_account_from_signed_out_to_locked_shows_what_the_engine_knows() {
         (&phrase_needed.status, &phrase_needed.changes, phrase_needed.button),
         (&Status::NeedsRecoveryPhrase, &Changes::Hidden(Hidden::NoKeys), None)
     );
-    assert_no_sample_data(&phrase_needed, "needs the recovery phrase");
+    assert_no_sample_data(&phrase_needed, "needs the master key");
     // Without the keys nothing syncs: the b says so, never "up to date".
     let b = live.tray_inputs();
     assert!(b.signed_in && !b.locked && b.engine == EngineState::NotRunning);

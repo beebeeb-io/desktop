@@ -218,10 +218,10 @@ fn account_says_who_is_signed_in_and_the_phrase_row_is_text() {
     let mut rt = runtime("DW-A51");
     assert_eq!(says(&rt, "item-0-0-title"), "Anna Visser");
     assert_eq!(says(&rt, "item-0-1-title"), "anna@northwind.studio");
-    // The recovery row reads 'Recovery phrase, shown once at sign-up'; it is not a button.
+    // The recovery row reads 'Master key, shown once at sign-up'; it is not a button.
     let phrase = info(&rt, "item-1-0");
     assert_eq!(phrase.role, "listitem");
-    assert_eq!(phrase.label.as_deref(), Some("Recovery phrase, shown once at sign-up"));
+    assert_eq!(phrase.label.as_deref(), Some("Master key, shown once at sign-up"));
     let stops = tab_stops(&mut rt);
     assert!(!stops.iter().any(|k| k.starts_with("item-1-")), "{stops:?}");
     // The product states are text, not only colour.

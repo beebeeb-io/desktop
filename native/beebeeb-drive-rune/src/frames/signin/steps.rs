@@ -273,7 +273,7 @@ impl Ui {
         self.pump();
     }
 
-    /// "I've lost my recovery phrase" (DW-A25) and "I found my phrase".
+    /// "I've lost my master key" (DW-A25) and "I found my master key".
     pub fn lost_phrase(&mut self, lost: bool) {
         if self.restoring {
             return;
@@ -376,7 +376,7 @@ impl Ui {
         self.focus = Some(TITLE_KEY);
     }
 
-    /// "Recover with phrase" (DW-A45), and Back from the new password: recovery's first step,
+    /// "Enter your master key" (DW-A45), and Back from the new password: recovery's first step,
     /// the email and the twelve words (DW-A47).
     pub fn recover_with_phrase(&mut self) {
         if !self.in_app_doors() && matches!(self.screen, Screen::Forgot | Screen::NewPassword) {

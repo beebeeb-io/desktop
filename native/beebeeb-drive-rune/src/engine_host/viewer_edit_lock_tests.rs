@@ -160,7 +160,7 @@ fn a_sign_out_takes_the_edit_and_its_text() {
     assert!(w.stored_saves().is_empty());
 }
 
-/// A lock that closes the vault (the key leaves memory; the recovery phrase opens it again), the same account: the
+/// A lock that closes the vault (the key leaves memory; the master key opens it again), the same account: the
 /// edit kept open across it is saved after the unlock too.
 #[test]
 fn an_edit_kept_across_a_closed_vault_is_saved_after_the_phrase_opens_it() {

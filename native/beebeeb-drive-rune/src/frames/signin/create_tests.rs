@@ -1,5 +1,5 @@
 //! Tests of sign-up (DW-A31 to DW-A44): every frame's scene, the whole flow from the keyboard,
-//! Back from every step, the engine's answers, and that the password, the recovery phrase, the
+//! Back from every step, the engine's answers, and that the password, the master key, the
 //! email code and the words typed back are in no tree a tool or assistive technology can read.
 
 use rune::{Key, Runtime};
@@ -24,7 +24,7 @@ const HEADINGS: [&str; 14] = [
     "Set a password",
     "Set a password",
     "Set a password",
-    "Your recovery phrase",
+    "Your master key",
     "Confirm your phrase",
     "Confirm your phrase",
     "Name this PC",
@@ -390,7 +390,7 @@ fn both_boxes_must_be_ticked_and_the_pages_open_outside_the_app() {
     assert!(boxes.iter().all(|b| b.role == "checkbox"));
     assert_eq!(
         boxes[1].label.as_deref(),
-        Some("I understand that Beebeeb cannot recover my account if I lose both my password and my recovery phrase.")
+        Some("I understand that Beebeeb cannot recover my account if I lose both my password and my master key.")
     );
     tab_to(&mut rt, "check-0-row");
     space(&mut rt);
@@ -515,7 +515,7 @@ fn the_shown_phrase_is_in_no_tree_and_no_label() {
         }
     }
     assert!(
-        dumps[1].1.contains("Recovery phrase") && dumps[1].1.contains("Word 12"),
+        dumps[1].1.contains("Master key") && dumps[1].1.contains("Word 12"),
         "the list and its places have names"
     );
     // Left, the screen draws no word: the source is told, and the words are asked for again only there.
@@ -577,7 +577,7 @@ fn three_words_are_typed_back_into_named_secure_fields_and_a_suggestion_fills_on
     for (name, dump) in &dumps {
         assert!(!dump.contains(WORD), "the word is in the {name}");
     }
-    assert!(dumps[1].1.contains("Recovery word 3"), "the field has a name");
+    assert!(dumps[1].1.contains("Master key word 3"), "the field has a name");
     assert!(
         !has(&rt, "chip-0"),
         "nothing is offered for a word the list does not know"
@@ -613,7 +613,7 @@ fn words_that_do_not_match_are_said_without_saying_which_and_the_words_can_be_sh
     assert_eq!(info(&rt, "field-1-msg").role, "alert");
     assert_eq!(
         said(&rt, "field-1-msg").as_deref(),
-        Some("Those words do not match your recovery phrase.")
+        Some("Those words do not match your master key.")
     );
     assert!(!has(&rt, "field-0-msg") && !has(&rt, "field-2-msg"));
     // The same place whichever word is wrong.
@@ -687,7 +687,7 @@ fn creating_has_no_way_back_and_each_failure_has_its_one_way_on() {
     assert!(
         said(&rt, "field-0-msg")
             .unwrap_or_default()
-            .ends_with("Your password and recovery phrase are kept.")
+            .ends_with("Your password and master key are kept.")
     );
     assert!(ui(&mut rt).can_resend(), "a new code can be asked for at once");
 }

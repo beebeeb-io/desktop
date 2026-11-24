@@ -377,7 +377,7 @@ Each line: the test name, then what it asserts. "Pinned" names an engine or nati
 - `unlock_vault_says_the_set_up_sentence_when_the_key_is_not_there`: a Keychain with a token and no key says the approved "Set up this Mac" sentence.
 - `unlock_vault_maps_only_the_keychain_load_and_never_the_session_it_installs`: only the Keychain load's error is mapped.
 - `the_route_is_keychain_when_the_key_is_there`: the unlock route is Keychain when a key is stored.
-- `the_route_is_recovery_phrase_when_neither_layout_holds_a_key`: a session and no key (either layout) routes to the recovery phrase.
+- `the_route_is_recovery_phrase_when_neither_layout_holds_a_key`: a session and no key (either layout) routes to the master key.
 - `the_route_reads_the_legacy_layout_too`: a key only in the legacy flat layout is a key.
 - `an_unreadable_keychain_routes_to_the_keychain_unlock`: an unreadable Keychain routes to the Keychain unlock, never to a set-up that would overwrite a key.
 - `the_route_is_a_snake_case_string_on_the_wire`: snake_case strings, no other fields.

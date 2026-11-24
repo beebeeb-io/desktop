@@ -9,7 +9,7 @@
 //! 2. **The word rules** ([`scrub`]'s first pass) replace what they recognise with a marker, to keep a line readable:
 //!    a URL, an email address, a path (from a root to the last later word with a `/` or `\`, because a name can hold
 //!    spaces), a file name, a UUID or long hex id (`<id>`), a token, a 6 to 8 digit code, a run of 12 plain lowercase
-//!    words (a recovery phrase), the value after a credential label, a text between “…”, ‘…’, «…» or backticks (the
+//!    words (a master key), the value after a credential label, a text between “…”, ‘…’, «…» or backticks (the
 //!    engine quotes the names it prints: `<name>`), `custom:<name>` (a backup folder the person picked) and the host
 //!    of the lock-held sentence. A server body (JSON or HTML) is replaced whole. From `HTTP <3 digits>` on, nothing
 //!    of the text is read: the log writes `HTTP <status>` with the status's standard reason from a fixed table
@@ -402,7 +402,7 @@ fn put(out: &mut String, gap: bool, piece: impl std::fmt::Display) {
     let _ = write!(out, "{space}{piece}");
 }
 
-/// The plain words of a recovery phrase from `tokens[at]` on (the splitters between them do not count): how many, and
+/// The plain words of a master key from `tokens[at]` on (the splitters between them do not count): how many, and
 /// the index after the last.
 fn phrase_run(tokens: &[(&str, bool)], at: usize) -> (usize, usize) {
     let (mut run, mut end) = (0, at);

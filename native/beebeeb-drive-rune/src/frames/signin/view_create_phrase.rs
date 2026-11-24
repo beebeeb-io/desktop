@@ -1,4 +1,4 @@
-//! Create an account, drawn, from the recovery phrase on: the phrase shown once (DW-A39), three
+//! Create an account, drawn, from the master key on: the phrase shown once (DW-A39), three
 //! of its words typed back (DW-A40, DW-A41), this device's name (DW-A42), the account being
 //! made (DW-A43) and "Your account is ready" (DW-A44).
 //!
@@ -7,22 +7,22 @@
 //! no element label, no accessibility text, no shared layout cache, no `String`. The three
 //! words typed back are secure fields shown as typed, and the suggestions are secure text too.
 
-use rune::{El, el, row};
+use rune::{el, row, El};
 
-use super::create::{DEVICE_KEY, Pictured, WORD_KEYS};
-use super::create_kit::{self as ck, Field, cact};
+use super::create::{Pictured, DEVICE_KEY, WORD_KEYS};
+use super::create_kit::{self as ck, cact, Field};
 use super::create_source::CreateProblem;
 use super::view::actions;
 use super::view_create::{head, primary, state};
 use super::view_steps::{escape_first, open};
-use super::{Intent, Ui, icons};
-use crate::State;
+use super::{icons, Intent, Ui};
 use crate::theme::icons::{DOC_GENERIC, FILES};
 use crate::theme::scale::space;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
-use crate::ui::au_entry::{self, WORD_WIDTH, type_entry};
+use crate::ui::au_entry::{self, type_entry, WORD_WIDTH};
 use crate::ui::kit;
+use crate::State;
 
 // ---------------------------------------------------------------------------
 // DW-A39
@@ -67,12 +67,16 @@ fn phrase_grid(ui: &Ui, t: &Theme) -> El {
     let mut grid = rune::col()
         .key("au-pw")
         .role("list")
-        .label("Recovery phrase")
+        .label("Master key")
         .w_full()
         .gap(space::S6);
     let mut boxes = boxes.into_iter().peekable();
     while boxes.peek().is_some() {
-        grid = grid.child(row().gap(space::S6).children(boxes.by_ref().take(3).collect::<Vec<_>>()));
+        grid = grid.child(
+            row()
+                .gap(space::S6)
+                .children(boxes.by_ref().take(3).collect::<Vec<_>>()),
+        );
     }
     grid
 }
@@ -91,10 +95,10 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let print = out(ck::small_button(k, "Print", &DOC_GENERIC, t), |ui| {
         ui.phrase_out(Intent::PrintPhrase)
     });
-    head("Back", 5, "Recovery phrase", t)
+    head("Back", 5, "Master key", t)
         .child(au::heading(
-            "Your recovery phrase",
-            Some("This phrase protects Drive, Pass, VPN, Chat and Mail. The same 12 words."),
+            "Your master key",
+            Some("Your master key: 12 words. Your password only unlocks it on this device. Anyone with these words can open your files; without them, a forgotten password means the data is gone. Beebeeb can't recover it."),
             false,
             t,
         ))
@@ -110,7 +114,7 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         ))
         .child(row().w_full().gap(space::S10).center_y().child(copy).child(save).child(print))
         .child(
-            ck::checkbox(k, ui.phrase_saved(), "I have saved my recovery phrase offline.", false, t)
+            ck::checkbox(k, ui.phrase_saved(), "I have saved my master key somewhere safe, outside Beebeeb.", false, t)
                 .on_press_tx(cact(Ui::toggle_saved)),
         )
         .child(actions(6.0).child(primary(
@@ -141,9 +145,16 @@ const TAKE: [fn(&mut Ui); 4] = [
 
 pub fn confirm(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let c = ui.create_state();
-    let mut column = head("Back", 5, "Confirm the phrase", t).child(au::heading(
-        "Confirm your phrase",
-        Some("Type the words you wrote down."),
+    let p = ui.confirm_positions();
+    let sub = format!(
+        "Type words {}, {} and {} of your master key.",
+        p[0] + 1,
+        p[1] + 1,
+        p[2] + 1
+    );
+    let mut column = head("Back", 5, "Confirm your master key", t).child(au::heading(
+        "Confirm your master key",
+        Some(sub.as_str()),
         false,
         t,
     ));
@@ -151,14 +162,14 @@ pub fn confirm(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         // The message stands under the middle field and does not say which word is wrong.
         let wrong = ui.words_mismatch() && i == 1;
         let label = format!("Word {}", at + 1);
-        let name = format!("Recovery word {}", at + 1);
+        let name = format!("Master key word {}", at + 1);
         column = column.child(ck::field(
             k,
             Field {
                 label: &label,
                 name: Some(&name),
                 icon: None,
-                message: wrong.then_some("Those words do not match your recovery phrase."),
+                message: wrong.then_some("These words don't match your master key. Check them against what you saved."),
                 error: wrong,
                 mono: true,
                 pictured: c.pictured == Some(Pictured::Word(i)),
@@ -196,7 +207,7 @@ pub fn confirm(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                 .child(offered)
                 .child(el().grow(1.0))
                 .child(
-                    au_entry::link_in(k, "Show the words again", type_::CAPTION, 13.0, 0.875, t)
+                    au_entry::link_in(k, "Show my master key", type_::CAPTION, 13.0, 0.875, t)
                         .on_press_tx(cact(Ui::show_words_again)),
                 ),
         )
@@ -334,7 +345,7 @@ pub fn ready(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             Tone::Amber,
             &icons::LOCK,
             Some("Encrypted on this PC"),
-            Some("Your recovery phrase was shown once and can't be shown again. It is the way back in if you lose your password and have no other signed-in device."),
+            Some("Your master key was shown once and can't be shown again. It is the way back in if you lose your password and have no other signed-in device."),
             false,
             t,
         ))

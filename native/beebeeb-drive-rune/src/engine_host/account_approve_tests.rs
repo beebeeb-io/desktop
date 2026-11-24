@@ -32,7 +32,7 @@ const REQUESTER_KEY_B64: &str =
 const LIVE: &str = "2999-01-01T00:00:00Z";
 const GONE: &str = "2001-01-01T00:00:00Z";
 
-/// One registered account for every test here (a registration runs Argon2id once), and its recovery phrase.
+/// One registered account for every test here (a registration runs Argon2id once), and its master key.
 fn account() -> (Arc<FakeAccount>, String) {
     static ACCOUNT: OnceLock<(Arc<FakeAccount>, String)> = OnceLock::new();
     ACCOUNT

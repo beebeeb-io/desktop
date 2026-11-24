@@ -16,7 +16,7 @@ Since 2026-11-13 Settings > Security is ONE page with frame ids of its own (`DW-
 
 | Frame | What it is | Status |
 | --- | --- | --- |
-| `DW-A51` | Who is signed in, what became of the recovery phrase, which Beebeeb products this account uses. | built; light: 0 failing on all six lines; dark: 1 pixel line red (`item-0-0-avatar edge 10 > 9`: the rim of the 32 pt avatar disc; measured, the board's disc is 0.2 device px smaller under its ring) |
+| `DW-A51` | Who is signed in, what became of the master key, which Beebeeb products this account uses. | built; light: 0 failing on all six lines; dark: 1 pixel line red (`item-0-0-avatar edge 10 > 9`: the rim of the 32 pt avatar disc; measured, the board's disc is 0.2 device px smaller under its ring) |
 | `DW-A52` | Sign-in and security: everything about getting in, who else is in, and getting out. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S01`. Not a gated frame any more; the id stays a name the app's links understand |
 | `DW-A84` | Security checkup: the account's security factors in one list, with a score (7 of 7). | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S01` (the checkup is on the page). Not a gated frame any more |
 | `DW-A84a` | The same page with one thing left: no passkey yet (6 of 7). | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S01a`. Not a gated frame any more |

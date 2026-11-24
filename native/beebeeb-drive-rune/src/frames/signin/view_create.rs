@@ -138,7 +138,7 @@ fn verify(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             Some("We could not check the code. Check your connection and try again.")
         }
         None if ui.code_expired() => Some(
-            "Your email code expired before the account was created. Request a new one. Your password and recovery phrase are kept.",
+            "Your email code expired before the account was created. Request a new one. Your password and master key are kept.",
         ),
         None => None,
     };
@@ -275,7 +275,7 @@ fn terms(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                 ck::checkbox(
                     k,
                     understood,
-                    "I understand that Beebeeb cannot recover my account if I lose both my password and my recovery phrase.",
+                    "I understand that Beebeeb cannot recover my account if I lose both my password and my master key.",
                     true,
                     t,
                 )
@@ -366,7 +366,7 @@ fn password(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let mut column = head("Back", 4, "Password", t)
         .child(au::heading(
             "Set a password",
-            Some("It unlocks your vault on this PC. Your recovery phrase stays the ultimate backup."),
+            Some("It unlocks your vault on this PC. Your master key stays the ultimate backup."),
             false,
             t,
         ))

@@ -25,7 +25,7 @@ const SET_OFFLINE: &str = "Beebeeb couldn't be reached, or couldn't check this p
      again. If your new password was already set, sign in with it.";
 const SET_RATE_LIMITED: &str = "Too many tries. Wait a moment, then try again.";
 const SET_ENDED: &str =
-    "If your new password was set, sign in with it. If not, go back and enter your recovery phrase again.";
+    "If your new password was set, sign in with it. If not, go back and enter your master key again.";
 const SET_OTHER: &str =
     "That didn't finish, and nothing was signed in. Try again. If your new password was already set, sign in with it.";
 
@@ -37,7 +37,7 @@ fn problem_banner(k: &mut Keys, problem: &PhraseProblem, t: &Theme) -> El {
             k,
             Tone::Red,
             &icons::INFO,
-            Some("That phrase doesn't open this account"),
+            Some("That master key doesn't open this account"),
             Some("Check the words against what you wrote down. Nothing was changed, and your password is as it was."),
             true,
             t,
@@ -68,8 +68,8 @@ pub fn recover(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let mut c = au::column()
         .child(au::back_link("Recovery options", &icons::BACK, t).on_press_tx(act(Ui::leave_recovery)))
         .child(au::heading(
-            "Recover with your phrase",
-            Some("Enter your email and the 12-word recovery phrase from your account setup."),
+            "Enter your master key (12 words)",
+            Some("Enter your email and your master key (12 words)."),
             false,
             t,
         ));
@@ -102,7 +102,7 @@ pub fn recover(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     };
     let mut foot = actions(6.0).child(primary(
         k,
-        "Verify phrase",
+        "Verify master key",
         Some(&icons::KEY),
         state,
         Ui::verify_phrase,
@@ -250,7 +250,7 @@ pub fn new_password(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         .child(au::back_link("Back", &icons::BACK, t).on_press_tx(act(Ui::recover_with_phrase)))
         .child(au::heading(
             "Set a new password",
-            Some("Your phrase was verified. Choose a strong password for your account."),
+            Some("Your master key was verified. Choose a strong password for your account."),
             false,
             t,
         ));

@@ -287,7 +287,7 @@ pub trait DriveSettings {
     /// - The bundle holds three things only: queue counts, an error code, and the last error
     ///   message.
     /// - It never holds: a file or folder name, a path, the account's email address, a device
-    ///   name, a key or any key material, a sign-in or session token, the recovery phrase.
+    ///   name, a key or any key material, a sign-in or session token, the master key.
     /// - Every string goes through the engine's export redaction
     ///   (`beebeeb_engine::diagnostic_redaction`) BEFORE anything is written to disk: the file
     ///   on disk is already the redacted one, there is no unredacted copy to clean up.

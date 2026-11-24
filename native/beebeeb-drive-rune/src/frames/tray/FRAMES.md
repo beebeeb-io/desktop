@@ -102,7 +102,7 @@ main window is closed.
 
 | What | Engine call |
 | --- | --- |
-| Signed out, locked, the recovery phrase needed, the keys unreadable, ready | `Engine::gate` |
+| Signed out, locked, the master key needed, the keys unreadable, ready | `Engine::gate` |
 | Signed out because Beebeeb refused the session again and again (DW-1219) | `Accounts::active_account` → `auth_health.is_expired` |
 | Paused (DW-1204) | `Engine::is_paused` |
 | Sync runs on this PC | `Engine::is_syncing` |
@@ -132,7 +132,7 @@ carries a finished check.
 | --- | --- | --- |
 | Sync isn't running | "Sync isn't running", "Files on this PC are unchanged." | signed in and unlocked, and the engine does not run on this PC (before its first start, after a start that failed): "Up to date" would be a guess (DW-1212) |
 | Locked, sync off | "{name} is locked", "Nothing syncs while it's locked." | DW-1211 says "Sync keeps running while it's locked"; this engine stops while the keys are not in memory |
-| The recovery phrase needed | "Recovery phrase needed", "Enter it in {name} to sync this PC." | signed in, and this PC holds no key of the account (the window's DW-A23) |
+| The master key needed | "Master key needed", "Enter it in {name} to sync this PC." | signed in, and this PC holds no key of the account (the window's DW-A23) |
 | The keys unreadable | "Can't read your keys", "Windows didn't answer. Nothing syncs until it does." | the credential store did not answer |
 | Stopped by an error on this PC | "Sync stopped", no line | the engine's `engine_error` with nothing given up: DW-1207's count would be a guess |
 | Recent changes hidden | "Recent changes are hidden", "Sign in to see file names." / "File names show once your keys are on this PC." | DW-1211's rule (no names), for the other states without the keys in memory |

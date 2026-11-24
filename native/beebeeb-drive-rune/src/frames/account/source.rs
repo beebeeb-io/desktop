@@ -233,7 +233,7 @@ impl FactorKind {
             Self::EmailVerified => "Email verified",
             Self::TwoFactor => "Two-factor authentication",
             Self::StrongPassword => "Strong password",
-            Self::RecoveryPhraseSaved => "Recovery phrase saved",
+            Self::RecoveryPhraseSaved => "Master key saved",
             Self::Passkeys => "Passkeys",
             Self::PasswordNotInBreach => "Password not in a breach",
             Self::Sessions => "Devices and sessions",

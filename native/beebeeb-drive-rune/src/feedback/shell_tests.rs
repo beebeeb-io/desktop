@@ -124,15 +124,15 @@ fn every_screen_reports_its_frame_and_only_files_allows_comment_mode() {
     }));
 }
 
-/// The frames that take a password, a recovery phrase or a code say so, and are denied without
+/// The frames that take a password, a master key or a code say so, and are denied without
 /// any registry line. Every registered line is read: the count below is the registry's.
 #[test]
 fn sign_in_and_first_run_are_denied_with_their_reason_and_the_registry_is_default_deny() {
     for (gate, word) in [
         (GateState::SignedOut, "password"),
-        (GateState::FirstRun, "recovery phrase"),
+        (GateState::FirstRun, "master key"),
         (GateState::Locked, "password"),
-        (GateState::NeedsRecoveryPhrase, "recovery phrase"),
+        (GateState::NeedsRecoveryPhrase, "master key"),
     ] {
         let app = machine([Event::Gate(gate)]);
         match frame::on_screen(&app).feedback {

@@ -102,7 +102,7 @@ fn forbidden_in_messages() -> Vec<(&'static str, &'static str, String)> {
         ),
         ("verification code", "493817", "the code 493817 was refused".into()),
         (
-            "recovery phrase",
+            "master key",
             "abandon",
             "phrase was abandon ability able about above absent absorb abstract absurd accident account accuse here"
                 .into(),

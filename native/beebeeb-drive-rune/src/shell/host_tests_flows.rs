@@ -272,7 +272,7 @@ fn a_lock_wipes_what_was_typed_in_an_account_form() {
 
 /// Sign-up (DW-A31 to DW-A44) is a set of screens of the sign-in window: "Create a Beebeeb account" opens
 /// it on the shell's next poll, on every one of its screens:
-/// the password (DW-A36 to DW-A38), the recovery phrase shown (DW-A39) and typed back (DW-A40, DW-A41).
+/// the password (DW-A36 to DW-A38), the master key shown (DW-A39) and typed back (DW-A40, DW-A41).
 #[test]
 fn sign_up_opens_in_the_sign_in_window() {
     use crate::frames::signin::create::{FRAME_IDS, Step};

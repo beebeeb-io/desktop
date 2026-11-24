@@ -336,7 +336,7 @@ fn status(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &The
                 CodeFor::TurnOffTwoFactor,
             ),
         ],
-        Some("Lost your authenticator? Sign in with a backup code, another signed-in device or your recovery phrase."),
+        Some("Lost your authenticator? Sign in with a backup code, another signed-in device or your master key."),
         t,
     ));
     (set::pane(children, t), confirm)

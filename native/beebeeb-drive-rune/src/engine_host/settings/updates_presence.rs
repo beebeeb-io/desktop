@@ -4,7 +4,7 @@
 //!
 //! The mark is the engine's session turn (`Engine::session_turn`, read in the engine at this head): it moves on at a
 //! screen lock (by hand or away), a vault lock, a session the server ended, a sign-out, and every sign-in write
-//! (a password or passkey sign-in, the recovery words, the start's restore), and also at two writes of the person's
+//! (a password or passkey sign-in, the the 12 words of your master key, the start's restore), and also at two writes of the person's
 //! own session (a confirmed change of the sign-in email, a password change). A screen unlock with Windows Hello does
 //! not move it. So any of these between the press and the hand-off makes the update wait, and the press is offered
 //! again once the lock is open: for the two writes of the person's own, that is a wait they did not need, never an

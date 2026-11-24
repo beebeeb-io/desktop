@@ -51,7 +51,7 @@ fn why(kind: FactorKind) -> &'static str {
         FactorKind::EmailVerified => "Shows the address is yours, so sign-in mail reaches you.",
         FactorKind::TwoFactor => "A code from your phone at sign-in, so a stolen password is not enough.",
         FactorKind::StrongPassword => "A longer password is harder to guess.",
-        FactorKind::RecoveryPhraseSaved => "Your 12 words get you back in when you forget your password.",
+        FactorKind::RecoveryPhraseSaved => "Your master key (12 words) gets you back in when you forget your password.",
         FactorKind::Passkeys => "Sign in with Windows Hello or your phone instead of typing your password.",
         FactorKind::PasswordNotInBreach => "This password is in a known leak. Change it.",
         FactorKind::Sessions => "See which devices are signed in, and end the ones you don't use.",

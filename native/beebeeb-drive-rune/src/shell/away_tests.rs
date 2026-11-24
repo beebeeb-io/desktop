@@ -870,7 +870,7 @@ fn an_engine_without_the_automatic_lock_never_covers() {
 }
 
 /// The cover stays held while the engine is closed (it lifts at a later open poll), but it is drawn only over the gates
-/// of an open engine: a closed engine's own screen (sign-in, the recovery phrase, an unreadable key store) is never
+/// of an open engine: a closed engine's own screen (sign-in, the master key, an unreadable key store) is never
 /// hidden behind a lock screen whose Unlock cannot answer.
 #[test]
 fn the_cover_never_hides_the_screen_of_a_closed_engine() {

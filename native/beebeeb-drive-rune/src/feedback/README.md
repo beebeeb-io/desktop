@@ -76,7 +76,7 @@ The panel reads the folder again at most every 2 s, and only while it is open.
   registry says `feedback: FeedbackPolicy::Allowed` (`shell/registry.rs`; today: Files). Any other
   frame shows "Comment mode is off on this screen: <reason>": a group with no line, a group whose
   line says `Denied("…")`, and any dialog in front that has not opted in itself. Sign-in, first
-  run, the locked screen and the recovery phrase are denied with a reason that names the secret.
+  run, the locked screen and the master key are denied with a reason that names the secret.
 - A secure element never has its text in `note.json` or `tree.json` (`"[redacted: secure field]"`,
   label dropped) and its box is painted flat grey in both PNGs. Secure means: Rune says so
   (`El::secure`, a secure `TextEdit`), or its key starts with `secure-`, or any ancestor is secure.
@@ -89,7 +89,7 @@ The panel reads the folder again at most every 2 s, and only while it is open.
 
 ## For frame lanes
 A frame gets comment mode only by opting in, and opting in is a promise:
-1. **Mark every secret.** Each text node that can show a password, a recovery phrase word, a key,
+1. **Mark every secret.** Each text node that can show a password, a master key word, a key,
    a token, a pairing or one-time code gets `.secure()`. A group of them (the 12 words, a QR code
    with its caption, a "copy code" line) sits in ONE element keyed `secure-<name>`: its whole
    subtree is redacted and its whole box blanked. A secret in a tooltip, a toast or a flying

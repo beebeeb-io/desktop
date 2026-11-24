@@ -1,5 +1,5 @@
 //! What a person types a secret into on the account screens, beyond `au::field`: the six digit
-//! boxes of a one-time code (`.au-digit`), the twelve numbered boxes of a recovery phrase
+//! boxes of a one-time code (`.au-digit`), the twelve numbered boxes of a master key
 //! (`.au-word`), and a field drawn as the board draws one that holds the keyboard.
 //!
 //! Secrets. A digit, a recovery word and a backup code are drawn by Rune's secure text alone
@@ -153,7 +153,7 @@ pub fn code_input(
 }
 
 // ---------------------------------------------------------------------------
-// The recovery phrase (`.au-words` > `.au-word`)
+// The master key (`.au-words` > `.au-word`)
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,7 +264,7 @@ pub fn word_box(i: usize, edit: &TextEdit, input: El, state: WordState, h: f32, 
 pub fn word_input(edit: &TextEdit, input_key: &'static str, i: usize, not_a_word: bool, t: &Theme) -> El {
     let mut input = text_input(edit, type_entry::WORD)
         .key(input_key)
-        .label(format!("Recovery word {}", i + 1))
+        .label(format!("Master key word {}", i + 1))
         .position_in_set(i + 1, WORDS)
         .single_line()
         .color(t.text)
@@ -276,7 +276,7 @@ pub fn word_input(edit: &TextEdit, input_key: &'static str, i: usize, not_a_word
     input
 }
 
-/// How many boxes a recovery phrase has, and how many to a row.
+/// How many boxes a master key has, and how many to a row.
 pub const WORDS: usize = 12;
 pub const WORDS_PER_ROW: usize = 3;
 
