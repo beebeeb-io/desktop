@@ -2,10 +2,10 @@
 //! item, from what the engine reports, never before it and never from the action; Try again for exactly the
 //! items that were left; a message between presses with its own wake. Every id and name is the board's.
 
-use super::super::Toast;
 use super::super::protected::poll;
 use super::super::source::{Account, Counts, Details, FilesSource, LocalOutcome, NoEngine, StorageSplit};
 use super::super::tests::{find, runtime_of, settle};
+use super::super::Toast;
 use super::*;
 use crate::source::DriveItem;
 use rune::Runtime;
@@ -203,7 +203,10 @@ fn a_row_reads_what_the_engine_says_of_it_not_what_the_action_suggests() {
         rt.state.selection_is_on_this_pc(),
         "Free up space is gone for bytes that are still here"
     );
-    assert_eq!(rt.state.actions.toast, None, "Remove from this PC has no message");
+    assert_eq!(
+        rt.state.actions.toast, None,
+        concat!("Remove from ", beebeeb_engine::device_word!(), " has no message")
+    );
     // Keep on this PC of a file that is not downloaded yet: the engine says "online only" until it is, and so
     // does the row. An item the engine left reads what the engine says too (kept again after a failed reclaim).
     rt.update(|s, tx| assert!(s.toggle_keep_offline(tx)));
@@ -504,7 +507,11 @@ fn what_free_up_space_left_is_said_with_the_engines_reason() {
     );
     assert_eq!(
         Toast::failure(Action::FreeUpSpace, ActionError::HoldsKept),
-        "Couldn't free up space. Something in it is kept on this PC."
+        concat!(
+            "Couldn't free up space. Something in it is kept on ",
+            beebeeb_engine::device_word!(),
+            "."
+        )
     );
     assert!(find(&rt, "toast-action").is_none());
 }

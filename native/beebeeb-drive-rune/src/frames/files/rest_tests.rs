@@ -12,6 +12,13 @@ use crate::State;
 use crate::init;
 use rune::{Key, Mods, Runtime};
 
+/// The primary modifier: ⌘ alone on a Mac (rune reads ⌘+Ctrl there as an app chord, so a text field's
+/// select-all would not fire); the shared `CTRL` (Ctrl and cmd) elsewhere.
+#[cfg(target_os = "macos")]
+const CTRL: Mods = Mods { cmd: true, ..NONE };
+#[cfg(not(target_os = "macos"))]
+use super::tests::CTRL;
+
 /// The board's window over a fixture whose changes its folders show (as `board_fixture` wires
 /// it), the test keeping its handles on what was asked and what is refused.
 fn wired() -> (Runtime<State>, Calls, Fails) {

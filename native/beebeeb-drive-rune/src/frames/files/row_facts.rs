@@ -1,7 +1,7 @@
 //! What a row says of its item when the source knows no more: the details panel's facts and the kind's name.
 
 use super::source::Details;
-use crate::source::{DriveItem, format_size};
+use crate::source::{format_size, DriveItem};
 use crate::ui::file_list::format_date;
 
 /// What a row itself says about the item, for a source that knows no more.
@@ -15,7 +15,7 @@ pub fn details_of_row(item: &DriveItem, folder: &str) -> Details {
     let place = match item.pc_status.as_deref() {
         Some("online_only") => "Online only now",
         Some("on_this_pc") => "Downloaded",
-        Some("available_offline") => "Kept on this PC",
+        Some("available_offline") => concat!("Kept on ", beebeeb_engine::device_word!()),
         _ => "",
     };
     let offline_note = match (place.is_empty(), size.is_empty()) {

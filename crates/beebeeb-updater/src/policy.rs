@@ -221,7 +221,7 @@ pub fn check(
     }
 
     let targets: Vec<&str> = trust.targets.iter().map(String::as_str).collect();
-    let (_, platform) = manifest.platform(&targets).ok_or(Refusal::NoBuildForThisPc)?;
+    let (target, platform) = manifest.platform(&targets).ok_or(Refusal::NoBuildForThisPc)?;
     let file_name = trusted_file_name(&platform.url, &trust.allowed_hosts).ok_or(Refusal::UntrustedAddress)?;
     let size = platform
         .size
@@ -233,7 +233,7 @@ pub fn check(
         .ok_or(Refusal::ArtifactSignature)?;
     // The name is covered by the artefact's own signature once the bytes verify. An older release's artefact with
     // its honest signature has that release's name, so it cannot stand in for this version.
-    if artifact.file != file_name || !names_version(file_name, manifest.version) {
+    if artifact.file != file_name || !names_version(file_name, manifest.version, target) {
         return Err(Refusal::SignatureForOtherFile);
     }
     if manifest.version < trust.floor {
@@ -281,12 +281,18 @@ pub fn trusted_file_name<'a>(url: &'a str, allowed_hosts: &[String]) -> Option<&
     path.rsplit('/').next()
 }
 
-/// True for `Beebeeb_<version>_<rest>.exe` and nothing else (`Beebeeb_0.9.0_x64-setup.exe`). A manifest's own
-/// signature signs `<channel>.json`, so it can never pass as an artefact's, nor the reverse.
-fn names_version(file_name: &str, version: Version) -> bool {
+/// True for `Beebeeb_<version>_<rest>.exe` (Windows) or `Beebeeb_<version>_<rest>.app.tar.gz` (a Mac) and nothing
+/// else (`Beebeeb_0.9.0_x64-setup.exe`). A manifest's own signature signs `<channel>.json`, so it can never pass as
+/// an artefact's, nor the reverse.
+fn names_version(file_name: &str, version: Version, target: &str) -> bool {
+    let suffix = if target.starts_with("darwin-") {
+        ".app.tar.gz"
+    } else {
+        ".exe"
+    };
     file_name
         .strip_prefix("Beebeeb_")
-        .and_then(|rest| rest.strip_suffix(".exe"))
+        .and_then(|rest| rest.strip_suffix(suffix))
         .and_then(|rest| rest.split_once('_'))
         .is_some_and(|(named, rest)| named == version.to_string() && !rest.is_empty())
 }

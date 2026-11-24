@@ -179,6 +179,10 @@ pub trait Platform: Send + Sync {
     ) -> Result<Box<dyn ControlServer>, ServeError>;
     /// Hands one request to the running instance and waits at most `timeout` for its answer.
     fn send_control(&self, identity: AppIdentity, request: &Request, timeout: Duration) -> Delivery;
+    /// macOS: the File Provider bridge the engine signals Finder through; `None` on a platform without one.
+    fn file_provider(&self) -> Option<Arc<dyn beebeeb_engine::file_provider_port::FileProviderPort>> {
+        None
+    }
     /// Opens the OS's own folder picker (DW-0738: Windows draws it) with `title`, showing where `start` is.
     /// BLOCKS until the person closed it: a worker's call, never the window's thread. `Ok(None)`: closed
     /// without a folder. The folder is the person's own: shown to them, never logged.

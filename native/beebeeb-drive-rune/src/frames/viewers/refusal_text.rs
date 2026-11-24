@@ -19,9 +19,17 @@ pub const HEVC_STORE_URL: &str = "https://apps.microsoft.com/search?query=HEVC%2
 pub const UNSHOWABLE: &str = "HEIC and RAW photos can\u{2019}t be shown in Beebeeb yet. Open them in your default app.";
 
 /// The Photos Original tab's words for a HEIC (ux-24: its own reason, not the combined one).
-pub const HEIC_WORDS: &str = "HEIC photos can\u{2019}t be shown at full size on this PC yet. This is the preview.";
+pub const HEIC_WORDS: &str = concat!(
+    "HEIC photos can\u{2019}t be shown at full size on ",
+    beebeeb_engine::device_word!(),
+    " yet. This is the preview."
+);
 /// The same for a camera RAW.
-pub const RAW_WORDS: &str = "RAW photos can\u{2019}t be shown at full size on this PC yet. This is the camera\u{2019}s preview.";
+pub const RAW_WORDS: &str = concat!(
+    "RAW photos can\u{2019}t be shown at full size on ",
+    beebeeb_engine::device_word!(),
+    " yet. This is the camera\u{2019}s preview."
+);
 
 /// A refusal in full.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,15 +148,20 @@ pub fn text_with(system_decoder_on: bool, why: &Refusal) -> Text {
             "no helper",
         ),
         Refusal::NoSandbox => (
-            "Beebeeb's player could not start safely on this PC (its protected sandbox failed to start). Open the \
-             file in another app."
+            concat!("Beebeeb's player could not start safely on ", beebeeb_engine::device_word!(), " (its protected sandbox failed to start). Open the \
+             file in another app.")
                 .into(),
             OPEN_ELSEWHERE,
             None,
             "no sandbox",
         ),
     };
-    Text { sentence, action, link, log_word }
+    Text {
+        sentence,
+        action,
+        link,
+        log_word,
+    }
 }
 
 /// The notice of a video that plays WITHOUT sound (ux-57): (sentence, button). Only a video whose VIDEO cannot be
@@ -157,10 +170,20 @@ pub fn text_with(system_decoder_on: bool, why: &Refusal) -> Text {
 pub fn no_sound(why: NoSound) -> (String, &'static str) {
     match why {
         NoSound::Codec(codec) => (
-            format!("No sound: this PC has no decoder for {} audio", codec_name(codec)),
+            format!(
+                concat!(
+                    "No sound: ",
+                    beebeeb_engine::device_word!(),
+                    " has no decoder for {} audio"
+                ),
+                codec_name(codec)
+            ),
             OPEN_DEFAULT,
         ),
-        NoSound::Device => ("Sound isn't available on this PC".into(), OPEN_ELSEWHERE),
+        NoSound::Device => (
+            concat!("Sound isn't available on ", beebeeb_engine::device_word!()).into(),
+            OPEN_ELSEWHERE,
+        ),
     }
 }
 
@@ -201,7 +224,10 @@ mod tests {
                 assert!(!t.sentence.contains("  "), "{why:?}: double space");
                 assert!(!t.sentence.contains("can't play  "), "{why:?}");
                 assert!(!t.action.is_empty() && !t.log_word.is_empty(), "{why:?}");
-                assert!(seen.insert(t.sentence.clone()), "{why:?} repeats another reason's sentence");
+                assert!(
+                    seen.insert(t.sentence.clone()),
+                    "{why:?} repeats another reason's sentence"
+                );
             }
         }
     }
@@ -244,12 +270,21 @@ mod tests {
     #[test]
     fn a_missing_audio_decoder_is_a_notice_not_a_refusal() {
         let (words, action) = no_sound(NoSound::Codec(Codec::Aac));
-        assert_eq!(words, "No sound: this PC has no decoder for AAC audio");
+        assert_eq!(
+            words,
+            concat!(
+                "No sound: ",
+                beebeeb_engine::device_word!(),
+                " has no decoder for AAC audio"
+            )
+        );
         assert_eq!(action, OPEN_DEFAULT);
         let (device, _) = no_sound(NoSound::Device);
         assert_ne!(device, words);
         // A video that cannot be decoded is still refused, with its own words.
-        assert!(text(&Refusal::NoSystemDecoder(Codec::H264)).sentence.contains("no decoder"));
+        assert!(text(&Refusal::NoSystemDecoder(Codec::H264))
+            .sentence
+            .contains("no decoder"));
     }
 
     #[test]

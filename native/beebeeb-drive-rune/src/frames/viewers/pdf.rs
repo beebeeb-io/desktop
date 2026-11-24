@@ -5,18 +5,18 @@
 //! The page's pixels are the source's (rendered on this PC from the decrypted file). A source
 //! with no picture of a page gets a blank page, never a sample.
 
-use rune::{Color, El, SurfaceFit, TextStyle, col, el, row, text_input};
+use rune::{col, el, row, text_input, Color, El, SurfaceFit, TextStyle};
 
 use super::chrome::{Dot, Head, Status};
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::media::{FIND_KEY, ZOOMS};
 use super::source::{PdfDoc, Picture};
-use super::{Intent, Ui, details, media_icons, style, ui};
-use crate::State;
+use super::{details, media_icons, style, ui, Intent, Ui};
 use crate::theme::scale;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
+use crate::ui::button::{button, keys, ButtonState, Size, Variant};
 use crate::ui::kit;
-use crate::ui::toolbar::{ToolState, tool_button};
+use crate::ui::toolbar::{tool_button, ToolState};
+use crate::State;
 
 /// What a page says while its picture is being rendered on this PC.
 pub const PAGE_RENDERING: &str = "Rendering this page\u{2026}";
@@ -96,7 +96,7 @@ pub fn tools(ui: &Ui, t: &Theme) -> Vec<El> {
         .child(also(
             "tool-0",
             step("zoom-minus", "Zoom out", &media_icons::MINUS, -1, zoom > ZOOMS[0])
-                .shortcut_hint("Ctrl+Minus")
+                .shortcut_hint(crate::frames::files::key_label("Minus"))
                 .child(
                     kit::glyph("tool-0-icon", &media_icons::MINUS, 13.0, t.text_secondary)
                         .absolute(7.5, 5.5)
@@ -123,7 +123,7 @@ pub fn tools(ui: &Ui, t: &Theme) -> Vec<El> {
                 1,
                 zoom < ZOOMS[ZOOMS.len() - 1],
             )
-            .shortcut_hint("Ctrl+Plus")
+            .shortcut_hint(crate::frames::files::key_label("Plus"))
             .child(
                 kit::glyph("tool-2-icon", &media_icons::PLUS_SMALL, 13.0, t.text_secondary)
                     .absolute(7.5, 5.5)
@@ -143,7 +143,7 @@ pub fn tools(ui: &Ui, t: &Theme) -> Vec<El> {
             if finding { ToolState::On } else { ToolState::Idle },
             t,
         )
-        .shortcut_hint("Ctrl+F")
+        .shortcut_hint(crate::frames::files::key_label("F"))
         .checked(finding)
         .on_press(with_ui(|ui| {
             if ui.media.find.is_some() {
@@ -261,7 +261,18 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
             .child(nav("find-nav-0", "Next match", 1, "Enter", false))
             .child(nav("find-nav-1", "Previous match", -1, "Shift+Enter", true))
             .child(el().key("find-spacer").grow(1.0))
-            .child(button(keys("find-done"), "Done", None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t).on_press(with_ui(Ui::close_find))),
+            .child(
+                button(
+                    keys("find-done"),
+                    "Done",
+                    None,
+                    Variant::Ghost,
+                    Size::Sm,
+                    ButtonState::Enabled,
+                    t,
+                )
+                .on_press(with_ui(Ui::close_find)),
+            ),
     )
 }
 

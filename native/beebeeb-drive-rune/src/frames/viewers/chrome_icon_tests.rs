@@ -1,8 +1,8 @@
 //! The viewer's title draws the file's icon in its tint, left of the name. The title is built directly: a deck
 //! opens in the office window, which draws its own bar.
 
-use super::super::source::{FixtureViewerSource, ViewerSource, board};
-use super::{Head, title};
+use super::super::source::{board, FixtureViewerSource, ViewerSource};
+use super::{title, Head};
 use crate::theme::file_icon_colors::tint_color;
 use crate::theme::file_icons::Tint;
 use crate::theme::tokens::theme;

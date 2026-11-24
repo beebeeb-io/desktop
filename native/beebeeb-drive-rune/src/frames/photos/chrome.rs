@@ -80,7 +80,7 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
         text_input(&s.search, type_::SEARCH)
             .key("search-input")
             .label("Search names")
-            .shortcut_hint("Ctrl+F")
+            .shortcut_hint(concat!(beebeeb_engine::primary_key!(), "F"))
             .single_line()
             .color(t.text)
             .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)

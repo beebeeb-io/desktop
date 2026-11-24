@@ -61,6 +61,26 @@ pub fn windows_release_trust() -> Result<crate::policy::Trust, NotAReleaseBuild>
 /// The same trust with a given not-before. The bridge release 0.8.25 uses this to check a v2 manifest before it
 /// installs a native build, with the fixed [`crate::policy::V2_KEY_CREATED`] (it bakes in no time of its own).
 pub fn windows_trust_built_at(not_before: u64) -> Result<crate::policy::Trust, NotAReleaseBuild> {
+    trust_for(&["windows-x86_64-nsis", "windows-x86_64"], not_before)
+}
+
+/// The manifest platform key of a Mac on Apple Silicon: the only Mac target (macOS 14 and later, Apple Silicon).
+pub const DARWIN_TARGET: &str = "darwin-aarch64";
+
+/// The trust a released native Mac build ships with: the same key, host and floor as Windows, the `darwin-aarch64`
+/// target. A Mac only downloads updates ([`crate::machine::INSTALL_UNSUPPORTED`]); the trust is what makes its check
+/// pick the Mac entry of a manifest and no other platform's.
+pub fn darwin_release_trust() -> Result<crate::policy::Trust, NotAReleaseBuild> {
+    std::hint::black_box(BUILD_MARK);
+    darwin_trust_built_at(BUILD_NOT_BEFORE.unwrap_or(0))
+}
+
+/// [`darwin_release_trust`] with a given not-before.
+pub fn darwin_trust_built_at(not_before: u64) -> Result<crate::policy::Trust, NotAReleaseBuild> {
+    trust_for(&[DARWIN_TARGET], not_before)
+}
+
+fn trust_for(targets: &[&str], not_before: u64) -> Result<crate::policy::Trust, NotAReleaseBuild> {
     let key = crate::signature::PublicKey::updater_v2().map_err(|_| NotAReleaseBuild::NoUpdaterKey)?;
     Ok(crate::policy::Trust {
         keys: vec![crate::policy::TrustedKey {
@@ -69,7 +89,7 @@ pub fn windows_trust_built_at(not_before: u64) -> Result<crate::policy::Trust, N
         }],
         product: "desktop".to_string(),
         allowed_hosts: vec![RELEASE_HOST.to_string()],
-        targets: vec!["windows-x86_64-nsis".to_string(), "windows-x86_64".to_string()],
+        targets: targets.iter().map(|target| target.to_string()).collect(),
         floor: crate::policy::NATIVE_FLOOR,
         not_before,
     })
@@ -197,6 +217,16 @@ mod tests {
         assert_eq!(trust.floor.to_string(), "0.9.0");
         assert_eq!(trust.targets, ["windows-x86_64-nsis", "windows-x86_64"]);
         assert_eq!(trust.not_before, 1_800_000_000);
+    }
+
+    #[test]
+    fn a_mac_build_trusts_the_same_key_and_host_and_only_the_darwin_target() {
+        let trust = darwin_trust_built_at(1_800_000_000).expect("the v2 key is committed");
+        assert_eq!(trust.targets, ["darwin-aarch64"]);
+        assert_eq!(trust.allowed_hosts, ["releases.beebeeb.io"]);
+        assert_eq!(trust.keys.len(), 1);
+        assert_eq!(trust.floor.to_string(), "0.9.0");
+        assert_eq!(darwin_release_trust().expect("trust").not_before, 0);
     }
 
     /// A signature the 0.8.x key really made (the published 0.8.22 stable manifest).

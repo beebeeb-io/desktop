@@ -10,9 +10,9 @@ use super::share::PASSWORD_INPUT;
 use super::source::{Action, ActionError, Call, FilesSource, NoEngine};
 use super::tests::*;
 use super::{Intent, Toast};
-use crate::State;
 use crate::init;
 use crate::shell::app::{Dialog as ShellDialog, Event, Intent as ShellIntent, Screen, Section};
+use crate::State;
 use rune::{Key, Runtime};
 
 fn pick(rt: &mut Runtime<State>, label: &str) {
@@ -466,7 +466,7 @@ fn alt_enter_opens_details_with_the_boards_rows_and_done_closes_it() {
         ("Changed", "Yesterday, 16:42"),
         ("Added", "28 Oct 2026"),
         ("Where", "Files"),
-        ("On this PC", "No"),
+        (concat!("On ", beebeeb_engine::device_word!()), "No"),
         ("Encrypted", "Yes, end to end"),
         ("Version history", "3 versions"),
     ];
@@ -493,7 +493,10 @@ fn details_of_a_file_on_this_pc_says_yes_and_its_last_row_goes_to_version_histor
     click(&mut rt, "row-5-date");
     press(&mut rt, Key::Enter, ALT);
     let on_pc = (0..7)
-        .find(|i| find(&rt, &format!("item-0-{i}-title")).is_some_and(|e| e.text.as_deref() == Some("On this PC")))
+        .find(|i| {
+            find(&rt, &format!("item-0-{i}-title"))
+                .is_some_and(|e| e.text.as_deref() == Some(concat!("On ", beebeeb_engine::device_word!())))
+        })
         .unwrap();
     assert_eq!(text_of(&rt, &format!("item-0-{on_pc}-value")), "Yes");
     press(&mut rt, Key::Escape, NONE);
@@ -742,7 +745,11 @@ fn a_file_with_no_preview_says_so_and_offers_the_two_ways_on() {
     assert_eq!(text_of(&rt, "pv-blank-title"), "No preview for this kind of file");
     assert_eq!(
         text_of(&rt, "pv-blank-text"),
-        "Moodboard.sketch \u{00B7} 18.4 MB. Open it in another app, or keep it on this PC to open it offline."
+        concat!(
+            "Moodboard.sketch \u{00B7} 18.4 MB. Open it in another app, or keep it on ",
+            beebeeb_engine::device_word!(),
+            " to open it offline."
+        )
     );
     assert!(
         find(&rt, "pv-open").is_none(),
@@ -832,9 +839,17 @@ fn the_row_says_two_versions_and_opening_it_opens_the_choice_not_the_file() {
             label_of(&rt, "btn-2"),
             label_of(&rt, "btn-3")
         ],
-        ["Keep both", "Keep this PC's", "Keep Anna's iPad's", "Cancel"]
+        [
+            "Keep both",
+            concat!("Keep ", beebeeb_engine::device_word!(), "'s"),
+            "Keep Anna's iPad's",
+            "Cancel"
+        ]
     );
-    assert_eq!(label_of(&rt, "version-here"), "This PC, Today, 09:12, 1.2 MB");
+    assert_eq!(
+        label_of(&rt, "version-here"),
+        concat!(beebeeb_engine::device_word_cap!(), ", Today, 09:12, 1.2 MB")
+    );
     assert_eq!(label_of(&rt, "version-there"), "Anna's iPad, Today, 08:50, 1.3 MB");
     assert!(asked(&calls).is_empty(), "nothing is opened and nothing is decided yet");
     // A double-click on the row opens the choice too.

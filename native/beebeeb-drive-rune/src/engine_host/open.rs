@@ -444,7 +444,7 @@ pub fn open<C: CredentialStores>(
         let entries = stored_account_entries(&stores.for_account(identity, &account_id));
         bind_to_server(&state_dir, entries, api_base)?;
     }
-    let (host, messages) = ChannelHost::new(wake);
+    let (host, messages) = ChannelHost::with_file_provider(wake, crate::shell::platform::current().file_provider());
     let config = EngineConfig {
         account_id,
         state_dir,

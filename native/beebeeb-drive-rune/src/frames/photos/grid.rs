@@ -437,7 +437,7 @@ fn empty(list: ListState, t: &Theme) -> El {
             action: None,
         },
         ListState::OnItsWay => ViewState::Loading {
-            words: "Getting your photos ready. Your file list is downloading and being decrypted on this PC.",
+            words: concat!("Getting your photos ready. Your file list is downloading and being decrypted on ", beebeeb_engine::device_word!(), "."),
         },
         ListState::Failed => ViewState::Failed {
             key: "ph-empty",

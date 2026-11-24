@@ -12,19 +12,19 @@ use std::sync::Mutex;
 
 use beebeeb_engine::account_binding::Identity;
 use beebeeb_engine::app::{Engine, EngineConfig};
-use beebeeb_engine::drive_v2::case_place::{CaseRule, Clash, with_rule_for_test};
+use beebeeb_engine::drive_v2::case_place::{with_rule_for_test, CaseRule, Clash};
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
 use beebeeb_engine::runner::EngineRunner;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
 use beebeeb_engine::sync_view::Start;
-use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, start_fake};
+use beebeeb_engine::test_api::fake_account::{start_fake, FakeAccount, TEST_PHRASE};
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::engine_host::EngineFilesSource;
 use crate::engine_host::files_launch::Starts;
+use crate::engine_host::EngineFilesSource;
 use crate::frames::files::source::FilesSource;
 
 const PASSWORD: &str = "an invented password for case twins";
@@ -315,16 +315,24 @@ fn the_files_list_marks_each_twin_and_only_the_twins() {
 /// failure: the twin's words are never said of something else.
 #[test]
 fn a_twin_refusal_says_why_and_a_plain_conflict_does_not() {
-    use crate::frames::files::Toast;
     use crate::frames::files::source::Action;
+    use crate::frames::files::Toast;
     assert_eq!(
         Toast::failure(Action::Open, ActionError::NameSharedButCase),
-        "Couldn't open. Another item here has the same name except for capital letters. Rename one on the web to \
-         use it on this PC."
+        concat!(
+            "Couldn't open. Another item here has the same name except for capital letters. Rename one on the web to \
+         use it on ",
+            beebeeb_engine::device_word!(),
+            "."
+        )
     );
     assert_eq!(
         Toast::failure(Action::Rename, ActionError::NameShared),
-        "Couldn't rename. Another item here has the same name. Rename one on the web to use it on this PC."
+        concat!(
+            "Couldn't rename. Another item here has the same name. Rename one on the web to use it on ",
+            beebeeb_engine::device_word!(),
+            "."
+        )
     );
     assert_eq!(map_drive_err(DriveError::Conflict), ActionError::Failed);
     assert_eq!(
