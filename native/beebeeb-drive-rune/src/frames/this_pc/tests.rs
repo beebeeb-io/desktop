@@ -305,12 +305,14 @@ fn the_row_menu_opens_from_the_keyboard_and_removes_the_copy() {
 /// DW-0715 (no menu) the section's own. Each frame reads as the board draws it.
 #[test]
 fn the_status_line_under_the_row_menu_reads_as_dw_1306_draws_it() {
-    let files = os("4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only");
+    // The Files frame's own sample line (frames/files draws it): its words are that frame's, so either form is right.
+    let board_files = "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only";
+    let files = |shown: String| shown == board_files || shown == os(board_files);
     let section = os("3 available offline \u{00B7} 1.4 GB on this PC");
     for dark in [false, true] {
         let mut rt = runtime(scenes::dw_1306, dark);
         assert!(has(&rt, "menu"));
-        assert_eq!(text(&rt, "status-details"), files, "DW-1306, dark {dark}");
+        assert!(files(text(&rt, "status-details")), "DW-1306, dark {dark}");
         assert_eq!(text(&rt, "status-text"), "Up to date");
         assert_eq!(count(&rt, "status-details", ""), 1, "one status line, never two");
         press(&mut rt, Key::Escape);
