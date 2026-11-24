@@ -101,7 +101,7 @@ impl AddRefused {
                 "This folder holds a folder that is backed up already. Choose one of them, not both."
             }
             Self::KnownFolderOff => "This folder is in the list already. Switch it on there to back it up.",
-            Self::NotAFolder => concat!("This isn't a folder on ", crate::device_word!(), "."),
+            Self::NotAFolder => concat!("This isn't a folder on ", device_word!(), "."),
             Self::Backups(_) => "Couldn't add this folder. Try again in a moment.",
         }
     }
@@ -145,7 +145,7 @@ impl RemoveRefused {
         match self {
             Self::NotChosen => "This folder is no longer in the list. Nothing was changed.",
             Self::NoCopyFound => {
-                concat!(crate::device_word_cap!(), " hasn't found this folder's backup yet, so it can't be moved to Trash. Nothing was changed.")
+                concat!(device_word_cap!(), " hasn't found this folder's backup yet, so it can't be moved to Trash. Nothing was changed.")
             }
             Self::Backups(_) => "Couldn't stop backing up this folder. Nothing was changed.",
             Self::PasswordRefused(DeleteBackupError::WrongPassword) => {

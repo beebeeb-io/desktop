@@ -944,11 +944,11 @@ impl SwitchRefused {
     /// One line a person reads.
     pub fn words(self) -> &'static str {
         match self {
-            Self::NotOnThisPc => concat!("That account is no longer signed in on ", crate::device_word!(), ". Sign in to it again."),
+            Self::NotOnThisPc => concat!("That account is no longer signed in on ", device_word!(), ". Sign in to it again."),
             Self::UnsavedEdits => "A document has changes that are not saved. Save or close it first.",
             Self::EngineStillRunning => "Beebeeb could not stop syncing in time. Try again in a moment.",
             Self::CurrentUnknown => "Beebeeb is still checking this account. Try again in a moment.",
-            Self::Store => concat!("Beebeeb could not reach ", crate::device_word!(), "'s credential store. Nothing was changed."),
+            Self::Store => concat!("Beebeeb could not reach ", device_word!(), "'s credential store. Nothing was changed."),
         }
     }
 }

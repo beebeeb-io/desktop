@@ -731,7 +731,7 @@ async fn regression_1640_a_folder_deleted_elsewhere_is_not_created_again_for_wha
     // Now wholly on disk: copied where it can upload, the original and the folder removed.
     retry_kept_originals(&bridge.db, &sync_root, &|_, _| LocalEntry::WhollyLocal);
     assert_eq!(
-        std::fs::read(sync_root.join(concat!("notes (", crate::device_word!(), ").txt"))).unwrap(),
+        std::fs::read(sync_root.join(concat!("notes (", device_word!(), ").txt"))).unwrap(),
         b"edited, never sent"
     );
     assert!(!docs.exists(), "the emptied folder is removed");
@@ -744,7 +744,7 @@ async fn regression_1640_a_folder_deleted_elsewhere_is_not_created_again_for_wha
         .collect();
     assert_eq!(
         feed,
-        vec![("kept as a copy".to_string(), concat!("notes (", crate::device_word!(), ").txt").to_string())]
+        vec![("kept as a copy".to_string(), concat!("notes (", device_word!(), ").txt").to_string())]
     );
     drop(server.finish());
 }
@@ -783,9 +783,9 @@ fn regression_1640_a_second_remote_op_copies_nothing_again() {
     );
     remove_pruned_entries(&db, &sync_root, &emptied, &|_, _| LocalEntry::WhollyLocal);
     std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(sync_root.join(concat!("notes (", crate::device_word!(), ").txt")).exists());
+    assert!(sync_root.join(concat!("notes (", device_word!(), ").txt")).exists());
     assert!(
-        !sync_root.join(concat!("notes (", crate::device_word!(), " 2).txt")).exists(),
+        !sync_root.join(concat!("notes (", device_word!(), " 2).txt")).exists(),
         "the same bytes are not copied twice"
     );
     assert_eq!(db.list_kept_copies().unwrap().len(), 1, "one entry");

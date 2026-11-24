@@ -63,7 +63,7 @@ const MODEL_MAX: usize = 64;
 /// Why a delete of this PC's own device folder is refused (shown, never logged; no name in it).
 const THIS_PC: &str = concat!(
     "This may be ",
-    crate::device_word!(),
+    device_word!(),
     "'s own backup. Nothing was deleted."
 );
 

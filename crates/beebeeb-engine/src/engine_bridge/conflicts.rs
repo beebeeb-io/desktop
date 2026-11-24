@@ -494,7 +494,7 @@ impl EngineBridge {
                 unavailable_reason: Some(
                     concat!(
                         "On ",
-                        crate::device_word!(),
+                        device_word!(),
                         " the file's name leads to a different file, so it is not shown."
                     )
                     .to_string(),

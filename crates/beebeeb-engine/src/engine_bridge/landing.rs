@@ -190,10 +190,10 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
             updated_at: Some(detected_at),
             detail: concat!(
                 "Changed on ",
-                crate::device_word!(),
+                device_word!(),
                 ", but Beebeeb doesn't know which version it was based on, so it \
                      isn't sent. Both versions are kept: yours on ",
-                crate::device_word!(),
+                device_word!(),
                 ", the other in the file's history."
             )
             .to_string(),
@@ -226,7 +226,7 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
             detail: format!(
                 concat!(
                     "A change to one of them stays on ",
-                    crate::device_word!(),
+                    device_word!(),
                     " and isn't sent until a later update checks it. \
                  Nothing is lost. {}{}"
                 ),
@@ -288,31 +288,31 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
                 let original = if kept.original_removed {
                     ""
                 } else {
-                    concat!(" The original stays on ", crate::device_word!(), " until it can be removed.")
+                    concat!(" The original stays on ", device_word!(), " until it can be removed.")
                 };
                 (
                     copy_name.clone(),
                     "kept as a copy",
                     format!(
                         "Deleted elsewhere while it held changes not sent from {device}. Those changes are kept as {copy_name}, {place}.{original}",
-                        device = crate::device_word!()
+                        device = device_word!()
                     ),
                 )
             }
             KeptReason::InUse => (
                 original_name,
                 "waiting to close",
-                concat!("Deleted elsewhere while it was open on ", crate::device_word!(), ". It is removed from ", crate::device_word!(), " once it is closed.").to_string(),
+                concat!("Deleted elsewhere while it was open on ", device_word!(), ". It is removed from ", device_word!(), " once it is closed.").to_string(),
             ),
             KeptReason::PartlyLocal => (
                 original_name,
                 "kept in place",
-                concat!("Deleted elsewhere while only part of it was on ", crate::device_word!(), ", so it could not be checked for changes. It stays where it is, as it is. Dismiss this once you have dealt with it.").to_string(),
+                concat!("Deleted elsewhere while only part of it was on ", device_word!(), ", so it could not be checked for changes. It stays where it is, as it is. Dismiss this once you have dealt with it.").to_string(),
             ),
             KeptReason::CopyFailed => (
                 original_name,
                 "kept in place",
-                concat!("Deleted elsewhere while it held changes not sent from ", crate::device_word!(), ", and they could not be copied. It stays where it is; the copy is tried again.").to_string(),
+                concat!("Deleted elsewhere while it held changes not sent from ", device_word!(), ", and they could not be copied. It stays where it is; the copy is tried again.").to_string(),
             ),
         };
         entries.push(VersionConflictEntry {
@@ -775,9 +775,9 @@ pub fn copy_as_this_pc(path: &Path, dir: &Path) -> std::io::Result<(PathBuf, Str
     };
     for n in 1..=99 {
         let suffix = if n == 1 {
-            concat!(" (", crate::device_word!(), ")").to_string()
+            concat!(" (", device_word!(), ")").to_string()
         } else {
-            format!(concat!(" (", crate::device_word!(), " {n})"))
+            format!(concat!(" (", device_word!(), " {n})"))
         };
         let name = match ext {
             Some(ext) => format!("{stem}{suffix}.{ext}"),

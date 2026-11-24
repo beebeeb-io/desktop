@@ -52,11 +52,11 @@ impl BundleRefused {
             Self::NotSignedIn => "Unlock Beebeeb to export a support bundle.",
             Self::NoQueue => concat!(
                 "Nothing has synced on ",
-                crate::device_word!(),
+                device_word!(),
                 " yet, so there is nothing to put in a bundle."
             ),
             Self::NoFolder => concat!(
-                crate::device_word_cap!(),
+                device_word_cap!(),
                 " has no Downloads folder to save the bundle in."
             ),
             Self::WriteFailed => "The bundle could not be saved in your Downloads folder.",

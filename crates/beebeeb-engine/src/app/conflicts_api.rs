@@ -148,7 +148,7 @@ fn iso(time: SystemTime) -> String {
 /// same file replaces it. `<account>` is a digest of the account's user id (its email when no id is known) and
 /// `<file>` one of the file's id: never an id itself, and never a path a name or an id could lead out of the folder.
 /// Sign-out leaves it: it is the person's own data.
-pub const REPLACED_FOLDER: &str = concat!("Replaced on ", crate::device_word!());
+pub const REPLACED_FOLDER: &str = concat!("Replaced on ", device_word!());
 
 /// The name of the copy being made, beside the kept one, until Keep there is known to have worked.
 const INCOMING: &str = ".incoming";
