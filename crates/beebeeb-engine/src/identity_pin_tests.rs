@@ -82,8 +82,8 @@ const LITERALS_ALLOWED: &[(&str, &[&str], &str)] = &[
     ),
     (
         "crates/beebeeb-engine/src/finder_setup/error.rs",
-        &["io.beebeeb.app", "io.beebeeb.bridge"],
-        "two in-process NSError-style domain labels: tags an error is classified by, never a name anything is \
+        &["io.beebeeb.bridge"],
+        "one bridge NSError-style domain label: a tag an error is classified by, never a name anything is \
          stored or registered under",
     ),
     (
