@@ -19,6 +19,7 @@ pub mod bandwidth;
 pub mod bandwidth_data;
 pub mod diagnostics;
 pub mod drive;
+pub mod finder;
 pub mod general;
 pub mod insights;
 pub mod keep;
@@ -56,6 +57,7 @@ pub const SIDEBAR_PANE: &str = "settings-sidebar";
 pub const PAGE_PANE: &str = "settings-page";
 use rune::{Align, Cx, El, Key, KeyEvent, Side, Tx, col, row};
 
+use beebeeb_engine::surfaces::phase::{FinderFailureReason, FinderSetup};
 use drive::{DriveSettings, Kept};
 use source::{AlertTarget, BoardSettings, Channel, SettingsSource, ThemeChoice};
 
@@ -83,6 +85,8 @@ pub enum Pane {
     Diagnostics,
     /// Thumbnails and previews (DW-0744).
     Previews,
+    /// Sync › Beebeeb in Finder (macOS, dm-18).
+    Finder,
 }
 
 /// Which menu a pop-up button drops.
@@ -204,6 +208,8 @@ pub struct SettingsUi {
     pub more: more::MoreUi,
     /// What Thumbnails and previews holds open: a drafted choice, the compare view.
     pub previews: previews::PreviewsUi,
+    /// What Beebeeb in Finder holds (macOS, dm-18).
+    pub finder: finder::FinderUi,
     /// The crash record "Send a report" attached to Report a problem (`shell::crash_notice`), until a bundle holds it.
     pub crash_record: Option<crate::log_file::crash::CrashRecord>,
 }
@@ -223,6 +229,7 @@ impl Default for SettingsUi {
             bandwidth: bandwidth::Held::default(),
             more: more::MoreUi::default(),
             previews: previews::PreviewsUi::default(),
+            finder: finder::FinderUi::default(),
             crash_record: None,
         }
     }
@@ -302,6 +309,8 @@ impl SettingsUi {
     /// Whether `pane` draws from a source that answers for it (Drive's own panes ask `drive`).
     pub fn wired(&self, pane: Pane) -> bool {
         match pane {
+            // Read from the reconciler, which answers on its own.
+            Pane::Finder => cfg!(target_os = "macos"),
             Pane::Storage | Pane::Insights | Pane::Sync | Pane::Bandwidth | Pane::Diagnostics | Pane::Previews => {
                 self.drive.wired(pane)
             }
@@ -412,6 +421,12 @@ pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, t: &Theme) -> Option<El> {
 #[allow(clippy::type_complexity)]
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0701", |s| open_on(s, "DW-0701")),
+    ("DM-18-adding", |s| finder::show(s, FinderSetup::Adding, None, false)),
+    ("DM-18-ready", |s| finder::show(s, FinderSetup::Ready, None, false)),
+    ("DM-18-off", |s| finder::show(s, FinderSetup::UserDisabled, Some(FinderFailureReason::UserDisabled), false)),
+    ("DM-18-failed", |s| finder::show(s, FinderSetup::Failed, Some(FinderFailureReason::Timeout), false)),
+    ("DM-18-missing", |s| finder::show(s, FinderSetup::Missing, None, false)),
+    ("DM-18-repair", |s| finder::show(s, FinderSetup::Ready, None, true)),
     ("DW-0781", |s| {
         s.settings.source = Box::new(BoardSettings::new().with_update_available());
         open_on(s, "DW-0701");
@@ -596,6 +611,7 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
         "DW-0784" | "DW-0784c" | "DW-0784d" => (Pane::Sync, Some(Dialog::Keep), None),
         "DW-0784b" => (Pane::Sync, Some(Dialog::KeepConfirm), None),
         "DW-0744" => (Pane::Previews, None, None),
+        "DM-18" => (Pane::Finder, None, None),
         _ => return None,
     })
 }
@@ -677,7 +693,7 @@ fn shell_pane(section: Pane) -> SettingsPane {
     match section {
         Pane::Notifications | Pane::Recent => SettingsPane::Notifications,
         Pane::Storage | Pane::Insights => SettingsPane::Storage,
-        Pane::Sync => SettingsPane::SyncAndFileExplorer,
+        Pane::Sync | Pane::Finder => SettingsPane::SyncAndFileExplorer,
         Pane::Bandwidth => SettingsPane::Bandwidth,
         Pane::Previews => SettingsPane::ThumbnailsAndPreviews,
         _ => SettingsPane::General,
@@ -750,6 +766,9 @@ pub fn go(s: &mut State, frame: &'static str) {
     ui.show(pane);
     ui.source.opened(pane);
     ui.drive.opened(pane);
+    if pane == Pane::Finder {
+        finder::open(ui);
+    }
     match dialog {
         Some(Dialog::Limit(which)) => ui.open_limit(which),
         Some(Dialog::Keep) => keep::open(ui),
@@ -780,7 +799,7 @@ impl Pane {
             Pane::General | Pane::About | Pane::StorageLocation | Pane::Diagnostics => Pane::General,
             Pane::Notifications | Pane::Recent => Pane::Notifications,
             Pane::Storage | Pane::Insights => Pane::Storage,
-            Pane::Sync => Pane::Sync,
+            Pane::Sync | Pane::Finder => Pane::Sync,
             Pane::Bandwidth => Pane::Bandwidth,
             Pane::Previews => Pane::Previews,
         }
@@ -830,6 +849,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::Storage => storage::pane(ui, &t),
         Pane::Insights => insights::pane(ui, &t),
         Pane::Sync => sync::pane(ui, &t),
+        Pane::Finder => finder::pane(ui, &t),
         Pane::Bandwidth => bandwidth::pane(ui, &t),
         Pane::Diagnostics => diagnostics::pane(ui, &t),
         // A source that does not answer for this pane: the same "not built yet" frame.

@@ -45,7 +45,7 @@ use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary
 pub mod account;
 mod app_lock;
 mod away;
-mod finder_setup;
+pub mod finder_setup;
 mod drive_errors;
 use drive_errors::{map_drive_err, map_new_file_err};
 pub mod backups;
