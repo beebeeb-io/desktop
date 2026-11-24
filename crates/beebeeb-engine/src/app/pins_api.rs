@@ -8,7 +8,7 @@ use crate::account::SessionGeneration;
 impl<C: CredentialStores> Engine<C> {
     /// The pinned folder ids, in order, for `session`. A failed read is an `Err`, never "none".
     pub fn pinned_folders_for(&self, session: SessionGeneration) -> Result<Vec<String>, AccountCallError> {
-        self.account_call_for(session, |api| async move { api.pinned_folders().await })
+        self.account_call_for(session, |api| async move { Ok(api.pinned_folders().await?) })
     }
 
     /// Stores the pinned folder ids (the whole list) for `session`.
