@@ -35,6 +35,30 @@ fn viewer_probe_through_serve() {
     eprintln!("PROBE exit {}", helper.exit_code());
 }
 
+
+#[test]
+fn viewer_probe_open_edit_through_serve() {
+    use beebeeb_office_protocol::office::{EditKind, OpenEdit, Outline};
+    let memory = FakeMemory::new();
+    let mut helper = Running::start(Arc::clone(&memory), Arc::new(Office));
+    let doc = memory.section(PROBE.to_vec());
+    helper.send(0, &Message::OpenEdit(OpenEdit { doc, kind: EditKind::Docx }));
+    let (id, answer) = helper.answer();
+    eprintln!("PROBE-EDIT open answer {id}: {answer:?}");
+    if let Message::Opened(opened) = &answer {
+        eprintln!("PROBE-EDIT check_opened: {:?}", check_opened(opened, &Limits::CONTRACT));
+        let ask = Render { page: 0, scale: render_scale(1.0, 96.0), region: None, out: NO_GRANT };
+        let (w, h) = asked_size(&ask, &opened.sizes[0], &Limits::CONTRACT).expect("size");
+        let out = memory.zeroed(w as usize * h as usize * 4);
+        helper.send(2, &Message::Render(Render { out, ..ask }));
+        eprintln!("PROBE-EDIT render: {:?}", helper.answer());
+        helper.send(4, &Message::Outline(Outline { from: 0 }));
+        eprintln!("PROBE-EDIT outline: {:?}", helper.answer());
+    }
+    helper.close();
+    eprintln!("PROBE-EDIT exit {}", helper.exit_code());
+}
+
 #[cfg(windows)]
 mod win {
     use std::fs::File;
@@ -48,7 +72,7 @@ mod win {
 
     const HELPER: &str = env!("CARGO_BIN_EXE_beebeeb-office-render");
 
-    fn run(name: &str, bytes: &[u8]) {
+    fn run(name: &str, bytes: &[u8], edit: bool) {
         let sandbox = Sandbox::new(SandboxLimits::default()).expect("the sandbox starts");
         let mut child: Child = sandbox.spawn(Path::new(HELPER)).expect("the confined helper starts");
         let pipes = child.take_pipes().expect("pipes");
@@ -65,9 +89,10 @@ mod win {
         let mut doc = Section::new(bytes.len()).expect("section");
         doc.as_mut_slice().copy_from_slice(bytes);
         let g = child.grant(&doc, Access::Read).expect("grant");
-        let open = Message::Open(Open { kind: DocKind::Docx, doc: GrantRef { wire: g.wire, len: g.len } });
+        let gr = GrantRef { wire: g.wire, len: g.len };
+        let (open, kind) = if edit { (Message::OpenEdit(beebeeb_office_protocol::office::OpenEdit { doc: gr, kind: beebeeb_office_protocol::office::EditKind::Docx }), beebeeb_office_protocol::office::KIND_OPEN_EDIT) } else { (Message::Open(Open { kind: DocKind::Docx, doc: gr }), KIND_OPEN) };
         let id = ids.next_id();
-        write_frame(&mut to, KIND_OPEN, id, &open.encode().expect("fits")).expect("write");
+        write_frame(&mut to, kind, id, &open.encode().expect("fits")).expect("write");
         let a = rx.recv_timeout(Duration::from_secs(60));
         let ans = match &a { Ok(Ok(f)) => format!("kind={:#06x} {:?}", f.kind, Message::decode(f.kind, &f.payload)), other => format!("{other:?}") };
         eprintln!("PROBE-WIN {name} open: {ans}");
@@ -91,8 +116,10 @@ mod win {
 
     #[test]
     fn viewer_probe_windows_sandbox() {
-        run("letter", include_bytes!("fixtures/letter-1.docx"));
-        run("probe-lo", super::PROBE);
-        run("system-font", include_bytes!("fixtures/system-font.docx"));
+        for edit in [false, true] {
+            eprintln!("PROBE-WIN edit={edit}");
+            run("letter", include_bytes!("fixtures/letter-1.docx"), edit);
+            run("probe-lo", super::PROBE, edit);
+        }
     }
 }
