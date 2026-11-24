@@ -133,6 +133,16 @@ const LITERALS_ALLOWED: &[(&str, &[&str], &str)] = &[
         "the name of the first list of commands (DW-1232: Beebeeb, File, Edit): the brand, for both builds",
     ),
     (
+        "native/beebeeb-drive-rune/src/shell/macos_menu.rs",
+        &["Beebeeb"],
+        "the name of the macOS menu bar's first menu (`APP`): the brand, for both builds",
+    ),
+    (
+        "native/beebeeb-drive-rune/src/shell/platform/macos_autostart.rs",
+        &["io.beebeeb.app.plist"],
+        "the 0.8.x LaunchAgent file name to find and remove (legacy, only ever the real build's)",
+    ),
+    (
         "native/beebeeb-drive-rune/src/ui/kit.rs",
         &["Beebeeb"],
         "the logo's accessibility label (the brand, for both builds)",
@@ -162,7 +172,12 @@ const NAMING_ALLOWED: [(&str, usize, &str); 3] = [
 
 /// Rule 2b's allow-list: engine test code that names `REAL` on purpose, `(file, namings, why)`. Everything else in
 /// the engine's tests runs on `TEST`.
-const TEST_REAL_ALLOWED: [(&str, usize, &str); 18] = [
+const TEST_REAL_ALLOWED: [(&str, usize, &str); 19] = [
+    (
+        "crates/beebeeb-engine/src/config/paths.rs",
+        2,
+        "the default sync root suggestion is asserted against REAL's user-facing folder name (macOS container-relative, elsewhere the home folder)",
+    ),
     (
         "crates/beebeeb-engine/src/backup/device.rs",
         7,
