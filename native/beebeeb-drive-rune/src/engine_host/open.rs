@@ -15,7 +15,7 @@
 //! credentials with no local data beside them are refused for every server ([`CredentialsWithoutData`]).
 //!
 //! Must not: run before the single-instance claim (a second launch must not open a second handle), run in a
-//! tooling run, read `BB_API_BASE` (the API base is the caller's argument or the engine's built-in default), hand
+//! tooling run, read `BB_API_BASE` anywhere but [`api_base`] (and there only where the build reads `--api-base`), hand
 //! the engine a `--api-base` value that was not checked (an [`ApiBase`] is made in this file and nowhere else), let
 //! the engine read a test build's stored session or `state.db` for a server they were not made for.
 
@@ -24,7 +24,7 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 
 use beebeeb_engine::app::{CredentialStores, Engine, EngineConfig};
 use beebeeb_engine::host::{ChannelHost, HostMessage};
@@ -146,7 +146,15 @@ impl fmt::Display for Refused {
 /// and it is an origin the app may talk to ([`Refused`] says why not), else the engine's built-in default. A flag the
 /// build does not read is ignored whatever it holds; a flag it reads is never replaced by the default.
 pub fn api_base(flag: Option<&str>, reads_flag: bool) -> Result<ApiBase, Refused> {
-    match flag.filter(|_| reads_flag) {
+    api_base_with_env(flag, std::env::var("BB_API_BASE").ok().as_deref(), reads_flag)
+}
+
+/// [`api_base`] with `BB_API_BASE` given: where the build reads `--api-base` (a dev build or the test build, on every
+/// OS), a non-empty `BB_API_BASE` is that flag's fallback, checked the same way; the flag wins. Where the build does
+/// not read the flag (the real app as shipped) the environment is ignored too.
+pub fn api_base_with_env(flag: Option<&str>, env: Option<&str>, reads_flag: bool) -> Result<ApiBase, Refused> {
+    let env = env.map(str::trim).filter(|text| !text.is_empty());
+    match flag.or(env).filter(|_| reads_flag) {
         None => Ok(ApiBase::engine_default()),
         Some(text) => checked_origin(text).map(|origin| ApiBase {
             origin,

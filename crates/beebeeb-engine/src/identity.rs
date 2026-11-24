@@ -71,17 +71,6 @@ pub static TEST: EngineIdentity = EngineIdentity {
     logs_dir_name: "Beebeeb Test",
 };
 
-/// Whether a test build may open an engine as [`TEST`] on macOS: this crate's own unit-test build (`cfg!(test)`,
-/// whose tests run in a throw-away root under `test_sandbox`), and the tests of the native shell, which turn on
-/// the dev-only `macos-test-engine` feature under `[dev-dependencies]`. Compile-time only; a release build with
-/// the feature does not compile (below). [`REAL`] is never refused, whatever this is.
-const TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS: bool = cfg!(test) || cfg!(feature = "macos-test-engine");
-
-#[cfg(all(feature = "macos-test-engine", not(debug_assertions)))]
-compile_error!(
-    "beebeeb-engine: macos-test-engine is for tests only; it is on in a release build (enable it under [dev-dependencies] only)"
-);
-
 impl EngineIdentity {
     /// The identity a bundle identifier names: exactly the two known ones, anything else is `None`.
     pub const fn from_bundle_identifier(identifier: &str) -> Option<&'static EngineIdentity> {
@@ -97,7 +86,11 @@ impl EngineIdentity {
     /// The other build of this app (the test build for the real app, and the other way around): the one whose
     /// folders this one must never sync into.
     pub fn other_build(&self) -> &'static EngineIdentity {
-        if self.is_real() { &TEST } else { &REAL }
+        if self.is_real() {
+            &TEST
+        } else {
+            &REAL
+        }
     }
 
     /// Whether this is the released app.
@@ -126,27 +119,28 @@ impl EngineIdentity {
         }
     }
 
-    /// Why this app must not run on `os` (`std::env::consts::OS`), or `None` when it may. The test build has no
-    /// macOS App Group and no File Provider extension signed for it, so on a Mac it could only use the real
-    /// app's group container: it does not start there. `Engine::open` refuses with this.
+    /// Why this app must not run on `os` (`std::env::consts::OS`), or `None` when it may. No build is refused
+    /// any more: the test build on macOS used to be, because it shared the real app's data there. It no longer
+    /// does: its Keychain service (`io.beebeeb.app.test`), config and state folder (`beebeeb-test`), cache and
+    /// temp folder (`beebeeb-test`), log folder (`Logs/Beebeeb Test`) and App Group container
+    /// (`R8352WDJJR.io.beebeeb.app.test.fileprovider`) are all its own
+    /// (`the_macos_test_identity_shares_no_path_or_service_with_the_real_one`). `Engine::open` asks this.
     pub fn refusal_on(&self, os: &str) -> Option<&'static str> {
-        self.refusal(os, TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS)
+        self.refusal(os)
     }
 
-    /// Why a host must not start on `os`, before it makes anything: [`Self::refusal_on`] without its test-build
-    /// exception, in every build. A host's own start question is never relaxed, also not in a debug binary
-    /// that was linked with `macos-test-engine` on (`cargo build --all-targets` unifies dev-dependency features).
+    /// Why a host must not start on `os`, before it makes anything. Same answer as [`Self::refusal_on`].
     pub fn start_refusal_at(&self, os: &str) -> Option<&'static str> {
-        self.refusal(os, false)
+        self.refusal(os)
     }
 
-    /// [`Self::refusal_on`] with the one exception spelled out: `tests_may_open` is
-    /// [`TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS`], fixed at compile time (no env var or runtime switch), true only in a
-    /// test build. Every shipped build passes false.
-    fn refusal(&self, os: &str, tests_may_open: bool) -> Option<&'static str> {
-        (!self.is_real() && os == "macos" && !tests_may_open).then_some(
-            "This is a test build of Beebeeb. Test builds do not run on macOS: they would share the real app's data there.",
-        )
+    /// The one place a refusal would be decided. There is none today.
+    fn refusal(&self, os: &str) -> Option<&'static str> {
+        // The reason there is none: on a Mac the test build's Keychain service is not the real app's.
+        debug_assert!(
+            self.is_real() || os != "macos" || self.credential_service != self.other_build().credential_service
+        );
+        None
     }
 
     /// Where this app's throw-away files go under an OS temp or cache dir, and so the only part of that dir a
@@ -294,52 +288,55 @@ mod tests {
         assert!(!temp.join("bb_real-file").starts_with(TEST.scratch_dir_in(temp)));
     }
 
-    /// The test build does not run on macOS; nothing else is refused.
+    /// Nothing is refused, on any OS: the test build on macOS has its own names for everything.
     #[test]
-    fn only_the_test_build_on_macos_is_refused() {
-        // `false`: a shipped (non-unit-test) build.
-        assert!(
-            TEST.refusal("macos", false)
-                .is_some_and(|words| words.contains("macOS"))
-        );
-        for os in ["windows", "linux", "freebsd", ""] {
-            assert_eq!(TEST.refusal(os, false), None, "{os:?}");
-        }
-        // The real app, under either answer of the compile-time exception: never refused.
-        for os in ["macos", "windows", "linux", "freebsd", ""] {
-            for tests_may_open in [false, true] {
-                assert_eq!(REAL.refusal(os, tests_may_open), None, "{os:?}");
+    fn no_build_is_refused_on_any_os() {
+        for identity in [TEST.other_build(), &TEST] {
+            for os in ["macos", "windows", "linux", "freebsd", ""] {
+                assert_eq!(identity.refusal_on(os), None, "{os:?}");
+                assert_eq!(identity.start_refusal_at(os), None, "{os:?}");
             }
-        }
-        // The exception is compile-time only: this crate's unit tests (`cfg!(test)`) or `macos-test-engine`.
-        const { assert!(TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS) };
-        assert_eq!(
-            TESTS_MAY_OPEN_AN_ENGINE_ON_MACOS,
-            cfg!(test) || cfg!(feature = "macos-test-engine")
-        );
-        assert!(TEST.refusal_on("macos").is_none());
-        assert!(TEST.refusal("macos", true).is_none());
-        // It relaxes the test build on macOS only: elsewhere, and for the real app, it changes nothing.
-        for os in ["macos", "windows", "linux", "freebsd", ""] {
-            assert_eq!(TEST.other_build().refusal_on(os), None, "{os:?}");
-            assert_eq!(TEST.refusal(os, true), None, "{os:?}");
         }
     }
 
-    /// A host's start question has no exception: the test build is refused on macOS in every build, the same
-    /// words as a shipped `refusal_on`; nothing else is refused.
+    /// Why the macOS refusal could go: every folder, Keychain service and container the test identity uses on
+    /// a Mac is its own. No path is equal to a real one, none sits inside one, and none contains one. The 0.8.x
+    /// Tauri app used the real identifier and `beebeeb`, so it is covered by the real column.
     #[test]
-    fn the_start_question_never_relaxes() {
-        assert_eq!(TEST.start_refusal_at("macos"), TEST.refusal("macos", false));
-        assert!(
-            TEST.start_refusal_at("macos")
-                .is_some_and(|words| words.contains("macOS"))
-        );
-        for os in ["windows", "linux", "freebsd", ""] {
-            assert_eq!(TEST.start_refusal_at(os), None, "{os:?}");
-        }
-        for os in ["macos", "windows", "linux", "freebsd", ""] {
-            assert_eq!(TEST.other_build().start_refusal_at(os), None, "{os:?}");
+    fn the_macos_test_identity_shares_no_path_or_service_with_the_real_one() {
+        use std::path::{Path, PathBuf};
+        let home = Path::new("/Users/someone");
+        let paths = |id: &EngineIdentity| -> Vec<(&'static str, PathBuf)> {
+            let support = home.join("Library/Application Support");
+            vec![
+                ("config", support.join(id.config_dir_name())),
+                ("app data", support.join(id.bundle_identifier())),
+                ("state", id.state_dir_in(&support.join(id.bundle_identifier()))),
+                ("cache", home.join("Library/Caches").join(id.config_dir_name())),
+                ("temp", std::path::Path::new("/tmp").join(id.config_dir_name())),
+                ("logs", home.join("Library/Logs").join(id.logs_dir_name())),
+                (
+                    "group container",
+                    home.join("Library/Group Containers").join(id.macos_app_group()),
+                ),
+                ("sync folder", home.join(id.sync_folder_name())),
+                (
+                    "keychain service",
+                    PathBuf::from("keychain").join(id.credential_service()),
+                ),
+            ]
+        };
+        assert!(std::ptr::eq(TEST.other_build(), &REAL));
+        let (real, test) = (paths(TEST.other_build()), paths(&TEST));
+        for (rname, r) in &real {
+            for (tname, t) in &test {
+                let (rl, tl) = (r.to_string_lossy().to_lowercase(), t.to_string_lossy().to_lowercase());
+                let (r, t) = (Path::new(&rl), Path::new(&tl));
+                assert!(
+                    t != r && !t.starts_with(r) && !r.starts_with(t),
+                    "test {tname} {tl} overlaps real {rname} {rl}"
+                );
+            }
         }
     }
 
@@ -379,11 +376,9 @@ mod tests {
         assert_ne!(*logs_dir_name, TEST.logs_dir_name);
         // No test name is a prefix-free accident: none equals the real one case-insensitively either.
         assert!(!TEST.sync_folder_name.eq_ignore_ascii_case(REAL.sync_folder_name));
-        assert!(
-            !TEST
-                .cloud_files_provider_name
-                .eq_ignore_ascii_case(REAL.cloud_files_provider_name)
-        );
+        assert!(!TEST
+            .cloud_files_provider_name
+            .eq_ignore_ascii_case(REAL.cloud_files_provider_name));
     }
 
     #[test]

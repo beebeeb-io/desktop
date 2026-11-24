@@ -205,15 +205,13 @@ fn the_test_build_refuses_the_real_apps_state_folder_and_sync_folder() {
     );
     // A second start with another host folder is refused: one state folder per process.
     let elsewhere = tempfile::tempdir().unwrap();
-    assert!(
-        open::open(
-            elsewhere.path(),
-            &ApiBase::engine_default(),
-            MemoryCredentials::default(),
-            || {}
-        )
-        .is_err()
-    );
+    assert!(open::open(
+        elsewhere.path(),
+        &ApiBase::engine_default(),
+        MemoryCredentials::default(),
+        || {}
+    )
+    .is_err());
 
     // Where it syncs: its own folder, not the real app's; and a folder Windows has registered to the real
     // app's provider is refused by the engine's owner check, as is one whose registration cannot be read.
@@ -228,11 +226,9 @@ fn the_test_build_refuses_the_real_apps_state_folder_and_sync_folder() {
     // Its settings file is its own.
     let settings = DesktopConfig::path_for(identity).unwrap();
     assert_ne!(settings, DesktopConfig::path_for(&REAL).unwrap());
-    assert!(
-        settings
-            .components()
-            .any(|part| part.as_os_str() == TEST.config_dir_name())
-    );
+    assert!(settings
+        .components()
+        .any(|part| part.as_os_str() == TEST.config_dir_name()));
 }
 
 /// The sync folder is never a backup folder, and whose sync folder that is comes from the identity: the test
@@ -506,7 +502,13 @@ fn the_api_base_is_an_argument_never_the_environment() {
             !text.contains("api_base_url("),
             "{file} reads the API base from the environment"
         );
-        assert!(!text.contains("env::var(\"BB_"), "{file} reads an environment variable");
+        // The one read: `open::api_base`, as the fallback of `--api-base` where the build reads the flag.
+        let reads = text.matches("env::var(\"BB_").count();
+        assert_eq!(
+            reads,
+            usize::from(file == "engine_host/open.rs"),
+            "{file} reads an environment variable"
+        );
     }
     // The engine handle hands its own API base to the engine it starts.
     let app = include_str!("../../../../crates/beebeeb-engine/src/app.rs");
@@ -668,8 +670,8 @@ fn settings_is_unwired_on_a_live_engine() {
 
 #[test]
 fn account_is_the_engines_source_on_a_live_engine_and_unbound_panes_are_unwired() {
-    use crate::frames::account::Pane as AccountPane;
     use crate::frames::account::source::{Count, PaneState};
+    use crate::frames::account::Pane as AccountPane;
     let s = engine_state();
     let source = s.account.source.as_deref().expect("the engine's account source");
     // Account, Sign-in and security and Devices and sessions answer (`engine_host::account`).
@@ -697,7 +699,7 @@ fn pc_status_is_empty_on_a_live_engine() {
 #[test]
 fn sidebar_badges_are_0_on_a_live_engine() {
     let s = engine_state();
-    use crate::ui::sidebar::{SidebarSection, badge_for};
+    use crate::ui::sidebar::{badge_for, SidebarSection};
     assert!(
         badge_for(&s, SidebarSection::Shared).is_none(),
         "shared badge on engine"
@@ -732,7 +734,7 @@ fn the_snapshot_path_keeps_every_groups_fixtures() {
     assert!(!s.frames.pc.sync_words().is_empty());
     assert!(!s.frames.pc.summary().is_empty());
     assert!(s.storage_split.is_some(), "snap: the board's split is present");
-    use crate::ui::sidebar::{SidebarSection, badge_for};
+    use crate::ui::sidebar::{badge_for, SidebarSection};
     assert!(badge_for(&s, SidebarSection::Shared).is_some(), "snap: shared badge");
     assert!(badge_for(&s, SidebarSection::Trash).is_some(), "snap: trash badge");
     assert!(s.this_pc.kept_count() > 0, "snap: available offline count");
@@ -1032,4 +1034,41 @@ fn what_is_left_of_a_refused_drop_is_the_files_that_did_not_go_in() {
     // Nothing went in: the window sends all of it again. Not refused: nothing is left.
     assert_eq!(upload_rest(&files, 0, true), None);
     assert_eq!(upload_rest(&files, 3, false), None);
+}
+
+/// `BB_API_BASE` is the fallback of `--api-base` where the build reads the flag (the test build, on every OS), checked
+/// the same way, and ignored where it does not (the real app as shipped). The flag wins.
+#[test]
+fn bb_api_base_is_the_fallback_of_the_flag_where_the_build_reads_it() {
+    let origin = |flag, env, reads| open::api_base_with_env(flag, env, reads).map(|base| base.origin().to_string());
+    assert_eq!(
+        origin(None, Some("http://127.0.0.1:3001/"), true).unwrap(),
+        "http://127.0.0.1:3001"
+    );
+    assert_eq!(
+        origin(Some("http://localhost:4000"), Some("http://127.0.0.1:3001"), true).unwrap(),
+        "http://localhost:4000"
+    );
+    assert_eq!(
+        open::api_base_with_env(None, Some("http://127.0.0.1:3001"), true)
+            .unwrap()
+            .chosen_by_flag(),
+        true
+    );
+    // not read: the default, whatever the environment holds (even an invalid value)
+    assert_eq!(
+        open::api_base_with_env(None, Some("http://evil.example"), false).unwrap(),
+        ApiBase::engine_default()
+    );
+    // empty or blank: the default
+    assert_eq!(
+        open::api_base_with_env(None, Some("  "), true).unwrap(),
+        ApiBase::engine_default()
+    );
+    assert_eq!(
+        open::api_base_with_env(None, None, true).unwrap(),
+        ApiBase::engine_default()
+    );
+    // checked like the flag: plain http to a remote host is refused, never replaced by the default
+    assert!(open::api_base_with_env(None, Some("http://example.com"), true).is_err());
 }

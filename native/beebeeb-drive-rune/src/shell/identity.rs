@@ -99,11 +99,10 @@ impl AppIdentity {
         }
     }
 
-    /// Why this app must not start on `os` (`std::env::consts::OS`), or `None` when it may. The engine's
-    /// rule: the test build has no macOS App Group and no File Provider extension of its own, so there it
-    /// would have to use the real app's. `shell::run` asks before anything else exists. This question has no
-    /// test exception in any build (the engine's `start_refusal_at`); only `Engine::open` lets this crate's
-    /// tests open a TEST engine on a Mac (`macos-test-engine`, a dev-dependency feature).
+    /// Why this app must not start on `os` (`std::env::consts::OS`), or `None` when it may. Today never: the test
+    /// build on macOS used to be refused because it shared the real app's data; it has its own Keychain service,
+    /// folders and App Group now (the engine's `the_macos_test_identity_shares_no_path_or_service_with_the_real_one`).
+    /// `shell::run` still asks before anything else exists, so a future refusal has its caller.
     pub fn start_refusal(self, os: &str) -> Option<&'static str> {
         self.engine().start_refusal_at(os)
     }
@@ -251,6 +250,24 @@ mod tests {
         assert!(!real.url_scheme().eq_ignore_ascii_case(test.url_scheme()));
     }
 
+    /// On macOS the shell's folders are `~/Library/{Application Support,Caches,Logs}/<state_dir_id>`: the test
+    /// build's is neither the real one nor inside it (and not the 0.8.x Tauri app's, which is the real one).
+    #[test]
+    fn the_test_build_has_its_own_state_folder_beside_the_real_one() {
+        use std::path::Path;
+        let (real, test) = (
+            Path::new("Library/Application Support").join(AppIdentity::Real.state_dir_id()),
+            Path::new("Library/Application Support").join(AppIdentity::Test.state_dir_id()),
+        );
+        assert_ne!(real, test);
+        assert!(!test.starts_with(&real) && !real.starts_with(&test));
+        assert_eq!(
+            AppIdentity::Test.engine().credential_service(),
+            AppIdentity::Test.bundle_identifier()
+        );
+        assert_eq!(AppIdentity::Test.start_refusal("macos"), None);
+    }
+
     #[test]
     fn only_the_exact_real_identifier_is_the_real_app() {
         assert_eq!(
@@ -382,29 +399,15 @@ mod tests {
         assert!(!AppIdentity::Test.engine().is_real());
     }
 
-    /// The test build does not start on macOS; the real app starts everywhere, the test build elsewhere. The
-    /// start question is the same in this test build as in a shipped one: the test exception never reaches it.
+    /// No build is refused on any OS: the test build runs on macOS with its own Keychain service and folders.
     #[test]
-    fn the_test_build_is_refused_on_macos_only() {
-        assert!(AppIdentity::Test.start_refusal("macos").is_some_and(|words| words.contains("macOS")));
-        for os in ["windows", "linux"] {
-            assert_eq!(AppIdentity::Test.start_refusal(os), None, "{os}");
-        }
+    fn no_build_is_refused_on_any_os() {
         for os in ["macos", "windows", "linux"] {
-            assert_eq!(AppIdentity::Real.start_refusal(os), None, "{os}");
+            for identity in AppIdentity::BOTH {
+                assert_eq!(identity.start_refusal(os), None, "{os}");
+                assert_eq!(identity.engine().refusal_on(os), None, "{os}");
+            }
         }
-    }
-
-    /// This crate's tests may open a TEST engine on a Mac (`Engine::open` asks `refusal_on`): the engine's
-    /// `macos-test-engine` feature, on under `[dev-dependencies]` only. The real app is never refused anywhere,
-    /// and the test build's own start question still refuses macOS (above).
-    #[test]
-    fn this_crates_tests_may_open_a_test_engine_on_macos() {
-        for os in ["macos", "windows", "linux"] {
-            assert_eq!(AppIdentity::Test.engine().refusal_on(os), None, "{os}");
-            assert_eq!(AppIdentity::Real.engine().refusal_on(os), None, "{os}");
-        }
-        assert!(AppIdentity::Test.start_refusal("macos").is_some());
     }
 
     /// `GOLDEN` is the real app: golden/snapshot exports compare against the board, which
@@ -423,7 +426,7 @@ mod tests {
     /// one is tellable apart.
     #[test]
     fn tray_menu_names_the_build() {
-        use crate::shell::tray::{MenuEntry, TrayInputs, tray_model_for};
+        use crate::shell::tray::{tray_model_for, MenuEntry, TrayInputs};
         let inputs = TrayInputs {
             signed_in: true,
             explorer_ready: true,
@@ -452,7 +455,7 @@ mod tests {
     /// The tray tooltip says "<name>: <state>": the test build shows "Beebeeb Test: …".
     #[test]
     fn tray_tooltip_names_the_build() {
-        use crate::shell::tray::{TrayInputs, tray_model_for};
+        use crate::shell::tray::{tray_model_for, TrayInputs};
         let inputs = TrayInputs {
             signed_in: true,
             explorer_ready: true,
