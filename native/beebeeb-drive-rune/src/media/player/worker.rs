@@ -302,17 +302,36 @@ impl Worker {
         if self.slots.cancelled() {
             return Err(Exit::Done);
         }
-        let bytes = self.opener.open(&self.item.file_id)?;
+        let mut bytes = self.opener.open(&self.item.file_id)?;
         self.len = bytes.len();
+        // RE-d: the file's two ends first (the tail chunk, then the head), so a `moov` written at the end gives the
+        // length now, and the helper's first reads come from the reader's cache (`super::ranged`).
+        let probed = super::ranged::prime_and_probe(bytes.as_mut(), &self.slots.cancel);
         self.bytes = Some(bytes);
         self.trace.mark("bytes");
         if self.slots.cancelled() {
             return Err(Exit::Done);
         }
+        if let Some(length_ms) = probed {
+            self.show_length(length_ms)?;
+        }
         self.start_helper()?;
         loop {
             self.tick()?;
         }
+    }
+
+    /// The length the file's own header states, shown while the helper opens it (its `Opened` replaces it).
+    fn show_length(&mut self, length_ms: u64) -> Result<(), Exit> {
+        self.now.length_ms = length_ms;
+        self.publish(|player| {
+            if let Some(state) = player.shown.as_mut() {
+                state.length_ms = length_ms;
+            }
+        })
+        .ok_or(Exit::Done)?;
+        self.wake();
+        Ok(())
     }
 
     /// Starts a helper in `self.profile`, hands it to the run and sends it `Open`.
@@ -432,7 +451,11 @@ impl Worker {
                 Err(LinkError::Timeout) => break,
                 Err(gone @ (LinkError::Gone | LinkError::Protocol(_))) => {
                     batch.iter_mut().for_each(wipe_answer);
-                    return Err(broke_as(if gone == LinkError::Gone { Broke::Gone } else { Broke::Protocol }));
+                    return Err(broke_as(if gone == LinkError::Gone {
+                        Broke::Gone
+                    } else {
+                        Broke::Protocol
+                    }));
                 }
             }
             wait = Duration::ZERO;

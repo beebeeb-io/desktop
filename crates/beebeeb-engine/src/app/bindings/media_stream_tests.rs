@@ -739,6 +739,29 @@ fn media_sequential_play_at_real_stride_fetches_each_chunk_once() {
     assert!(crossed >= 25, "precondition: the play crossed {crossed} chunks");
 }
 
+/// RE-d at the real numbers of a phone's 367 MB MOV (core plans it in 16 MiB chunks): the player reads the last byte
+/// first, then the head, then the helper reads the head and the `moov` at the end and starts at the head again. Only
+/// the head and the tail chunks are fetched, each once: the tail chunk stays in the cache while the head is read.
+#[test]
+fn media_range_tail_then_head_fetches_only_the_end_chunks() {
+    const LEN: u64 = 367_000_000;
+    const CHUNK: u64 = 16 << 20;
+    let last = ((LEN - 1) / CHUNK) as u32;
+    let (mut reader, fetches) = counting(LEN, CHUNK, Limits::SHIPPED);
+    let moov = LEN - 2_000_000;
+    for (at, len) in [(LEN - 1, 1), (0, 1), (0, 65_536), (moov, 2_000_000), (32, 1 << 20)] {
+        read(&mut reader, at, len).unwrap_or_else(|why| panic!("read at {at}: {why:?}"));
+        settle(&reader);
+    }
+    drop(reader);
+    let fetched = fetches.lock().unwrap().clone();
+    assert_eq!(
+        fetched,
+        HashMap::from([(0, 1), (last, 1)]),
+        "only the head and the tail chunks, each once"
+    );
+}
+
 /// A stride whose three chunks pass the ceiling (the cap is the ceiling, 2 500) and a chunk 0 of more than a quarter
 /// of it (1 000): chunk 0 is not pinned, sequential play evicts it, and every later chunk is still fetched once.
 /// Mutant (g): chunk 0 pinned always → chunk 0 stays (and the chunk played is evicted) → red here.

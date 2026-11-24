@@ -75,6 +75,7 @@ use super::os_controls::{NowPlaying, OsButton};
 use super::transport::LinkError;
 use super::video::VideoSurface;
 
+mod ranged;
 mod worker;
 
 #[cfg(test)]
