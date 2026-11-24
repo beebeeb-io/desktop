@@ -12,6 +12,10 @@ use crate::shell::tray_icon::TaskbarTheme;
 
 #[path = "macos_control.rs"]
 mod control_socket;
+#[path = "macos_autostart.rs"]
+mod autostart;
+#[path = "macos_tray.rs"]
+mod tray;
 
 pub struct MacPlatform;
 
@@ -19,17 +23,20 @@ impl Platform for MacPlatform {
     fn name(&self) -> &'static str {
         "macos"
     }
-    fn create_tray(&self, _model: &TrayModel, _on_event: TrayHandler) -> Result<Box<dyn TrayIcon>, PlatformError> {
-        Err(PlatformError::NotBuilt("the menu-bar b on macOS"))
+    fn create_tray(&self, model: &TrayModel, on_event: TrayHandler) -> Result<Box<dyn TrayIcon>, PlatformError> {
+        tray::create_tray(model, on_event)
     }
     fn taskbar_theme(&self) -> TaskbarTheme {
-        TaskbarTheme::Dark
+        tray::taskbar_theme()
     }
     fn autostart_enabled(&self) -> Result<bool, PlatformError> {
-        Err(PlatformError::NotBuilt("open at login on macOS"))
+        autostart::autostart_enabled()
     }
-    fn set_autostart(&self, _enabled: bool) -> Result<(), PlatformError> {
-        Err(PlatformError::NotBuilt("open at login on macOS"))
+    fn set_autostart(&self, enabled: bool) -> Result<(), PlatformError> {
+        autostart::set_autostart(enabled)
+    }
+    fn adopt_autostart(&self) -> Result<bool, PlatformError> {
+        autostart::adopt_autostart()
     }
     fn show_start_refusal(&self, title: &str, message: &str) {
         eprintln!("{title}: {message}");

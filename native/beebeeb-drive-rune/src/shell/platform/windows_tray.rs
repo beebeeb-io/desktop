@@ -458,6 +458,7 @@ fn anchor_of(monitor: HMONITOR) -> Option<Anchor> {
         monitor: rect(info.rcMonitor),
         work: rect(info.rcWork),
         scale: f64::from(dpi_x) / 96.0,
+        icon: None,
     })
 }
 
