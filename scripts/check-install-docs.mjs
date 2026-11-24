@@ -24,6 +24,9 @@
 //      release has a `.dmg`, and CONTRIBUTING.md does not deny the PR CI that
 //      `.github/workflows/ci.yml` runs.
 //
+//   6. (GL-0002) The README does not claim selective sync works on every
+//      platform: each "Selective sync" line must say it is not available.
+//
 // Network: needs read-only HTTPS to api.github.com + github.com. It fails
 // closed if it cannot reach them — a check that cannot prove anything is a red.
 //
@@ -71,7 +74,7 @@ check(!/older version is renamed `?file \(Device, HH:MM\)/.test(readme),
 // The conflict description must match what the runner actually does: if the
 // runner calls sweep_auto_resolutions (24 h auto Keep Both), the README must
 // say so, and must not claim a conflict waits for the user indefinitely.
-const runnerPath = process.env.RUNNER_PATH ?? path.join(repoRoot, 'src-tauri', 'src', 'runner.rs')
+const runnerPath = process.env.RUNNER_PATH ?? path.join(repoRoot, 'crates', 'beebeeb-engine', 'src', 'runner.rs')
 const runnerSweeps = /^\s*sweep_auto_resolutions\(/m.test(fs.readFileSync(runnerPath, 'utf8'))
 check(!runnerSweeps || /24 hours[^\n]*Keep Both/i.test(readme),
   `README describes the 24 h automatic Keep Both (runner calls sweep_auto_resolutions: ${runnerSweeps})`)
@@ -86,7 +89,7 @@ const deadLinks = [...readme.matchAll(/\]\(#([^)]+)\)/g)].map((m) => m[1]).filte
 check(deadLinks.length === 0, `every in-page README link resolves to a heading${deadLinks.length ? ` (dead: ${deadLinks.join(', ')})` : ''}`)
 const pinned = [...readme.matchAll(/Beebeeb[_-]\d+\.\d+\.\d+[_-][^\s`]*/g)].map((m) => m[0])
 check(pinned.length === 0, `README names installers with <version>, not a pinned version${pinned.length ? ` (found ${pinned[0]})` : ''}`)
-const releaseWorkflow = fs.readFileSync(path.join(repoRoot, '.github', 'workflows', 'release.yml'), 'utf8')
+const releaseWorkflow = fs.readFileSync(path.join(repoRoot, '.github', 'workflows', 'release-native-windows.yml'), 'utf8')
 if (/verify-authenticode\.ps1/.test(releaseWorkflow)) {
   check(!/not (yet )?code-signed|not signed with a (Windows )?code-signing certificate|do not carry an OS-trusted code-signing certificate/i.test(readme),
     'README does not call the Windows installers unsigned (the release workflow gates on Authenticode)')
@@ -169,14 +172,22 @@ try {
   check(readme.includes(sig.keyId), `README names the signing key ID ${sig.keyId} next to the key`)
   // The updater key baked into the app must be the key that signs "latest",
   // otherwise in-app updates are broken and the README's Updating section lies.
-  const conf = JSON.parse(fs.readFileSync(path.join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'))
-  const bakedB64 = Buffer.from(conf.plugins.updater.pubkey, 'base64').toString('utf8').split('\n')[1] ?? ''
+  const bakedKey = fs.readFileSync(path.join(repoRoot, 'crates', 'beebeeb-updater', 'keys', 'updater-0.8.pub'), 'utf8').trim()
+  const bakedB64 = Buffer.from(bakedKey, 'base64').toString('utf8').split('\n')[1] ?? ''
   const baked = decodeMinisignPublicKey(bakedB64.trim())
   check(Boolean(baked) && baked.keyId === sig.keyId && commandKeys.includes(bakedB64.trim()),
     `README's minisign command uses the app's baked updater key (${baked?.keyId ?? 'unparseable'}), which signs ${release.tag_name}`)
 } catch (error) {
   check(false, `could not prove the README key against the latest release: ${error.message}`)
 }
+// ── 6. Selective sync claims (GL-0002) ───────────────────────────────────────
+const selectiveLines = readme.split('\n').filter((l) => /\*\*Selective sync\*\*/.test(l))
+check(selectiveLines.length > 0, 'README mentions Selective sync')
+check(
+  selectiveLines.every((l) => /\bnot (available|offered)\b/i.test(l)),
+  'README does not claim Selective sync on every platform (each mention says it is not available)',
+)
+
 
 console.log(`\ninstall-docs check: ${passes} passed, ${failures.length} failed`)
 process.exit(failures.length === 0 && passes > 0 ? 0 : 1)

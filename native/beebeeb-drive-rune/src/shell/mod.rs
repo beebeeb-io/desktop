@@ -1,0 +1,682 @@
+//! The app shell: lifetime, windows, the b in the notification area, single instance, start at
+//! login, deep links and routing. `README.md` in this directory is the guide for other lanes.
+//!
+//! | file | what |
+//! |---|---|
+//! | `app.rs` | the route machine: sections, settings, dialogs, history, the session gate |
+//! | `registry.rs` | which frame group draws which state: ONE line per group |
+//! | `placeholder.rs` | the "not built yet" frame for a group with no line |
+//! | `host.rs` | the running shell in the root state, and the hooks Rune calls |
+//! | `actions.rs` | `ShellActions` / `EngineActions` and the fixture engine |
+//! | `surfaces.rs`, `window_state.rs` | the two windows, and where the main one was |
+//! | `tray.rs`, `tray_icon.rs` | the b: its model and its pixels |
+//! | `flyout.rs`, `flyout_window.rs` | the flyout: where it opens, and its window |
+//! | `tray_tip_window.rs` | the first-run tray tip (DW-0380): a window of its own by the b |
+//! | `identity.rs` | which app this build is (real or test): every per-app name |
+//! | `instance.rs`, `control.rs` | the command line, one instance, the control channel |
+//! | `deeplink.rs`, `autostart.rs` | links, start at login |
+//! | `platform/` | the OS seam: `windows` real, `macos` and `linux` stubs |
+
+pub mod actions;
+pub mod app;
+#[cfg(test)]
+mod a11y_walk_tests;
+// The pure half of Windows-only code: used by `platform/windows.rs`, tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod autostart;
+pub mod capture_setting;
+pub mod away;
+// The transport is Windows-only (`platform/windows_control.rs`); the protocol is tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod control;
+pub(crate) mod crash_notice;
+#[cfg(test)]
+mod crash_notice_tests;
+pub mod deeplink;
+pub mod files_frame;
+pub mod flyout;
+pub mod flyout_window;
+pub mod host;
+pub mod identity;
+pub mod instance;
+pub mod intents;
+mod settings_open;
+mod settings_open_pages;
+mod settings_open_places;
+mod settings_show_in_files;
+mod viewer_intents;
+pub(crate) mod viewer_save;
+pub mod placeholder;
+pub mod platform;
+pub(crate) mod redraw;
+pub mod registry;
+pub mod session_gate;
+#[cfg(test)]
+mod start_refusal_tests;
+pub mod state;
+pub mod storage_view;
+pub mod surfaces;
+pub mod tray;
+pub mod tray_tip_window;
+// Rendered by `platform/windows.rs`; tested (and looked at) on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod tray_icon;
+// The pure half of `platform/windows_tray.rs`; tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod tray_win;
+pub mod web_pages;
+pub mod window_state;
+pub mod work_area;
+
+use std::io::Write as _;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
+
+use rune::{App, AppSpec, Titlebar, Tx, WindowSpec};
+use surfaces::WindowKind;
+
+use crate::engine_host::open::OpenError;
+use crate::source::{DriveSource, LargeFixtureSource};
+use actions::{EngineActions, FixtureEngine, HostActions, ShellActions};
+use app::{Dialog, Event, GateState, Route, Section, SettingsPane};
+use control::Reply;
+use flyout_window::FlyoutState;
+use tray_tip_window::TipState;
+use host::{Shell, Wiring};
+use identity::AppIdentity;
+use instance::{Claim, Plan, Start};
+use platform::{Platform, ServeError};
+use state::State;
+
+/// Titlebar height in points — the single source of truth used by both
+/// `App::titlebar` and `ui::caption::caption_bar`.
+/// Board: `.kit-wincap { height: 32px }`.
+pub const TITLEBAR_H: f32 = 32.0;
+
+pub const FAMILIES: (&str, &str) = ("Inter", "JetBrains Mono");
+/// Inter (sans) + JetBrains Mono (mono), bundled as TTF.
+pub static FONTS: &[&[u8]] = &[
+    // Inter, variable (optical size 14-32, weight 100-900): the build the board draws with, so
+    // the wordmark's optical size and the 650 weights are the board's.
+    include_bytes!("../../assets/fonts/inter-latin-variable-opsz-wght.ttf"),
+    include_bytes!("../../assets/fonts/jetbrains-mono-latin-400-normal.ttf"),
+    include_bytes!("../../assets/fonts/jetbrains-mono-latin-500-normal.ttf"),
+    include_bytes!("../../assets/fonts/jetbrains-mono-latin-600-normal.ttf"),
+];
+
+/// Named states for headless renders (`--snap out.png --scene NAME`) and the frame gate
+/// (`scripts/compare.sh DW-0401`): one per board frame, by its frame id, and the ones that put
+/// the route machine somewhere, so a frame lane can render its group before any navigation
+/// exists.
+const SCENES: &[crate::ui::gate::Scene<State>] = &[
+    ("light", |_| {}),
+    ("dark", |_| {}),
+    ("large-folder", |s| {
+        let source = Box::new(LargeFixtureSource::new(5000));
+        (s.listing, s.list_error) = state::load(source.as_ref(), None);
+        s.source = source;
+        s.selected = None;
+        s.show_detail_pane = false;
+    }),
+    ("DW-0401", |_| {}),
+    ("shared", |s| scene(s, Event::Navigate(Route::section(Section::Shared)))),
+    ("photos", |s| scene(s, Event::Navigate(Route::section(Section::Photos)))),
+    ("backups", |s| {
+        scene(s, Event::Navigate(Route::section(Section::Backups)))
+    }),
+    ("trash", |s| scene(s, Event::Navigate(Route::section(Section::Trash)))),
+    ("sync-history", |s| {
+        scene(s, Event::Navigate(Route::section(Section::SyncHistory)))
+    }),
+    ("available-offline", |s| {
+        scene(s, Event::Navigate(Route::section(Section::AvailableOffline)))
+    }),
+    ("settings", |s| scene(s, Event::OpenSettings(SettingsPane::General))),
+    ("shortcuts", |s| scene(s, Event::OpenDialog(Dialog::Shortcuts))),
+    ("signed-out", |s| scene(s, Event::Gate(GateState::SignedOut))),
+    ("locked", |s| scene(s, Event::Gate(GateState::Locked))),
+    ("no-plan", |s| scene(s, Event::Gate(GateState::NoPlan))),
+    ("first-run", |s| scene(s, Event::Gate(GateState::FirstRun))),
+    ("DW-A01", |s| crate::frames::signin::set_scene(s, "DW-A01")),
+    ("DW-A02", |s| crate::frames::signin::set_scene(s, "DW-A02")),
+    ("DW-A03", |s| crate::frames::signin::set_scene(s, "DW-A03")),
+    ("DW-A04", |s| crate::frames::signin::set_scene(s, "DW-A04")),
+    ("DW-A05", |s| crate::frames::signin::set_scene(s, "DW-A05")),
+    ("DW-A06", |s| crate::frames::signin::set_scene(s, "DW-A06")),
+    ("DW-A07", |s| crate::frames::signin::set_scene(s, "DW-A07")),
+    ("DW-A08", |s| crate::frames::signin::set_scene(s, "DW-A08")),
+    ("DW-A09", |s| crate::frames::signin::set_scene(s, "DW-A09")),
+    ("DW-A10", |s| crate::frames::signin::set_scene(s, "DW-A10")),
+    ("DW-A18", |s| crate::frames::signin::set_scene(s, "DW-A18")),
+    ("DW-A19", |s| crate::frames::signin::set_scene(s, "DW-A19")),
+    ("DW-A20", |s| crate::frames::signin::set_scene(s, "DW-A20")),
+    ("DW-A21", |s| crate::frames::signin::set_scene(s, "DW-A21")),
+    ("DW-A22", |s| crate::frames::signin::set_scene(s, "DW-A22")),
+    ("DW-0601", |s| crate::frames::photos::set_scene(s, "DW-0601")),
+    ("DW-0116", |s| crate::frames::photos::set_scene(s, "DW-0116")),
+    ("DW-0602", |s| crate::frames::photos::set_scene(s, "DW-0602")),
+    ("DW-0603", |s| crate::frames::photos::set_scene(s, "DW-0603")),
+    ("DW-0604", |s| crate::frames::photos::set_scene(s, "DW-0604")),
+    ("DW-0605", |s| crate::frames::photos::set_scene(s, "DW-0605")),
+    ("DW-0605b", |s| crate::frames::photos::set_scene(s, "DW-0605b")),
+    ("DW-0606", |s| crate::frames::photos::set_scene(s, "DW-0606")),
+    ("DW-0607", |s| crate::frames::photos::set_scene(s, "DW-0607")),
+    ("DW-0608", |s| crate::frames::photos::set_scene(s, "DW-0608")),
+    ("DW-0609", |s| crate::frames::photos::set_scene(s, "DW-0609")),
+    ("DW-0610", |s| crate::frames::photos::set_scene(s, "DW-0610")),
+    ("DW-0611", |s| crate::frames::photos::set_scene(s, "DW-0611")),
+    // Shared and Trash, by board frame id.
+    ("DW-0501", crate::frames::shared::scenes::dw_0501),
+    ("DW-0502", crate::frames::shared::scenes::dw_0502),
+    ("DW-0503", crate::frames::shared::scenes::dw_0503),
+    ("DW-0505", crate::frames::shared::scenes::dw_0505),
+    ("DW-0506", crate::frames::shared::scenes::dw_0506),
+    ("DW-0507", crate::frames::shared::scenes::dw_0507),
+    ("DW-0508", crate::frames::shared::scenes::dw_0508),
+    ("DW-0509", crate::frames::shared::scenes::dw_0509),
+    ("DW-0510", crate::frames::shared::scenes::dw_0510),
+    ("DW-0747", crate::frames::trash::scenes::dw_0747),
+    ("DW-0748", crate::frames::trash::scenes::dw_0748),
+    ("DW-0749b", crate::frames::trash::scenes::dw_0749b),
+    ("DW-0117", crate::frames::trash::scenes::dw_0117),
+];
+
+fn scene(s: &mut State, event: Event) {
+    host::dispatch(s, event);
+}
+
+/// How long the control channel's thread waits for the window thread to take a request
+/// before it answers "busy".
+const CONTROL_ACK_WAIT: Duration = Duration::from_secs(3);
+/// How long a later launch waits for the running instance's answer before it says that it is
+/// not answering. Longer than [`CONTROL_ACK_WAIT`], so a "busy" arrives as such.
+const CONTROL_SEND_WAIT: Duration = Duration::from_secs(5);
+
+/// The control channel's handler: hands the request to the window thread and waits for it to
+/// be taken, so the caller's acknowledgement means "the app has it", not "a pipe exists".
+fn control_handler(
+    target: Arc<Mutex<Option<rune::AppHandle<State>>>>,
+    own_origin: String,
+) -> platform::ControlHandler {
+    Arc::new(move |request| {
+        // A launch that named another server than this instance runs on: nothing is shown (bug 9: the same one is).
+        let request = match request {
+            control::Request::ShowOn(origin) if origin == own_origin => control::Request::Show,
+            control::Request::ShowOn(_) => return Reply::OtherServer,
+            other => other,
+        };
+        let main = target.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        // Not up yet (the first moments of a start).
+        let Some(main) = main else { return Reply::Busy };
+        let (done, taken) = mpsc::channel();
+        main.update(move |s: &mut State, tx| {
+            host::on_control(s, request, tx);
+            let _ = done.send(());
+        });
+        match taken.recv_timeout(CONTROL_ACK_WAIT) {
+            Ok(()) => Reply::Ok,
+            Err(_) => Reply::Busy,
+        }
+    })
+}
+
+/// Starts the app and returns when it quits.
+///
+/// In order: read the launch arguments (`instance::parse_args`: a link silences every other
+/// flag; a shipped build ignores every dev flag) and check `--api-base` (a dev build or the
+/// test build reads it; a value the app may not talk to ends the start); unless this is a
+/// tooling run of a dev build, claim this identity's control channel (serving it IS being the
+/// one instance; a later launch hands over one request, waits for the answer and exits, or says
+/// why it could not) and refuse to start beside another agent that holds the profile's sync
+/// lock; then run the two windows, in the notification area when Windows started the app at
+/// login.
+pub fn run() {
+    let identity = AppIdentity::CURRENT;
+    // Decision 2462: a dev build and the test build read `--api-base`; the real app in a build that ships does not.
+    // One answer, fixed at build time, for the parse and for the check.
+    let reads_api_base =
+        crate::engine_host::open::reads_api_base_flag(instance::DEV_BUILD, self::identity::engine_identity());
+    let launch = instance::parse_args(std::env::args().skip(1), instance::DEV_BUILD, reads_api_base);
+    // Made here only so a refusal below can show the start-refusal box; nothing is started with it yet.
+    let platform = platform::current();
+    // The server of this run, before anything else exists: a `--api-base` the app may not talk to ends the start
+    // here (`refuse_start`: stderr and the box, exit 2), never the default in its place.
+    let api_base = match crate::engine_host::open::api_base(launch.api_base.as_deref(), reads_api_base) {
+        Ok(api_base) => api_base,
+        Err(refused) => std::process::exit(refuse_start(&*platform, &launch, identity, &refused.to_string())),
+    };
+    // `--gate-export out.json --scene DW-0401 [--theme dark] [--size 1278x798]`: the frame gate's
+    // native half (`ui::gate`). A diagnostic flag: dev builds only, never on a link's command line.
+    if launch.tooling
+        && launch.rune_args.iter().any(|arg| arg == instance::GATE_EXPORT_FLAG)
+        && let Some(code) = crate::ui::gate::run_from_args(
+            crate::frames::scenes(SCENES),
+            state::init,
+            registry::view,
+            FONTS,
+            FAMILIES,
+        )
+    {
+        std::process::exit(code);
+    }
+    // Before any state exists: the feedback mode's inbox is chosen when the state is made.
+    #[cfg(feature = "feedback")]
+    crate::feedback::paths::set_flag_dir(launch.feedback_dir.clone());
+
+    let control_target = Arc::new(Mutex::new(None));
+    let (claim, _control_server) = if launch.tooling {
+        (Claim::First, None)
+    } else {
+        match platform.serve_control(identity, control_handler(control_target.clone(), api_base.origin().to_owned())) {
+            Ok(server) => (Claim::First, Some(server)),
+            Err(ServeError::AlreadyRunning) => (Claim::Running, None),
+            Err(ServeError::NotBuilt(what)) => {
+                host::log(format!(
+                    "not built yet: {what}; nothing keeps a second instance from starting"
+                ));
+                (Claim::First, None)
+            }
+            Err(ServeError::Os(error)) => {
+                host::log(format!("the control channel could not be created ({error})"));
+                (Claim::Unavailable, None)
+            }
+        }
+    };
+    let plan = instance::plan(&launch, claim, identity);
+    // The real engine: only for the one instance that is the app (after the claim, so a second launch never
+    // opens a second handle), never in a tooling run and never beside `--db` (a dev build's read-only look at
+    // one state.db). A handle that cannot be opened ends the start: the window never shows the fixture's
+    // sample files in place of an account's.
+    let wake_target: WakeTarget = Arc::new(Mutex::new(None));
+    let real_engine = if matches!(plan, Plan::BeTheApp) && launch.db.is_none() {
+        match open_engine(identity, &api_base, wake_target.clone()) {
+            Ok(opened) => Some(opened),
+            Err(error) => std::process::exit(engine_not_opened(&*platform, &launch, identity, &error)),
+        }
+    } else {
+        None
+    };
+    // The first run (DW-0201 to DW-0208 are Windows' frames): whether this PC still has it to do is read here,
+    // once, before the first window is chosen, so a start with a stored session opens on the right one.
+    if cfg!(target_os = "windows")
+        && let Some((_, live)) = &real_engine
+    {
+        live.wire_first_run();
+    }
+    let engine: Arc<dyn EngineActions> = match &real_engine {
+        Some((opened, live)) => {
+            host::log(format!("the engine is open; the stored session says {:?}", opened.gate));
+            live.clone()
+        }
+        None => Arc::new(FixtureEngine::ready()),
+    };
+    let start = match plan {
+        Plan::Tooling => None,
+        Plan::ExitQuietly => return,
+        Plan::BeTheApp => Some(instance::start(&launch, engine.profile_holder())),
+        Plan::Hand(request) => Some(instance::after_hand(platform.send_control(
+            identity,
+            // The checked origin (the parser's own serialization), the form the running instance compares.
+            &match request {
+                control::Request::ShowOn(_) => control::Request::ShowOn(api_base.origin().to_owned()),
+                other => other,
+            },
+            CONTROL_SEND_WAIT,
+        ))),
+        Plan::Refuse(refusal) => Some(Start::Refuse(refusal)),
+    };
+    let (tooling, show_window) = match start {
+        None => (true, true),
+        Some(Start::Run { show_window }) => (false, show_window),
+        Some(Start::Forwarded) => return,
+        Some(Start::Refuse(refusal)) => {
+            let message = instance::refusal_message(&refusal, identity);
+            host::log(&message);
+            if instance::refusal_is_shown(&launch) {
+                platform.show_start_refusal(identity.product_name(), &message);
+            }
+            // The installer and scripts read this: the request was NOT carried out.
+            std::process::exit(1);
+        }
+    };
+    let actions: Arc<dyn ShellActions> = Arc::new(HostActions::new(engine.clone(), platform.clone()));
+
+    // `--db` (dev builds only; a shipped build never parses it).
+    let source: Option<Box<dyn DriveSource>> = match launch.db.clone() {
+        None => None,
+        Some(Err(error)) => {
+            eprintln!("beebeeb-drive: {error}");
+            std::process::exit(2);
+        }
+        Some(Ok(path)) => match crate::source_engine::EngineSource::open(&path) {
+            Ok(source) => Some(Box::new(source)),
+            Err(error) => {
+                // A fixed word and the path the person typed; never a name from the database.
+                eprintln!("beebeeb-drive: cannot open --db {}: {error}", path.display());
+                std::process::exit(2);
+            }
+        },
+    };
+
+    // Where the main window was. A tooling run reads and writes nothing.
+    let dirs = if tooling {
+        None
+    } else {
+        rune::dirs::AppDirs::new(identity.state_dir_id())
+    };
+    let state_file = dirs.as_ref().map(|dirs| dirs.state().join(window_state::FILE_NAME));
+    let saved = state_file.as_deref().map(window_state::load).unwrap_or_default();
+    let capture_file = dirs.as_ref().map(|dirs| dirs.state().join(capture_setting::FILE_NAME));
+    let hide_from_capture = capture_file.as_deref().is_some_and(capture_setting::load);
+    let saved_main = saved.get(WindowKind::Main.key()).copied();
+    // The 0.8.x app's frame, once: only while this app has no window file of its own.
+    let legacy_frame = match (&dirs, &state_file) {
+        (Some(dirs), Some(own)) if saved_main.is_none() => {
+            window_state::read_legacy_once(own, &dirs.config().join(window_state::LEGACY_FRAME_FILE_NAME))
+        }
+        _ => None,
+    };
+    // Signed out, the one window opens as the first-run window (960 x 640), not where the
+    // main window was.
+    let first_kind = surfaces::kind_for(&app::AppMachine::for_session(engine.session()).screen());
+
+    let main_spec = AppSpec::<State> {
+        fonts: FONTS,
+        families: FAMILIES,
+        scenes: crate::frames::scenes(SCENES),
+        min_size: Some(WindowKind::Main.min_size()),
+        poll: Some(host::poll),
+        on_key: Some(host::on_key),
+        ..AppSpec::new(
+            identity.main_window_title(),
+            first_kind.default_size(),
+            state::init,
+            registry::view,
+        )
+    };
+    // The live feedback mode (test builds) draws over the main window's view and looks at its
+    // inbox in the poll; its keys come through `host::on_key`.
+    #[cfg(feature = "feedback")]
+    let main_spec = crate::feedback::hook_spec(main_spec);
+    let flyout_spec = AppSpec::<FlyoutState> {
+        fonts: FONTS,
+        families: FAMILIES,
+        min_size: Some(WindowKind::Flyout.min_size()),
+        on_key: Some(flyout_window::on_key),
+        ..AppSpec::new(
+            identity.flyout_window_title(),
+            WindowKind::Flyout.default_size(),
+            flyout_window::fixture_state,
+            flyout_window::view,
+        )
+    };
+    // The first-run tray tip (DW-0380): opened by the shell when the guide reaches it (`host::Shell::show_tray_tip`).
+    let tray_tip_spec = AppSpec::<TipState> {
+        fonts: FONTS,
+        families: FAMILIES,
+        min_size: Some(tray_tip_window::SIZE),
+        on_key: Some(tray_tip_window::on_key),
+        ..AppSpec::new(
+            identity.main_window_title(),
+            tray_tip_window::SIZE,
+            tray_tip_window::init,
+            tray_tip_window::view,
+        )
+    };
+
+    let window = Arc::new(Mutex::new(None));
+    let window_slot = window.clone();
+    // Rune reads only what `parse_args` let through: nothing in a shipped build, nothing on a
+    // command line that carries a link.
+    let main_app = main_app(main_spec)
+        .args(launch.rune_args.clone())
+        .titlebar(Titlebar::new(TITLEBAR_H))
+        .on_window(move |native| {
+            *window_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(native.clone())
+        });
+    // The compositor that reads the live window's tree and pixels for a note.
+    #[cfg(feature = "feedback")]
+    let main_app = crate::feedback::install(main_app);
+    let mut main_app = main_app;
+    let flyout_platform = platform.clone();
+    let mut flyout_app = App::new(flyout_spec)
+        .args(launch.rune_args.clone())
+        .on_focus(flyout_window::on_focus)
+        .on_window(move |native| flyout_platform.adopt_flyout_window(native));
+    let mut tray_tip_app = App::new(tray_tip_spec).args(launch.rune_args.clone());
+    if !tooling {
+        // The app outlives its window: closing it leaves the b running (DW-1231).
+        main_app = main_app.keep_running().on_close(host::on_close).on_quit(host::on_quit);
+        flyout_app = flyout_app.keep_running();
+        tray_tip_app = tray_tip_app.keep_running();
+        if !show_window {
+            main_app = main_app.windowless();
+        }
+    }
+    let (main, flyout_handle, tray_tip_handle) = (main_app.handle(), flyout_app.handle(), tray_tip_app.handle());
+    let tray_tip_main = main.clone();
+    let tray_tip_app = tray_tip_app.init(move || tray_tip_window::with_main(tray_tip_main));
+
+    let flyout_hidden_at = Arc::new(Mutex::new(None));
+    let tray_anchor = Arc::new(Mutex::new(None));
+    let tray_anchor_slot = tray_anchor.clone();
+    let wiring = Wiring {
+        main: Some(main.clone()),
+        flyout: Some(flyout_handle),
+        window,
+        flyout_hidden_at: flyout_hidden_at.clone(),
+        tray_tip: Some(tray_tip_handle),
+        tray_anchor,
+        saved,
+        state_file,
+        capture_file,
+        hide_from_capture,
+    };
+    let (shell_actions, shell_platform) = (actions.clone(), platform.clone());
+    let init_engine = real_engine
+        .as_ref()
+        .map(|(opened, live)| (opened.engine.clone(), live.clone()));
+    // From here on the engine's reports wake the window (`host::poll` reads what changed).
+    *wake_target.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(main.clone());
+    let main_app = main_app.init(move || {
+        let shell = Shell::new(shell_actions, shell_platform, wiring);
+        match (source, init_engine) {
+            (Some(source), _) => state::init_from(shell, source, None),
+            (None, Some((engine, live))) => {
+                let mut s = state::init_on_engine(shell, engine.clone());
+                // The first run on this PC, when it is still to do (`engine_host::setup`).
+                state::wire_first_run(&mut s, engine, &live);
+                s
+            }
+            (None, None) => state::init_with(shell),
+        }
+    });
+    let flyout_main = main.clone();
+    let flyout_engine = real_engine.as_ref().map(|(_, live)| live.clone());
+    let flyout_app = flyout_app.init(move || {
+        let flyout = FlyoutState::new(actions, Some(flyout_main), flyout_hidden_at);
+        crate::frames::tray::on_engine(flyout, flyout_engine)
+    });
+
+    if !tooling {
+        match platform.adopt_autostart() {
+            Ok(true) => host::log("start at login: the earlier app's entry for this program is now in this app's form"),
+            Ok(false) => {}
+            Err(error) => host::log(format!("start at login was not checked ({error})")),
+        }
+        // Runs on the UI thread once the event loop is up, window or not.
+        main.update(|s, _| {
+            s.shell.start_tray();
+            s.shell.start_sync();
+        });
+        // From here a later launch's request reaches the window thread.
+        *control_target.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(main.clone());
+    }
+
+    rune::run_windows(move |displays| {
+        // The displays as the window may use them: the taskbar's room and the frame left out.
+        let work_areas = work_area::os_work_areas();
+        let monitors = work_area::usable(&surfaces::monitors(displays), &work_areas);
+        // Where the b is until a click on it says otherwise: the primary display, by its taskbar.
+        if let Some(anchor) = surfaces::primary_anchor(&surfaces::monitors(displays), &work_areas) {
+            let mut slot = tray_anchor_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            slot.get_or_insert(anchor);
+        }
+        let first_place = saved_main.or_else(|| {
+            legacy_frame
+                .as_deref()
+                .and_then(|text| window_state::import_legacy_frame(text, &monitors))
+        });
+        let (main_app, main_options) = if first_kind == WindowKind::Main {
+            let mut restored = window_state::restore(first_place.as_ref(), &monitors, surfaces::MAIN_MIN_SIZE);
+            if restored.position.is_none() {
+                // Nothing usable saved: the default size, cut to the work area and centred.
+                let first = work_area::first_place(surfaces::MAIN_SIZE, surfaces::MAIN_MIN_SIZE, &monitors);
+                restored = window_state::Restored {
+                    maximized: restored.maximized,
+                    ..first
+                };
+            }
+            (
+                main_app.maximized(restored.maximized),
+                surfaces::main_options(&restored),
+            )
+        } else {
+            let place = work_area::first_place(surfaces::FIRST_RUN_SIZE, surfaces::FIRST_RUN_SIZE, &monitors);
+            (main_app, surfaces::first_run_options(&place))
+        };
+        vec![
+            WindowSpec::from_app(WindowKind::Main.key(), main_app)
+                .options(main_options)
+                .boxed(),
+            WindowSpec::from_app(WindowKind::Flyout.key(), flyout_app)
+                .options(surfaces::flyout_options())
+                .boxed(),
+            WindowSpec::from_app(tray_tip_window::KEY, tray_tip_app)
+                .options(surfaces::tray_tip_options())
+                .boxed(),
+        ]
+    });
+}
+
+/// The main window's app on `spec`, with the hooks that need nothing of this run: a `beebeeb://` link, a reopen, the
+/// window's focus, and the input method's text for the editor the app draws itself. `run` adds what is this run's (its
+/// arguments, the titlebar, the native window's slot); the tests build the same app headless.
+pub(crate) fn main_app(spec: AppSpec<State>) -> App<State> {
+    App::new(spec)
+        .on_open_url(host::on_open_url)
+        .on_reopen(host::on_reopen)
+        .on_focus(|s: &mut State, focused, _| {
+            crate::frames::signin::on_window_focus(s, focused);
+            crate::frames::files::pins::on_focus(s, focused);
+        })
+        .on_ime(on_ime)
+}
+
+/// The input method's text while no text field has the keyboard: the office editor's (its page, grid or slide has an
+/// `ime_cursor` caret then). A composition stays in this process until it is committed
+/// (`frames::office::edit::ime`).
+pub(crate) fn on_ime(s: &mut State, ime: &rune::Ime, tx: &mut Tx) -> bool {
+    crate::frames::office::edit::ime::on_ime(s, tx, ime.clone());
+    true
+}
+
+/// The main window's handle, once it exists: what an engine thread wakes.
+type WakeTarget = Arc<Mutex<Option<rune::AppHandle<State>>>>;
+type RealEngine = (
+    crate::engine_host::open::Opened<beebeeb_engine::app::PlatformCredentials>,
+    Arc<crate::engine_host::LiveEngine<beebeeb_engine::app::PlatformCredentials>>,
+);
+
+/// The OS folder the engine keeps this app's local state under, for the app-dirs of `identity`. It is the
+/// folder the 0.8.x app (Tauri's `app_local_data_dir`) used, so the real app finds its `state.db` after the
+/// update: `%LOCALAPPDATA%\<id>` on Windows (Rune's `state`), and Rune's `data` elsewhere
+/// (`~/Library/Application Support/<id>`, `$XDG_DATA_HOME/<id>`).
+pub(crate) fn local_data_of(dirs: &rune::dirs::AppDirs, os: &str) -> std::path::PathBuf {
+    if os == "windows" { dirs.state() } else { dirs.data() }.to_path_buf()
+}
+
+/// Ends a start that stops for a reason the person must read (a refused `--api-base`, the test
+/// build's data on this computer not for this run's server, stored credentials without local data). `line` names no
+/// value. It goes to stderr, and into the start-refusal box unless this start shows none (`instance::start_refusal_is_shown`:
+/// not the installer's call, not a tooling run; at login it is shown): a release build has no console, so without the box such
+/// a start would stop without a word. Returns 2, the exit code `run` ends with.
+fn refuse_start(platform: &dyn Platform, launch: &instance::Launch, identity: AppIdentity, line: &str) -> i32 {
+    eprintln!("beebeeb-drive: {line}");
+    if instance::start_refusal_is_shown(launch) {
+        platform.show_start_refusal(identity.product_name(), line);
+    }
+    2
+}
+
+/// What `run` says when the engine was not opened, and the exit code it ends with: the test build's data not for this
+/// run's server ([`refuse_start`], 2); anything else in the start-refusal box, as before (1).
+fn engine_not_opened(
+    platform: &dyn Platform,
+    launch: &instance::Launch,
+    identity: AppIdentity,
+    error: &OpenError,
+) -> i32 {
+    match error {
+        OpenError::OtherServer(other) => refuse_start(platform, launch, identity, &other.to_string()),
+        OpenError::CredentialsWithoutData(alone) => refuse_start(platform, launch, identity, &alone.to_string()),
+        OpenError::Failed(error) => {
+            let message = format!(
+                "{} could not open its data on this computer. {error}",
+                identity.product_name()
+            );
+            host::log(&message);
+            platform.show_start_refusal(identity.product_name(), &message);
+            1
+        }
+    }
+}
+
+/// Open the real engine for this binary's identity (`engine_host::open` asks for it, once) on the platform's
+/// credential store, talking to `api_base` (checked in `run`; no environment variable is read for it). The server
+/// is said once on stdout first: its origin and where it came from, nothing else.
+fn open_engine(
+    identity: AppIdentity,
+    api_base: &crate::engine_host::open::ApiBase,
+    wake: WakeTarget,
+) -> Result<RealEngine, OpenError> {
+    let dirs = rune::dirs::AppDirs::new(identity.state_dir_id())
+        .ok_or_else(|| "The folder for app data could not be found.".to_string())?;
+    // Never a reason not to start: a closed or broken stdout loses the line, it does not stop the app.
+    let _ = writeln!(std::io::stdout(), "{}", api_base.start_line());
+    // The local log file (`log_file/mod.rs`), before the engine starts so its first warning is kept. Best effort.
+    let _ = crate::log_file::install(&local_data_of(&dirs, std::env::consts::OS));
+    // drive-complete-138b: the crash record a previous run left, read before this run can write one.
+    if let Some(dir) = crate::log_file::dir() {
+        crate::log_file::crash::remember_pending(dir);
+    }
+    // Slice B5: what Windows needs to show this app's toasts (`platform::windows_toast`). Nothing yet.
+    #[cfg(windows)]
+    platform::windows_toast::start(identity);
+    let (opened, messages) = crate::engine_host::open::open(
+        &local_data_of(&dirs, std::env::consts::OS),
+        api_base,
+        beebeeb_engine::app::PlatformCredentials,
+        {
+            // the engine rings once per report (once per row of a first file list). The rings are one ask of
+            // the window at most every `AT_MOST_EVERY`, and the ask draws only when the window's poll found something
+            // (`redraw.rs`). An empty `update` here drew the whole window once per ring.
+            let wakes = redraw::EngineWakes::start(redraw::AT_MOST_EVERY, move || {
+                if let Some(main) = wake.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+                    main.update_if(redraw::engine_woke);
+                }
+            });
+            // On an engine thread: ring and do nothing else.
+            move || wakes.ring()
+        },
+    )?;
+    // The real app only (never in `engine_host::open::open`, which tests use): a session the server ended closes
+    // the vault by itself, as core says.
+    opened.engine.watch_session();
+    opened.engine.serve_own_data_proofs();
+    // Slice B6: File Explorer's menu items for this app's files (`platform::windows_verbs`). Nothing yet.
+    #[cfg(windows)]
+    platform::windows_verbs::register(identity, &opened.engine);
+    let live = Arc::new(crate::engine_host::LiveEngine::new(&opened, messages));
+    Ok((opened, live))
+}

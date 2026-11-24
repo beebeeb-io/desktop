@@ -1,0 +1,88 @@
+# The cargo-deny policy for the Office helper (beebeeb-office-render).
+#
+# Run in this directory:
+#   cargo deny --manifest-path Cargo.toml --config deny.toml check
+#
+# Copied from the Office engine's own policy (its root deny.toml), with the same bans and licence allow-list: the
+# helper links the Office engine, so its graph is held to the engine's rules, plus the helper's own crates.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "warn"
+# zip 3.0.0 has 4 advisories about extracting archives TO DISK (symlinks, permission bits, abort on a symlink
+# entry). The Office engine's readers read archives in memory only and never call an extract-to-disk function.
+# Not reachable as the code stands; the advisories stay listed until upstream moves to a fixed zip.
+ignore = [
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
+    # zip 3.0.0, two more advisories published after the four above; also not reachable: 0545 is AES-encrypted
+    # entries read with a password (`aes-crypto` is off: our zip has `deflate` only, and nothing calls
+    # `by_name_decrypt`); 0548 is `ZipStreamReader` (nothing here streams a zip; archives are read through `ZipArchive`).
+    "RUSTSEC-2026-0545",
+    "RUSTSEC-2026-0548",
+    # chrono 0.4.45: "unmaintained", no vulnerability. Comes with wordcraft-engine (the local clock's offset for
+    # Insert > Date & Time); it opens no connection. Revisit at a WordCraft bump.
+    "RUSTSEC-2026-0543",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Permissive only. MPL-2.0, LGPL and anything else is REPORTED, so a person decides.
+allow = [
+    "MIT", "MIT-0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
+    "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "BSL-1.0", "0BSD", "OFL-1.1", "Unlicense",
+    "Ubuntu-font-1.0",  # Ubuntu Light, the slide renderer's last-resort face (epaint_default_fonts); lead 2026-11-15 R-L1
+]
+
+exceptions = [  # MPL-2.0 via deckcraft-engine (slides editor, `edit-slides`): accepted by the owner 2026-11-18; notice: desktop-090 w17-licence-notice
+    { allow = ["MPL-2.0"], crate = "symphonia" },
+    { allow = ["MPL-2.0"], crate = "symphonia-bundle-flac" },
+    { allow = ["MPL-2.0"], crate = "symphonia-bundle-mp3" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-aac" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-adpcm" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-alac" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-pcm" },
+    { allow = ["MPL-2.0"], crate = "symphonia-codec-vorbis" },
+    { allow = ["MPL-2.0"], crate = "symphonia-core" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-caf" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-isomp4" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-mkv" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-ogg" },
+    { allow = ["MPL-2.0"], crate = "symphonia-format-riff" },
+    { allow = ["MPL-2.0"], crate = "symphonia-metadata" },
+    { allow = ["MPL-2.0"], crate = "symphonia-utils-xiph" },
+]
+
+[licenses.private]
+# Our own unpublished crates (this helper, the protocol and sandbox crates, the Office engine) are not checked here.
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+# Network clients, TLS stacks, socket layers and async runtimes: none may be in the helper's graph (the viewer
+# contract §5.2). tests/pins.rs reads this list and checks Cargo.lock against it: 19 names.
+deny = [
+    { crate = "reqwest" }, { crate = "ureq" }, { crate = "hyper" }, { crate = "h2" }, { crate = "curl" },
+    { crate = "isahc" }, { crate = "attohttpc" }, { crate = "tiny_http" }, { crate = "tungstenite" },
+    { crate = "rustls" }, { crate = "native-tls" }, { crate = "openssl" }, { crate = "quinn" },
+    { crate = "socket2" }, { crate = "mio" },
+    { crate = "tokio" }, { crate = "async-std" }, { crate = "smol" }, { crate = "async-io" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Sources are crates.io plus the git sources the viewer spec (§3) accepted, each pinned by revision.
+allow-git = [
+    "https://github.com/storytold/craft-libs",
+    # The Office engine's repository: the helper's one git dependency, pinned by revision in Cargo.toml.
+    "https://github.com/beebeeb-io/desktop-office",
+]
+required-git-spec = "rev"

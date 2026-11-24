@@ -1,0 +1,33 @@
+leftovers[before-install]: files_under_root=0 uninstall_entries=0 vendor_registry_keys=0 firewall_rules=0 profile_or_program_dirs=0 processes=0
+downloaded in 7 s
+msi: LibreOffice_26.2.7_Win_x86-64.msi bytes=373121024 sha256=480fecf759fc6393bd614fbf43753eb95a8198fc1a065d41b727e3b664cd1e59
+msi sha256: MATCHES the pinned official checksum
+msi signature: Valid / CN=The Document Foundation, O=The Document Foundation, L=Berlin, S=Berlin, C=DE
+extracted (msiexec /a, administrative install) in 43 s
+extracted: files=19487 bytes=1596016674 (1,522 MB)
+  top-level Fonts: files=135 MB=53
+  top-level help: files=5342 MB=11
+  top-level presets: files=13 MB=0
+  top-level program: files=5565 MB=711
+  top-level readmes: files=124 MB=2
+  top-level share: files=8283 MB=720
+  top-level System: files=9 MB=1
+  top-level System64: files=10 MB=2
+  top-level CREDITS.fodt: files=1 MB=2
+  top-level LibreOffice_26.2.7_Win_x86-64.msi: files=1 MB=19
+  top-level LICENSE.html: files=1 MB=1
+  top-level license.txt: files=1 MB=0
+  top-level NOTICE: files=1 MB=0
+  top-level update-settings.ini: files=1 MB=0
+program dir: \lo\program
+  sofficeapp.dll MISSING
+  mergedlo.dll bytes=148098392
+  soffice.bin bytes=2730840
+  licence / notice files at the top of the install:
+    CREDITS.fodt bytes=2047898
+    LibreOffice_26.2.7_Win_x86-64.msi bytes=19849216
+    LICENSE.html bytes=584659
+    license.txt bytes=512711
+    NOTICE bytes=1859
+    update-settings.ini bytes=306
+leftovers[after-install]: files_under_root=19488 uninstall_entries=0 vendor_registry_keys=0 firewall_rules=0 profile_or_program_dirs=0 processes=0

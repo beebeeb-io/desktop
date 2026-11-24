@@ -123,8 +123,8 @@ extension BeebeebIPCError: CustomNSError {
 final class XPCBridge {
     /// The App Group shared with the containing app — see
     /// `BeebeebFileProvider.entitlements`' `com.apple.security.application-
-    /// groups` and `src-tauri/entitlements.plist`'s identical entry. Mirrors
-    /// `crate::ipc_socket::MACOS_APP_GROUP_ID` on the Rust side (task 1524);
+    /// groups` and `packaging/macos/entitlements.plist`'s identical entry. Mirrors
+    /// `EngineIdentity::macos_app_group` on the Rust side (task 1524);
     /// keep both, plus the two entitlements plists, in sync if it ever
     /// changes.
     static let appGroupID = "R8352WDJJR.io.beebeeb.app.fileprovider"
@@ -212,7 +212,7 @@ final class XPCBridge {
     /// contract this two-process architecture needs. Verifying the
     /// alternative empirically would require a signed build against a real,
     /// registered domain, which this round's restrictions rule out (no
-    /// touching Guus's real domain, no second daemon instance). Kept the
+    /// touching the owner's real domain, no second daemon instance). Kept the
     /// group-container location; see the task file for the full writeup with
     /// sources.
     ///

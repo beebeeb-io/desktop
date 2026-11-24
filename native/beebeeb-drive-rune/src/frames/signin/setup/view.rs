@@ -1,0 +1,1105 @@
+//! The first run's steps, drawn from [`Ui`] with the setup kit (`ui::setup`) and the account
+//! kit (`ui::au`). Every string is the board's; every measurement is its computed CSS.
+
+use rune::tok::Family;
+use rune::{Color, Cx, El, TextStyle, col, el, row};
+
+use super::source::{Explorer, LockAfter, PreviewFormat, PreviewSize, Switch};
+use super::{
+    Answered, Compare, CompareMode, PHOTO, PasskeyStep, SHEET, Setting, Step, Ui, act, folder, icons, passkey,
+};
+use crate::State;
+use crate::frames::signin::icons as signin_icons;
+use crate::theme::scale::{self, space};
+use crate::theme::tokens::{self, Theme, type_};
+use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone, type_au};
+use crate::ui::setup::{self, SegInk, SegSize, Status, StepState};
+use crate::ui::switch as ui_switch;
+use crate::ui::view_state::{ViewState, try_again, view_state};
+use crate::ui::{kit, settings_list};
+
+const PRODUCT: &str = "Drive";
+
+/// `.t-sub` at 500 and its mono twin: the sample's size in the preview card.
+const SUB_MEDIUM: TextStyle = scale::text::SUB_STRONG;
+const SUB_MONO: TextStyle = scale::text::MONO;
+const SUB_MONO_MEDIUM: TextStyle = TextStyle::new(12.0, 500.0).family(Family::Mono).lh(15.0);
+/// `.wn-fdlg-ni`: File Explorer's own 13px.
+const NAV: TextStyle = scale::text::READ;
+/// `.t-cap.font-mono`: a weight under a size in the compare view.
+const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
+
+pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
+    let t = tokens::theme(cx.system_dark());
+    // On Windows, Enter presses the focused button or link (and Space does too).
+    cx.web_focus();
+    let mut k = Keys::new();
+    let column = match (ui.step, ui.compare.is_some()) {
+        // The board draws step 4 behind the compare view as its heading and its two buttons.
+        (Step::Previews, true) => previews_behind(&mut k, &t),
+        // A step nothing answers for keeps its place and says so.
+        (step, _) if step != Step::Done && !ui.available(step) => folder::not_yet(step, &mut k, &t),
+        // The sync folder is asked for before File Explorer has anything to add.
+        (Step::Explorer, _) if ui.asks_folder() => folder::ask(&ui.folder, &mut k, &t),
+        // A start worked, but this PC didn't keep the folder: said as an error, never as "Added".
+        (Step::Explorer, _) if ui.folder_unsaved() => folder::unsaved(&mut k, &t),
+        (Step::Passkey, _) => passkey::step(ui, &mut k, &t),
+        (Step::Lock, _) => lock(ui, &mut k, &t),
+        (Step::Backup, _) if ui.loading(Step::Backup) => folder::backup_loading(&mut k, &t),
+        (Step::Backup, _) if ui.failed(Step::Backup) => folder::backup_failed(&mut k, &t),
+        (Step::Backup, _) if ui.folders.is_empty() => folder::backup_none(&mut k, &t),
+        (Step::Backup, _) => backup(ui, &mut k, &t),
+        (Step::Previews, _) if ui.loading(Step::Previews) => previews_loading(&mut k, &t),
+        (Step::Previews, _) if ui.failed(Step::Previews) => previews_failed(&mut k, &t),
+        (Step::Previews, _) => previews(ui, &mut k, &t),
+        (Step::Explorer, _) => match &ui.explorer {
+            Explorer::Added => explorer_added(&mut k, &t),
+            Explorer::Adding => explorer_adding(&mut k, &t),
+            Explorer::Failed { code } => {
+                explorer_failed(WINDOWS_REFUSED, WINDOW_WORKS, code, ui.can_choose_again(), &mut k, &t)
+            }
+            Explorer::NotSyncing => {
+                explorer_failed(SYNC_DID_NOT_START, NOTHING_SYNCS, "", ui.can_choose_again(), &mut k, &t)
+            }
+        },
+        (Step::Notifications, _) => notifications(&mut k, &t),
+        (Step::Login, _) => login(ui, &mut k, &t),
+        (Step::Done, _) => done(ui, &mut k, &t),
+    };
+    let steps: Vec<(&str, StepState)> = Step::STEPS
+        .iter()
+        .map(|step| {
+            let state = match step.cmp(&ui.step) {
+                std::cmp::Ordering::Less => StepState::Done,
+                std::cmp::Ordering::Equal => StepState::Now,
+                std::cmp::Ordering::Greater => StepState::Ahead,
+            };
+            (step.label(), state)
+        })
+        .collect();
+    let adding_words = format!("Adding {name} to File Explorer\u{2026}");
+    let added_words = format!("{name} is in File Explorer");
+    let failed_words = format!("Couldn't add {name} to File Explorer");
+    let not_yet_words = format!("{name} isn't in File Explorer yet");
+    let status = match &ui.explorer {
+        // Nothing is being added while no folder is chosen, or where nothing adds one.
+        _ if ui.asks_folder() || !ui.available(Step::Explorer) => Status {
+            icon: &icons::EXPLORER,
+            words: &not_yet_words,
+            failed: false,
+        },
+        _ if ui.folder_unsaved() => Status {
+            icon: &icons::ALERT,
+            words: "Beebeeb's folder isn't saved on this PC yet",
+            failed: true,
+        },
+        Explorer::Adding => Status {
+            icon: &icons::ADDING,
+            words: &adding_words,
+            failed: false,
+        },
+        Explorer::Added => Status {
+            icon: &icons::ADDED,
+            words: &added_words,
+            failed: false,
+        },
+        Explorer::Failed { .. } | Explorer::NotSyncing => Status {
+            icon: &icons::ALERT,
+            words: &failed_words,
+            failed: true,
+        },
+    };
+    // While the compare view is up, what is behind it takes no press and no focus.
+    let behind = ui.compare.is_some();
+    let skip = (ui.step != Step::Done).then(|| {
+        let link = setup::skip_link(&t);
+        if behind {
+            link.disabled(true)
+        } else {
+            link.on_press_tx(act(Ui::skip))
+        }
+    });
+    let over = ui.compare.map(|compare| compare_sheet(ui, compare, &t));
+    setup::page(
+        name,
+        PRODUCT,
+        &steps,
+        &signin_icons::CHECK,
+        &status,
+        skip,
+        column,
+        over,
+        &t,
+        cx,
+    )
+    .on_key(super::on_key)
+}
+
+/// `.au-actions`: the buttons at the foot of a column, 6 apart, 6 below the column's gap.
+pub(super) fn actions() -> El {
+    col().key("au-actions").w_full().gap(space::S6).mt(6.0)
+}
+
+pub(super) fn primary(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to: fn(&mut Ui)) -> El {
+    let b = au::button(k, label, None, ButtonKind::Primary, ButtonSize::Lg, state, t);
+    if state == ButtonState::Enabled {
+        b.on_press_tx(act(to)).default_button()
+    } else {
+        b
+    }
+}
+
+pub(super) fn ghost(k: &mut Keys, label: &str, state: ButtonState, t: &Theme, to: fn(&mut Ui)) -> El {
+    let b = au::button(k, label, None, ButtonKind::Ghost, ButtonSize::Lg, state, t);
+    if state == ButtonState::Enabled {
+        b.on_press_tx(act(to))
+    } else {
+        b
+    }
+}
+
+fn switch(row_key: &str, name: &str, on: bool, t: &Theme, to: impl Fn(&mut Ui) + 'static) -> El {
+    ui_switch::switch(&format!("{row_key}-switch"), "", on, true, t)
+        .label(name)
+        .on_press_tx(act(to))
+}
+
+// ---------------------------------------------------------------------------
+// DW-0202: app lock
+// ---------------------------------------------------------------------------
+
+fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
+    let on = ui.lock_on;
+    let chosen = LockAfter::ALL.iter().position(|a| *a == ui.lock_after).unwrap_or(1);
+    let labels: Vec<&str> = LockAfter::ALL.iter().map(|a| a.label()).collect();
+    // A source that sets no delay draws no "Lock again after" (never a choice nothing acts on), and neither does
+    // the switch off (off never locks).
+    let delay = ui.sets_lock_after() && on;
+    let mut rows = vec![setup::item(
+        k,
+        Some(&icons::FACE),
+        "App lock",
+        Some("Your PC's password works if Windows Hello doesn't"),
+        |key| vec![switch(key, "App lock", on, t, Ui::toggle_lock)],
+        None,
+        false,
+        t,
+    )];
+    if delay {
+        rows.push(setup::item(
+            k,
+            None,
+            "Lock again after",
+            None,
+            |_| {
+                vec![setup::segmented(
+                    "seg-0",
+                    "Lock again after",
+                    &labels,
+                    chosen,
+                    SegSize::Sm,
+                    None,
+                    t,
+                    |j, tab| tab.on_press_tx(act(move |ui: &mut Ui| ui.set_lock_after(LockAfter::ALL[j]))),
+                )]
+            },
+            None,
+            true,
+            t,
+        ));
+    }
+    setup::column()
+        .child(au::heading(
+            "Lock Beebeeb",
+            Some("Ask for Windows Hello when you open the app, so nobody else can look through your files on this PC."),
+            false,
+            t,
+        ))
+        .child(setup::list(
+            k,
+            rows,
+            Some("Sync keeps running while the app is locked. File Explorer follows your PC's lock instead."),
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// DW-0203: back up folders
+// ---------------------------------------------------------------------------
+
+fn backup(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
+    let rows: Vec<El> = ui
+        .folders
+        .iter()
+        .enumerate()
+        .map(|(i, folder)| {
+            setup::item(
+                k,
+                Some(&icons::FOLDER),
+                &folder.name,
+                Some(&folder.summary),
+                |key| {
+                    vec![switch(key, &folder.name, folder.on, t, move |ui: &mut Ui| {
+                        ui.toggle_folder(i)
+                    })]
+                },
+                None,
+                i > 0,
+                t,
+            )
+        })
+        .collect();
+    let any = ui.folders.iter().any(|f| f.on);
+    setup::column()
+        .child(au::heading(
+            "Back up your folders",
+            Some("Your folders are encrypted on this PC before they upload. They stay where they are."),
+            false,
+            t,
+        ))
+        .child(setup::list(
+            k,
+            rows,
+            Some("Change these any time in Settings \u{203a} Backups, and add other folders there."),
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(
+                    k,
+                    "Turn on backup",
+                    if any {
+                        ButtonState::Enabled
+                    } else {
+                        ButtonState::Disabled
+                    },
+                    t,
+                    Ui::go_on,
+                ))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// DW-0204: thumbnails and previews
+// ---------------------------------------------------------------------------
+
+const PREVIEWS_SUB: &str = "Photos open instantly from a saved preview, instead of downloading the full original.";
+
+fn preview_card(ui: &Ui, t: &Theme) -> El {
+    let (original, _) = ui.pictures();
+    let name = ui.preview_name();
+    let mut words = row().key("prev-words").grow(1.0).min_w(0.0).h(15.0).items_end();
+    words = words.child(kit::label("prev-size", format!("{name} \u{b7}"), SUB_MEDIUM, t.text));
+    if let Some(weight) = ui.weight(ui.size, ui.format) {
+        // A space of 12px Inter between the dot and the weight, as the board's line has.
+        words = words.child(kit::label("prev-size-bytes", weight, SUB_MONO_MEDIUM, t.text).ml(3.33));
+    }
+    words = words
+        .child(kit::label("prev-orig", ", original", type_au::SUB, t.text_tertiary))
+        .child(kit::label("prev-orig-bytes", ui.original_weight(), SUB_MONO, t.text_tertiary).ml(3.33));
+    row()
+        .key("prev-card")
+        .role("group")
+        .label(format!(
+            "Sample: {name}{}, original {}",
+            ui.weight(ui.size, ui.format)
+                .map(|w| format!(" {w}"))
+                .unwrap_or_default(),
+            ui.original_weight()
+        ))
+        .w_full()
+        .padding(space::S12)
+        .gap(space::S12)
+        .center_y()
+        .radius(scale::radius::PANEL)
+        .fill(t.card)
+        .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
+        .child(
+            el().key("prev-thumb")
+                .role("image")
+                .label(if ui.sample().bundled {
+                    "Sample photo"
+                } else {
+                    "Your photo"
+                })
+                .size(70.0, 52.0)
+                .radius(tokens::radius::MD)
+                .pixels(original),
+        )
+        .child(words)
+        .child(setup::small_button("btn-0", "Compare", t).on_press_tx(act(Ui::open_compare)))
+}
+
+fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
+    // "Compare" is the column's first button: `btn-0`.
+    let _ = k.next("btn");
+    let size = PreviewSize::ALL.iter().position(|s| *s == ui.size).unwrap_or(3);
+    let format = PreviewFormat::ALL.iter().position(|f| *f == ui.format).unwrap_or(0);
+    let sizes: Vec<&str> = PreviewSize::ALL.iter().map(|s| s.label()).collect();
+    let formats: Vec<&str> = PreviewFormat::ALL.iter().map(|f| f.label()).collect();
+    let limit = ui.space_limit();
+    let label = |key: &str, words: &str| {
+        kit::label(
+            key.to_string(),
+            words.to_uppercase(),
+            type_::SECTION_LABEL,
+            t.text_tertiary,
+        )
+        .w_full()
+        .mb(-4.0)
+    };
+    // The limit as the product has it: the board draws the pop-up button and gives it no
+    // choices here (they are Settings › Storage's, DW-0712), so it is a value, not a control.
+    let space = setup::item(
+        k,
+        None,
+        "Space on this PC",
+        None,
+        |key| vec![settings_list::pop_button(key, &limit, t).a11y_hidden()],
+        None,
+        false,
+        t,
+    )
+    .label(format!("Space on this PC, {limit}"));
+    setup::column()
+        .child(au::heading("Thumbnails and previews", Some(PREVIEWS_SUB), false, t))
+        .child(preview_card(ui, t))
+        .child(label("label-0", "Preview size"))
+        .child(setup::segmented(
+            "seg-0",
+            "Preview size",
+            &sizes,
+            size,
+            SegSize::Md,
+            None,
+            t,
+            |j, tab| tab.on_press_tx(act(move |ui: &mut Ui| ui.set_size(PreviewSize::ALL[j]))),
+        ))
+        .child(label("label-1", "Format"))
+        .child(setup::segmented(
+            "seg-1",
+            "Format",
+            &formats,
+            format,
+            SegSize::Md,
+            None,
+            t,
+            |j, tab| tab.on_press_tx(act(move |ui: &mut Ui| ui.set_format(PreviewFormat::ALL[j]))),
+        ))
+        // No limit to state (nothing is kept on this PC yet): no row, only the line under the choices.
+        .child(if limit.is_empty() {
+            setup::note(k, &ui.fit_line(), setup::FOOT, 16.0, t)
+        } else {
+            setup::list(k, vec![space], Some(&ui.fit_line()), t)
+        })
+        .child(
+            actions()
+                .child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+/// Step 4 while the account's preview setting is being read: its heading, a loading state, nothing chosen and
+/// nothing stored until the read answered. "Not now" stays.
+fn previews_loading(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading("Thumbnails and previews", None, false, t))
+        .child(view_state(ViewState::Loading { words: "Reading your preview settings\u{2026}" }, t))
+        .child(
+            actions()
+                .child(primary(k, "Continue", ButtonState::Disabled, t, Ui::go_on))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+/// Step 4 when reading the preview setting failed: said as a failure, never as "off" or "not in this version". Try
+/// again reads it again; Not now goes on with nothing changed.
+fn previews_failed(k: &mut Keys, t: &Theme) -> El {
+    let retry = try_again("previews-failed", t).on_press_tx(act(Ui::retry_previews));
+    setup::column()
+        .child(au::heading("Thumbnails and previews", None, false, t))
+        .child(view_state(
+            ViewState::Failed {
+                key: "previews-failed",
+                title: "Couldn\u{2019}t read your preview settings",
+                why: "Beebeeb couldn\u{2019}t read your preview settings. Nothing is changed.",
+                retry: Some(retry),
+            },
+            t,
+        ))
+        .child(actions().child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)))
+}
+
+/// Step 4 as the board draws it behind the compare view: nothing in it takes a press.
+fn previews_behind(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading("Thumbnails and previews", Some(PREVIEWS_SUB), false, t))
+        .child(
+            actions()
+                .child(au::button(
+                    k,
+                    "Continue",
+                    None,
+                    ButtonKind::Primary,
+                    ButtonSize::Lg,
+                    ButtonState::Busy,
+                    t,
+                ))
+                .child(au::button(
+                    k,
+                    "Not now",
+                    None,
+                    ButtonKind::Ghost,
+                    ButtonSize::Lg,
+                    ButtonState::Busy,
+                    t,
+                )),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// DW-0206, DW-0206b, DW-0280: File Explorer
+// ---------------------------------------------------------------------------
+
+/// Windows' own neutral colours (`.kit-os`): the pane is a picture of File Explorer, not Beebeeb.
+struct Os {
+    card: Color,
+    /// The selected row's ground: the ink at 9% over the card.
+    selected: Color,
+    ink: Color,
+    icon: Color,
+}
+
+fn os(t: &Theme) -> Os {
+    let grey = |v: u8| rune::color::hex(&format!("#{v:02x}{v:02x}{v:02x}")).unwrap_or(Color::BLACK);
+    if t.dark {
+        Os {
+            card: grey(0x16),
+            selected: grey(0x29),
+            ink: grey(0xe4),
+            icon: grey(0xb7),
+        }
+    } else {
+        Os {
+            card: grey(0xfd),
+            selected: grey(0xe8),
+            ink: grey(0x12),
+            icon: grey(0x42),
+        }
+    }
+}
+
+fn explorer_added(k: &mut Keys, t: &Theme) -> El {
+    let os = os(t);
+    let places: [(&str, Option<&'static rune::Icon>); 5] = [
+        ("Home", Some(&icons::HOME)),
+        ("Gallery", Some(&icons::GALLERY)),
+        ("Beebeeb", None),
+        ("Desktop", Some(&icons::DESKTOP)),
+        ("Documents", Some(&icons::DOCUMENT)),
+    ];
+    let mut nav = col()
+        .key("nav")
+        .role("image")
+        .label("File Explorer's navigation pane: Home, Gallery, Beebeeb (selected), Desktop, Documents")
+        .w(220.0)
+        .padding(space::S8)
+        .gap(space::S2)
+        .radius(scale::radius::PANEL)
+        .fill(os.card)
+        .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
+        .box_shadow(kit::ring(kit::HAIR, t.separator));
+    for (i, (name, icon)) in places.iter().enumerate() {
+        let mut ni = row().h(28.0).px(space::S10).gap(space::S9).center_y().radius(tokens::radius::SM);
+        ni = match icon {
+            Some(icon) => ni.child(kit::glyph(format!("nav-{i}-icon"), icon, 15.0, os.icon)),
+            // The b as Windows shows it in the pane: one colour, the letter cut out of its plate.
+            None => ni.key("nav-on").fill(os.ink.alpha(0.09)).child(
+                el().key(format!("nav-{i}-b"))
+                    .size(15.0, 15.0)
+                    // The plate is a glyph, as the board's is an SVG: it keeps its soft edge on a half pixel.
+                    // Its top is on half a device pixel (y 295.75 at 200 %): the board's browser draws it from
+                    // the pixel above (rows 591 to 620, measured), Rune from the pixel below. A quarter point
+                    // up puts both layers on the board's rows; at 100 % and 150 % nothing changes.
+                    .mt(-0.25)
+                    .mb(0.25)
+                    .child(rune::icon(&icons::B_PLATE, 15.0).color(os.icon).absolute(0.0, 0.0))
+                    // The mark's b, moved to the middle of the plate as the board's symbol has it
+                    // (its mask sits 34.018, 22.026 of 512 further right and down than the mark's).
+                    .child(
+                        rune::icon(&crate::theme::icons::MARK_B, 15.0)
+                            .color(os.selected)
+                            .absolute(15.0 * 34.018 / 512.0, 15.0 * 22.026 / 512.0),
+                    ),
+            ),
+        };
+        nav = nav.child(ni.child(kit::label(format!("nav-{i}"), *name, NAV, os.ink).a11y_hidden()));
+        if i == 2 {
+            nav = nav.child(el().key("nav-sep").h(kit::HAIR).mx(8.0).my(5.0).fill(t.separator));
+        }
+    }
+    setup::column()
+        .child(au::heading(
+            "Beebeeb is in File Explorer",
+            Some("Your Beebeeb files show in File Explorer's navigation pane, and in other apps' Open and Save As dialogs."),
+            false,
+            t,
+        ))
+        .child(nav)
+        .child(setup::note(
+            k,
+            "Anyone who can use this PC while it's signed in can open these files in File Explorer. File Explorer follows Windows' lock, not Beebeeb's.",
+            type_::CAPTION,
+            0.0,
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on))
+                .child(ghost(k, "Show in File Explorer", ButtonState::Enabled, t, Ui::show_in_explorer)),
+        )
+}
+
+fn explorer_adding(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Adding Beebeeb to File Explorer",
+            Some("This takes a few seconds. You can carry on; it finishes by itself."),
+            false,
+            t,
+        ))
+        .child(
+            // Windows gives no progress: the bar says "busy", not how far.
+            el().key("bar")
+                .role("progressbar")
+                .label("Adding Beebeeb to File Explorer")
+                .w_full()
+                .h(4.0)
+                .radius(2.0)
+                .fill(t.text.alpha(0.09))
+                .child(
+                    el().key("bar-fill")
+                        .absolute(0.3 * setup::COLUMN_W, 0.0)
+                        .size(0.3 * setup::COLUMN_W, 4.0)
+                        .radius(2.0)
+                        .fill(t.text_secondary),
+                ),
+        )
+        .child(actions().child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on)))
+}
+
+/// DW-0280's banner title: Windows was asked and did not finish.
+const WINDOWS_REFUSED: &str = "Windows didn't finish adding Beebeeb to File Explorer";
+/// The banner's title when sync did not start, so Windows was never asked (`Explorer::NotSyncing`).
+const SYNC_DID_NOT_START: &str = "Sync didn't start on this PC, so Beebeeb isn't in File Explorer yet";
+
+/// DW-0280's sentence under the heading: true when only the File Explorer entry failed.
+const WINDOW_WORKS: &str = "Your files are safe, and the Beebeeb window works without File Explorer.";
+/// The sentence when sync itself did not start (the contract's ruling Q3: the board's sentence is not true then).
+const NOTHING_SYNCS: &str = "Your files are safe in Beebeeb. Nothing syncs with this PC until sync starts.";
+
+/// `code`: Windows' code for support; empty when there is none (the sentence then stands alone). `another`: no
+/// folder was kept yet, so another one can be chosen (the folder may be what was refused).
+fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Keys, t: &Theme) -> El {
+    let lead = "Try again in a moment.";
+    let why = if code.is_empty() { lead.to_string() } else { format!("{lead} {code}") };
+    let retry = try_again("explorer-failed", t).on_press_tx(act(Ui::go_on));
+    setup::column()
+        .child(au::heading(
+            "Couldn't add Beebeeb to File Explorer",
+            Some(sub),
+            false,
+            t,
+        ))
+        .child(view_state(
+            ViewState::Failed { key: "explorer-failed", title, why: &why, retry: Some(retry) },
+            t,
+        ))
+        .child(
+            actions()
+                .children(another.then(|| {
+                    ghost(
+                        k,
+                        "Choose another folder\u{2026}",
+                        ButtonState::Enabled,
+                        t,
+                        Ui::choose_folder,
+                    )
+                }))
+                .child(ghost(
+                    k,
+                    "Continue without File Explorer",
+                    ButtonState::Enabled,
+                    t,
+                    Ui::not_now,
+                )),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// DW-0207, DW-0281, DW-0208
+// ---------------------------------------------------------------------------
+
+fn notifications(k: &mut Keys, t: &Theme) -> El {
+    let (mark, _, wash) = au::tone(Tone::Neutral, t);
+    setup::column()
+        .child(au::heading(
+            "Stay informed",
+            Some("Get told when sync stops, or when someone signs in to your account. No marketing, ever."),
+            false,
+            t,
+        ))
+        .child(
+            el().key("tile-at").a11y_hidden().w_full().py(space::S16).center().child(
+                el().key("tile")
+                    .size(64.0, 64.0)
+                    .radius(18.0)
+                    .fill(wash)
+                    .center()
+                    .child(kit::glyph("tile-icon", &icons::BELL, 32.0, mark)),
+            ),
+        )
+        .child(
+            actions()
+                .child(primary(k, "Allow notifications", ButtonState::Enabled, t, Ui::go_on))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+fn login(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
+    let on = ui.login_on;
+    let rows = vec![setup::item(
+        k,
+        Some(&icons::POWER),
+        "Open at login",
+        None,
+        |key| vec![switch(key, "Open at login", on, t, Ui::toggle_login)],
+        None,
+        false,
+        t,
+    )];
+    setup::column()
+        .child(au::heading(
+            "Open Beebeeb when you log in",
+            Some("So the b is in the notification area and your files sync from the start."),
+            false,
+            t,
+        ))
+        .child(setup::list(k, rows, None, t))
+        .child(actions().child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on)))
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "On" } else { "Off" }
+}
+
+fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
+    let r = &ui.results;
+    let explorer = match &ui.explorer {
+        _ if ui.asks_folder() => "Off",
+        Explorer::Added => "On",
+        Explorer::Adding => "Adding\u{2026}",
+        Explorer::Failed { .. } | Explorer::NotSyncing => "Off",
+    };
+    let backup = match ui.answered(Switch::Backup) {
+        Some(Answered::Waiting) => "Saving\u{2026}".to_string(),
+        Some(Answered::Unknown | Answered::NotChanged) => "Not changed".to_string(),
+        _ if r.backup.is_empty() => "Off".to_string(),
+        _ => r.backup.join(", "),
+    };
+    // A switch whose change is answered after the press draws no value before the answer, and never the value
+    // that was asked for when the change did not happen.
+    let switch = |switch: Switch, on: bool| match ui.answered(switch) {
+        Some(Answered::NotAsked) => "Not set here",
+        Some(Answered::Waiting) => "Saving\u{2026}",
+        Some(Answered::Unknown) => "Not changed",
+        Some(Answered::NotChanged) | None => on_off(on),
+    };
+    // The passkey's answer may still be out (step 1 was left while Windows' dialog or Beebeeb was answering): no value
+    // is claimed before it.
+    let passkey = match ui.passkey_step {
+        PasskeyStep::Waiting => "Adding\u{2026}",
+        _ if r.passkey => "Added",
+        _ => "Not added",
+    };
+    let rows: [(&str, String, Setting); 7] = [
+        ("Passkey", passkey.into(), Setting::Passkey),
+        ("App lock", switch(Switch::AppLock, r.app_lock).into(), Setting::AppLock),
+        ("Backup", backup, Setting::Backup),
+        (
+            "Previews",
+            match ui.answered(Switch::Previews) {
+                Some(Answered::NotAsked) => "Not set here".into(),
+                Some(Answered::Waiting) => "Saving\u{2026}".into(),
+                Some(Answered::Unknown | Answered::NotChanged) => "Not changed".into(),
+                None => ui.preview_name(),
+            },
+            Setting::Previews,
+        ),
+        ("File Explorer", explorer.into(), Setting::FileExplorer),
+        (
+            "Notifications",
+            switch(Switch::Notifications, r.notifications).into(),
+            Setting::Notifications,
+        ),
+        (
+            "Open at login",
+            switch(Switch::OpenAtLogin, r.open_at_login).into(),
+            Setting::OpenAtLogin,
+        ),
+    ];
+    let links = ui.opens_settings();
+    let rows: Vec<El> = rows
+        .into_iter()
+        .map(|(title, value, setting)| {
+            // A step nothing answered for set nothing: its row says so, never a value.
+            let value = if ui.available(setting.step()) {
+                value
+            } else {
+                "Not available yet".to_string()
+            };
+            let row = setup::item(
+                k,
+                None,
+                title,
+                None,
+                |key| vec![setup::value(key, &value, t).a11y_hidden()],
+                Some(26.0),
+                false,
+                t,
+            )
+            .label(format!("{title}, {value}"));
+            if !links {
+                // Nothing opens the setting from here: the row is its value, not a link.
+                return row.role("group");
+            }
+            row.role("link")
+                .hover(t.hover)
+                .press(t.press)
+                .focusable(true)
+                .cursor(rune::Cursor::Pointer)
+                .on_press_tx(act(move |ui: &mut Ui| ui.open_setting(setting)))
+        })
+        .collect();
+    // What was asked and did not happen, said in words (the rows show what is set). App lock is apart: a Windows
+    // Hello that was cancelled leaves it as it was, and that is not an error.
+    let unchanged = |names: [(Switch, &'static str); 3]| -> Vec<&'static str> {
+        names
+            .into_iter()
+            .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::Unknown)))
+            .map(|(_, name)| name)
+            .collect()
+    };
+    let not_changed = unchanged([
+        (Switch::Notifications, "notifications"),
+        (Switch::OpenAtLogin, "open at login"),
+        (Switch::Backup, "backup"),
+    ]);
+    let lock_kept: Vec<&str> = [(Switch::AppLock, "app lock"), (Switch::LockAfter, "lock delay")]
+        .into_iter()
+        .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::Unknown)))
+        .map(|(_, name)| name)
+        .collect();
+    let note = |key: &'static str, k: &mut Keys, words: String| {
+        el().key(key)
+            .role("alert")
+            .w_full()
+            .child(setup::note(k, &words, type_::CAPTION, 0.0, t))
+    };
+    setup::column()
+        .child(au::heading(
+            "You're set up",
+            Some("You can change any of this later in Settings."),
+            false,
+            t,
+        ))
+        .child(setup::list(k, rows, None, t))
+        .children((!not_changed.is_empty()).then(|| {
+            note(
+                "not-changed",
+                k,
+                format!("Couldn't change {}. You can set it in Settings.", not_changed.join(" and ")),
+            )
+        }))
+        .children((!lock_kept.is_empty()).then(|| {
+            let verb = if lock_kept.len() == 1 { "wasn't" } else { "weren't" };
+            note(
+                "lock-not-changed",
+                k,
+                format!(
+                    "{} {verb} changed. You can set it in Settings.",
+                    capitalised(&lock_kept.join(" and "))
+                ),
+            )
+        }))
+        .child(setup::note(
+            k,
+            "Your file list and thumbnails keep loading in the background.",
+            type_::CAPTION,
+            0.0,
+            t,
+        ))
+        .child(actions().child(primary(k, "Open my Beebeeb", ButtonState::Enabled, t, Ui::finish)))
+}
+
+// ---------------------------------------------------------------------------
+// DW-0209: the compare view
+// ---------------------------------------------------------------------------
+
+/// The compare view's ground: "color-mix(in oklch, black 88%, paper)".
+fn stage(t: &Theme) -> Color {
+    if t.dark {
+        Color::BLACK
+    } else {
+        rune::color::hex("#060505").unwrap_or(Color::BLACK)
+    }
+}
+
+fn tag(key: &str, words: &str) -> El {
+    el().key(format!("{key}-box"))
+        .h(18.0)
+        .px(space::S8)
+        .center()
+        .radius(tokens::radius::SM)
+        .fill(Color::BLACK.alpha(0.5))
+        .child(kit::label(key.to_string(), words, type_::CAPTION, Color::WHITE))
+}
+
+fn photo(ui: &Ui, compare: Compare, t: &Theme) -> El {
+    let (original, preview) = ui.pictures();
+    let (w, h) = PHOTO;
+    let original_tag = format!("Original \u{b7} {}", ui.original_weight());
+    let preview_tag = match ui.weight(ui.size, ui.format) {
+        Some(weight) => format!("{} \u{b7} {weight}", ui.preview_name()),
+        None => ui.preview_name(),
+    };
+    let frame = |key: &str| el().key(key.to_string()).size(w, h).radius(tokens::radius::SM);
+    match compare.mode {
+        CompareMode::Wipe => {
+            let x = (compare.wipe * w).round();
+            frame("cmp-photo")
+                .role("slider")
+                .label("Wipe between the original and the preview")
+                .range_value(f64::from(compare.wipe * 100.0), 0.0, 100.0)
+                .on_step(|s: &mut State, delta: i32, _: &mut rune::Tx| {
+                    if let Some(ui) = s.setup.as_mut() {
+                        ui.move_wipe(delta as f32 * super::WIPE_STEP);
+                    }
+                })
+                .focusable(true)
+                .focus_ring(2.0, 2.0, t.accent_deep)
+                .pixels(original)
+                // The preview from the line to the right edge, cut from the same picture box.
+                .child(
+                    el().key("cmp-preview-at")
+                        .absolute(x, 0.0)
+                        .size(w - x, h)
+                        .clip_corners([0.0, 4.0, 4.0, 0.0])
+                        .child(el().absolute(-x, 0.0).size(w, h).pixels(preview)),
+                )
+                .child(
+                    el().key("cmp-wipe")
+                        .absolute(x - 1.0, 0.0)
+                        .size(2.0, h)
+                        .fill(Color::WHITE),
+                )
+                .child(el().absolute(12.0, 12.0).child(tag("cmp-tag-0", &original_tag)))
+                .child(
+                    el().pin(None, Some(12.0), Some(12.0), None)
+                        .child(tag("cmp-tag-1", &preview_tag)),
+                )
+        }
+        CompareMode::Stacked => {
+            // Two pictures of half the height, the original above the preview.
+            let half = (h - 10.0) / 2.0;
+            let one = |key: &str, pixels: &rune::Pixels, words: &str, name: &str| {
+                el().key(format!("{key}-pic"))
+                    .role("image")
+                    .label(name.to_string())
+                    .size(half * w / h, half)
+                    .radius(tokens::radius::SM)
+                    .pixels(pixels)
+                    .child(el().absolute(12.0, 12.0).child(tag(key, words)))
+            };
+            col()
+                .key("cmp-photo")
+                .size(w, h)
+                .gap(space::S10)
+                .items_center()
+                .child(one("cmp-tag-0", original, &original_tag, "The original"))
+                .child(one("cmp-tag-1", preview, &preview_tag, "The preview"))
+        }
+        CompareMode::Flip => {
+            let (pixels, key, words) = if compare.original_showing {
+                (original, "cmp-tag-0", original_tag.as_str())
+            } else {
+                (preview, "cmp-tag-1", preview_tag.as_str())
+            };
+            frame("cmp-photo")
+                .role("button")
+                .label(if compare.original_showing {
+                    "Showing the original. Press to show the preview."
+                } else {
+                    "Showing the preview. Press to show the original."
+                })
+                .focusable(true)
+                .focus_ring(2.0, 2.0, t.accent_deep)
+                .cursor(rune::Cursor::Pointer)
+                .pixels(pixels)
+                .on_press_tx(act(Ui::flip))
+                .child(el().absolute(12.0, 12.0).child(tag(key, words)))
+        }
+    }
+}
+
+/// One choice at the foot of the compare view: a size or a format, with what it weighs.
+fn option(j: usize, label: &str, weight: Option<String>, on: bool, t: &Theme) -> El {
+    let dim = Color::WHITE.alpha(0.7);
+    let mut o = col()
+        .key(if on {
+            format!("cmp-opt-{j}-on")
+        } else {
+            format!("cmp-opt-{j}-tab")
+        })
+        .role("radio")
+        .label(match &weight {
+            Some(weight) => format!("{label}, {weight}"),
+            None => label.to_string(),
+        })
+        .checked(on)
+        // As wide as its wider line, to the fraction of a point: the row is centred.
+        .w(24.0
+            + rune::text::advance(label, type_::HEAD)
+                .max(weight.as_deref().map_or(0.0, |w| rune::text::advance(w, CAP_MONO))))
+        .h(43.0)
+        .py(space::S6)
+        .items_center()
+        .radius(8.0)
+        .focusable(true)
+        .focus_ring(2.0, 0.0, t.accent_deep)
+        .cursor(rune::Cursor::Pointer)
+        .child(kit::label(format!("cmp-opt-{j}"), label, type_::HEAD, Color::WHITE).a11y_hidden());
+    if on {
+        o = o.fill(Color::WHITE.alpha(0.18));
+    }
+    if let Some(weight) = weight {
+        o = o.child(kit::label(format!("cmp-opt-{j}-bytes"), weight, CAP_MONO, dim).a11y_hidden());
+    }
+    o
+}
+
+fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
+    let dim = Color::WHITE.alpha(0.7);
+    let modes: Vec<&str> = CompareMode::ALL.iter().map(|m| m.label()).collect();
+    let mode = CompareMode::ALL.iter().position(|m| *m == compare.mode).unwrap_or(1);
+    let head = row()
+        .key("cmp-head")
+        .w_full()
+        .h(48.0)
+        .px(space::S16)
+        .gap(space::S12)
+        .center_y()
+        .child(
+            setup::small_button("cmp-done", "Done", t)
+                .on_press_tx(act(Ui::close_compare))
+                .default_button(),
+        )
+        .child(setup::segmented(
+            "cmp-seg",
+            "How to compare",
+            &modes,
+            mode,
+            SegSize::Sm,
+            Some(SegInk {
+                track: Color::WHITE.alpha(0.14),
+                rest: Color::WHITE.alpha(0.75),
+            }),
+            t,
+            |j, tab| tab.on_press_tx(act(move |ui: &mut Ui| ui.set_compare_mode(CompareMode::ALL[j]))),
+        ))
+        .child(el().grow(1.0))
+        .child(kit::label(
+            "cmp-hint",
+            match compare.mode {
+                CompareMode::Wipe => "Pinch to zoom \u{b7} double-click for 1:1",
+                CompareMode::Stacked => "The original above, the preview below",
+                CompareMode::Flip => "Press the photo to flip",
+            },
+            type_::CAPTION,
+            dim,
+        ));
+    let mut foot = row()
+        .key("cmp-foot")
+        .w_full()
+        .pb(16.0)
+        .gap(space::S24)
+        .center()
+        .role("group")
+        .label("Preview size and format");
+    for (j, size) in PreviewSize::ALL.iter().enumerate() {
+        let size = *size;
+        foot = foot.child(
+            option(j, size.label(), ui.weight(size, ui.format), size == ui.size, t)
+                .on_press_tx(act(move |ui: &mut Ui| ui.set_size(size))),
+        );
+    }
+    foot = foot.child(
+        el().key("cmp-sep")
+            .a11y_hidden()
+            .size(kit::HAIR, 18.0)
+            .mx(2.0)
+            .fill(Color::WHITE.alpha(0.3)),
+    );
+    for (j, format) in PreviewFormat::ALL.iter().enumerate() {
+        let format = *format;
+        foot = foot.child(
+            option(
+                PreviewSize::ALL.len() + j,
+                format.label(),
+                ui.weight(ui.size, format),
+                format == ui.format,
+                t,
+            )
+            .on_press_tx(act(move |ui: &mut Ui| ui.set_format(format))),
+        );
+    }
+    foot = foot.child(setup::small_button("cmp-choose", "Choose photo", t).on_press_tx(act(Ui::choose_photo)));
+    setup::sheet(
+        "Compare a preview with the original",
+        SHEET.0,
+        SHEET.1,
+        col()
+            .key("cmp")
+            .w_full()
+            .h_full()
+            .corners([0.0, 0.0, 14.0, 14.0])
+            .fill(stage(t))
+            .child(head)
+            .child(
+                el().key("cmp-stage")
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .center()
+                    .child(photo(ui, compare, t)),
+            )
+            .child(foot),
+        t,
+    )
+    // Modal: Tab stays inside, what is behind is inert, Esc closes it, focus goes back to
+    // Compare. `setup::page` draws the scrim, so `dialog::modal` (a second scrim) is not used.
+    .modal_tx(false, act(Ui::close_compare))
+}
+
+/// First letter up, for a name that starts a sentence.
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}

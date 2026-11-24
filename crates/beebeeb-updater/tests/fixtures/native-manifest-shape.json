@@ -1,0 +1,19 @@
+{
+  "version": "0.9.0",
+  "notes": "# Beebeeb Desktop 0.9.0 - native\n",
+  "pub_date": "2026-11-20T10:00:00Z",
+  "product": "desktop",
+  "channel": "beta",
+  "platforms": {
+    "windows-x86_64": {
+      "url": "https://releases.beebeeb.io/desktop/artifacts/0.9.0/Beebeeb_0.9.0_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKQUFBQQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxODAwMDAwMDAwCWZpbGU6QmVlYmVlYl8wLjkuMF94NjQtc2V0dXAuZXhlCkJCQkIK",
+      "size": 9000001
+    },
+    "windows-x86_64-nsis": {
+      "url": "https://releases.beebeeb.io/desktop/artifacts/0.9.0/Beebeeb_0.9.0_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKQUFBQQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxODAwMDAwMDAwCWZpbGU6QmVlYmVlYl8wLjkuMF94NjQtc2V0dXAuZXhlCkJCQkIK",
+      "size": 9000001
+    }
+  }
+}

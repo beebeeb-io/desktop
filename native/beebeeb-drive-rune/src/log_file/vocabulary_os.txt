@@ -1,0 +1,150 @@
+# The OS error texts the engine logs through `std::io::Error`, the Windows and HTTP client errors, and units: their
+# words are written as they are. Hand-kept; a phrase per line (its words are what counts). Lines starting with # are
+# comments.
+# std::io::Error and io::ErrorKind (Display and Debug)
+os error
+entity not found
+permission denied
+connection refused
+connection reset
+connection aborted
+host unreachable
+network unreachable
+network down
+not connected
+address in use
+address not available
+broken pipe
+entity already exists
+operation would block
+not a directory
+is a directory
+directory not empty
+read-only filesystem or storage medium
+stale network file handle
+invalid input parameter
+invalid data
+invalid filename
+timed out
+write zero
+no storage space
+seek on unseekable file
+quota exceeded
+file too large
+resource busy
+executable file busy
+deadlock
+cross-device link or rename
+too many links
+argument list too long
+operation interrupted
+unsupported
+unexpected end of file
+out of memory
+in progress
+other error
+uncategorized error
+NotFound PermissionDenied ConnectionRefused ConnectionReset ConnectionAborted HostUnreachable NetworkUnreachable
+NetworkDown NotConnected AddrInUse AddrNotAvailable BrokenPipe AlreadyExists WouldBlock NotADirectory IsADirectory
+DirectoryNotEmpty ReadOnlyFilesystem StaleNetworkFileHandle InvalidInput InvalidData InvalidFilename TimedOut
+WriteZero StorageFull NotSeekable QuotaExceeded FileTooLarge ResourceBusy ExecutableFileBusy Deadlock
+CrossesDevices TooManyLinks ArgumentListTooLong Interrupted Unsupported UnexpectedEof OutOfMemory InProgress Other
+Uncategorized Some None Ok Err Error Kind Os Custom code kind message
+# Linux and macOS (strerror)
+Operation not permitted
+No such file or directory
+No such process
+Interrupted system call
+Input/output error
+Bad file descriptor
+Resource temporarily unavailable
+Cannot allocate memory
+Device or resource busy
+File exists
+Invalid cross-device link
+Not a directory
+Is a directory
+Invalid argument
+Too many open files
+Text file busy
+File too large
+No space left on device
+Read-only file system
+Broken pipe
+File name too long
+Directory not empty
+Disk quota exceeded
+Stale file handle
+Operation not supported
+Address already in use
+Network is unreachable
+Network is down
+Connection reset by peer
+Software caused connection abort
+Transport endpoint is not connected
+Connection timed out
+Operation timed out
+Host is down
+No route to host
+Name or service not known
+Temporary failure in name resolution
+# Windows (FormatMessage)
+Access is denied.
+The system cannot find the file specified.
+The system cannot find the path specified.
+The process cannot access the file because it is being used by another process.
+The process cannot access the file because another process has locked a portion of the file.
+The directory is not empty.
+The filename, directory name, or volume label syntax is incorrect.
+There is not enough space on the disk.
+# ERROR_HANDLE_DISK_FULL (39): its text in Microsoft Learn, "System Error Codes (0-499)"
+The disk is full.
+The network path was not found.
+The network name cannot be found.
+The specified network name is no longer available.
+The parameter is incorrect.
+The handle is invalid.
+Cannot create a file when that file already exists.
+The media is write protected.
+The device is not ready.
+The request is not supported.
+The operation completed successfully.
+The semaphore timeout period has expired.
+Element not found.
+Catastrophic failure
+Unspecified error
+The requested operation requires elevation.
+The cloud file provider is not running.
+The cloud operation is invalid.
+The cloud file metadata is corrupt and unreadable.
+The cloud operation was canceled by user.
+The cloud sync root is already connected with another cloud sync provider.
+The file cannot be accessed by the system.
+An existing connection was forcibly closed by the remote host.
+No connection could be made because the target machine actively refused it.
+A connection attempt failed because the connected party did not properly respond after a period of time, or
+established connection failed because connected host has failed to respond.
+No such host is known.
+HRESULT
+# macOS: Foundation's error domain identifier (Apple Developer Documentation, "NSCocoaErrorDomain"); an NSError
+# is written as its domain and its code
+NSCocoaErrorDomain
+# The HTTP client (reqwest, hyper, rustls)
+HTTP HTTPS TLS DNS TCP
+error sending request for url
+error trying to connect
+tcp connect error
+dns error
+connection closed before message completed
+error decoding response body
+operation timed out
+invalid certificate
+certificate verify failed
+client error
+Connect
+request or response body error
+# The sandbox crate's step names (crates/beebeeb-office-sandbox, SandboxError::Os), written by media/refusal_log.rs
+UI administrators capabilities capability container exit identifier inheritable integrity job kill
+lpac map membership profile random restricted restrictions section token view wait
+# Units
+ms s KB MB GB

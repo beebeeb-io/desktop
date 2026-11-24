@@ -1,0 +1,485 @@
+//! The two-level lock through `EngineSignInSource`, on the real engine and the fake accounts of `signin_tests.rs`:
+//! what a Windows Hello answer opens (a locked screen, and only on a verified prompt of the turn it was asked
+//! in), and what the account's password opens (either level, with the code step when the account has one).
+//! The prompt is a script the test answers; nothing here waits on Windows.
+
+use std::sync::atomic::AtomicUsize;
+
+use beebeeb_engine::app::lock_api::LockState;
+
+use super::*;
+use crate::engine_host::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult};
+
+/// The prompts that are up, oldest first, and how many were taken away.
+#[derive(Clone, Default)]
+struct Prompts {
+    up: Arc<Mutex<Vec<HelloDone>>>,
+    taken_away: Arc<AtomicUsize>,
+    asked: Arc<AtomicUsize>,
+}
+
+impl HelloPrompter for Prompts {
+    fn start(&self, done: HelloDone) -> Result<HelloCancel, ()> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        self.up.lock().unwrap().push(done);
+        let taken_away = self.taken_away.clone();
+        Ok(Box::new(move || {
+            taken_away.fetch_add(1, Ordering::SeqCst);
+        }))
+    }
+}
+
+impl Prompts {
+    fn asked(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+    }
+
+    /// The oldest prompt that is up ends with `result`, on this thread (the prompt's own, in the app).
+    fn answer(&self, result: HelloResult) {
+        let done = self.up.lock().unwrap().remove(0);
+        done(result);
+    }
+}
+
+/// Signed in as the first account, the keys in memory, with a prompt the test answers.
+fn open_with_prompts(fake: &Fake) -> (Arc<Engine<MemoryCredentials>>, Source, Prompts) {
+    let (engine, mut source) = signed_in(fake);
+    let prompts = Prompts::default();
+    source.hello = Box::new(prompts.clone());
+    (engine, source, prompts)
+}
+
+#[test]
+fn windows_hello_opens_a_locked_screen_only_on_a_verified_prompt() {
+    let fake = fake("hello");
+    let (engine, mut source, prompts) = open_with_prompts(&fake);
+    // Open: nothing a prompt could open, so none is shown.
+    source.begin_hello();
+    assert_eq!(next(&mut source), SignInEvent::Hello(HelloOutcome::Cancelled));
+    assert_eq!(prompts.asked(), 0);
+
+    assert_eq!(engine.lock_screen(), Ok(()));
+    assert_eq!(
+        source.gate(),
+        GateState::Locked,
+        "a locked screen is the lock screen's gate"
+    );
+    let asked_of_the_server = fake.fake.routes().len();
+    for (result, outcome) in [
+        (HelloResult::Failed, HelloOutcome::NotRecognized),
+        (HelloResult::Cancelled, HelloOutcome::Cancelled),
+        (HelloResult::Unavailable, HelloOutcome::Unavailable),
+    ] {
+        source.begin_hello();
+        prompts.answer(result);
+        assert_eq!(next(&mut source), SignInEvent::Hello(outcome));
+        assert_eq!(engine.lock_state(), LockState::ScreenLocked, "{result:?} opens nothing");
+    }
+    assert_eq!(prompts.asked(), 3);
+
+    source.begin_hello();
+    prompts.answer(HelloResult::Verified);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::Hello(HelloOutcome::Succeeded(NextAfterSignIn::Drive))
+    );
+    assert_eq!(engine.lock_state(), LockState::Open);
+    assert_eq!(source.gate(), GateState::Ready);
+    assert_eq!(
+        fake.fake.routes().len(),
+        asked_of_the_server,
+        "the screen lock opens without the server"
+    );
+}
+
+#[test]
+fn a_verified_prompt_of_an_earlier_turn_opens_nothing() {
+    let fake = fake("late");
+    let (engine, mut source, prompts) = open_with_prompts(&fake);
+    assert_eq!(engine.lock_screen(), Ok(()));
+
+    // Asked in one lock; the screen was opened and locked again before the prompt answered.
+    source.begin_hello();
+    assert_eq!(engine.unlock_screen_platform_verified(engine.session_turn()), Ok(()));
+    assert_eq!(engine.lock_screen(), Ok(()));
+    prompts.answer(HelloResult::Verified);
+    assert_eq!(next(&mut source), SignInEvent::Hello(HelloOutcome::Cancelled));
+    assert_eq!(engine.lock_state(), LockState::ScreenLocked);
+
+    // The person left the prompt: it is taken away, its yes opens nothing and reaches no screen.
+    source.begin_hello();
+    // (That press took the first prompt's place: its cancel is counted too. Only this leave's is checked here.)
+    let taken_before = prompts.taken_away.load(Ordering::SeqCst);
+    source.cancel_hello();
+    assert_eq!(prompts.taken_away.load(Ordering::SeqCst), taken_before + 1);
+    prompts.answer(HelloResult::Verified);
+    assert_eq!(engine.lock_state(), LockState::ScreenLocked);
+    assert_eq!(source.poll(), None, "an answer of a prompt that was left is dropped");
+
+    // Asked under the first account; it signed out and ANOTHER account signed in and locked its screen
+    // before the prompt answered: the yes is not that account's. The sign-out ended the lock the prompt was asked
+    // for, so the source's next poll takes the prompt away and tells the screen (`signin_hello_end_tests.rs`).
+    source.begin_hello();
+    let taken_before = prompts.taken_away.load(Ordering::SeqCst);
+    engine.sign_out_keeping_local_data().expect("signed out");
+    assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
+    assert_eq!(prompts.taken_away.load(Ordering::SeqCst), taken_before + 1);
+    source.begin_sign_in(&fake.second.email, PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::SignedIn(Ok(NextAfterSignIn::RecoveryPhrase))
+    );
+    source.begin_restore(&words(TEST_PHRASE));
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::PhraseRestored(Ok(NextAfterSignIn::Drive))
+    );
+    assert_eq!(engine.lock_screen(), Ok(()));
+    prompts.answer(HelloResult::Verified);
+    assert_eq!(source.poll(), None, "the taken-away prompt's yes reaches no screen");
+    assert_eq!(engine.lock_state(), LockState::ScreenLocked);
+    assert_eq!(engine.user_id().as_deref(), Some(fake.second.user_id.as_str()));
+}
+
+/// L273: Unlock pressed again while a prompt is up takes the first prompt away (forgotten, it would stay on screen
+/// with nobody waiting for it); the first prompt's yes opens nothing, and the second prompt's yes opens the lock.
+#[test]
+fn a_second_begin_hello_cancels_the_first() {
+    let fake = fake("again");
+    let (engine, mut source, prompts) = open_with_prompts(&fake);
+    assert_eq!(engine.lock_screen(), Ok(()));
+    source.begin_hello();
+    assert_eq!(
+        prompts.taken_away.load(Ordering::SeqCst),
+        0,
+        "the first prompt replaces nothing"
+    );
+    source.begin_hello();
+    assert_eq!(prompts.asked(), 2);
+    assert_eq!(
+        prompts.taken_away.load(Ordering::SeqCst),
+        1,
+        "the first prompt is taken away, never just dropped"
+    );
+    // A yes of the first prompt (decided before it was taken away) opens nothing and reaches no screen.
+    prompts.answer(HelloResult::Verified);
+    assert_eq!(engine.lock_state(), LockState::ScreenLocked);
+    assert_eq!(source.poll(), None, "an answer of the first prompt is dropped");
+    // The second prompt is the one the screen waits for.
+    prompts.answer(HelloResult::Verified);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::Hello(HelloOutcome::Succeeded(NextAfterSignIn::Drive))
+    );
+    assert_eq!(engine.lock_state(), LockState::Open);
+}
+
+#[test]
+fn without_a_prompt_the_lock_screen_is_told_so_at_once() {
+    let fake = fake("noprompt");
+    // The source as built without a window: no prompt can be shown.
+    let (engine, mut source) = signed_in(&fake);
+    assert_eq!(engine.lock_screen(), Ok(()));
+    source.begin_hello();
+    assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Unavailable)));
+    assert_eq!(engine.lock_state(), LockState::ScreenLocked);
+}
+
+#[test]
+fn a_closed_vault_opens_with_the_password_and_with_nothing_else() {
+    let fake = fake("vault");
+    let (engine, mut source, prompts) = open_with_prompts(&fake);
+    let _ = engine.lock_vault();
+    assert_eq!(
+        source.gate(),
+        GateState::VaultClosed,
+        "a closed vault is not the lock screen's gate"
+    );
+    assert_eq!(engine.lock_state(), LockState::VaultClosed);
+
+    // Windows Hello opens no closed vault: no prompt is even shown.
+    source.begin_hello();
+    assert_eq!(next(&mut source), SignInEvent::Hello(HelloOutcome::Cancelled));
+    assert_eq!(prompts.asked(), 0);
+
+    source.begin_unlock("not the password");
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::VaultUnlocked(Err(SignInProblem::Invalid))
+    );
+    fake.sign_in.store(RATE_LIMITED, Ordering::SeqCst);
+    source.begin_unlock(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::VaultUnlocked(Err(SignInProblem::RateLimited { seconds: 30 }))
+    );
+    fake.sign_in.store(NO_ANSWER, Ordering::SeqCst);
+    source.begin_unlock(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::VaultUnlocked(Err(SignInProblem::Offline))
+    );
+    assert_eq!(
+        source.gate(),
+        GateState::VaultClosed,
+        "a proof that was not made unlocks nothing"
+    );
+    fake.sign_in.store(ANSWERS, Ordering::SeqCst);
+
+    source.begin_unlock(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::Drive))
+    );
+    assert_eq!(source.gate(), GateState::Ready);
+    assert_eq!(engine.account_email().as_deref(), Some(fake.first.email.as_str()));
+    assert!(engine.keys_for_engine_start().is_ok());
+}
+
+#[test]
+fn the_password_opens_a_locked_screen_too_and_asks_the_code_when_the_account_has_one() {
+    let fake = fake("strong");
+    let (engine, mut source, _prompts) = open_with_prompts(&fake);
+    assert_eq!(engine.lock_screen(), Ok(()));
+    source.begin_unlock(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::Drive))
+    );
+    assert_eq!(engine.lock_state(), LockState::Open);
+
+    // With an authenticator: the password alone opens nothing; the code finishes it.
+    fake.two_factor.store(true, Ordering::SeqCst);
+    let _ = engine.lock_vault();
+    source.begin_unlock(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::TwoFactor))
+    );
+    assert_eq!(source.gate(), GateState::VaultClosed);
+    source.begin_two_factor(TOTP, CodeKind::Authenticator);
+    assert_eq!(next(&mut source), SignInEvent::TwoFactor(Ok(NextAfterSignIn::Drive)));
+    assert_eq!(source.gate(), GateState::Ready);
+}
+
+/// The person went back while the code that finishes an unlock was at the server, and it was accepted anyway:
+/// the lock is put back at the level it had, and nobody is signed out.
+#[test]
+fn an_unlock_that_was_left_and_finished_anyway_is_locked_again_at_its_level_never_signed_out() {
+    for level in [LockState::ScreenLocked, LockState::VaultClosed] {
+        let fake = fake(if level == LockState::ScreenLocked {
+            "left-s"
+        } else {
+            "left-v"
+        });
+        let (engine, mut source, _prompts) = open_with_prompts(&fake);
+        fake.two_factor.store(true, Ordering::SeqCst);
+        if level == LockState::ScreenLocked {
+            assert_eq!(engine.lock_screen(), Ok(()));
+        } else {
+            let _ = engine.lock_vault();
+        }
+        source.begin_unlock(PASSWORD);
+        assert_eq!(
+            next(&mut source),
+            SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::TwoFactor))
+        );
+        fake.code_door.shut();
+        source.begin_two_factor(TOTP, CodeKind::Authenticator);
+        wait_until("the code to be sent", || requests(&fake, "/auth/2fa/verify") == 1);
+        source.discard_partial_sign_in();
+        let plan_asked = requests(&fake, "/billing/subscription");
+        fake.code_door.open();
+
+        wait_until("the lock to be put back", || engine.lock_state() == level);
+        // The lock never left `level` before the late code was answered, so the wait above can return at once. The
+        // finished unlock ends with the engine's plan check (a request), and the lock is put back after it: wait
+        // for that request (it is asked once per session, so give up after a while), then for the worker's wake.
+        let began = std::time::Instant::now();
+        while requests(&fake, "/billing/subscription") == plan_asked && began.elapsed() < Duration::from_secs(3) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        // The worker is done with the step once its wake arrived; the state holds.
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(engine.lock_state(), level, "{level:?}");
+        assert_eq!(
+            engine.user_id().as_deref(),
+            Some(fake.first.user_id.as_str()),
+            "{level:?}"
+        );
+        assert_eq!(source.poll(), None, "an answer of a step that was left is dropped");
+    }
+}
+
+/// A left password step that ended at the code step opened and stored nothing: it locks nothing.
+#[test]
+fn a_left_password_step_that_ended_at_the_code_locks_nothing() {
+    let fake = fake("left-code");
+    let (engine, _source, _prompts) = open_with_prompts(&fake);
+    assert_eq!(engine.lock_screen(), Ok(()));
+    let (answers, _unread) = mpsc::channel();
+    let event = SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::TwoFactor));
+    undo_left_step(&engine, &answers, &event, Some(LockState::ScreenLocked));
+    assert_eq!(
+        engine.lock_state(),
+        LockState::ScreenLocked,
+        "the screen lock stays a screen lock"
+    );
+    // A keyless unlock stored a session: it is locked, as before.
+    let event = SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::RecoveryPhrase));
+    undo_left_step(&engine, &answers, &event, Some(LockState::ScreenLocked));
+    assert_eq!(
+        engine.lock_state(),
+        LockState::VaultClosed,
+        "a stored session is still locked"
+    );
+}
+
+/// A left twelve-words step that opened is put back at the level it had.
+#[test]
+fn a_left_twelve_words_step_is_put_back() {
+    let fake = fake("left-words");
+    let (engine, _source, _prompts) = open_with_prompts(&fake);
+    assert_eq!(engine.lock_state(), LockState::Open);
+    let (answers, _unread) = mpsc::channel();
+    let event = SignInEvent::PhraseRestored(Ok(NextAfterSignIn::Drive));
+    undo_left_step(&engine, &answers, &event, Some(LockState::ScreenLocked));
+    assert_eq!(engine.lock_state(), LockState::ScreenLocked);
+}
+
+// ---- the screen lock's password (`begin_screen_password`) ----
+
+fn locked_screen(fake: &Fake) -> (Arc<Engine<MemoryCredentials>>, Source) {
+    let (engine, source) = signed_in(fake);
+    assert_eq!(engine.lock_screen(), Ok(()));
+    assert_eq!(source.gate(), GateState::Locked);
+    (engine, source)
+}
+
+#[test]
+fn screen_password_the_right_one_opens_through_the_proof_and_makes_no_session() {
+    let fake = fake("screen-right");
+    let (engine, mut source) = locked_screen(&fake);
+    let sign_ins = requests(&fake, "/opaque/login-start");
+    source.begin_screen_password(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::Opened)
+    );
+    assert_eq!(engine.lock_state(), LockState::Open);
+    assert_eq!(source.gate(), GateState::Ready);
+    assert_eq!(requests(&fake, "/opaque/login-start"), sign_ins, "no sign-in was made");
+    assert_eq!(requests(&fake, "/password-proof/finish"), 1);
+}
+
+#[test]
+fn screen_password_wrong_tries_are_counted_and_the_fifth_waits_while_unlock_counts_down() {
+    let fake = fake("screen-wrong");
+    let (engine, mut source) = locked_screen(&fake);
+    for _ in 0..4 {
+        source.begin_screen_password("not the password at all");
+        assert_eq!(
+            next(&mut source),
+            SignInEvent::ScreenPassword(ScreenPasswordOutcome::Wrong { wait_ms: 0 })
+        );
+    }
+    source.begin_screen_password("not the password at all");
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::Wrong { wait_ms: 30_000 })
+    );
+    // The wait counts down from the answer on, a second per tick (the test's tick is 2 ms).
+    assert_eq!(next(&mut source), SignInEvent::ScreenWaitLeft { seconds: 29 });
+    assert_eq!(next(&mut source), SignInEvent::ScreenWaitLeft { seconds: 28 });
+    // A press during the wait checks nothing and asks the server nothing.
+    let starts = requests(&fake, "/password-proof/start");
+    source.begin_screen_password(PASSWORD);
+    let waited = next_after_ticks(&mut source);
+    assert!(
+        matches!(waited, SignInEvent::ScreenPassword(ScreenPasswordOutcome::Wait { .. })),
+        "{waited:?}"
+    );
+    assert_eq!(requests(&fake, "/password-proof/start"), starts);
+    assert_eq!(engine.lock_state(), LockState::ScreenLocked);
+}
+
+/// The next answer that is not a tick of the wait.
+fn next_after_ticks(source: &mut Source) -> SignInEvent {
+    loop {
+        match next(source) {
+            SignInEvent::ScreenWaitLeft { .. } => {}
+            other => return other,
+        }
+    }
+}
+
+#[test]
+fn screen_password_an_answer_after_the_session_moved_opens_nothing() {
+    let fake = fake("screen-late");
+    let (engine, mut source) = locked_screen(&fake);
+    fake.code_door.shut();
+    source.begin_screen_password(PASSWORD);
+    wait_until("the proof's finish reached the server", || {
+        requests(&fake, "/password-proof/finish") == 1
+    });
+    // The person signed out while the check was on its way.
+    engine.sign_out_keeping_local_data().expect("signed out");
+    fake.code_door.open();
+    assert_eq!(
+        next_after_ticks(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::Overtaken)
+    );
+    assert_ne!(engine.lock_state(), LockState::Open);
+}
+
+#[test]
+fn screen_password_offline_the_record_the_sign_in_made_decides() {
+    let fake = fake("screen-offline");
+    let (engine, mut source) = locked_screen(&fake);
+    fake.step_up.store(NO_ANSWER, Ordering::SeqCst);
+    source.begin_screen_password("not the password at all");
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::Wrong { wait_ms: 0 })
+    );
+    source.begin_screen_password(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::Opened)
+    );
+    assert_eq!(engine.lock_state(), LockState::Open);
+}
+
+#[test]
+fn screen_password_the_servers_limit_is_a_limit_and_every_answer_maps() {
+    let fake = fake("screen-limit");
+    let (_engine, mut source) = locked_screen(&fake);
+    fake.step_up.store(RATE_LIMITED, Ordering::SeqCst);
+    source.begin_screen_password(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::ServerLimit { wait_ms: None })
+    );
+    use beebeeb_engine::app::lock_api::LockRefused as R;
+    use beebeeb_engine::app::lock_password_api::ScreenUnlock as U;
+    for (answer, outcome) in [
+        (Ok(U::Opened), ScreenPasswordOutcome::Opened),
+        (Ok(U::Wrong { wait_ms: 7 }), ScreenPasswordOutcome::Wrong { wait_ms: 7 }),
+        (Ok(U::Wait { wait_ms: 8 }), ScreenPasswordOutcome::Wait { wait_ms: 8 }),
+        (Ok(U::LocalCheckOff), ScreenPasswordOutcome::LocalCheckOff),
+        (Ok(U::OfflineNoRecord), ScreenPasswordOutcome::OfflineNoRecord),
+        (Ok(U::AccountUpgradeNeeded), ScreenPasswordOutcome::AccountUpgradeNeeded),
+        (Ok(U::SessionEnded), ScreenPasswordOutcome::SessionEnded),
+        (Err(R::Overtaken), ScreenPasswordOutcome::Overtaken),
+        (Err(R::CouldNotCheck), ScreenPasswordOutcome::Failed),
+    ] {
+        assert_eq!(map_screen_unlock(answer), outcome);
+    }
+    assert_eq!(seconds_up(0), 0);
+    assert_eq!(seconds_up(1), 1);
+    assert_eq!(seconds_up(30_000), 30);
+    assert_eq!(seconds_up(30_001), 31);
+}
+
+#[path = "signin_hello_end_tests.rs"]
+mod hello_end;

@@ -1,0 +1,11 @@
+# THROWAWAY (task 2477 editor spike). Copied into <gridcraft>/crates/zz-bb-gc-edit and built inside the upstream
+# workspace. Links gridcraft-engine (commands, undo, recalculation, the .xlsx reader and writer) and nothing above it.
+[package]
+name = "zz-bb-gc-edit"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gridcraft-engine = { workspace = true }
+serde_json = { workspace = true }

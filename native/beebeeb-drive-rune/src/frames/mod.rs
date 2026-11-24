@@ -1,0 +1,273 @@
+//! The board's frames, one module per group (one lane each). A group exposes `view`, `on_key`
+//! and a `FRAMES` table of its board frames (frame id, and the scene that shows it).
+//!
+//! A new group adds TWO lines here: its `pub mod`, and its `FRAMES` in [`scenes`]. The shell
+//! names its own scenes once (`shell::SCENES`) and never changes for a new group.
+//!
+//! Lane f-shared-search-trash: `shared` (DW-05xx), `trash` (DW-0747…, DW-0117), drawn from a
+//! `<Group>Source`; their scenes are named in `shell::SCENES`. The checklist of frames, built and
+//! not built, is `shared/FRAMES.md`.
+
+pub mod account;
+pub mod backups;
+pub mod files;
+pub mod global;
+pub mod item;
+pub mod office;
+pub mod open_file;
+pub mod photos;
+pub mod placeholder;
+pub mod search;
+pub mod show_in_folder;
+pub mod settings;
+pub mod shared;
+pub mod signin;
+pub mod this_pc;
+pub mod trash;
+pub mod tray;
+pub mod viewers;
+
+use std::sync::OnceLock;
+
+use crate::State;
+use crate::shell::app::{Event, Route, Section};
+use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
+use crate::ui::gate::Scene;
+use crate::ui::sidebar::SidebarSection;
+use rune::{KeyEvent, Tx};
+
+/// Every scene the app can be rendered in (`--scene`, `scripts/compare.sh`): the shell's own,
+/// then every group's board frames. Built once.
+pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
+    static ALL: OnceLock<Vec<Scene<State>>> = OnceLock::new();
+    ALL.get_or_init(|| {
+        [
+            shell,
+            files::SCENES,
+            files::scenes_waveb::SCENES,
+            files::protected::SCENES,
+            files::long_list::SCENES,
+            files::session::SCENES,
+            files::browse_states::SCENES,
+            search::FRAMES,
+            global::FRAMES,
+            settings::FRAMES,
+            account::FRAMES,
+            signin::FRAMES,
+            signin::create::FRAMES,
+            signin::setup::FRAMES,
+            signin::setup::RENDER_SCENES,
+            item::scenes::RENDER_SCENES,
+            signin::before_files::FRAMES,
+            signin::lock::SCENES,
+            account::app_lock_password::SCENES,
+            signin::setup::guide::FRAMES,
+            this_pc::scenes::FRAMES,
+            this_pc::scenes::RENDER_SCENES,
+            backups::FRAMES,
+            tray::FRAMES,
+            viewers::FRAMES,
+            shared::scenes::FRAMES,
+            office::sheets::FRAMES,
+            office::slides::FRAMES,
+            office::dialogs::FRAMES,
+            office::docs::FRAMES,
+            office::states::FRAMES,
+        ]
+        .concat()
+    })
+}
+
+/// A notice the gate screens show when a button's action is not built in the engine yet.
+/// Stamped with the gate it was raised under so a gate change clears it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateNotice {
+    pub message: &'static str,
+    pub gate: crate::shell::app::GateState,
+}
+
+/// Somewhere a control wants to go that this lane does not draw: the shell's route machine
+/// (or the lane that owns the target frame) picks it up. A control never does nothing, and an
+/// intent about ONE item always carries that item's id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Intent {
+    /// Open a board frame that is about no single item (`DW-0749` Empty Trash, `DW-0504` New
+    /// request, `DW-0414` New, `DW-0404` Sort).
+    Frame(&'static str),
+    /// Open a board frame about the item with this id (`DW-0411` Details, `DW-0511` People
+    /// with access, `DW-1180` Show in File Explorer).
+    About(&'static str, String),
+    /// Open the item with this id as Files would.
+    OpenItem(String),
+    /// Something the engine or the shell does with the item of this id, named by the board's
+    /// words ("copy-link", "preview", "leave", "delete-permanently"): a clipboard write, a
+    /// confirmation, a further menu. For "search" the string is what was typed.
+    Do(&'static str, String),
+}
+
+/// What the status line says about this PC: the engine's words, not a view's.
+pub trait PcStatus {
+    /// The sync state in words ("Up to date").
+    fn sync_words(&self) -> String;
+    /// How much is on this PC: the status line of a section with nothing of its own to count.
+    fn summary(&self) -> String;
+}
+
+/// The board's sample PC (the words Files shows in DW-0401).
+pub struct BoardPc;
+
+impl PcStatus for BoardPc {
+    fn sync_words(&self) -> String {
+        "Up to date".into()
+    }
+    fn summary(&self) -> String {
+        "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only".into()
+    }
+}
+
+/// A live window with an engine before the engine lane wires the status line: no words,
+/// never the board's sample counts.
+pub struct UnwiredPc;
+
+impl PcStatus for UnwiredPc {
+    fn sync_words(&self) -> String {
+        String::new()
+    }
+    fn summary(&self) -> String {
+        String::new()
+    }
+}
+
+/// The sync state in words for the status line of Shared and Trash: the PC's words where it has some (the board's
+/// sample, a test's), else what Files' own status line says (`FilesSource::sync_state`), so the three agree.
+/// Empty: nothing syncs here (no dot, no word).
+pub fn sync_words(s: &State) -> String {
+    let own = s.frames.pc.sync_words();
+    if own.is_empty() {
+        s.actions.source.sync_state().unwrap_or_default()
+    } else {
+        own
+    }
+}
+
+/// How much is on this PC, for a section with nothing of its own to count: the PC's summary, else Files' own words.
+pub fn pc_summary(s: &State) -> String {
+    let own = s.frames.pc.summary();
+    if own.is_empty() { files::window::pc_summary(s) } else { own }
+}
+
+/// What the lane's groups keep on `State` (ONE field: `State::frames`).
+pub struct Ui {
+    pub shared: shared::SharedUi,
+    pub trash: trash::TrashUi,
+    pub find: search::SearchUi,
+    /// The navigation intents emitted so far, oldest first. The shell's poll takes them
+    /// (`shell::intents::drain_frame_intents`).
+    pub intents: Vec<Intent>,
+    /// What an item's read-only Preview over Trash or Shared reads (`item::source`). A window without an engine
+    /// reads nothing (`Unwired`).
+    pub item_preview: Box<dyn item::source::ItemPreviewSource>,
+    /// What is typed in the toolbar's search field of these sections (not Files' field).
+    pub search: rune::TextEdit,
+    pub pc: Box<dyn PcStatus>,
+    /// The window opened on this section, with no place before it: Back has nowhere to go.
+    /// The board draws its frames so; only a scene sets it (the route machine always starts
+    /// on Files, so in the running app a section has Files behind it).
+    pub first_place: bool,
+    /// A notice the gate screens (DW-0009, DW-0014) show when a button's action is not built
+    /// yet. Set by `on_press`, drawn under the buttons, stamped with the gate it was raised
+    /// under so a gate change clears it.
+    pub gate_notice: Option<GateNotice>,
+}
+
+impl Default for Ui {
+    fn default() -> Self {
+        Ui {
+            shared: shared::SharedUi::default(),
+            trash: trash::TrashUi::default(),
+            find: search::SearchUi::first(crate::shell::instance::DEV_BUILD),
+            intents: Vec::new(),
+            item_preview: Box::new(item::source::Unwired),
+            search: rune::TextEdit::new(""),
+            pc: Box::new(BoardPc),
+            first_place: false,
+            gate_notice: None,
+        }
+    }
+}
+
+/// The registry's lines (`shell::registry::FRAMES`): Shared and Trash. Neither shows a secret;
+/// comment mode stays off until the lane has the proving test of `feedback/README.md`.
+pub const SHARED: Frame = Frame {
+    group: FrameGroup::Section(Section::Shared),
+    view: shared::view,
+    on_key: Some(shared::on_key),
+    feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
+};
+pub const TRASH: Frame = Frame {
+    group: FrameGroup::Section(Section::Trash),
+    view: trash::view,
+    on_key: Some(trash::on_key),
+    feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
+};
+
+/// Put the window on a section, as a click in the sidebar does (the tests).
+pub fn go(s: &mut State, section: Section) {
+    crate::shell::host::dispatch(s, Event::Navigate(Route::section(section)));
+}
+
+/// A board frame: the section as the window's first place (`Ui::first_place`).
+pub fn scene(s: &mut State, section: Section) {
+    go(s, section);
+    s.frames.first_place = true;
+}
+
+/// Whether Back and Forward have somewhere to go from this section.
+pub fn history(s: &State) -> (bool, bool) {
+    if s.frames.first_place {
+        return (false, false);
+    }
+    (s.shell.app.can_go_back(), s.shell.app.can_go_forward())
+}
+
+/// The keys of the section the window shows. `None`: not one of this lane's sections.
+pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
+    match s.sidebar_section {
+        SidebarSection::Shared => Some(shared::on_key(s, ev, tx)),
+        SidebarSection::Trash => Some(trash::on_key(s, ev, tx)),
+        _ => None,
+    }
+}
+
+/// The root key handler of this lane's windows (`El::on_key`).
+pub fn on_key_root(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    on_key(s, ev, tx).unwrap_or(false)
+}
+
+/// Keys the lists of both sections share: whether `ev` is a plain key (no modifier).
+pub fn plain(ev: &KeyEvent) -> bool {
+    let m = ev.mods;
+    !m.cmd && !m.ctrl && !m.alt && !m.shift && !m.logo
+}
+
+/// The Menu key, or Shift+F10.
+pub fn is_menu_key(ev: &KeyEvent) -> bool {
+    let m = ev.mods;
+    let bare = !m.cmd && !m.ctrl && !m.alt && !m.logo;
+    match ev.key {
+        rune::Key::ContextMenu => bare && !m.shift,
+        rune::Key::Function(10) => bare && m.shift,
+        _ => false,
+    }
+}
+
+/// Alt+Enter: Details, as the menus say.
+pub fn is_alt_enter(ev: &KeyEvent) -> bool {
+    let m = ev.mods;
+    ev.key == rune::Key::Enter && m.alt && !m.cmd && !m.ctrl && !m.shift && !m.logo
+}
+
+/// Space, alone.
+pub fn is_space(ev: &KeyEvent) -> bool {
+    plain(ev) && matches!(&ev.key, rune::Key::Text(t) if t == " ")
+}

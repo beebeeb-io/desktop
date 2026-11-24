@@ -1,0 +1,3 @@
+leftovers[before-remove]: files_under_root=20052 uninstall_entries=0 vendor_registry_keys=0 firewall_rules=0 profile_or_program_dirs=0 processes=0
+leftovers[after-remove]: files_under_root=0 uninstall_entries=0 vendor_registry_keys=0 firewall_rules=0 profile_or_program_dirs=0 processes=0
+exit=0

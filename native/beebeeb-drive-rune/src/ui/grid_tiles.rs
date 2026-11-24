@@ -1,0 +1,146 @@
+//! The grid of a folder (`.mk-gridview`): one tile per item, its name under it (at most two
+//! lines) and one line of figures under the name. A tile is plain until its thumbnail arrives
+//! (DW-0119: "No spinners"); a folder or a document shows its glyph; a video carries its length.
+//!
+//! Keys: `grid` (the padded area), `rows` (the tiles' box: the grid's one Tab stop, as the list's),
+//! `grid-<i>`, `grid-<i>-thumb`, `-icon`, `-badge`, `-badge-icon`, `-badge-text`, `-name`, `-sub`.
+
+use crate::theme::file_icons::FileIcon;
+use crate::theme::tokens::Theme;
+use rune::tok::Family;
+use rune::{Color, El, TextStyle, col, row};
+
+use super::file_row::RowLook;
+use super::file_tile::{self, TilePicture, TileSize};
+use super::{file_list, global_icons, kit};
+
+/// `.mk-gcell`: 128 x 150 (`grid-template-columns: repeat(auto-fill, 128px)`, `grid-auto-rows: 150px`).
+pub const CELL_W: f32 = 128.0;
+pub const CELL_H: f32 = 150.0;
+/// `.mk-gridview`: `gap: 10px 14px`, `padding: 16px 18px`.
+pub const ROW_GAP: f32 = 10.0;
+pub const COL_GAP: f32 = 14.0;
+pub const PAD_Y: f32 = 16.0;
+pub const PAD_X: f32 = 18.0;
+/// `.mk-gname`: 12/500 on a 15 line, centred, two lines at most.
+pub const NAME: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
+/// `.mk-gsub`: 10.5/400 in the machine face.
+pub const SUB: TextStyle = TextStyle::new(10.5, 400.0).family(Family::Mono).lh(13.5);
+/// `.mk-gbadge`: 10/600 in the machine face.
+pub const BADGE: TextStyle = TextStyle::new(10.0, 600.0).family(Family::Mono).lh(13.0);
+
+/// What the tile shows.
+#[derive(Clone, Copy)]
+pub enum Thumb {
+    /// A kind's icon and colour from the registry, `size` points across (a folder 44, a document 34).
+    Type(FileIcon, f32),
+    /// A picture or a video whose thumbnail has not arrived: a plain tile.
+    Plain,
+    /// The thumbnail arrived.
+    Picture,
+    /// The thumbnail arrived and a FIXTURE source says which of the board's six stand-in pictures
+    /// it is (1 to 6). An engine hands over pixels; only a board fixture names a sample.
+    Sample(u8),
+}
+
+/// One of the board's six stand-in pictures (`.mk-ph1` to `.mk-ph6`) as the fill of `tile`.
+pub fn sample(tile: El, n: u8) -> El {
+    let c = |hex: &str| rune::color::hex(hex).unwrap_or(Color::BLACK);
+    let (degrees, stops): (f32, [(f32, &str); 3]) = match n {
+        1 => (160.0, [(0.0, "#e9c9a0"), (0.55, "#b97a50"), (1.0, "#5e4a4a")]),
+        2 => (170.0, [(0.0, "#9cc4dc"), (0.6, "#e9e2cf"), (1.0, "#8d9a78")]),
+        3 => (150.0, [(0.0, "#33435c"), (0.55, "#7a7f96"), (1.0, "#e3b58c")]),
+        4 => (200.0, [(0.0, "#c7d6b0"), (0.6, "#6c8d62"), (1.0, "#2f4634")]),
+        6 => (120.0, [(0.0, "#d9dfe4"), (0.6, "#8ea4b4"), (1.0, "#4a5866")]),
+        _ => return file_list::thumbnail(tile),
+    };
+    tile.linear_gradient(degrees.to_radians(), stops.map(|(at, hex)| (at, c(hex))))
+}
+
+/// One item of the grid.
+pub struct Tile<'a> {
+    pub name: &'a str,
+    /// The line under the name: a size, or how many items a folder holds.
+    pub sub: &'a str,
+    pub thumb: Thumb,
+    /// The arrived thumbnail's pixels, from a source of real thumbnails (`Thumb::Picture` draws them).
+    pub pixels: Option<rune::Pixels>,
+    /// A video's length ("0:41").
+    pub length: Option<&'a str>,
+    pub selected: bool,
+}
+
+/// How many tiles stand side by side in a grid `width` points wide (padding included).
+pub fn columns(width: f32) -> usize {
+    let inner = width - 2.0 * PAD_X;
+    (((inner + COL_GAP) / (CELL_W + COL_GAP)).floor() as usize).max(1)
+}
+
+/// A picture asked for stays held until its tile is this many rows out of view.
+pub const KEEP_ROWS: usize = 3;
+
+/// One tile (`.mk-gcell`): the one file tile at its Medium size, with the grid's figures under the
+/// name and a video's length on the picture. The caller adds what a press does, its label and its
+/// position in the set.
+pub fn tile(i: usize, item: &Tile, t: &Theme) -> El {
+    let k = format!("grid-{i}");
+    let badge = item.length.map(|length| {
+        row()
+            .key(format!("{k}-badge"))
+            .h(18.0)
+            .px(5.0)
+            .gap(3.0)
+            .radius(6.0)
+            .items_center()
+            .fill(Color::BLACK.alpha(0.55))
+            .child(kit::glyph(
+                format!("{k}-badge-icon"),
+                &global_icons::PLAY,
+                9.0,
+                Color::WHITE,
+            ))
+            .child(kit::label(format!("{k}-badge-text"), length, BADGE, Color::WHITE))
+    });
+    // `.mk-gsub { margin-top: -4px }`: 2 under the name.
+    let sub = kit::label(
+        format!("{k}-sub"),
+        item.sub,
+        SUB,
+        if item.selected {
+            t.text_secondary
+        } else {
+            t.text_tertiary
+        },
+    )
+    .mt(-4.0);
+    file_tile::tile_with(
+        &k,
+        item.name,
+        TilePicture::Thumb(&item.thumb),
+        item.pixels.as_ref(),
+        item.name,
+        Some(sub),
+        badge,
+        RowLook {
+            selected: item.selected,
+            ..RowLook::default()
+        },
+        TileSize::Medium,
+        t,
+    )
+}
+
+/// The grid: `rows` (the listbox holding the realised lines), scrolling when they do not fit the height.
+/// `rows` is the box the caller makes focusable (the grid's one Tab stop).
+pub fn grid(rows: El) -> El {
+    col()
+        .key("grid")
+        .grow(1.0)
+        .min_w(0.0)
+        .min_h(0.0)
+        .h_full()
+        .py(PAD_Y)
+        .px(PAD_X)
+        .scroll(rune::ScrollSpec { stick_bottom: false })
+        .child(rows.key("rows").w_full())
+}

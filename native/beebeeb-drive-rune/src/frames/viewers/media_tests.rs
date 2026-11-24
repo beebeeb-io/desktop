@@ -1,0 +1,926 @@
+//! Tests of the photo, audio, PDF, table and archive viewers: every frame's words, the router by
+//! file type, what each control does on the board's fixture, and that a source with no pictures
+//! is never answered for by a sample.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use rune::{Env, Key, KeyEvent, Mods, Runtime};
+
+use super::kinds::{Viewer, viewer_of};
+use super::source::{Body, FixtureViewerSource, Match, OpenError, OpenFile, Picture, ViewerSource, board};
+use super::{Intent, open_from, open_item, set_scene};
+use crate::shell::app::Screen;
+use crate::source::DriveItem;
+use crate::{State, init, view};
+
+type Calls = Rc<RefCell<Vec<String>>>;
+
+/// The fixture, with what the viewer asked of it kept where a test can read it.
+struct Recording {
+    inner: FixtureViewerSource,
+    calls: Calls,
+}
+
+impl ViewerSource for Recording {
+    fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+        self.inner.open(id)
+    }
+    fn poll(&mut self, id: &str) -> Option<Body> {
+        self.inner.poll(id)
+    }
+    fn cancel(&mut self, _: &str) {}
+    fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+        self.inner.retry(id)
+    }
+    fn set_offline(&mut self, id: &str, on: bool) -> bool {
+        self.calls.borrow_mut().push(format!("offline {id} {on}"));
+        true
+    }
+    fn picture(&self, id: &str, which: Picture) -> Option<rune::Pixels> {
+        self.inner.picture(id, which)
+    }
+    fn find(&mut self, id: &str, words: &str) -> Vec<Match> {
+        self.calls.borrow_mut().push(format!("find {id} {words}"));
+        self.inner.find(id, words)
+    }
+    fn can_play(&self) -> bool {
+        true
+    }
+    fn play(&mut self, id: &str, on: bool) -> bool {
+        self.calls.borrow_mut().push(format!("play {id} {on}"));
+        true
+    }
+}
+
+/// A source that has the board's files and none of the trait's optional answers: what an
+/// engine-backed source is before it renders pictures.
+struct Bare(FixtureViewerSource);
+
+impl ViewerSource for Bare {
+    fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+        self.0.open(id)
+    }
+    fn poll(&mut self, _: &str) -> Option<Body> {
+        None
+    }
+    fn cancel(&mut self, _: &str) {}
+    fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+        self.0.retry(id)
+    }
+}
+
+fn runtime_of(state: State, dark: bool) -> Runtime<State> {
+    let env = Env {
+        system_dark: dark,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
+    rt.on_key = Some(crate::shell::host::on_key);
+    rt.poll = Some(crate::shell::host::poll);
+    rt.frame(0.0);
+    rt
+}
+
+fn scene(frame: &str) -> Runtime<State> {
+    let mut state = init();
+    set_scene(&mut state, frame);
+    runtime_of(state, false)
+}
+
+fn recording(file: &str) -> (Runtime<State>, Calls) {
+    let calls = Calls::default();
+    let mut state = init();
+    let source = Recording {
+        inner: FixtureViewerSource::new(),
+        calls: calls.clone(),
+    };
+    assert!(open_from(&mut state, Box::new(source), file));
+    (runtime_of(state, false), calls)
+}
+
+fn info(rt: &Runtime<State>, key: &str) -> rune::ElementInfo {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+        .unwrap_or_else(|| panic!("no element keyed {key}"))
+}
+
+fn has(rt: &Runtime<State>, key: &str) -> bool {
+    rt.elements()
+        .iter()
+        .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+}
+
+fn words(rt: &Runtime<State>, key: &str) -> String {
+    info(rt, key).text.unwrap_or_default()
+}
+
+fn press_with(rt: &mut Runtime<State>, key: Key, mods: Mods) {
+    rt.key(KeyEvent { key, mods });
+    rt.frame(0.0);
+    rt.frame(0.0);
+    rt.settle_all();
+}
+
+fn press(rt: &mut Runtime<State>, key: Key) {
+    press_with(rt, key, Mods::default());
+}
+
+fn ctrl(rt: &mut Runtime<State>, key: Key) {
+    press_with(
+        rt,
+        key,
+        Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    );
+}
+
+fn click(rt: &mut Runtime<State>, key: &str) {
+    rt.settle_all();
+    rt.frame(0.0);
+    let r = info(rt, key).rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    rt.frame(0.0);
+    rt.settle_all();
+}
+
+fn viewer(rt: &Runtime<State>) -> &super::Ui {
+    rt.state.viewer.ui.as_ref().expect("a file is open")
+}
+
+fn intents(rt: &mut Runtime<State>) -> Vec<Intent> {
+    rt.state.viewer.ui.as_mut().expect("a file is open").take_intents()
+}
+
+fn on_a_file(rt: &Runtime<State>) -> bool {
+    matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.is_some())
+}
+
+fn item(id: &str, name: &str) -> DriveItem {
+    DriveItem {
+        id: id.into(),
+        parent_id: None,
+        name: name.into(),
+        is_folder: false,
+        size: None,
+        child_count: None,
+        modified_at: "2026-11-04T16:40:00Z".into(),
+        mime: None,
+        has_thumbnail: false,
+        shared_type: None,
+        shared_badges: vec![],
+        pc_status: None,
+        is_protected: false,
+    }
+}
+
+/// Every frame of this file, a key it draws and the words there.
+const BUILT: [(&str, &str, &str); 7] = [
+    ("DW-1501", "tb-pill-label", "Camera preview \u{00B7} Sony ARW"),
+    ("DW-1502", "detail-camera-value", "Sony ILCE-7RM5"),
+    ("DW-1503", "audio-title", "Harbour sessions, take 3"),
+    ("DW-1505", "item-count", "Page 2 of 6 \u{00B7} 2.3 MB"),
+    ("DW-1506", "find-count", "2 of 3"),
+    ("DW-1514", "csv-2-5", "440.00"),
+    (
+        "DW-1515",
+        "banner-text",
+        "214 files \u{00B7} 3.8 GB unpacked \u{00B7} files inside can't be opened here.",
+    ),
+];
+
+#[test]
+fn every_frame_draws_its_words_in_both_themes() {
+    for (frame, key, text) in BUILT {
+        for dark in [false, true] {
+            let mut state = init();
+            set_scene(&mut state, frame);
+            let rt = runtime_of(state, dark);
+            assert_eq!(words(&rt, key), text, "{frame} dark={dark}");
+            assert!(has(&rt, "status-text"), "{frame}: the status line");
+        }
+    }
+}
+
+#[test]
+fn the_router_gives_each_type_its_viewer() {
+    for (name, want) in [
+        ("DSC04182.ARW", Some(Viewer::Photo)),
+        ("Harbour.heic", Some(Viewer::Photo)),
+        ("take 3.m4a", Some(Viewer::Audio)),
+        ("Studio plan.PDF", Some(Viewer::Pdf)),
+        ("Rates 2026.csv", Some(Viewer::Table)),
+        ("rates.tsv", Some(Viewer::Table)),
+        ("export.zip", Some(Viewer::Archive)),
+        ("notes.md", Some(Viewer::Markdown)),
+        ("server.log", Some(Viewer::Text)),
+        ("Q4 plan.key", None),
+        ("no extension", None),
+    ] {
+        assert_eq!(viewer_of(name), want, "{name}");
+    }
+}
+
+#[test]
+fn a_file_of_each_type_opens_its_viewer_through_the_router() {
+    for (id, name, key) in [
+        (board::RAW, "DSC04182.ARW", "photo"),
+        (board::AUDIO, "Harbour sessions, take 3.m4a", "artwork"),
+        (board::PDF, "Studio plan.pdf", "page-area"),
+        (board::CSV, "Rates 2026.csv", "csv-table"),
+        (board::ZIP, "Shoot selects export.zip", "column-headers"),
+    ] {
+        let mut state = init();
+        assert!(open_item(&mut state, &item(id, name)), "{name}");
+        let rt = runtime_of(state, false);
+        assert!(on_a_file(&rt), "{name}: the route is on the file");
+        assert_eq!(viewer(&rt).file.name, name);
+        assert!(has(&rt, key), "{name}: its viewer draws {key}");
+    }
+    // A type with no viewer opens the viewer's "No preview" frame (w29); a folder is not this group's.
+    let mut state = init();
+    assert!(open_item(&mut state, &item("q4plan", "Q4 plan.key")));
+    state.viewer.ui = None;
+    let folder = DriveItem {
+        is_folder: true,
+        ..item(board::PDF, "Studio plan.pdf")
+    };
+    assert!(!open_item(&mut state, &folder));
+    assert!(state.viewer.ui.is_none());
+    // A file of a type this group reads that the source does not have IS this group's: the window says it is
+    // gone, and the caller does not hand it to another app instead.
+    assert!(open_item(&mut state, &item("nowhere", "Nowhere.pdf")));
+    assert!(matches!(
+        state.viewer.ui.as_ref().map(|ui| &ui.file.body),
+        Some(Body::Stopped(super::source::Stopped::Gone))
+    ));
+}
+
+#[test]
+fn enter_on_a_files_row_opens_the_viewer_and_escape_returns_to_the_list() {
+    let mut rt = runtime_of(init(), false);
+    let row = rt
+        .state
+        .listing
+        .items
+        .iter()
+        .position(|i| i.id == "contract")
+        .expect("the board's Files list has Contract draft.pdf");
+    rt.state.select_only(row);
+    press(&mut rt, Key::Enter);
+    assert!(on_a_file(&rt));
+    assert_eq!(viewer(&rt).file.name, "Contract draft.pdf");
+    assert!(has(&rt, "thumb-sidebar"));
+    press(&mut rt, Key::Escape);
+    press(&mut rt, Key::Tab);
+    assert!(!on_a_file(&rt));
+    assert!(rt.state.viewer.ui.is_none(), "what was decrypted is dropped");
+    assert!(has(&rt, "row-0"), "the list is back");
+}
+
+#[test]
+fn a_window_on_another_drive_opens_none_of_these_from_the_boards_samples() {
+    for (id, name) in [(board::RAW, "DSC04182.ARW"), (board::PDF, "Studio plan.pdf")] {
+        let drive = Box::new(crate::source::LargeFixtureSource::new(3));
+        let mut state = crate::shell::state::init_from(crate::shell::host::Shell::fixture(), drive, None);
+        assert!(!open_item(&mut state, &item(id, name)));
+        assert!(state.viewer.ui.is_none());
+    }
+}
+
+#[test]
+fn a_source_without_pictures_gets_plain_tiles_and_no_sample() {
+    let mut bare = Bare(FixtureViewerSource::new());
+    for which in [Picture::Photo, Picture::Strip(0), Picture::Artwork, Picture::Page(1)] {
+        assert!(bare.picture(board::RAW, which).is_none(), "{which:?}");
+    }
+    assert!(bare.find(board::PDF_FIND, "terrace").is_empty());
+    assert!(!bare.play(board::AUDIO, false));
+    // The frames still draw, on their plain tiles; and a play the source did not do is not shown as done.
+    for (id, key) in [
+        (board::RAW, "photo"),
+        (board::AUDIO, "artwork"),
+        (board::PDF_FIND, "page"),
+    ] {
+        let mut state = init();
+        assert!(open_from(&mut state, Box::new(Bare(FixtureViewerSource::new())), id));
+        let mut rt = runtime_of(state, false);
+        assert!(has(&rt, key), "{id}");
+        if id == board::AUDIO {
+            // A source that cannot play draws no Play button, and offers the recording to another app instead.
+            assert!(!has(&rt, "pause"), "no Play where nothing can play");
+            assert_eq!(
+                info(&rt, "tool-1").label.as_deref(),
+                Some("Open in another app\u{2026}")
+            );
+            assert!(!words(&rt, "audio-caption").contains("keeps playing"));
+            assert!(!words(&rt, "status-details").contains("Playing"));
+            // Space does nothing either.
+            press(&mut rt, Key::Text(" ".into()));
+            assert!(!words(&rt, "status-details").contains("Paused"));
+        }
+        if id == board::PDF_FIND {
+            ctrl(&mut rt, Key::Command('f'));
+            rt.state
+                .viewer
+                .ui
+                .as_mut()
+                .unwrap()
+                .media
+                .find
+                .as_mut()
+                .unwrap()
+                .edit
+                .insert("terrace");
+            rt.frame(0.0);
+            rt.frame(0.0);
+            assert_eq!(words(&rt, "find-count"), "No matches");
+            assert!(!has(&rt, "mark-0"));
+        }
+    }
+    // The fixture has them: the board's sample window only.
+    let fixture = FixtureViewerSource::new();
+    assert!(fixture.picture(board::RAW, Picture::Photo).is_some());
+    assert!(fixture.picture(board::PDF, Picture::Page(2)).is_some());
+    assert!(
+        fixture.picture(board::PDF, Picture::Page(3)).is_none(),
+        "a page the board does not draw"
+    );
+    assert!(fixture.picture("voice-over-draft.m4a", Picture::Artwork).is_none());
+}
+
+#[test]
+fn a_photo_steps_through_its_folder_and_back_returns_to_the_list() {
+    let (mut rt, calls) = recording(board::RAW);
+    assert_eq!(
+        words(&rt, "status-details"),
+        "RAW \u{00B7} the camera's own preview, not a developed RAW"
+    );
+    assert_eq!(info(&rt, "gallery-4").target[2], 52.0);
+    assert_eq!(info(&rt, "gallery-3").target[2], 36.0);
+    press(&mut rt, Key::Right);
+    assert_eq!(viewer(&rt).file.name, "DSC04183.ARW");
+    assert_eq!(info(&rt, "gallery-5").target[2], 52.0, "the strip follows");
+    press(&mut rt, Key::Left);
+    press(&mut rt, Key::Left);
+    assert_eq!(viewer(&rt).file.name, "DSC04181.ARW");
+    click(&mut rt, "gallery-0");
+    assert_eq!(viewer(&rt).file.name, "DSC04178.ARW");
+    press(&mut rt, Key::Left);
+    assert_eq!(
+        viewer(&rt).file.name,
+        "DSC04178.ARW",
+        "the first of the folder: no step"
+    );
+    // Back is the list, not the photo before.
+    click(&mut rt, "back");
+    assert!(!on_a_file(&rt));
+    assert!(rt.state.viewer.ui.is_none());
+    assert!(calls.borrow().is_empty());
+}
+
+#[test]
+fn a_photos_actions_share_keep_offline_show_details_and_trash() {
+    let (mut rt, calls) = recording(board::RAW);
+    click(&mut rt, "action-0");
+    click(&mut rt, "action-3");
+    assert_eq!(intents(&mut rt), [Intent::Share, Intent::Trash]);
+    assert_eq!(words(&rt, "action-1-label"), "Offline");
+    click(&mut rt, "action-1");
+    assert_eq!(*calls.borrow(), [format!("offline {} true", board::RAW)]);
+    assert_eq!(words(&rt, "action-1-label"), "On this PC");
+    // Details: the panel with the RAW's facts (DW-1502); the photo stands alone beside it.
+    click(&mut rt, "action-2");
+    assert!(viewer(&rt).show_details);
+    assert_eq!(words(&rt, "detail-lens-value"), "FE 35mm F1.4 GM");
+    assert_eq!(words(&rt, "status-details"), "Space for Preview");
+    assert!(!has(&rt, "gallery") && !has(&rt, "action-0"));
+    assert_eq!(info(&rt, "photo").target[2], 500.0);
+    // Alt+Shift+P hides it again (DW-1501).
+    press_with(
+        &mut rt,
+        Key::Text("P".into()),
+        Mods {
+            alt: true,
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    assert!(has(&rt, "gallery"));
+    assert_eq!(info(&rt, "photo").target[2], 600.0);
+}
+
+#[test]
+fn a_recording_plays_pauses_and_walks_its_queue() {
+    let (mut rt, calls) = recording(board::AUDIO);
+    assert_eq!(words(&rt, "time-elapsed"), "1:12");
+    assert_eq!(words(&rt, "time-remain"), "\u{2212}2:50");
+    assert_eq!(words(&rt, "status-details"), "Playing \u{00B7} Studio demos, 1 of 5");
+    assert_eq!(info(&rt, "pause").label.as_deref(), Some("Pause"));
+    assert!(!info(&rt, "prev").focusable, "the first of the queue has no previous");
+    press(&mut rt, Key::Text(" ".into()));
+    assert_eq!(*calls.borrow(), [format!("play {} false", board::AUDIO)]);
+    assert_eq!(info(&rt, "pause").label.as_deref(), Some("Play"));
+    assert_eq!(words(&rt, "status-details"), "Paused \u{00B7} Studio demos, 1 of 5");
+    click(&mut rt, "pause");
+    assert_eq!(calls.borrow().len(), 2);
+    // Space with the keyboard on the button is one press, not two.
+    assert_eq!(info(&rt, "pause").label.as_deref(), Some("Pause"));
+    press(&mut rt, Key::Text(" ".into()));
+    assert_eq!(calls.borrow().len(), 3);
+    assert_eq!(info(&rt, "pause").label.as_deref(), Some("Play"));
+    press(&mut rt, Key::Text(" ".into()));
+    // A press on a track plays it; Ctrl+Left and the buttons step.
+    click(&mut rt, "track-3");
+    assert_eq!(viewer(&rt).file.name, "Client call, 30 Oct.m4a");
+    assert_eq!(words(&rt, "status-details"), "Playing \u{00B7} Studio demos, 4 of 5");
+    assert!(!has(&rt, "audio-artist"), "no artist in its tags: none shown");
+    ctrl(&mut rt, Key::Left);
+    assert_eq!(words(&rt, "audio-title"), "Room tone, Studio B");
+    click(&mut rt, "next");
+    click(&mut rt, "next");
+    assert_eq!(words(&rt, "audio-title"), "Voice-over draft");
+    assert!(!info(&rt, "next").focusable, "the last of the queue has no next");
+    ctrl(&mut rt, Key::Right);
+    assert_eq!(words(&rt, "audio-title"), "Voice-over draft");
+    click(&mut rt, "tool-0");
+    assert_eq!(intents(&mut rt), [Intent::Share]);
+    press(&mut rt, Key::Escape);
+    press(&mut rt, Key::Tab);
+    assert!(!on_a_file(&rt), "Esc is the folder, not the track before");
+}
+
+#[test]
+fn a_pdf_turns_pages_and_zooms() {
+    let (mut rt, _) = recording(board::PDF);
+    assert_eq!(words(&rt, "item-count"), "Page 2 of 6 \u{00B7} 2.3 MB");
+    assert_eq!(info(&rt, "page").target[2], 420.0);
+    click(&mut rt, "thumb-4");
+    assert_eq!(words(&rt, "item-count"), "Page 5 of 6 \u{00B7} 2.3 MB");
+    press(&mut rt, Key::PageDown);
+    press(&mut rt, Key::PageDown);
+    assert_eq!(viewer(&rt).media.page, 6, "the last page: no further");
+    press(&mut rt, Key::PageUp);
+    assert_eq!(viewer(&rt).media.page, 5);
+    click(&mut rt, "zoom-plus");
+    assert_eq!(words(&rt, "zoom-pct"), "125%");
+    assert_eq!(info(&rt, "page").target[2], 525.0);
+    ctrl(&mut rt, Key::Command('-'));
+    ctrl(&mut rt, Key::Command('-'));
+    assert_eq!(words(&rt, "zoom-pct"), "75%");
+    for _ in 0..9 {
+        ctrl(&mut rt, Key::Command('='));
+    }
+    assert_eq!(words(&rt, "zoom-pct"), "400%");
+    assert!(!info(&rt, "zoom-plus").focusable, "the largest: no further");
+    click(&mut rt, "tool-4");
+    assert_eq!(intents(&mut rt), [Intent::Share]);
+}
+
+#[test]
+fn find_in_a_pdf_marks_the_matches_steps_through_them_and_escape_closes_it_first() {
+    let (mut rt, calls) = recording(board::PDF_FIND);
+    assert!(!has(&rt, "find-bar"));
+    ctrl(&mut rt, Key::Command('f'));
+    assert!(has(&rt, "find-bar"));
+    assert!(
+        info(&rt, super::media::FIND_KEY).focused,
+        "the keyboard is in the field"
+    );
+    assert_eq!(words(&rt, "find-count"), "");
+    for ch in "terrace".chars() {
+        press(&mut rt, Key::Text(ch.to_string()));
+    }
+    assert_eq!(viewer(&rt).media.find.as_ref().unwrap().edit.text, "terrace");
+    assert_eq!(words(&rt, "find-count"), "1 of 3");
+    assert_eq!(
+        calls.borrow().last().unwrap(),
+        &format!("find {} terrace", board::PDF_FIND)
+    );
+    assert!(
+        has(&rt, "mark-0") && has(&rt, "mark-1") && !has(&rt, "mark-2"),
+        "two on page 1"
+    );
+    press(&mut rt, Key::Enter);
+    assert_eq!(words(&rt, "find-count"), "2 of 3");
+    press(&mut rt, Key::Enter);
+    assert_eq!(words(&rt, "find-count"), "3 of 3");
+    assert_eq!(viewer(&rt).media.page, 3, "the third is on page 3");
+    assert!(has(&rt, "mark-2") && !has(&rt, "mark-0"));
+    press(&mut rt, Key::Enter);
+    assert_eq!(words(&rt, "find-count"), "1 of 3", "around the end");
+    assert_eq!(viewer(&rt).media.page, 1);
+    // The second chevron: the previous one. (Shift+Enter in the field asks the same of
+    // `Tx::mods`; the test runtime's submit carries no modifiers, so only the button is proven.)
+    click(&mut rt, "find-nav-1");
+    assert_eq!(words(&rt, "find-count"), "3 of 3");
+    click(&mut rt, "find-nav-1");
+    assert_eq!(words(&rt, "find-count"), "2 of 3");
+    click(&mut rt, "find-nav-0");
+    assert_eq!(words(&rt, "find-count"), "3 of 3");
+    // Esc closes find and the file stays; Esc again leaves the file.
+    press(&mut rt, Key::Escape);
+    press(&mut rt, Key::Tab);
+    assert!(!has(&rt, "find-bar"));
+    assert!(on_a_file(&rt) && rt.state.viewer.ui.is_some());
+    press(&mut rt, Key::Escape);
+    press(&mut rt, Key::Tab);
+    assert!(!on_a_file(&rt));
+    // Done closes it too.
+    let mut rt = scene("DW-1506");
+    click(&mut rt, "find-done");
+    assert!(!has(&rt, "find-bar") && !has(&rt, "mark-1"));
+}
+
+#[test]
+fn a_table_selects_a_cell_moves_it_and_sorts_by_a_column() {
+    let (mut rt, _) = recording(board::CSV);
+    assert_eq!(
+        words(&rt, "item-count"),
+        "Comma-separated \u{00B7} 6 columns \u{00B7} 48 rows"
+    );
+    assert_eq!(viewer(&rt).media.cell, None);
+    click(&mut rt, "csv-2-5");
+    assert_eq!(viewer(&rt).media.cell, Some((2, 5)));
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Left);
+    assert_eq!(viewer(&rt).media.cell, Some((3, 4)));
+    press(&mut rt, Key::Right);
+    press(&mut rt, Key::Right);
+    assert_eq!(viewer(&rt).media.cell, Some((3, 5)), "the last column: no further");
+    // Amount, ascending: by value (0.00, 385.00, …), not by letter.
+    click(&mut rt, "csv-th-5");
+    assert_eq!(viewer(&rt).media.cell, None);
+    let amounts = |rt: &Runtime<State>| (0..8).map(|r| words(rt, &format!("csv-{r}-5"))).collect::<Vec<_>>();
+    assert_eq!(
+        amounts(&rt),
+        [
+            "0.00", "385.00", "440.00", "475.00", "617.50", "660.00", "665.00", "760.00"
+        ]
+    );
+    assert_eq!(words(&rt, "csv-0-1"), "Studio", "a row moves whole");
+    click(&mut rt, "csv-th-5");
+    assert_eq!(amounts(&rt)[0], "760.00");
+    click(&mut rt, "csv-th-5");
+    assert_eq!(amounts(&rt)[0], "760.00", "the file's order again");
+    assert_eq!(words(&rt, "csv-1-0"), "2026-10-03");
+    // Rate: 95.00 before 110.00 (a sort by letter would put 110.00 first).
+    click(&mut rt, "csv-th-4");
+    assert_eq!(words(&rt, "csv-0-4"), "0.00");
+    assert_eq!(words(&rt, "csv-1-4"), "95.00");
+    assert_eq!(words(&rt, "csv-7-4"), "110.00");
+    // Client: by letter.
+    click(&mut rt, "csv-th-1");
+    assert_eq!(words(&rt, "csv-0-1"), "Harbourlight");
+    assert_eq!(words(&rt, "csv-7-1"), "Studio");
+    // Edit opens it in Sheets: the button and Ctrl+E.
+    click(&mut rt, "tb-btn-0");
+    ctrl(&mut rt, Key::Command('e'));
+    assert_eq!(intents(&mut rt), [Intent::EditInSheets, Intent::EditInSheets]);
+    assert!(viewer(&rt).editor.is_none(), "a table is not edited as text");
+}
+
+#[test]
+fn an_archive_lists_steps_into_a_folder_and_out_again() {
+    let (mut rt, _) = recording(board::ZIP);
+    assert_eq!(words(&rt, "row-0-name"), "Shoot selects/");
+    assert_eq!(words(&rt, "row-0-date"), "212 files");
+    assert_eq!(words(&rt, "row-0-size"), "\u{2014}");
+    assert_eq!(words(&rt, "row-2-size"), "4.1 MB");
+    assert!(
+        has(&rt, "row-4") && !has(&rt, "row-5"),
+        "the whole list, as the board draws it"
+    );
+    // A file inside cannot be opened here.
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Down);
+    assert_eq!(viewer(&rt).media.entry, Some(2));
+    press(&mut rt, Key::Enter);
+    assert_eq!(viewer(&rt).media.dir, "");
+    press(&mut rt, Key::Up);
+    // The folder: its list.
+    press(&mut rt, Key::Up);
+    press(&mut rt, Key::Enter);
+    assert_eq!(viewer(&rt).media.dir, "Shoot selects/");
+    assert_eq!(words(&rt, "row-0-name"), "Shoot selects/Day 1/");
+    assert!(!has(&rt, "row-1"));
+    press(&mut rt, Key::Backspace);
+    assert_eq!(words(&rt, "row-0-name"), "Shoot selects/");
+    // Back steps out of the folder before it leaves the archive.
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Enter);
+    assert_eq!(viewer(&rt).media.dir, "Shoot selects/");
+    click(&mut rt, "back");
+    assert!(on_a_file(&rt));
+    assert_eq!(viewer(&rt).media.dir, "");
+    click(&mut rt, "back");
+    assert!(!on_a_file(&rt));
+    // The way to the files themselves.
+    let (mut rt, _) = recording(board::ZIP);
+    click(&mut rt, "tb-btn-0");
+    assert_eq!(intents(&mut rt), [Intent::OpenInAnotherApp]);
+}
+
+#[test]
+fn share_opens_files_dialog_over_the_viewer() {
+    crate::shell::intents::poll_drains_for_this_test();
+    let (mut rt, _) = recording(board::AUDIO);
+    click(&mut rt, "tool-0");
+    assert!(intents(&mut rt).is_empty(), "the shell's router took the intent");
+    let mut shared = false;
+    rt.update(|s, _| shared = matches!(s.actions.dialog, Some(crate::frames::files::dialogs::Dialog::Share(_))));
+    assert!(shared, "Files holds the share of the open file");
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert!(has(&rt, "viewer-root"), "the dialog layer is drawn over the viewer");
+    assert!(viewer(&rt).toast.is_none());
+}
+
+#[test]
+fn trash_moves_the_file_and_leaves_the_viewer() {
+    crate::shell::intents::poll_drains_for_this_test();
+    let (mut rt, _) = recording(board::RAW);
+    click(&mut rt, "action-3");
+    let mut open = true;
+    rt.update(|s, _| open = super::ui(s).is_some());
+    assert!(!open, "the viewer closed back to Files");
+}
+
+#[test]
+fn open_in_another_app_says_not_built_yet_until_something_takes_it() {
+    crate::shell::intents::poll_drains_for_this_test();
+    let (mut rt, _) = recording(board::ZIP);
+    click(&mut rt, "tb-btn-0");
+    assert_eq!(words(&rt, "toast-text"), "Not built yet: Open in another app");
+}
+
+#[test]
+fn edit_in_sheets_says_not_built_yet_until_something_takes_it() {
+    crate::shell::intents::poll_drains_for_this_test();
+    let (mut rt, _) = recording(board::CSV);
+    ctrl(&mut rt, Key::Command('e'));
+    assert_eq!(words(&rt, "toast-text"), "Not built yet: Edit in Sheets");
+    press(&mut rt, Key::Down);
+    assert!(!has(&rt, "toast-text"));
+    click(&mut rt, "tb-btn-0");
+    assert_eq!(words(&rt, "toast-text"), "Not built yet: Edit in Sheets");
+}
+
+fn settle(rt: &mut Runtime<State>) {
+    rt.frame(0.0);
+    rt.frame(0.0);
+    rt.settle_all();
+}
+
+/// The thumbnails that are built: their page numbers.
+fn thumbs_built(rt: &Runtime<State>) -> Vec<u32> {
+    let mut pages: Vec<u32> = rt
+        .elements()
+        .iter()
+        .filter(|e| !e.exiting)
+        .filter_map(|e| {
+            e.key
+                .as_deref()?
+                .strip_prefix("thumb-")?
+                .strip_suffix("-page")?
+                .parse::<u32>()
+                .ok()
+        })
+        .map(|i| i + 1)
+        .collect();
+    pages.sort_unstable();
+    pages
+}
+
+/// The wheel over the middle of `key`, either sign of the toolkit's wheel, until `done`.
+fn wheel_until(rt: &mut Runtime<State>, key: &str, done: impl Fn(&Runtime<State>) -> bool) {
+    let r = info(rt, key).rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    for dy in [600.0, -1200.0] {
+        if done(rt) {
+            return;
+        }
+        rt.wheel(x, y, dy);
+        settle(rt);
+    }
+}
+
+#[test]
+fn a_long_pdf_builds_only_the_thumbnails_near_the_window_and_its_column_and_its_page_scroll() {
+    let (mut rt, _) = recording(board::PDF);
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.file.body = Body::Pdf(super::source::PdfDoc {
+            pages: 2000,
+            page: 1,
+            size: "2.3 MB".into(),
+        });
+        ui.media.page = 1;
+    });
+    settle(&mut rt);
+    assert_eq!(words(&rt, "item-count"), "Page 1 of 2000 \u{00B7} 2.3 MB");
+    // At 100 % the page fits: it stands in the middle of its area, 24 points under its top.
+    let (area, page) = (info(&rt, "page-area").rect, info(&rt, "page").rect);
+    assert_eq!(
+        page[0] + page[2] / 2.0,
+        area[0] + area[2] / 2.0,
+        "centred: {page:?} in {area:?}"
+    );
+    assert_eq!(page[1], area[1] + 24.0);
+    // 2,000 pages: the thumbnails in and near the window, not all of them.
+    let first = thumbs_built(&rt);
+    assert_eq!(first.first(), Some(&1));
+    assert!(
+        (4..=80).contains(&first.len()),
+        "the thumbnails near the window are built, not 2,000: {}",
+        first.len()
+    );
+    // The column scrolls: the wheel over it brings later pages, and the first leaves the window.
+    let column = info(&rt, "thumb-sidebar").rect;
+    let top_of = |rt: &Runtime<State>, key: &str| info(rt, key).rect[1];
+    let first_top = top_of(&rt, "thumb-0");
+    assert!(first_top >= column[1], "the first thumbnail starts inside the column");
+    wheel_until(&mut rt, "thumb-sidebar", |rt| {
+        !has(rt, "thumb-0") || top_of(rt, "thumb-0") < first_top
+    });
+    assert!(
+        !has(&rt, "thumb-0") || top_of(&rt, "thumb-0") < column[1],
+        "the wheel moved the first thumbnail out of the top of the column"
+    );
+    // A page turned by a key brings its thumbnail into the column, wherever the column stood.
+    rt.update(|s, _| s.viewer.ui.as_mut().expect("a file is open").go_page(899));
+    settle(&mut rt);
+    press(&mut rt, Key::PageDown);
+    assert_eq!(viewer(&rt).media.page, 900);
+    let shown = info(&rt, "thumb-899").rect;
+    assert!(
+        shown[1] >= column[1] && shown[1] + shown[3] <= column[1] + column[3],
+        "page 900's thumbnail is inside the column: {shown:?} in {column:?}"
+    );
+    assert!(thumbs_built(&rt).len() <= 80, "still only the ones near the window");
+    // A press on a thumbnail that was reached by scrolling turns to its page.
+    click(&mut rt, "thumb-899-page");
+    assert_eq!(viewer(&rt).media.page, 900);
+
+    // The page: at 400 % it is larger than its area, and the wheel brings its lower part into view.
+    for _ in 0..9 {
+        ctrl(&mut rt, Key::Command('='));
+    }
+    assert_eq!(words(&rt, "zoom-pct"), "400%");
+    let area = info(&rt, "page-area").rect;
+    let page = info(&rt, "page").rect;
+    assert!(
+        page[3] > area[3] && page[2] > area[2],
+        "the page is larger than its area: {page:?} in {area:?}"
+    );
+    let bottom = |rt: &Runtime<State>| {
+        let page = info(rt, "page").rect;
+        page[1] + page[3]
+    };
+    // Its left edge is inside the area at rest (a page wider than the area starts at its left, where scrolling
+    // can reach all of it: centred, its left part would lie where no scroll goes).
+    assert!(
+        page[0] >= area[0],
+        "the page's left edge can be seen: {page:?} in {area:?}"
+    );
+    let right = |rt: &Runtime<State>| {
+        let page = info(rt, "page").rect;
+        page[0] + page[2]
+    };
+    let right_before = right(&rt);
+    for dx in [900.0, -1800.0] {
+        if right(&rt) < right_before {
+            break;
+        }
+        rt.wheel_xy(area[0] + area[2] / 2.0, area[1] + area[3] / 2.0, dx, 0.0);
+        settle(&mut rt);
+    }
+    assert!(
+        right(&rt) < right_before,
+        "the page scrolls sideways: {} from {right_before}",
+        right(&rt)
+    );
+    let before = bottom(&rt);
+    assert!(before > area[1] + area[3], "the page's foot is below the window");
+    wheel_until(&mut rt, "page-area", |rt| bottom(rt) < before);
+    assert!(
+        bottom(&rt) < before,
+        "the wheel moved the page up: {} from {before}",
+        bottom(&rt)
+    );
+    // The next page is read from its top again.
+    press(&mut rt, Key::PageDown);
+    assert_eq!(viewer(&rt).media.page, 901);
+    assert_eq!(info(&rt, "page").rect[1], page[1], "a turned page starts at its top");
+}
+
+fn typed(rt: &mut Runtime<State>, text: &str) {
+    press(rt, Key::Text(text.into()));
+}
+
+/// The archive's list on the one list model (`ui::list_keys`, task 159): type-ahead on the entries' names, the ends,
+/// a page; a read-only single-select list, so Space, F2 and Delete are not its keys.
+#[test]
+fn an_archives_list_jumps_by_typed_names_and_keeps_its_keys() {
+    let (mut rt, _) = recording(board::ZIP);
+    // Names: "Shoot selects", "Day 1", "contact-sheet.pdf", "selects-list.csv", "README.txt".
+    typed(&mut rt, "r");
+    assert_eq!(viewer(&rt).media.entry, Some(4), "R: README.txt");
+    typed(&mut rt, "e");
+    assert_eq!(viewer(&rt).media.entry, Some(4), "\"re\": still README.txt");
+    let (mut rt, _) = recording(board::ZIP);
+    typed(&mut rt, "s");
+    typed(&mut rt, "e");
+    assert_eq!(viewer(&rt).media.entry, Some(3), "\"se\": selects-list.csv, by its name");
+    typed(&mut rt, "C");
+    assert_eq!(viewer(&rt).media.entry, Some(3), "\"sec\" matches none: focus stays");
+}
+
+#[test]
+fn an_archives_type_ahead_matches_a_prefix_and_cycles_one_letter() {
+    let (mut rt, _) = recording(board::ZIP);
+    typed(&mut rt, "s");
+    assert_eq!(viewer(&rt).media.entry, Some(0), "S: Shoot selects");
+    typed(&mut rt, "s");
+    assert_eq!(viewer(&rt).media.entry, Some(3), "S again: the next name with S");
+    typed(&mut rt, "s");
+    assert_eq!(viewer(&rt).media.entry, Some(0), "and around");
+    typed(&mut rt, "x");
+    assert_eq!(viewer(&rt).media.entry, Some(0), "no match: focus stays");
+}
+
+#[test]
+fn an_archives_list_moves_to_its_ends_and_by_a_page() {
+    let (mut rt, _) = recording(board::ZIP);
+    press(&mut rt, Key::End);
+    assert_eq!(viewer(&rt).media.entry, Some(4));
+    press(&mut rt, Key::Home);
+    assert_eq!(viewer(&rt).media.entry, Some(0));
+    press(&mut rt, Key::PageDown);
+    assert_eq!(viewer(&rt).media.entry, Some(4), "a page stops at the end");
+    press(&mut rt, Key::PageUp);
+    assert_eq!(viewer(&rt).media.entry, Some(0));
+    // Shift moves as a plain move: no multi-select here.
+    press_with(
+        &mut rt,
+        Key::Down,
+        Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    assert_eq!(viewer(&rt).media.entry, Some(1));
+    // F2 and Delete do nothing to a read-only list; the file stays open.
+    press(&mut rt, Key::Function(2));
+    press(&mut rt, Key::Delete);
+    assert_eq!(viewer(&rt).media.entry, Some(1));
+    assert!(on_a_file(&rt));
+    // Alt+Up: one folder up inside the archive.
+    press(&mut rt, Key::Up);
+    press(&mut rt, Key::Enter);
+    assert_eq!(viewer(&rt).media.dir, "Shoot selects/");
+    press_with(
+        &mut rt,
+        Key::Up,
+        Mods {
+            alt: true,
+            ..Mods::default()
+        },
+    );
+    assert_eq!(viewer(&rt).media.dir, "");
+}
+
+#[test]
+fn home_and_end_go_to_the_first_and_last_photo_of_the_strip() {
+    let (mut rt, _) = recording(board::RAW);
+    let names = |rt: &Runtime<State>| match &viewer(rt).file.body {
+        Body::Photo(doc) => (
+            doc.strip.first().map(|i| i.name.clone()),
+            doc.strip.last().map(|i| i.name.clone()),
+        ),
+        _ => panic!("a photo"),
+    };
+    let (first, last) = names(&rt);
+    press(&mut rt, Key::End);
+    assert_eq!(Some(viewer(&rt).file.name.clone()), last);
+    press(&mut rt, Key::End);
+    assert_eq!(Some(viewer(&rt).file.name.clone()), last, "already the last: it stays");
+    press(&mut rt, Key::Home);
+    assert_eq!(Some(viewer(&rt).file.name.clone()), first);
+}
+
+/// The zoom group keeps its 1px gap between the three tools (the board's `gap-px`), 2px padding.
+#[test]
+fn media_look_zoom_group_gap_is_one_pixel() {
+    let rt = scene("DW-1506");
+    let group = info(&rt, "zoom-group").rect;
+    let tools: f32 = ["tool-0", "tool-1", "tool-2"].iter().map(|k| info(&rt, k).rect[2]).sum();
+    assert_eq!(group[2], tools + 2.0 * 2.0 + 2.0 * 1.0, "padding 2 each side, gap 1 twice");
+}

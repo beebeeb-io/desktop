@@ -1,0 +1,168 @@
+{
+ "frame": "DW-1561",
+ "width": 1278,
+ "height": 798,
+ "elements": {
+  "pres-stage": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 1278,
+   "h": 798,
+   "bg": [
+    0,
+    0,
+    0,
+    255
+   ]
+  },
+  "pres-slide": {
+   "kind": "box",
+   "x": 89,
+   "y": 89.5,
+   "w": 1100,
+   "h": 619,
+   "bg": [
+    255,
+    255,
+    255,
+    255
+   ]
+  },
+  "pres-0": {
+   "kind": "text",
+   "x": 129,
+   "y": 129.5,
+   "w": 1020,
+   "h": 50.59,
+   "text": "What we shot",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 44,
+   "weight": 700,
+   "color": [
+    9,
+    9,
+    9,
+    255
+   ],
+   "tracking": -0.88
+  },
+  "pres-li-0": {
+   "kind": "text",
+   "x": 153.2,
+   "y": 200.09,
+   "w": 995.8,
+   "h": 33,
+   "text": "212 photos over two days · Alfama, Belém, the harbour",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 400,
+   "color": [
+    9,
+    9,
+    9,
+    255
+   ],
+   "tracking": 0
+  },
+  "pres-li-1": {
+   "kind": "text",
+   "x": 153.2,
+   "y": 233.09,
+   "w": 995.8,
+   "h": 33,
+   "text": "60 edited selects for the hotel",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 400,
+   "color": [
+    9,
+    9,
+    9,
+    255
+   ],
+   "tracking": 0
+  },
+  "pres-li-2": {
+   "kind": "text",
+   "x": 153.2,
+   "y": 266.09,
+   "w": 995.8,
+   "h": 33,
+   "text": "A 90-second film",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 400,
+   "color": [
+    9,
+    9,
+    9,
+    255
+   ],
+   "tracking": 0
+  },
+  "pres-image": {
+   "kind": "box",
+   "x": 129,
+   "y": 325.09,
+   "w": 1020,
+   "h": 343.41
+  },
+  "pres-esc-box": {
+   "kind": "box",
+   "x": 1230.2,
+   "y": 12,
+   "w": 31.8,
+   "h": 20,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ]
+  },
+  "pres-esc": {
+   "kind": "text",
+   "x": 1236.2,
+   "y": 14.75,
+   "w": 19.8,
+   "h": 14.5,
+   "text": "esc",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "pres-count": {
+   "kind": "text",
+   "x": 1224.99,
+   "y": 772,
+   "w": 33.01,
+   "h": 14,
+   "text": "2 / 3",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    255,
+    255,
+    255,
+    140
+   ],
+   "tracking": 0
+  }
+ },
+ "theme": "light"
+}

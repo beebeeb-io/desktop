@@ -1,0 +1,179 @@
+//! Account (DW-A51): who is signed in, what became of the recovery phrase, which Beebeeb
+//! products this account uses, and Drive's own part of the page (the plan).
+
+use crate::State;
+use crate::theme::tokens::{Theme, type_};
+use crate::ui::account_set::{self as set, Lead, Row, Tail};
+use crate::ui::au::Tone;
+use crate::ui::kit;
+use rune::{El, col, row};
+
+use super::source::{AccountSource, PaneState, Plan, ProductKind, ProductState};
+use super::{Pane, icons};
+
+/// The hue of the account's avatar tint (`.kit-avatar.hue-a`).
+const AVATAR_HUE: f32 = 250.0;
+
+/// A row of who is signed in. It is a link to the page that changes it only while something answers for that
+/// page: else it is the value alone, with no press and no chevron (never a row that leads to a page that is
+/// not there).
+fn who_row(index: usize, row: Row, to: (Pane, &'static str), source: &dyn AccountSource, t: &Theme) -> El {
+    let (page, frame) = to;
+    if source.pane_state(page) == PaneState::Unwired {
+        return set::item(0, index, &row, Vec::new(), t);
+    }
+    set::item(0, index, &row.link(true), Vec::new(), t).on_press(move |s: &mut State| super::go(s, frame))
+}
+
+pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
+    let who = source.identity();
+    // Name and email each open their page: one Tab stop, the arrows between them. A page nothing answers for
+    // leaves its row as text, and then the list is a plain one.
+    let wired = [Pane::Name, Pane::Email].iter().all(|p| source.pane_state(*p) != PaneState::Unwired);
+    let identity = (if wired { crate::ui::settings_list::roving_list } else { crate::ui::settings_list::list })(
+        0,
+        None,
+        vec![
+            who_row(
+                0,
+                Row::new(
+                    Lead::Avatar {
+                        initials: who.initials.clone(),
+                        hue: AVATAR_HUE,
+                    },
+                    who.name.clone(),
+                )
+                .name(format!("Name, {}", who.name)),
+                (Pane::Name, "DW-A64"),
+                source,
+                t,
+            ),
+            who_row(
+                1,
+                Row::new(Lead::Icon(&icons::MAIL), who.email.clone()).name(format!("Sign-in email, {}", who.email)),
+                (Pane::Email, "DW-A65"),
+                source,
+                t,
+            ),
+        ],
+        None,
+        t,
+    );
+
+    // The phrase was shown once, at sign-up, and never again: this row only says so. It is
+    // text, not a button: no reveal, no re-authentication, no regenerate.
+    let recovery = crate::ui::settings_list::list(
+        1,
+        Some("Recovery"),
+        vec![set::item(
+            1,
+            0,
+            &Row::new(Lead::Tile(&icons::KEY, Tone::Neutral), "Recovery phrase")
+                .sub("Shown once at sign-up")
+                .name("Recovery phrase, shown once at sign-up"),
+            Vec::new(),
+            t,
+        )],
+        Some("We can't show it again. Keep your 12 words on paper or in a password manager."),
+        t,
+    );
+
+    let products = source
+        .products()
+        .into_iter()
+        .enumerate()
+        .map(|(i, (kind, state))| {
+            let (icon, tone): (&'static rune::Icon, Tone) = match kind {
+                ProductKind::Drive => (&icons::FOLDER, Tone::Ink),
+                ProductKind::Pass => (&icons::KEY, Tone::Neutral),
+                ProductKind::Vpn => (&icons::GLOBE, Tone::Neutral),
+                ProductKind::Chat => (&icons::CHAT, Tone::Neutral),
+                ProductKind::Mail => (&icons::MAIL, Tone::Neutral),
+            };
+            // The state is text, not only colour.
+            let tail = match state {
+                ProductState::ThisApp => Tail::Pill {
+                    label: state.label().into(),
+                    tone: Tone::Neutral,
+                    dot: false,
+                },
+                ProductState::SignedIn => Tail::Pill {
+                    label: state.label().into(),
+                    tone: Tone::Green,
+                    dot: true,
+                },
+                ProductState::NotSignedIn => Tail::Value(state.label().into()),
+            };
+            set::item(
+                2,
+                i,
+                &Row::new(Lead::Tile(icon, tone), kind.label()).tail(tail),
+                Vec::new(),
+                t,
+            )
+        })
+        .collect();
+    let uses = crate::ui::settings_list::list(
+        2,
+        Some("This account uses"),
+        products,
+        Some("State on this PC. One account and one phrase; each product keeps its own keys."),
+        t,
+    );
+
+    let mut children = vec![set::heading("Account", None, None, t), identity, recovery, uses];
+    if let Some(plan) = source.plan() {
+        children.push(plan_card(&plan, t));
+    }
+    set::pane(children, t)
+}
+
+/// Drive's own part of the Account page: the plan, read only. Opens the plan pane (DW-0708).
+fn plan_card(plan: &Plan, t: &Theme) -> El {
+    row()
+        .key("card-0")
+        .role("link")
+        .label(format!(
+            "{}, {} {}. Manage on beebeeb.io",
+            plan.title, plan.used, plan.rest
+        ))
+        .w_full()
+        .center_y()
+        .gap(crate::theme::scale::space::S12)
+        .padding(crate::theme::scale::space::S12)
+        .radius(crate::theme::scale::radius::PANEL)
+        .fill(t.card)
+        .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)))
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .on_press(|s: &mut State| super::go(s, "DW-0708"))
+        .child(set::tile("card-0-tile", &icons::DATABASE, 34.0, 10.0, Tone::Neutral, t))
+        .child(
+            col()
+                .key("card-0-words")
+                .grow(1.0)
+                .min_w(0.0)
+                .child(kit::label("card-0-head", plan.title.clone(), type_::HEAD, t.text))
+                .child(
+                    row()
+                        .key("card-0-line")
+                        .gap(crate::theme::scale::space::S4)
+                        .child(kit::label(
+                            "card-0-mono",
+                            plan.used.clone(),
+                            set::SUB_MONO,
+                            t.text_tertiary,
+                        ))
+                        .child(kit::label("card-0-sub", plan.rest.clone(), set::SUB, t.text_tertiary)),
+                ),
+        )
+        .child(kit::label(
+            "card-0-link",
+            "Manage on beebeeb.io",
+            set::SUB,
+            t.text_tertiary,
+        ))
+        .child(kit::glyph("card-0-link-icon", &icons::EXTERNAL, 13.0, t.text))
+}

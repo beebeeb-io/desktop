@@ -6,7 +6,6 @@
 graphify-out/*
 !graphify-out/GRAPH_SUMMARY.md
 
-# Cargo build output, installed dependencies and Tauri-generated schemas.
+# Cargo build output and installed dependencies.
 target/
 node_modules/
-/src-tauri/gen/

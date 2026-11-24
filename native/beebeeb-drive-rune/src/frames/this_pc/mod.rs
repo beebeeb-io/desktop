@@ -1,0 +1,697 @@
+//! This PC: Sync history and Available offline (the board's DW-1301 to DW-1306, DW-0428,
+//! DW-0715, DW-0120). `FRAMES.md` beside this file lists every frame and which are built.
+//!
+//! [`Ui`] is what the two sections keep; every control changes it through one of its methods
+//! and reads the engine through [`source::ThisPcSource`]. What leaves the group (show a file
+//! in the window or in File Explorer, open a kept file, the ask before Remove all) is an
+//! [`Intent`]; [`poll`] carries each one out through the window's own Files source and the
+//! shell's routes ([`carry_out`]), and says a refusal in the window's toast.
+//!
+//! Nothing here is secret: names, folders, sizes and times of the person's own files. The
+//! search field holds a file name. Comment mode is allowed on both sections.
+
+mod chrome;
+#[cfg(any(target_os = "windows", test))]
+pub mod found_while_paused;
+mod history;
+pub mod icons;
+mod offline;
+pub mod scenes;
+mod settle;
+pub mod source;
+
+#[cfg(test)]
+mod tests;
+
+use rune::{Cx, El, Key, KeyEvent, TextEdit, Tx};
+
+use crate::State;
+pub use crate::shell::app::Section;
+use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
+use source::{Change, Exit, FixtureSource, Kept, Origin, Standing, ThisPcSource, What};
+
+/// The registry's lines for the two sections (`shell/registry.rs`).
+pub const SYNC_HISTORY: Frame = Frame {
+    group: FrameGroup::Section(Section::SyncHistory),
+    view: history::view,
+    on_key: Some(on_key),
+    feedback: FeedbackPolicy::Allowed,
+};
+pub const AVAILABLE_OFFLINE: Frame = Frame {
+    group: FrameGroup::Section(Section::AvailableOffline),
+    view: offline::view,
+    on_key: Some(on_key),
+    feedback: FeedbackPolicy::Allowed,
+};
+
+/// The history's filter (`.kit-seg`), in the board's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Filter {
+    All,
+    ThisPc,
+    OtherDevices,
+    Problems,
+}
+
+impl Filter {
+    pub const ALL: [Filter; 4] = [Filter::All, Filter::ThisPc, Filter::OtherDevices, Filter::Problems];
+
+    pub fn label(self, problems: usize) -> String {
+        match self {
+            Filter::All => "All".into(),
+            Filter::ThisPc => "This PC".into(),
+            Filter::OtherDevices => "Other devices".into(),
+            Filter::Problems => format!("Problems \u{00B7} {problems}"),
+        }
+    }
+}
+
+/// Where a control wants to go that this group does not draw. An intent about one item
+/// carries that item's id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Intent {
+    /// Show the changed file in the window; a trashed file opens Trash (DW-1301 > DW-0401).
+    ShowInBeebeeb(String),
+    /// Show the file in File Explorer (DW-0428, DW-1306 > DW-1180).
+    ShowInFileExplorer(String),
+    /// Open a kept item, also offline (DW-0715 > DW-0408).
+    Open(String),
+    /// "Remove all from this PC" asks once before anything is removed; the answer comes back
+    /// through [`Ui::remove_all_confirmed`].
+    AskRemoveAll,
+    /// The New menu (Files' DW-0415).
+    New,
+}
+
+/// The menu on a kept row (DW-1306).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RowMenu {
+    pub row: usize,
+    /// Where it opens, in the window.
+    pub at: (f32, f32),
+    /// The item the keyboard is on.
+    pub hot: usize,
+}
+
+/// The row menu's items, in the board's order.
+pub const MENU_ITEMS: [&str; 3] = ["Open", "Show in File Explorer", "Remove from this PC"];
+
+/// Task 2530: the question a problem's way out asks first (`settle.rs`): which problem, its name, and the answers its
+/// row lists (the two-versions answers, Keep both first; or Remove from the list alone).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asking {
+    pub problem: String,
+    pub name: String,
+    pub exits: Vec<Exit>,
+}
+
+/// The order the two-versions question draws its answers in: Keep both, the default, first.
+const ANSWER_ORDER: [Exit; 4] = [Exit::KeepBoth, Exit::KeepOther, Exit::KeepThisPcs, Exit::RemoveFromList];
+
+pub struct Ui {
+    source: Box<dyn ThisPcSource>,
+    pub filter: Filter,
+    /// Search history. Its own field: never Files' search.
+    pub search: TextEdit,
+    /// The selected kept row.
+    pub selected: Option<usize>,
+    pub menu: Option<RowMenu>,
+    /// The window opened on this section (the flyout's "View full history"): Back has nowhere
+    /// to go even when the route machine remembers a place.
+    pub first_place: bool,
+    intents: Vec<Intent>,
+    /// "Remove all from this PC" was pressed: the window asks once before anything is removed.
+    pub confirm_remove_all: bool,
+    /// Task 2530: a problem's Choose or Remove was pressed: the window asks before anything changes.
+    pub asking: Option<Asking>,
+    /// Task 2530: what a way out did, and when: the window's toast says it for [`REFUSAL_FOR`].
+    pub said: Option<(&'static str, std::time::Instant)>,
+    /// The board's sample PC (the frame gate's scenes): the status lines hold the board's sample words. Never in
+    /// the running app.
+    sample: bool,
+    /// A change the source refused, and when: the window's toast says it for [`REFUSAL_FOR`].
+    pub refusal: Option<(&'static str, std::time::Instant)>,
+    /// The section of this group that was on screen at the last poll: arriving at one, also from the other, is an
+    /// opening.
+    was_open: Option<Section>,
+    /// A sync check finished and the lists are to be read again: waits while a menu or an ask is open.
+    pub(crate) reread_due: bool,
+}
+
+/// How long a refusal's toast stays.
+pub const REFUSAL_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+/// How soon the window looks again while an answer is out or a toast shows.
+pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+impl Ui {
+    pub fn new(source: Box<dyn ThisPcSource>) -> Ui {
+        Ui {
+            source,
+            filter: Filter::All,
+            search: TextEdit::new(""),
+            selected: None,
+            menu: None,
+            first_place: false,
+            intents: Vec::new(),
+            confirm_remove_all: false,
+            asking: None,
+            said: None,
+            sample: false,
+            refusal: None,
+            was_open: None,
+            reread_due: false,
+        }
+    }
+
+    /// The board's sample PC.
+    pub fn fixture() -> Ui {
+        Ui::sample(FixtureSource::board())
+    }
+
+    /// A sample PC of the board, for the frame gate's scenes.
+    pub fn sample(source: FixtureSource) -> Ui {
+        Ui {
+            sample: true,
+            ..Ui::new(Box::new(source))
+        }
+    }
+
+    /// The board's sample words stand in the status lines (a scene), never a real PC's.
+    pub fn is_sample(&self) -> bool {
+        self.sample
+    }
+
+    /// Whether the source has lists to show, or why not.
+    pub fn standing(&self) -> Standing {
+        self.source.standing()
+    }
+
+    /// `false`: This PC is turned off (`engine_host::this_pc::TURNED_ON`), and the views draw the shell's frame.
+    pub fn wired(&self) -> bool {
+        self.source.wired()
+    }
+
+    pub fn problem_count(&self) -> usize {
+        self.source.problems().len()
+    }
+
+    /// The problems Try again applies to (task 2524: a held edit has no action).
+    pub fn retryable_problem_count(&self) -> usize {
+        self.source.problems().iter().filter(|c| c.can_retry()).count()
+    }
+
+    pub fn kept_count(&self) -> usize {
+        self.source.kept_count()
+    }
+
+    pub fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        self.source.kept()
+    }
+
+    pub fn today(&self) -> chrono::NaiveDate {
+        self.source.today()
+    }
+
+    /// The changes the list shows: the filter, then the search (names and folders).
+    pub fn changes(&self) -> Vec<Change> {
+        let all = match self.filter {
+            Filter::Problems => self.source.problems(),
+            _ => self.source.history(),
+        };
+        let query = self.search.text.trim().to_lowercase();
+        all.into_iter()
+            .filter(|c| match self.filter {
+                Filter::All | Filter::Problems => true,
+                Filter::ThisPc => c.origin == Origin::ThisPc,
+                Filter::OtherDevices => c.origin != Origin::ThisPc,
+            })
+            .filter(|c| {
+                query.is_empty()
+                    || c.name.to_lowercase().contains(&query)
+                    || c.what.place().is_some_and(|p| p.to_lowercase().contains(&query))
+            })
+            .collect()
+    }
+
+    /// The history has nothing at all (DW-1305), whatever the filter and the search say.
+    pub fn no_history(&self) -> bool {
+        self.source.history().is_empty() && self.source.problems().is_empty()
+    }
+
+    pub fn set_filter(&mut self, filter: Filter) {
+        self.filter = filter;
+    }
+
+    pub fn retry(&mut self, problem: &str) {
+        self.source.retry(problem);
+    }
+
+    pub fn retry_all(&mut self) {
+        self.source.retry_all();
+    }
+
+    /// Task 2530: a problem's Choose (`remove` false: the two-versions answers) or Remove (`remove` true) was pressed:
+    /// the window asks first, with only the answers the problem's row lists. A problem the source no longer lists, or
+    /// one with no such answer, asks nothing.
+    pub fn ask_exit(&mut self, problem: &str, remove: bool) {
+        let Some(change) = self
+            .source
+            .problems()
+            .into_iter()
+            .find(|c| c.problem() == Some(problem))
+        else {
+            return;
+        };
+        let exits: Vec<Exit> = ANSWER_ORDER
+            .into_iter()
+            .filter(|exit| change.exits().contains(exit) && (*exit == Exit::RemoveFromList) == remove)
+            .collect();
+        if !exits.is_empty() {
+            self.asking = Some(Asking {
+                problem: problem.to_string(),
+                name: change.name.clone(),
+                exits,
+            });
+        }
+    }
+
+    /// Task 2530: an answer to the question: asked of the source once, only one the question offered. The question
+    /// closes; the source says what it did.
+    pub fn settle(&mut self, exit: Exit) {
+        if let Some(asking) = self.asking.take()
+            && asking.exits.contains(&exit)
+        {
+            self.source.settle(&asking.problem, exit);
+        }
+    }
+
+    /// Task 2530: Cancel, Esc or a press outside: nothing changes.
+    pub fn ask_cancelled(&mut self) -> bool {
+        self.asking.take().is_some()
+    }
+
+    pub fn clear_search(&mut self) -> bool {
+        if self.search.text.is_empty() {
+            return false;
+        }
+        self.search.clear();
+        true
+    }
+
+    pub fn ask(&mut self, intent: Intent) {
+        self.intents.push(intent);
+    }
+
+    /// What the controls asked for since the last call, oldest first ([`carry_out`]).
+    pub fn take_intents(&mut self) -> Vec<Intent> {
+        std::mem::take(&mut self.intents)
+    }
+
+    /// A double-click or Enter on a change.
+    pub fn show_change(&mut self, change: &Change) {
+        self.ask(match self.filter {
+            Filter::Problems => Intent::ShowInFileExplorer(change.id.clone()),
+            _ => Intent::ShowInBeebeeb(change.id.clone()),
+        });
+    }
+
+    // ---- Available offline ----
+
+    pub fn select(&mut self, row: usize) {
+        if row < self.kept_count() {
+            self.selected = Some(row);
+        }
+    }
+
+    pub fn move_selection(&mut self, delta: isize) -> bool {
+        let count = self.kept_count();
+        if count == 0 {
+            return false;
+        }
+        self.selected = Some(match self.selected {
+            Some(i) => i.saturating_add_signed(delta).min(count - 1),
+            None => 0,
+        });
+        true
+    }
+
+    /// Try again after a failed read: the source reads again.
+    pub fn read_again(&mut self) {
+        self.source.refresh();
+    }
+
+    pub fn open_menu(&mut self, row: usize, at: (f32, f32)) {
+        if row < self.kept_count() {
+            self.selected = Some(row);
+            self.menu = Some(RowMenu { row, at, hot: 0 });
+        }
+    }
+
+    pub fn close_menu(&mut self) -> bool {
+        self.menu.take().is_some()
+    }
+
+    /// Pick an item of the open row menu.
+    pub fn pick(&mut self, item: usize) {
+        let Some(menu) = self.menu.take() else { return };
+        let Some(kept) = self.source.kept().get(menu.row).cloned() else {
+            return;
+        };
+        match item {
+            0 => self.ask(Intent::Open(kept.id)),
+            1 => self.ask(Intent::ShowInFileExplorer(kept.id)),
+            2 => self.remove_from_pc(&kept.id),
+            _ => {}
+        }
+    }
+
+    pub fn open_selected(&mut self) -> bool {
+        let Some(kept) = self.selected.and_then(|i| self.source.kept().get(i).cloned()) else {
+            return false;
+        };
+        self.ask(Intent::Open(kept.id));
+        true
+    }
+
+    /// Stop keeping one item here. Nothing is deleted from Beebeeb.
+    pub fn remove_from_pc(&mut self, id: &str) {
+        self.source.remove_from_pc(id);
+        self.selected = None;
+    }
+
+    /// The person said yes to "Remove all from this PC".
+    pub fn remove_all_confirmed(&mut self) {
+        self.confirm_remove_all = false;
+        self.source.remove_all_from_pc();
+        self.selected = None;
+        self.menu = None;
+    }
+
+    /// The person said no, or pressed Esc: nothing is removed.
+    pub fn remove_all_cancelled(&mut self) -> bool {
+        std::mem::take(&mut self.confirm_remove_all)
+    }
+}
+
+/// What the window says when something a row asked for did not happen. Fixed sentences: never a name.
+pub const NOT_SHOWN: &str = "Couldn't show this in File Explorer.";
+pub const NOT_OPENED: &str = "Couldn't open this.";
+
+/// Carries out what the two sections asked for and cannot do themselves, in the order asked: `true` when something
+/// was asked. A file is shown and opened through the window's own Files source (its guards: the session, sync
+/// running, a connection), the window moves by the shell's routes. What is refused is said in the window's toast,
+/// never only in a log line.
+pub fn carry_out(s: &mut State, tx: &mut Tx) -> bool {
+    use crate::shell::app::{Event, Route};
+    use crate::shell::host;
+
+    let intents = s.this_pc.take_intents();
+    let asked = !intents.is_empty();
+    for intent in intents {
+        let refused = match intent {
+            // Trash for a file that went there, else Files with the item selected and in view.
+            Intent::ShowInBeebeeb(id) => {
+                let trashed = s
+                    .this_pc
+                    .source
+                    .history()
+                    .iter()
+                    .any(|change| change.id == id && matches!(change.what, What::MovedToTrash { .. }));
+                if trashed {
+                    host::dispatch(s, Event::Navigate(Route::section(Section::Trash)));
+                } else {
+                    crate::frames::files::reveal::reveal(s, tx, &id);
+                }
+                None
+            }
+            Intent::ShowInFileExplorer(id) => s
+                .actions
+                .source
+                .show_in_file_explorer(&[offline::drive_item(&id, "", false)])
+                .err()
+                .map(|_| NOT_SHOWN),
+            Intent::Open(id) => open_kept(s, &id),
+            Intent::AskRemoveAll => {
+                s.this_pc.confirm_remove_all = s.this_pc.kept_count() > 0;
+                None
+            }
+            // New things are made in Files: the window goes there with its New menu open (DW-0415).
+            Intent::New => {
+                host::dispatch(s, Event::Navigate(Route::section(Section::Files)));
+                s.actions.menu = None;
+                s.toggle_menu(crate::frames::files::MenuKind::New);
+                None
+            }
+        };
+        if let Some(words) = refused {
+            s.this_pc.refusal = Some((words, std::time::Instant::now()));
+            tx.wake_after(POLL_EVERY);
+        }
+    }
+    asked
+}
+
+/// Opens a kept item: a folder in Files, a file in the window's viewer when it has one for the type, else in the
+/// file's own app. Only an item the list holds; the words of a refusal otherwise.
+fn open_kept(s: &mut State, id: &str) -> Option<&'static str> {
+    use crate::shell::app::{Event, Route};
+
+    let kept = s.this_pc.source.kept().iter().find(|kept| kept.id == id).cloned()?;
+    let item = offline::drive_item(&kept.id, &kept.name, kept.kind == source::Kind::Folder);
+    if item.is_folder {
+        let route = Route {
+            section: Section::Files,
+            folder: Some(item.id),
+            item: None,
+        };
+        crate::shell::host::dispatch(s, Event::Navigate(route));
+        return None;
+    }
+    use crate::frames::open_file::{Opened, Target, open_file};
+    matches!(open_file(s, Target::Item(&item)), Opened::Failed(_)).then_some(NOT_OPENED)
+}
+
+/// What the sections asked of the window ([`carry_out`]) and what the source's workers answered since the last
+/// frame, for the shell's poll: `true` when the window must draw again. A refusal becomes the window's toast. The
+/// source's part never calls the engine and never waits; a file is shown or opened through the Files source, as
+/// Files' own rows do it.
+/// A sync check finished (`shell::host::poll`): the lists are read again, on the first poll with nothing open over
+/// them.
+pub fn after_a_check(s: &mut State) {
+    s.this_pc.reread_due = true;
+    reread_if_free(s);
+}
+
+/// The read a finished check asked for, when nothing is open over the lists (`after_a_check`, and every poll).
+fn reread_if_free(s: &mut State) {
+    let ready = s.shell.app.gate() == crate::shell::app::GateState::Ready;
+    let ui = &mut s.this_pc;
+    if ui.reread_due && ready && ui.menu.is_none() && !ui.confirm_remove_all && ui.asking.is_none() {
+        ui.reread_due = false;
+        ui.source.refresh();
+    }
+}
+
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    reread_if_free(s);
+    let asked = carry_out(s, tx);
+    let open = matches!(
+        s.shell.app.route().section,
+        Section::SyncHistory | Section::AvailableOffline
+    );
+    let ui = &mut s.this_pc;
+    // The ask before Remove all does not outlive its section, or the items it was about.
+    let offline = s.shell.app.route().section == Section::AvailableOffline;
+    if ui.confirm_remove_all && (!offline || ui.kept_count() == 0) {
+        ui.confirm_remove_all = false;
+    }
+    // Task 2530: nor does a problem's question outlive Sync history, or the problem.
+    let history = s.shell.app.route().section == Section::SyncHistory;
+    if let Some(asking) = &ui.asking
+        && (!history
+            || !ui
+                .source
+                .problems()
+                .iter()
+                .any(|c| c.problem() == Some(asking.problem.as_str())))
+    {
+        ui.asking = None;
+    }
+    // A section that just opened: the source reads again when what it holds is old.
+    let here = open.then(|| s.shell.app.route().section);
+    if here.is_some() && here != ui.was_open {
+        ui.source.opened();
+    }
+    ui.was_open = here;
+    // The selected kept ITEM and the one a menu is open for, before the lists change under them: a read lands between
+    // polls, and an index would then name another item (the menu would act on it).
+    let kept_ids: Vec<String> = if ui.selected.is_some() || ui.menu.is_some() {
+        ui.source.kept().iter().map(|k| k.id.clone()).collect()
+    } else {
+        Vec::new()
+    };
+    let chosen = ui.selected.and_then(|i| kept_ids.get(i).cloned());
+    let menu_item = ui.menu.as_ref().and_then(|m| kept_ids.get(m.row).cloned());
+    let pumped = ui.source.pump();
+    if pumped.changed && (chosen.is_some() || menu_item.is_some() || ui.selected.is_some() || ui.menu.is_some()) {
+        let now: Vec<String> = ui.source.kept().iter().map(|k| k.id.clone()).collect();
+        let place = |id: Option<String>| id.and_then(|id| now.iter().position(|have| *have == id));
+        ui.selected = place(chosen);
+        match place(menu_item) {
+            Some(row) => {
+                if let Some(menu) = ui.menu.as_mut() {
+                    menu.row = row;
+                }
+            }
+            None => ui.menu = None,
+        }
+    }
+    let mut changed = pumped.changed || asked;
+    if let Some(words) = pumped.refusal {
+        ui.refusal = Some((words, std::time::Instant::now()));
+        changed = true;
+    }
+    if let Some(words) = pumped.done {
+        ui.said = Some((words, std::time::Instant::now()));
+        changed = true;
+    }
+    if ui.refusal.is_some_and(|(_, at)| at.elapsed() >= REFUSAL_FOR) {
+        ui.refusal = None;
+        changed = true;
+    }
+    if ui.said.is_some_and(|(_, at)| at.elapsed() >= REFUSAL_FOR) {
+        ui.said = None;
+        changed = true;
+    }
+    if pumped.busy || ui.refusal.is_some() || ui.said.is_some() {
+        tx.wake_after(POLL_EVERY);
+    }
+    changed
+}
+
+/// The two sections' keys. The shell's own shortcuts ran first (`host::on_key`); Esc arrives
+/// here when the shell had nothing to close.
+pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let section = s.shell.app.route().section;
+    let ui = &mut s.this_pc;
+    // The ask before Remove all: Esc says no, and the list under it hears no key. Tab and Space are the
+    // ask's own buttons' (not handled here, so focus moves and the focused button presses); Enter presses no focused
+    // button in Rune and the ask has no default button, so a stray Enter removes nothing.
+    if ui.confirm_remove_all {
+        return match ev.key {
+            Key::Escape => {
+                ui.remove_all_cancelled();
+                true
+            }
+            Key::Up | Key::Down | Key::ContextMenu => true,
+            _ => false,
+        };
+    }
+    // Task 2530: a problem's question, the same way: Esc says no; the list under it hears no key.
+    if ui.asking.is_some() {
+        return match ev.key {
+            Key::Escape => ui.ask_cancelled(),
+            Key::Up | Key::Down | Key::ContextMenu => true,
+            _ => false,
+        };
+    }
+    if ev.is_command('f') {
+        tx.focus(crate::ui::keys::SEARCH_KEY, true);
+        return true;
+    }
+    if let Some(menu) = ui.menu.as_mut() {
+        return match ev.key {
+            Key::Escape => ui.close_menu(),
+            Key::Down => {
+                menu.hot = (menu.hot + 1).min(MENU_ITEMS.len() - 1);
+                true
+            }
+            Key::Up => {
+                menu.hot = menu.hot.saturating_sub(1);
+                true
+            }
+            Key::Enter => {
+                let hot = menu.hot;
+                ui.pick(hot);
+                true
+            }
+            _ => false,
+        };
+    }
+    if ev.key == Key::Escape {
+        return ui.clear_search();
+    }
+    // Enter on a change shows its file, as a double-click does.
+    if section == Section::SyncHistory {
+        let row = tx
+            .focused()
+            .and_then(|key| key.strip_prefix("change-")?.parse::<usize>().ok());
+        return match (ev.key.clone(), row.and_then(|i| ui.changes().into_iter().nth(i))) {
+            (Key::Enter, Some(change)) => {
+                ui.show_change(&change);
+                true
+            }
+            _ => false,
+        };
+    }
+    // The list's keys are the list's: with focus on a row or nowhere.
+    if section != Section::AvailableOffline || tx.focused().is_some_and(|key| !key.starts_with("row-")) {
+        return false;
+    }
+    match ev.key {
+        Key::Down => ui.move_selection(1),
+        Key::Up => ui.move_selection(-1),
+        Key::PageDown => ui.move_selection(PAGE),
+        Key::PageUp => ui.move_selection(-PAGE),
+        Key::Home => ui.move_selection(isize::MIN / 2),
+        Key::End => ui.move_selection(isize::MAX / 2),
+        Key::Enter => ui.open_selected(),
+        _ => false,
+    }
+}
+
+/// Rows a PageUp / PageDown moves the selection.
+const PAGE: isize = 10;
+
+/// The window around a section's content: caption, sidebar, and the column the section fills.
+fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
+    // Keyboard as Windows has it: Tab visits every control.
+    cx.web_focus();
+    let t = crate::theme::tokens::theme(cx.system_dark());
+    let main_pane = |main: El| crate::ui::focus::pane(rune::col().grow(1.0).min_w(0.0).min_h(0.0).h_full().child(main), "this-pc-main");
+    rune::col()
+        .key("window")
+        .role("window")
+        .label(s.identity.main_window_title())
+        .w_full()
+        .h_full()
+        .fill(t.bg)
+        .child(crate::ui::caption::caption_bar(s.identity.main_window_title(), &t, cx))
+        .child(
+            rune::row()
+                .key("body")
+                .grow(1.0)
+                .min_h(0.0)
+                .w_full()
+                .child(crate::ui::focus::pane(rune::row().h_full().child(crate::ui::drive_sidebar::drive_sidebar(s, if here == Section::SyncHistory { crate::ui::drive_sidebar::Lit::SyncHistory } else { crate::ui::drive_sidebar::Lit::AvailableOffline }, crate::ui::sidebar::Standing::Open, &t)), "this-pc-sidebar"))
+                .child(match (s.this_pc.refusal, s.this_pc.said) {
+                    // A refused change: said over the section, never only in a log line.
+                    (Some((words, _)), _) => main_pane(main.child(crate::ui::toast::layer(crate::ui::toast::toast(
+                        &crate::theme::icons_files::ALERT,
+                        crate::ui::toast::Tone::Failed,
+                        words,
+                        None,
+                        &t,
+                    )))),
+                    // Task 2530: what a way out did.
+                    (None, Some((words, _))) => main_pane(main.child(crate::ui::toast::layer(crate::ui::toast::toast(
+                        &crate::theme::icons_files::CHECK,
+                        crate::ui::toast::Tone::Done,
+                        words,
+                        None,
+                        &t,
+                    )))),
+                    (None, None) => main_pane(main),
+                }),
+        )
+}

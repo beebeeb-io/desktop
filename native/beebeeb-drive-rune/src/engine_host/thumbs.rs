@@ -1,0 +1,707 @@
+//! Thumbnails on the real engine: [`EngineThumbStore`], the one store behind every thumbnail the app draws, and
+//! [`EngineThumbs`], the `ThumbSource` of the Files grid. The Photos source (`engine_host/photos.rs`) reads the
+//! same store.
+//!
+//! - A thumbnail: [`Engine::thumbnail_pixels_for`]: the encrypted picture another client stored with the file,
+//!   fetched and decrypted in memory by the engine, cut by the engine (the window never crops or scales).
+//! - A video's length: [`Engine::video_seconds_for`]: read from the copy on this PC, when there is one. A video
+//!   that is online only has no length here (it is never downloaded for it).
+//!
+//! - A photo the server has no thumbnail for (a HEIC, a camera's RAW) whose copy is on this PC: decoded once by
+//!   the confined helper ([`super::media::decode_picture`]), kept sealed by the engine
+//!   ([`Engine::keep_local_thumbnail`]) and read from there after that, also after a restart. Never downloaded
+//!   for it.
+//!
+//! Where the pixels live: in this process's memory, in this store, and (a thumbnail made here only) sealed in the
+//! engine's thumbnail cache. Nothing else is written to disk, nothing is logged. At most [`MAX_PICTURES`] pictures and [`MAX_BYTES`] of pixels are held; the ones not looked at
+//! for longest go first.
+//!
+//! Whose: everything held belongs to ONE session and account (the stamp). A look under another stamp drops all of
+//! it before it answers, on the caller's (the window's) thread; an answer that lands under another stamp is dropped
+//! and never stored. So another account never sees a picture of the one before, and neither does the same account
+//! after a lock.
+//!
+//! Thread rule: a look never waits. A draw only says what it wants ([`EngineThumbStore::picture`]); the session of
+//! that look is noted with it, on the window's thread. A few workers fetch, in the order the tiles were drawn, and
+//! wake the window ([`Engine::wake_host`]) when an answer is here. A wish no draw repeated for [`WISH_LIVES`] is for
+//! a tile that left the screen: it is dropped unfetched. A picture some draw still looks at is never dropped for
+//! room: when the store is full of those, a new one is not even asked for. A picture that arrives and cannot stay
+//! is not reported, and stops further asks for new pictures until there is room again (a held picture is still
+//! refreshed): a folder with more pictures than the store holds is not fetched again and again.
+//!
+//! How old: a file with no picture is asked again after [`ASK_AGAIN_AFTER`]; a fetch that failed (offline, a busy
+//! database) owes ONE redraw of its own, [`TRY_AGAIN_AFTER`] later, and if that fails too it is tried again only
+//! when something else redraws, never on a timer again; a picture held longer than [`REFRESH_AFTER`] is still shown and fetched
+//! again, so a picture of a file that changed does not stay for the session. The Photos source also drops the
+//! pictures of a file whose version or time changed in its library ([`EngineThumbStore::drop_file`]).
+//!
+//! Must not: log an id, a name or a pixel; hand out a picture without comparing the stamp.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
+use std::time::{Duration, Instant};
+
+use beebeeb_engine::app::photos_api::{ThumbCut, ThumbPixels, ThumbRefused};
+use beebeeb_media_protocol::image::MAX_IMAGE_FILE;
+use beebeeb_engine::app::{CredentialStores, Engine};
+use rune::Pixels;
+
+use super::log;
+use super::stamp::{Stamp, stamp};
+use crate::frames::global::grid::ThumbSource;
+
+#[cfg(test)]
+#[path = "thumbs_tests.rs"]
+mod tests;
+
+/// At most this many pictures are held.
+pub const MAX_PICTURES: usize = 600;
+/// At most this many bytes of pixels are held.
+pub const MAX_BYTES: usize = 160 * 1024 * 1024;
+/// At most this many wishes wait; one more is not taken (a tile that is still on screen asks again).
+pub const MAX_WISHES: usize = 400;
+/// How many fetches run at once.
+const WORKERS: usize = 3;
+/// A file that had no picture is asked again after this.
+pub const ASK_AGAIN_AFTER: Duration = Duration::from_secs(60);
+/// A fetch that failed for another reason (offline, a busy database) is tried again after this.
+pub const TRY_AGAIN_AFTER: Duration = Duration::from_secs(5);
+/// A picture held this long is shown and fetched again.
+pub const REFRESH_AFTER: Duration = Duration::from_secs(600);
+/// A wish no draw repeated for this long is dropped; a picture no draw looked at for this long may go for room.
+#[cfg(not(test))]
+pub const WISH_LIVES: Duration = Duration::from_secs(2);
+/// Tests hold a fetch on its worker: a wish outlives that.
+#[cfg(test)]
+pub const WISH_LIVES: Duration = Duration::from_secs(20);
+/// How long an idle worker sleeps before it looks whether the store is still there.
+const IDLE: Duration = Duration::from_millis(500);
+
+/// What is wished for of one file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Ask {
+    Picture(ThumbCut),
+    /// A video's length.
+    Length,
+}
+
+type Key = (String, Ask);
+
+enum Held {
+    Picture {
+        pixels: Pixels,
+        bytes: usize,
+        /// When a draw last looked at it.
+        used: Instant,
+        /// When it was fetched.
+        fetched: Instant,
+    },
+    /// A video's length in seconds.
+    Length(u32),
+    /// Nothing to show: not asked again before `until`.
+    Nothing { until: Instant, again: Again },
+}
+
+/// Whether a failure owes a redraw of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Again {
+    /// Nothing is owed (no picture exists, or it cannot be read).
+    No,
+    /// One redraw is owed once `until` has passed.
+    Once,
+    /// The redraw was given (or the failure came after one): nothing more on a timer.
+    Done,
+}
+
+#[derive(Default)]
+struct Inner {
+    /// Whose everything here is.
+    stamp: Option<Stamp>,
+    held: HashMap<Key, Held>,
+    bytes: usize,
+    /// What is wished for and not fetched yet, in the order it was first wished, each with the stamp of its look
+    /// and when a draw last repeated it.
+    wishes: VecDeque<(Key, Stamp, Instant)>,
+    in_flight: Vec<Key>,
+    workers: usize,
+    /// Something arrived since the window last asked.
+    arrived: bool,
+    /// A picture arrived and could not stay: nothing new is asked until a picture leaves.
+    full: bool,
+    /// Pictures whose copy on this PC did not decode, by file id, with the version of that copy: not tried again
+    /// under this stamp.
+    not_made: HashMap<String, i64>,
+    /// Tests only: the next fetch for this file waits on the first before it asks the engine, and says on the
+    /// second that its answer was taken in (or dropped).
+    #[cfg(test)]
+    next_fetch: Option<(String, std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>)>,
+}
+
+impl Inner {
+    fn clear(&mut self) {
+        self.held.clear();
+        self.bytes = 0;
+        self.wishes.clear();
+        self.in_flight.clear();
+        self.not_made.clear();
+        self.arrived = false;
+        self.full = false;
+    }
+
+    /// Everything here is `now`'s, or it goes.
+    fn look(&mut self, now: &Stamp) {
+        if self.stamp.as_ref() != Some(now) {
+            self.clear();
+            self.stamp = Some(now.clone());
+        }
+    }
+
+    /// The next wish to fetch: the one wished first that a draw still repeats. A wish no draw repeated for
+    /// `WISH_LIVES` is for a tile that left the screen: dropped, unfetched.
+    /// While the store is full, a wish for a picture the key does not hold is dropped too (a held one is refreshed).
+    fn next_wish(&mut self, now: Instant) -> Option<(Key, Stamp)> {
+        loop {
+            match self.wishes.pop_front()? {
+                (_, _, at) if now.duration_since(at) >= WISH_LIVES => {}
+                (key, _, _)
+                    if self.full
+                        && matches!(key.1, Ask::Picture(_))
+                        && !matches!(self.held.get(&key), Some(Held::Picture { .. }))
+                        && self.stale(now).is_none() => {}
+                (key, stamp, _) => return Some((key, stamp)),
+            }
+        }
+    }
+
+    fn pictures(&self) -> usize {
+        self.held
+            .values()
+            .filter(|held| matches!(held, Held::Picture { .. }))
+            .count()
+    }
+
+    fn over(&self) -> bool {
+        self.pictures() > MAX_PICTURES || self.bytes > MAX_BYTES
+    }
+
+    /// The picture no draw looked at for longest, if no draw looked at it since `WISH_LIVES` ago.
+    fn stale(&self, now: Instant) -> Option<Key> {
+        self.held
+            .iter()
+            .filter_map(|(key, held)| match held {
+                Held::Picture { used, .. } if now.duration_since(*used) >= WISH_LIVES => Some((*used, key.clone())),
+                _ => None,
+            })
+            .min_by_key(|(used, _)| *used)
+            .map(|(_, key)| key)
+    }
+
+    /// Is there room for one more picture, now or by dropping one no draw looks at any more?
+    fn has_room(&self, now: Instant) -> bool {
+        (!self.full && self.pictures() < MAX_PICTURES && self.bytes < MAX_BYTES) || self.stale(now).is_some()
+    }
+
+    fn drop_picture(&mut self, key: &Key) {
+        if let Some(Held::Picture { bytes, .. }) = self.held.remove(key) {
+            self.bytes = self.bytes.saturating_sub(bytes);
+        }
+    }
+
+    /// Back under the caps: the pictures no draw looks at any more go, longest unseen first. `false`: the store
+    /// is full of pictures that are looked at, and stays over.
+    fn make_room(&mut self, now: Instant) -> bool {
+        while self.over() {
+            let Some(key) = self.stale(now) else { return false };
+            self.drop_picture(&key);
+            self.full = false;
+        }
+        true
+    }
+
+    /// The tail of a look: wish for `key` unless it is in flight, already wished (then it lives on), without room,
+    /// or the line is full. `shows`: an answer is already held. `true`: a new wish was queued.
+    fn wish(&mut self, key: Key, stamped: Stamp, now: Instant, shows: bool) -> bool {
+        if self.in_flight.contains(&key) {
+            return false;
+        }
+        // Repeated by this draw: it keeps its place and lives on.
+        if let Some(wish) = self.wishes.iter_mut().find(|(wished, _, _)| *wished == key) {
+            wish.1 = stamped;
+            wish.2 = now;
+            return false;
+        }
+        // No room, and every picture held is still looked at: asking would only push one of those out.
+        if !shows && matches!(key.1, Ask::Picture(_)) && !self.has_room(now) {
+            return false;
+        }
+        // The line is full: this one waits for a later draw (the ones wished first are fetched first).
+        if self.wishes.len() >= MAX_WISHES {
+            return false;
+        }
+        self.wishes.push_back((key, stamped, now));
+        true
+    }
+
+    /// Everything held of the file `id` goes; a picture that leaves makes room.
+    fn drop_file(&mut self, id: &str) {
+        let keys: Vec<Key> = self.held.keys().filter(|key| key.0 == id).cloned().collect();
+        for key in keys {
+            self.drop_picture(&key);
+            self.held.remove(&key);
+            self.full = false;
+        }
+    }
+
+    /// An answer of a fetch that is current is taken in at `at`.
+    fn take_in(&mut self, key: Key, answer: Result<Held, ThumbRefused>, at: Instant) {
+        match answer {
+            Ok(held) => {
+                // A refresh replaces what was held; if the newcomer cannot stay, what was held comes back.
+                let before = self.held.remove(&key);
+                if let Some(Held::Picture { bytes, .. }) = &before {
+                    self.bytes = self.bytes.saturating_sub(*bytes);
+                }
+                let is_picture = matches!(held, Held::Picture { .. });
+                if let Held::Picture { bytes, .. } = &held {
+                    self.bytes += bytes;
+                }
+                self.held.insert(key.clone(), held);
+                // Full of pictures that are looked at: this one does not stay either, and is not reported.
+                if !self.make_room(at) && is_picture {
+                    self.drop_picture(&key);
+                    if let Some(old @ Held::Picture { .. }) = before {
+                        if let Held::Picture { bytes, .. } = &old {
+                            self.bytes += bytes;
+                        }
+                        self.held.insert(key, old);
+                    }
+                    // After the removal: `drop_picture` does not touch it, and `make_room` may have cleared it.
+                    self.full = true;
+                    return;
+                }
+                self.arrived = true;
+            }
+            // The session is not there for it: nothing is kept, not even "no picture".
+            Err(ThumbRefused::NotSignedIn | ThumbRefused::SessionEnded | ThumbRefused::NotYours) => {}
+            Err(refused) => {
+                // A picture that is held (a refresh that failed) stays.
+                if matches!(self.held.get(&key), Some(Held::Picture { .. })) {
+                    return;
+                }
+                let (wait, again) = match refused {
+                    ThumbRefused::NoThumbnail | ThumbRefused::Unreadable => (ASK_AGAIN_AFTER, Again::No),
+                    _ => match self.held.get(&key) {
+                        Some(Held::Nothing {
+                            again: Again::Once | Again::Done,
+                            ..
+                        }) => (TRY_AGAIN_AFTER, Again::Done),
+                        _ => (TRY_AGAIN_AFTER, Again::Once),
+                    },
+                };
+                self.held.insert(
+                    key,
+                    Held::Nothing {
+                        until: at + wait,
+                        again,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Every redraw owed by a failure that is due becomes given. `true` if there was one.
+    fn retry_due(&mut self, now: Instant) -> bool {
+        let mut due = false;
+        for held in self.held.values_mut() {
+            if let Held::Nothing { until, again } = held
+                && *again == Again::Once
+                && *until <= now
+            {
+                *again = Again::Done;
+                due = true;
+            }
+        }
+        due
+    }
+
+    /// Is a redraw owed by a failure that is not given yet?
+    fn retry_pending(&self) -> bool {
+        self.held
+            .values()
+            .any(|held| matches!(held, Held::Nothing { again: Again::Once, .. }))
+    }
+}
+
+/// See the module's doc.
+pub struct EngineThumbStore<C: CredentialStores> {
+    engine: Arc<Engine<C>>,
+    inner: Mutex<Inner>,
+    wake: Condvar,
+}
+
+impl<C: CredentialStores> EngineThumbStore<C> {
+    /// Starts no thread and asks nothing.
+    pub fn new(engine: Arc<Engine<C>>) -> Arc<Self> {
+        Arc::new(Self {
+            engine,
+            inner: Mutex::new(Inner::default()),
+            wake: Condvar::new(),
+        })
+    }
+
+    fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// What is held for `key` under the session that is here, and a wish for it when it is missing or old. Never
+    /// waits.
+    fn held_or_wish<T>(self: &Arc<Self>, id: &str, ask: Ask, read: impl FnOnce(&Held) -> Option<T>) -> Option<T> {
+        // The session and account of this look, read before anything is handed out.
+        let stamped = stamp(&self.engine);
+        let mut inner = self.inner();
+        inner.look(&stamped);
+        if !self.engine.has_session() {
+            return None;
+        }
+        let now = Instant::now();
+        let key = (id.to_string(), ask);
+        let mut answer = None;
+        match inner.held.get_mut(&key) {
+            Some(Held::Nothing { until, .. }) if *until > now => return None,
+            Some(Held::Nothing { .. }) | None => {}
+            Some(held) => {
+                let fresh = match held {
+                    Held::Picture { used, fetched, .. } => {
+                        *used = now;
+                        now.duration_since(*fetched) < REFRESH_AFTER
+                    }
+                    _ => true,
+                };
+                answer = read(held);
+                if fresh {
+                    return answer;
+                }
+            }
+        }
+        if inner.wish(key, stamped, now, answer.is_some()) {
+            self.start_workers(&mut inner);
+            self.wake.notify_one();
+        }
+        answer
+    }
+
+    /// The thumbnail of the file `id`, cut as `cut` says, if it is here; otherwise it is wished for, and the window
+    /// is woken when it arrives.
+    pub fn picture(self: &Arc<Self>, id: &str, cut: ThumbCut) -> Option<Pixels> {
+        self.held_or_wish(id, Ask::Picture(cut), |held| match held {
+            Held::Picture { pixels, .. } => Some(pixels.clone()),
+            _ => None,
+        })
+    }
+
+    /// The length of the video `id` in seconds, if this PC can say; asked for otherwise.
+    pub fn length(self: &Arc<Self>, id: &str) -> Option<u32> {
+        self.held_or_wish(id, Ask::Length, |held| match held {
+            Held::Length(seconds) => Some(*seconds),
+            _ => None,
+        })
+    }
+
+    /// The file `id` changed: what is held of it goes, and is asked for again at the next look.
+    pub fn drop_file(&self, id: &str) {
+        self.inner().drop_file(id);
+    }
+
+    /// Tests only: the next fetch for the file `id` waits, on its worker, before it asks the engine anything, until
+    /// the first is sent on; the second says its answer was taken in or dropped.
+    #[cfg(test)]
+    pub(super) fn hold_next_fetch(&self, id: &str) -> (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>) {
+        let ((release, hold), (ended, has_ended)) = (std::sync::mpsc::channel(), std::sync::mpsc::channel());
+        self.inner().next_fetch = Some((id.to_string(), hold, ended));
+        (release, has_ended)
+    }
+
+    /// Tests only: every picture held was fetched `by` longer ago.
+    #[cfg(test)]
+    pub(super) fn age_pictures(&self, by: Duration) {
+        for held in self.inner().held.values_mut() {
+            if let Held::Picture { fetched, .. } = held {
+                *fetched = fetched.checked_sub(by).expect("a clock that has run this long");
+            }
+        }
+    }
+
+    /// Nothing of the session that was here is kept.
+    pub fn forget(&self) {
+        let mut inner = self.inner();
+        inner.clear();
+        inner.stamp = None;
+    }
+
+    /// Did something arrive since the last call?
+    pub fn take_arrived(&self) -> bool {
+        let mut inner = self.inner();
+        let arrived = std::mem::take(&mut inner.arrived);
+        // Both are evaluated: the owed redraws are marked given whether or not something arrived.
+        let owed = inner.retry_due(Instant::now());
+        arrived | owed
+    }
+
+    /// Is something still on its way?
+    pub fn busy(&self) -> bool {
+        let inner = self.inner();
+        !inner.wishes.is_empty() || !inner.in_flight.is_empty() || inner.retry_pending()
+    }
+
+    fn start_workers(self: &Arc<Self>, inner: &mut Inner) {
+        while inner.workers < WORKERS && inner.workers < inner.wishes.len() + inner.in_flight.len() {
+            let store = Arc::downgrade(self);
+            let started = std::thread::Builder::new()
+                .name("thumbnails".into())
+                .spawn(move || work(store));
+            if started.is_err() {
+                log("thumbnails: could not start a worker");
+                return;
+            }
+            inner.workers += 1;
+        }
+    }
+
+    /// On a worker: the next wish that a draw still repeats, fetched and taken in. `false`: there was none.
+    fn fetch_one(&self) -> bool {
+        let (key, wished_under) = {
+            let mut inner = self.inner();
+            let Some(wish) = inner.next_wish(Instant::now()) else {
+                return false;
+            };
+            inner.in_flight.push(wish.0.clone());
+            wish
+        };
+        #[cfg(test)]
+        let hooks = self.inner().next_fetch.take_if(|(id, _, _)| *id == key.0);
+        #[cfg(test)]
+        if let Some((_, hold, _)) = &hooks {
+            let _ = hold.recv();
+        }
+        // The session of the look is handed over and the engine decides (with the token copy): a check here
+        // could not be. A panic must not leave the wish in flight for good.
+        let (id, ask) = (&key.0, key.1);
+        let session = wished_under.0;
+        // The copy's version when a thumbnail made here from it is to be sent to the server (115).
+        let mut to_send: Option<i64> = None;
+        let sent_id = key.0.clone();
+        let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match ask {
+            Ask::Picture(cut) => self
+                .engine
+                .thumbnail_pixels_for(session, id, cut)
+                // No server thumbnail: the one this PC made and kept (079), or made now from the copy here (095).
+                .or_else(|refused| match refused {
+                    ThumbRefused::NoThumbnail | ThumbRefused::Unreadable => self
+                        .made_here(&wished_under, id, server_has_none(refused).then_some(&mut to_send))
+                        .map(|whole| cut_made_here(whole, cut))
+                        .ok_or(refused),
+                    other => Err(other),
+                })
+                .map(|picture| {
+                    let pixels = Pixels::new();
+                    let bytes = picture.rgba.len();
+                    pixels.set(picture.width, picture.height, picture.rgba.to_vec());
+                    let now = Instant::now();
+                    Held::Picture {
+                        pixels,
+                        bytes,
+                        used: now,
+                        fetched: now,
+                    }
+                }),
+            Ask::Length => match self.engine.video_seconds_for(session, id) {
+                Ok(Some(seconds)) => Ok(Held::Length(u32::try_from(seconds).unwrap_or(u32::MAX))),
+                // This PC cannot say (online only): asked again later, once a copy may be here.
+                Ok(None) => Err(ThumbRefused::NoThumbnail),
+                Err(_) => Err(ThumbRefused::NotSignedIn),
+            },
+        }))
+        .unwrap_or_else(|_| {
+            log("thumbnails: a fetch ended early");
+            Err(ThumbRefused::Failed)
+        });
+        let mut inner = self.inner();
+        inner.in_flight.retain(|flying| *flying != key);
+        // Only for the session AND the account of its look, and only while they are still here. The session's
+        // turn only moves forward, so a stamp that is current now was current for the whole fetch.
+        let now = stamp(&self.engine);
+        let current = self.engine.has_session() && wished_under == now && inner.stamp.as_ref() == Some(&now);
+        if current {
+            let at = Instant::now();
+            inner.take_in(key, answer, at);
+        }
+        drop(inner);
+        // After the picture is shown: the thumbnail made here is sent once (115). The engine asks the setting, the
+        // metered and battery holds, the pause and the session; a refusal is tried again at a later look.
+        if current && let Some(version) = to_send {
+            let _ = self.engine.upload_made_thumbnail_for(session, &sent_id, version, true);
+        }
+        #[cfg(test)]
+        if let Some((_, _, ended)) = &hooks {
+            let _ = ended.send(());
+        }
+        if current {
+            self.engine.wake_host();
+        }
+        true
+    }
+}
+
+/// A worker: fetches while there are wishes; ends once the store is gone or nothing was wished for a while.
+fn work<C: CredentialStores>(store: Weak<EngineThumbStore<C>>) {
+    loop {
+        let Some(store) = store.upgrade() else { return };
+        if store.fetch_one() {
+            continue;
+        }
+        let inner = store.inner();
+        let (mut inner, _) = store
+            .wake
+            .wait_timeout_while(inner, IDLE, |inner| inner.wishes.is_empty())
+            .unwrap_or_else(PoisonError::into_inner);
+        if inner.wishes.is_empty() {
+            inner.workers = inner.workers.saturating_sub(1);
+            return;
+        }
+    }
+}
+
+/// The longest side of a thumbnail made here.
+pub(super) const LOCAL_THUMB_PX: u32 = 512;
+
+impl<C: CredentialStores> EngineThumbStore<C> {
+    /// On a worker: the thumbnail this PC made of the file `id`, whole. With a copy of the picture on this PC: the
+    /// one kept for the copy's version, else decoded now through the helper and kept. Without a copy here: the one
+    /// kept before, whatever its version. Nothing is ever downloaded for this. A copy that did not decode is not
+    /// tried again under this stamp (a helper is not started for it at every look).
+    fn made_here(&self, wished_under: &Stamp, id: &str, send_version: Option<&mut Option<i64>>) -> Option<ThumbPixels> {
+        let session = wished_under.0;
+        let copy = match self.engine.local_picture_copy_for(session, id, MAX_IMAGE_FILE) {
+            Ok(Some(copy)) => copy,
+            _ => return self.engine.local_thumbnail_for(session, id),
+        };
+        // With a copy here the thumbnail is of the copy's version: when the server had none, it is to be sent.
+        if let Some(out) = send_version {
+            *out = Some(copy.version);
+        }
+        if let Some(kept) = self.engine.local_thumbnail_at(session, id, copy.version) {
+            return Some(kept);
+        }
+        if self.inner().not_made.get(id) == Some(&copy.version) {
+            return None;
+        }
+        let bytes = copy.read()?;
+        match make_local_thumbnail(&self.engine, session, id, copy.version, &bytes) {
+            Ok(made) => Some(made),
+            Err(_) => {
+                let mut inner = self.inner();
+                if inner.stamp.as_ref() == Some(wished_under) {
+                    inner.not_made.insert(id.to_string(), copy.version);
+                }
+                None
+            }
+        }
+    }
+}
+
+/// Only "the server has none" lets a thumbnail made here be sent: a stored picture that does not decode
+/// (`Unreadable`) is on the server already, and any other refusal says nothing about it.
+pub(super) fn server_has_none(refused: ThumbRefused) -> bool {
+    refused == ThumbRefused::NoThumbnail
+}
+
+/// A photo with no server thumbnail whose bytes are on this PC: decoded through the helper (never in this process)
+/// and kept sealed in the engine's cache (079). The caller read `bytes` from the copy here; nothing is downloaded
+/// for this. Never logs a name or a byte.
+pub fn make_local_thumbnail<C: CredentialStores>(
+    engine: &Engine<C>,
+    session: beebeeb_engine::account::SessionGeneration,
+    file_id: &str,
+    version: i64,
+    bytes: &[u8],
+) -> Result<ThumbPixels, super::media::ImageRefusal> {
+    let decoded = super::media::decode_picture(bytes, LOCAL_THUMB_PX)?;
+    let pixels = ThumbPixels {
+        session,
+        width: decoded.width,
+        height: decoded.height,
+        rgba: decoded.rgba,
+    };
+    engine
+        .keep_local_thumbnail(session, file_id, version, &pixels)
+        .map_err(|_| super::media::ImageRefusal::Damaged)?;
+    Ok(pixels)
+}
+
+/// A thumbnail made here is kept whole; a tile gets the middle of it at the proportions of its cut (the engine cuts
+/// a stored picture the same way). A picture whose length does not match its size is handed on as it is.
+pub(super) fn cut_made_here(whole: ThumbPixels, cut: ThumbCut) -> ThumbPixels {
+    let (w, h) = (whole.width, whole.height);
+    let (keep_w, keep_h) = match cut {
+        ThumbCut::Whole => (w, h),
+        ThumbCut::Square => (w.min(h), w.min(h)),
+        ThumbCut::Strip => {
+            let wide = (u64::from(h) * 36 / 52).max(1) as u32;
+            if wide <= w {
+                (wide, h)
+            } else {
+                (w, ((u64::from(w) * 52 / 36).max(1) as u32).min(h))
+            }
+        }
+    };
+    if (keep_w, keep_h) == (w, h) || whole.rgba.len() as u64 != u64::from(w) * u64::from(h) * 4 {
+        return whole;
+    }
+    let (left, top) = (((w - keep_w) / 2) as usize, ((h - keep_h) / 2) as usize);
+    let (row, keep_row) = (w as usize * 4, keep_w as usize * 4);
+    let mut rgba = zeroize::Zeroizing::new(Vec::with_capacity(keep_row * keep_h as usize));
+    for y in top..top + keep_h as usize {
+        let start = y * row + left * 4;
+        rgba.extend_from_slice(&whole.rgba[start..start + keep_row]);
+    }
+    ThumbPixels {
+        session: whole.session,
+        width: keep_w,
+        height: keep_h,
+        rgba,
+    }
+}
+
+/// A video's length as a tile writes it ("0:41").
+pub(super) fn length_words(seconds: u32) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// The Files grid's thumbnails on the real engine. See the module's doc.
+pub struct EngineThumbs<C: CredentialStores> {
+    store: Arc<EngineThumbStore<C>>,
+}
+
+impl<C: CredentialStores> EngineThumbs<C> {
+    pub fn new(store: Arc<EngineThumbStore<C>>) -> Self {
+        Self { store }
+    }
+}
+
+impl<C: CredentialStores> ThumbSource for EngineThumbs<C> {
+    fn arrived(&self, id: &str) -> bool {
+        self.store.picture(id, ThumbCut::Square).is_some()
+    }
+
+    fn video_length(&self, id: &str) -> Option<String> {
+        self.store.length(id).map(length_words)
+    }
+
+    fn pixels(&self, id: &str) -> Option<Pixels> {
+        self.store.picture(id, ThumbCut::Square)
+    }
+
+    fn release(&self, id: &str) {
+        self.store.drop_file(id);
+    }
+}

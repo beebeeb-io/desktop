@@ -6,8 +6,7 @@ bun.lockb
 
 # Build artifacts
 target/
-dist/*
-!dist/index.html
+dist/
 build/
 .next/
 .astro/
@@ -34,6 +33,9 @@ token.json
 # Local data
 data/
 *.db
+# The upgrade fixture: state databases that release 0.8.25 wrote, invented rows only (the engine's
+# `upgrade_from_0_8_25` test opens them). Tracked on purpose.
+!crates/beebeeb-engine/tests/fixtures/state-db-0.8.25/**/state.db
 *.sqlite
 *.sqlite3
 
@@ -73,9 +75,6 @@ playwright-report/
 # Graphify local files (not committed)
 graphify-out/.graphify_root
 graphify-out/cache/
-
-# Tauri generated schemas
-src-tauri/gen/
 
 # Local scratch (verification screenshots, throwaway scripts) — never committed
 scratch/

@@ -8,44 +8,44 @@
 
 **Tech Stack:** Rust 2024 (Tauri v2, tokio `sync`/`time`/`rt`, serde, chrono, sysinfo, no new crates), Objective-C (`FileProvider.framework`, compiled by `src-tauri/build.rs`), React 19 + TypeScript (bun test with `tests/fixtures/componentHarness.ts`), eslint.
 
-**Spec:** `docs/specs/2026-10-06-macos-finder-setup-reconciler.md` (approved by Guus 2026-10-06). Executors read the spec and this plan together. Where the two disagree, see "Spec issues found" directly below. Nothing there is silently decided. The spec was amended in place on 2026-10-06 for ruling R8 and for this plan's review (its **Amended** line). Struck originals stay readable.
+**Spec:** `docs/specs/2026-10-06-macos-finder-setup-reconciler.md` (approved by the owner 2026-10-06). Executors read the spec and this plan together. Where the two disagree, see "Spec issues found" directly below. Nothing there is silently decided. The spec was amended in place on 2026-10-06 for ruling R8 and for this plan's review (its **Amended** line). Struck originals stay readable.
 
 ---
 
 ## Spec issues found
 
-Each item has file:line evidence from this worktree (`c351f98`) or from Guus's Mac.
+Each item has file:line evidence from this worktree (`c351f98`) or from the owner's Mac.
 
-**Round 2 (2026-10-06, after Guus's ruling R8).** The spec is now amended in place for items 1–10 and 12–16. The originals are struck through and the signed replacements sit beneath them (see the spec's **Amended** line). Item 11 stays an open question in spec §15. The interface refinements in Tasks 2, 3 and 7 (the `real_home` parameter, the `step`/`next_op` split, the typed handle methods) are plan-only. Items 17–21 are new in round 2.
+**Round 2 (2026-10-06, after the owner's ruling R8).** The spec is now amended in place for items 1–10 and 12–16. The originals are struck through and the signed replacements sit beneath them (see the spec's **Amended** line). Item 11 stays an open question in spec §15. The interface refinements in Tasks 2, 3 and 7 (the `real_home` parameter, the `step`/`next_op` split, the typed handle methods) are plan-only. Items 17–21 are new in round 2.
 
 **Round 3 (2026-10-06, rulings R9 and R10).** R9 answers item 18. R10 folds the binding of local data to its account into this plan as Task 10, the old items 17 and 19 are rewritten, and items 22–23 are new. The tasks are renumbered (20 → 21). The spec records R9, R10 and §5.6.
 
 **Round 4 (2026-10-06, Codex review of PR #113 and ruling R11).** Spec issue 24 is a P1 that Codex found. It is fixed in Tasks 11 and 12, with tests that reproduce it first. R11 rules the Windows gap of issue 17.
 
-~~**Item 1 needs a ruling from Guus before device check D5 can pass.** Items 6, 11 and 16 are smaller questions, queued in Task 21 step 1. Every other item is resolved in this plan as stated, and the reviewer can reject any one of them on its own.~~ (Superseded by round 2, above.)
+~~**Item 1 needs a ruling from the owner before device check D5 can pass.** Items 6, 11 and 16 are smaller questions, queued in Task 21 step 1. Every other item is resolved in this plan as stated, and the reviewer can reject any one of them on its own.~~ (Superseded by round 2, above.)
 
-1. **R2 and D5 contradict the existing re-sign-in path ~~(needs Guus)~~ (answered by R8).** After a session is revoked, the only way back in is `AuthExpiredBanner` → `forceReauth` (`src/desktopApi.ts:1030-1034`), which calls `clear_session` and then opens onboarding. `clear_session` *is* the "sign-out by choice" of spec §5.3(5), so it removes the domain. It also purges the operation queue and the decrypted cache (`src-tauri/src/lib.rs:1802-1844`, the task 1538 cross-account control). Spec R2 says "files stay listed … edits made meanwhile are kept and upload after sign-in". D5 says "Finder stays; … an edit made meanwhile reaches the server after sign-in". Neither holds while re-auth goes through `clear_session`. ~~**This plan does not change `forceReauth` or the purge.** That is security-sensitive and belongs to spec C (sign-in flow). The plan implements R2 everywhere the reconciler decides (see item 2), and D5 runs and reports the true result. The decision goes to `.claude/tasks/decisions/` (Task 21, step 1). Candidate answer for Guus: a `reauth` path that keeps the domain and, only for the *same* account id, keeps the queue.~~ **Resolved 2026-10-06 by ruling R8** (re-sign-in in place, spec §3). Tasks 11, 12 and 18 implement it, and device checks D5/D5b check it.
+1. **R2 and D5 contradict the existing re-sign-in path ~~(needs the owner)~~ (answered by R8).** After a session is revoked, the only way back in is `AuthExpiredBanner` → `forceReauth` (`src/desktopApi.ts:1030-1034`), which calls `clear_session` and then opens onboarding. `clear_session` *is* the "sign-out by choice" of spec §5.3(5), so it removes the domain. It also purges the operation queue and the decrypted cache (`src-tauri/src/lib.rs:1802-1844`, the task 1538 cross-account control). Spec R2 says "files stay listed … edits made meanwhile are kept and upload after sign-in". D5 says "Finder stays; … an edit made meanwhile reaches the server after sign-in". Neither holds while re-auth goes through `clear_session`. ~~**This plan does not change `forceReauth` or the purge.** That is security-sensitive and belongs to spec C (sign-in flow). The plan implements R2 everywhere the reconciler decides (see item 2), and D5 runs and reports the true result. The decision goes to `.claude/tasks/decisions/` (Task 21, step 1). Candidate answer for the owner: a `reauth` path that keeps the domain and, only for the *same* account id, keeps the queue.~~ **Resolved 2026-10-06 by ruling R8** (re-sign-in in place, spec §3). Tasks 11, 12 and 18 implement it, and device checks D5/D5b check it.
 2. **A startup 401 signs the app out without the person choosing it.** `restore_session_on_startup` → `discard_unusable_startup_session` (`lib.rs:599-622`) clears the keychain and boots signed out when the stored token is revoked. If "wanted" came from "is anyone signed in", the reconciler would remove the domain on that launch, which breaks R2. **Resolution in this plan:** the persisted intent `finder_signed_out_by_choice` (Task 6) is set only by a real sign-out and cleared at the next sign-in. Signed out *and* that flag set means `absent`. Signed out without the flag means `no action`. Core test `every_trigger_against_every_observation…` pins the 401 row.
 3. **The keys-arrive list in spec §5.3(2) is not the code's.** `desktop_login` and `desktop_login_2fa` never put a master key in memory. They store only the token (`lib.rs:1100-1118`, `1225-1245`). Keys arrive in exactly four functions: `apply_session` (browser handoff, `lib.rs:1541`), `desktop_unlock_with_recovery_phrase` (`lib.rs:1267`, two branches), `unlock_vault` (`lib.rs:1936`, two branches; missing from the spec) and `restore_session_on_startup` (`lib.rs:657`; covered by the launch trigger, which this plan fires *after* the restore finishes so the check sees the restored keys). Tasks 8 (launch) and 9 (the other three) wire all four, and a source-contract test proves that no other function installs a `Session`, including the two login commands. Round 2: R8's `reauth_in_place` (Task 11) is a fifth path. It also calls `keys_arrived`, and the Task 9 census counts it.
-4. **The lifecycle log cannot be at the real `~/Library/Logs` under the app sandbox.** The shipped app is sandboxed (`src-tauri/entitlements.plist`: `com.apple.security.app-sandbox`). Guus's live config is at `~/Library/Containers/io.beebeeb.app/Data/Library/Application Support/beebeeb/desktop.toml`. So `~` resolves to the container, and the file is `~/Library/Containers/io.beebeeb.app/Data/Library/Logs/Beebeeb/lifecycle.log`. Writing to the real `~/Library/Logs` would need a temporary-exception entitlement, which is a provisioning change. Whether Console.app lists the container's log is **unverified**. D0 checks it and records the answer, and the docs (Task 19) state the container path.
-5. **The `folder_taken` code is very likely already known.** Guus's 0.8.11 app saved the collision in its config at 15:05 on 2026-10-06 (`finder_install_last_attempt_at = 1791291909` = 13:05:09Z, inside the 15:04:31–15:05:09 local failure window): `finder_install_last_error = "The file couldn't be saved because a file with the same name already exists. (NSCocoaErrorDomain 516)"`. That is `NSFileWriteFileExistsError`. Task 1 therefore maps top-level `(NSCocoaErrorDomain, 516)`, or an underlying `(NSPOSIXErrorDomain, 17)` EEXIST, to `folder_taken`, marked provisional. D0 still has to confirm the top-level pair and capture the underlying error before the PR merges. If D0 shows anything else, the row is amended first (Task 21 step 5, row D0). This also removes the ordering knot in spec §6.2/§13.2, where D0 needs the row and the row needs D0.
+4. **The lifecycle log cannot be at the real `~/Library/Logs` under the app sandbox.** The shipped app is sandboxed (`src-tauri/entitlements.plist`: `com.apple.security.app-sandbox`). the owner's live config is at `~/Library/Containers/io.beebeeb.app/Data/Library/Application Support/beebeeb/desktop.toml`. So `~` resolves to the container, and the file is `~/Library/Containers/io.beebeeb.app/Data/Library/Logs/Beebeeb/lifecycle.log`. Writing to the real `~/Library/Logs` would need a temporary-exception entitlement, which is a provisioning change. Whether Console.app lists the container's log is **unverified**. D0 checks it and records the answer, and the docs (Task 19) state the container path.
+5. **The `folder_taken` code is very likely already known.** the owner's 0.8.11 app saved the collision in its config at 15:05 on 2026-10-06 (`finder_install_last_attempt_at = 1791291909` = 13:05:09Z, inside the 15:04:31–15:05:09 local failure window): `finder_install_last_error = "The file couldn't be saved because a file with the same name already exists. (NSCocoaErrorDomain 516)"`. That is `NSFileWriteFileExistsError`. Task 1 therefore maps top-level `(NSCocoaErrorDomain, 516)`, or an underlying `(NSPOSIXErrorDomain, 17)` EEXIST, to `folder_taken`, marked provisional. D0 still has to confirm the top-level pair and capture the underlying error before the PR merges. If D0 shows anything else, the row is amended first (Task 21 step 5, row D0). This also removes the ordering knot in spec §6.2/§13.2, where D0 needs the row and the row needs D0.
 6. **`signing` has no derivable codes.** `FileProviderBridge.m` has no provisioning-specific path: it passes NSErrors through and synthesizes four messages (lines 50, 66, 155, 173). The old classifier matched English substrings (`lib.rs:2112`). `policy::SIGNING_CODES` therefore starts **empty**, and a test pins it as empty, so the gap is visible and not silent. A signing failure falls back to `unknown` (one retry, then "Beebeeb couldn’t be added to Finder." with Try again). Capturing a real code is the optional rung D-S in Task 21 step 5.
 7. **Engine start order.** Spec §5.5 step 5 says "On Ready, start the sync engine". The code that step names (`start_engine_for_pending_finder_install`, `lib.rs:2568`) starts the engine *before* `addDomain` and waits for the daemon socket, because the extension talks to the daemon (`lib.rs:2614-2626`). The plan keeps that order: `StartEngine` comes before `AddDomain`, the sync folder is saved on `Ready`, and an engine the check started is stopped when the check ends in `Failed` or `UserDisabled`. That is the old `stop_pending_finder_install_engine` behaviour.
 8. **Lock is a race the spec does not list.** Now that the reconciler starts the engine by itself, a check that is running while `lock_vault` stops the engine could start a new one after the stop (`lock_vault`, `lib.rs:2002`). The plan adds `Trigger::Lock`: it cancels the check, holds, and is acknowledged before `lock_vault` stops the engine (Task 9). Sign-out gets the same ordering. The reconciler's removal now runs at the **start** of `clear_session_impl`, before the engine stop, where it used to run after the purge.
 9. **"Show in Finder" needs a command.** Spec §9 lists four commands, but the `not_in_applications` action reveals the app bundle. The plan adds `finder_setup_show_app` (Rust `reveal_item_in_dir` of the running bundle, Task 8).
 10. **-2005 and -2013 are in the lead's verified code list but in no §6.2 row.** They classify as `unknown` (one silent retry), and a test pins that.
-11. **`/Volumes/…/Applications/Beebeeb.app` is refused.** That is §6.2 taken literally ("starting with /Volumes/ → not OK"). An app installed on an external disk's Applications folder is told to move. The rule is pinned by a test and listed in Review Focus for Guus.
+11. **`/Volumes/…/Applications/Beebeeb.app` is refused.** That is §6.2 taken literally ("starting with /Volumes/ → not OK"). An app installed on an external disk's Applications folder is told to move. The rule is pinned by a test and listed in Review Focus for the owner.
 12. **Repair copy contradicts R5 and §5.1.** `REPAIR_BODY` (`src/macSettingsModel.ts:145`) and `design/hifi/macos-settings-dialogs.html:210,216,327` say "You can add it back afterwards." After this spec, Repair re-adds by itself. The artefact changes first (Task 13), then the code (Task 16). New body: "Beebeeb removes its Finder location and turns off Open Beebeeb at login, then adds itself back to Finder. Files waiting to upload are kept."
 13. **CI runs no clippy.** `.github/workflows/ci.yml` has `cargo check --locked --all-targets` and `cargo test --locked` but no clippy step, and whether the tree is clean under `-D warnings` is unknown. The gate is therefore **no new clippy warnings** compared with an `origin/main` baseline, plus zero warnings in files this plan creates (Task 1 step 0, Task 21 step 2).
 14. **A macOS surface the spec does not list.** `src/windows/views/SettingsView.tsx:873` makes the macOS main window's Finder panel call `install_finder_location`. Task 17 moves it onto `finder_setup_state`.
 15. **Apostrophes.** Spec §6.2 writes straight quotes ("hasn't"). Product copy in this repo uses the typographic `’` (for example `src/macSettingsModel.ts:91`). `finderSetupCopy.ts` and the artefact use `’`, and the copy test pins those exact strings.
-16. **D6's "exactly 1 add attempt after the flip" vs §5.5 step 3.** Turning the extension back on leaves the domain registered. §5.5 step 3 then only confirms stability, so the app itself calls `addDomain` **0** times after the flip (core test `user_disabled_poll_reads_only_while_visible_and_a_flip_runs_one_check`). fileproviderd may still log its own re-registration. D6 is therefore gated as "≤ 1" (Task 21), and the wording goes to Guus.
-17. **Local data is bound to the account that created it (ruling R10, hardening).** `state.db` and the files it points at carried no record of their account. Background: the private workspace task, which stays out of this public repo. Task 10 adds the binding: an owner record inside `state.db`, checked before every engine start; a different or unrecorded owner's data is reset first; a failed reset or sign-out purge stops. **Windows is covered, but it refuses where macOS and Linux reset.** A Windows PC that holds another account's unsent changes cannot start sync for the new account. The Windows sign-out, which refuses while unsent changes exist (`windows_cf/signout.rs:24`), cannot clear it either, and Windows sign-in refuses while a session is present. That leaves no in-app way forward, ~~which is a decision for Guus (Task 21 step 1)~~. **Ruled R11 (Guus, 2026-10-06):** "Refuse now, escape hatch as its own task". Windows stays fail-closed in this plan, and Task 10's Windows tests prove the refusal. The explicit "Discard and switch" escape hatch is private workspace task 1837.
-18. **R8 keeps the keys after a remote revocation.** Today a startup 401 deletes the vault key (`lib.rs:599-622`), so revoking a lost device from the web wipes its keys at its next launch. Task 12 keeps the key so the same account signs in again without its recovery phrase (R8: "keys … all stay"). That is a security trade-off. It is question 5 of the mandatory review (Task 11 step 9), and Task 12 merges only with that review's OK. Its fallback is described in Task 12. **Answered 2026-10-06 by ruling R9:** "Keep the key, review decides". The key stays. Task 12 merges only if the security review agrees, and if it disagrees the decision returns to Guus.
+16. **D6's "exactly 1 add attempt after the flip" vs §5.5 step 3.** Turning the extension back on leaves the domain registered. §5.5 step 3 then only confirms stability, so the app itself calls `addDomain` **0** times after the flip (core test `user_disabled_poll_reads_only_while_visible_and_a_flip_runs_one_check`). fileproviderd may still log its own re-registration. D6 is therefore gated as "≤ 1" (Task 21), and the wording goes to the owner.
+17. **Local data is bound to the account that created it (ruling R10, hardening).** `state.db` and the files it points at carried no record of their account. Background: the private workspace task, which stays out of this public repo. Task 10 adds the binding: an owner record inside `state.db`, checked before every engine start; a different or unrecorded owner's data is reset first; a failed reset or sign-out purge stops. **Windows is covered, but it refuses where macOS and Linux reset.** A Windows PC that holds another account's unsent changes cannot start sync for the new account. The Windows sign-out, which refuses while unsent changes exist (`windows_cf/signout.rs:24`), cannot clear it either, and Windows sign-in refuses while a session is present. That leaves no in-app way forward, ~~which is a decision for the owner (Task 21 step 1)~~. **Ruled R11 (owner, 2026-10-06):** "Refuse now, escape hatch as its own task". Windows stays fail-closed in this plan, and Task 10's Windows tests prove the refusal. The explicit "Discard and switch" escape hatch is private workspace task 1837.
+18. **R8 keeps the keys after a remote revocation.** Today a startup 401 deletes the vault key (`lib.rs:599-622`), so revoking a lost device from the web wipes its keys at its next launch. Task 12 keeps the key so the same account signs in again without its recovery phrase (R8: "keys … all stay"). That is a security trade-off. It is question 5 of the mandatory review (Task 11 step 9), and Task 12 merges only with that review's OK. Its fallback is described in Task 12. **Answered 2026-10-06 by ruling R9:** "Keep the key, review decides". The key stays. Task 12 merges only if the security review agrees, and if it disagrees the decision returns to the owner.
 19. ~~**Identity for installs from before R8.** No server user id is stored today. Task 6 adds `signed_in_user_id`: written at sign-in, backfilled by the startup probe (Task 12) while the session still works, and cleared by a sign-out by choice. Without it, the account check falls back to the account email recorded on this Mac (case-insensitive), and an unknown identity counts as a different account (fail closed). This is review question 1.~~
    Round 3: the identity is the owner record of the local data, inside `state.db` (Task 10), not a `desktop.toml` key. Local data from before R10 is adopted at startup by the email this computer's Keychain still holds. R8 falls back to the owner's email, then the Keychain email, then `last_signed_in_email` (case-insensitive). An identity that cannot be compared is never the same account. This is review question 1.
 20. **A mismatch revokes the newly minted session.** After "Sign out and switch" the person enters the other account's password again. That costs one extra sign-in, but leaves no second live session on the Mac and no new token held across a purge.
-21. **The switch warning is new UI copy.** Task 13 draws it in `design/hifi/macos-settings-dialogs.html` before any code (design first). Guus reviews the wording in that PR.
+21. **The switch warning is new UI copy.** Task 13 draws it in `design/hifi/macos-settings-dialogs.html` before any code (design first). the owner reviews the wording in that PR.
 22. **The private task's fix boundary names one function, but engines start in five places.** They are `start_engine_if_possible` (`lib.rs:851`), `persist_sync_root_and_start_engine` (`lib.rs:2562`), `start_engine_for_pending_finder_install` (`lib.rs:2612`), `pick_sync_root` (`lib.rs:4909`) and Task 8's `ensure_sync_root_and_engine`. Onboarding's folder pick and the Finder reconciler bypass the first. So Task 10 binds at the spawn (`spawn_bound_engine`, the only remaining `EngineRunner::spawn(`), and a source test pins it. It also puts the owner inside `state.db` rather than a separate file next to it, with the evidence given in Task 10.
 23. **A failed sign-out now stops on macOS and Linux (R10).** The engine has already stopped and Beebeeb has already left Finder (Task 9 removes it first). ~~So a person whose sign-out fails is still signed in, with no sync and no Finder entry, until they try again or relaunch.~~ The error says to try again. Windows already behaves this way (`lib.rs:1751`).
     Superseded during execution (spec §5.6): a sign-out that stops this way while the keys are still in memory leaves the person signed in, and the reconciler is told the keys are here, so Finder comes back and its check starts the engine again (same account, owner record untouched). Only a sign-out that stops while an earlier engine stop is unconfirmed does not ask for Finder back, because every start refuses until Beebeeb restarts. — lead, 2026-10-08 (final review)
@@ -87,7 +87,7 @@ Each item has file:line evidence from this worktree (`c351f98`) or from Guus's M
 - Brand: no emoji, the amber accent only for primary actions and encryption state, Inter/JetBrains Mono as already used. "Europe"/"the EU" wording is untouched.
 - Design before code: the artefact changes (Task 13) land on the UI branch **before** any frontend commit (spec §12).
 - Evidence: every new test is seen failing first, and the failure is pasted into the task file's Notes. The tests the spec names are mutation-checked. Each task reports counts (`test result: ok. N passed; 0 failed`, `N pass / 0 fail`), never adjectives.
-- Process: one worktree per lane. `CARGO_TARGET_DIR` is never shared between worktrees. Heavy cargo runs go through `/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh cargo-build -- …` (rc 75 = busy, retry). No `git stash`, no `pkill`, foreground commands only. Lanes do not commit `graphify-out/`. Commits use an explicit pathspec and end with the trailer of the model that wrote them (for example `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`).
+- Process: one worktree per lane. `CARGO_TARGET_DIR` is never shared between worktrees. Heavy cargo runs go through `~/Development/Beebeeb/beebeeb.io/scripts/coord/the lock script cargo-build -- …` (rc 75 = busy, retry). No `git stash`, no `pkill`, foreground commands only. Lanes do not commit `graphify-out/`. Commits use an explicit pathspec and end with the trailer of the model that wrote them (for example `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`).
 - **R8, re-sign-in in place.** A same-account sign-in replaces only the session token (Keychain and memory). It never purges the queue, never clears or rewrites keys, never removes the Finder domain, and never signs out. A different account, or one whose identity cannot be established, is an account switch: the warning with the pending-change count, then the full sign-out, then a fresh sign-in. On a mismatch nothing local changes. Windows keeps today's sign-in refusal and today's "Sign in again" flow.
 - **R8/R9/R10, security.** The `crypto-security-reviewer` agent reviews Tasks 10–12 before Lane R's PR merges (Task 11 step 9). Its findings are recorded verbatim in the task Notes, and the R10 findings also in the private workspace task's Notes.
 - **R10, local data belongs to one account.** Every engine start binds first (`spawn_bound_engine`, the only `EngineRunner::spawn(` in production). Another account's or an unrecorded owner's data is reset before anything starts (Windows refuses instead). An owner that cannot be compared stops the start and deletes nothing. A failed reset or sign-out purge stops. Public wording stays neutral ("local data is bound to the account that created it; a different account never reuses it"); background lives only in the private task.
@@ -100,7 +100,7 @@ These are the five conditions most likely to hurt a real person that the spec im
 2. **Signing out while a check is mid-flight** (for example 8 s into a 10 s stabilization wait): a person expects sign-out to finish with Beebeeb gone from Finder and no engine left running with their keys. Pinned by driver test `an_event_sent_during_an_operation_waits_for_it_and_wins_over_the_rest_of_the_check` (Task 7), source test `sign_out_lock_and_repair_reach_the_reconciler_before_the_engine_stops` (Task 9), and behavioural test `sign_out_waits_for_the_reconciler_removal` (Task 9).
 3. **Locking the vault while a check runs**: a person expects no engine afterwards. Pinned by core test `lock_cancels_the_check_and_holds_until_keys_arrive` (Task 3) and the Task 9 source test.
 4. **A Beebeeb window left open while the extension is off in System Settings**: a person expects a cheap read-only poll that never calls add, and exactly one check when they flip it back on. Pinned by core test `user_disabled_poll_reads_only_while_visible_and_a_flip_runs_one_check` (Task 3) and D6.
-5. **An app on an external disk's Applications folder** (`/Volumes/Data/Applications/Beebeeb.app`): a reasonable person expects it to work. ~~The spec says refuse. Pinned *as the spec rules* by `volumes_is_refused_even_under_an_applications_folder` (Task 2), and listed as Spec issue 11 for Guus to confirm.~~
+5. **An app on an external disk's Applications folder** (`/Volumes/Data/Applications/Beebeeb.app`): a reasonable person expects it to work. ~~The spec says refuse. Pinned *as the spec rules* by `volumes_is_refused_even_under_an_applications_folder` (Task 2), and listed as Spec issue 11 for the owner to confirm.~~
    Corrected during execution (spec §6.2): only a bundle at a volume's root is a disk image, so an Applications folder on another disk is a real install and is not refused. The test that pins it is `an_applications_folder_on_another_disk_is_a_real_install` (Task 2); the old test name no longer exists. Spec issue 11 is answered the same way. — lead, 2026-10-08 (final review)
 
 ---
@@ -161,12 +161,12 @@ Paths are relative to the desktop repo root (the worktree).
 
 ```bash
 export TASK=<allocated id>
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-r -b feat/$TASK-finder-reconciler origin/main
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-t -b feat/$TASK-finder-reconciler-ui origin/main
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-r -b feat/$TASK-finder-reconciler origin/main
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-t -b feat/$TASK-finder-reconciler-ui origin/main
 ```
 
-Each lane sets `WT` to its own worktree and never builds in the other one. Cargo uses the worktree's own `src-tauri/target`, so `CARGO_TARGET_DIR` stays **unset**. `LOCK=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh`. The evidence directory is `EVID=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/$TASK`. Lanes write evidence and Notes there, and the lead commits them (the workspace `.git` is lead-only).
+Each lane sets `WT` to its own worktree and never builds in the other one. Cargo uses the worktree's own `src-tauri/target`, so `CARGO_TARGET_DIR` stays **unset**. `LOCK=~/Development/Beebeeb/beebeeb.io/scripts/coord/the lock script`. The evidence directory is `EVID=~/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/$TASK`. Lanes write evidence and Notes there, and the lead commits them (the workspace `.git` is lead-only).
 
 The lane's loop command, used in every Rust task (from `$WT/src-tauri`):
 
@@ -412,7 +412,7 @@ pub mod fp_code {
 }
 
 /// `NSFileWriteFileExistsError`. PROVISIONAL until device check D0 confirms it (plan "Spec
-/// issues" 5): the 0.8.11 app saved exactly this for the orphan collision on Guus's Mac
+/// issues" 5): the 0.8.11 app saved exactly this for the orphan collision on the owner's Mac
 /// ("…a file with the same name already exists. (NSCocoaErrorDomain 516)", 2026-10-06
 /// 13:05:09Z). D0 also records the underlying error, which may be the POSIX EEXIST below.
 pub const COCOA_FILE_WRITE_FILE_EXISTS: i64 = 516;
@@ -787,7 +787,7 @@ mod tests {
     }
 
     /// Spec §6.2 taken literally (plan "Spec issues" 11): an app in an external disk's
-    /// Applications folder is refused too. Change this test only with Guus's ruling.
+    /// Applications folder is refused too. Change this test only with the owner's ruling.
     #[test]
     fn volumes_is_refused_even_under_an_applications_folder() {
         assert_eq!(at("/Volumes/Data/Applications/Beebeeb.app"), LaunchLocation::DiskImage);
@@ -2899,7 +2899,7 @@ mod tests {
     use crate::finder_setup::error::COCOA_DOMAIN;
     use std::time::{Duration, UNIX_EPOCH};
 
-    /// 2026-10-06T13:05:09Z, the moment Guus's 0.8.11 saved its last Finder failure.
+    /// 2026-10-06T13:05:09Z, the moment the owner's 0.8.11 saved its last Finder failure.
     fn at() -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(1_791_291_909)
     }
@@ -3216,7 +3216,7 @@ git show --stat HEAD
 
 ```toml
 # desktop.toml as desktop 0.8.11 writes it (DesktopConfig at a46146b), carrying the Finder
-# failure Guus's Mac saved on 2026-10-06. Values are fixtures; the key set is what matters.
+# failure the owner's Mac saved on 2026-10-06. Values are fixtures; the key set is what matters.
 account_id = "11111111-2222-3333-4444-555555555555"
 last_signed_in_email = "sam@beebeeb.io"
 sync_root = "/Users/sam/Library/Application Support/beebeeb/file-provider-state"
@@ -4906,7 +4906,7 @@ Round 2: this step runs after Task 12 and after the security review (Task 11 ste
 
 ## Task 10: Local data is bound to the account that created it (R10, backend, all platforms)
 
-**Lane R.** Ruling R10 (Guus, 2026-10-06, "Fold into 1834"): spec A also owns "local data is bound to the account that created it". This task is the fix boundary of the private workspace task. Read that file before starting: it holds the background and the device check, which stay out of this public repo. Write about this task in neutral hardening terms only, in commits, comments and the PR ("local data is bound to the account that created it; a different account never reuses it"). It comes before the R8 tasks because R8's account check (Task 11) reads the owner this task records. Shared code covers macOS, Linux and Windows. **Security-sensitive:** the mandatory review in Task 11 step 9 covers this task too.
+**Lane R.** Ruling R10 (owner, 2026-10-06, "Fold into 1834"): spec A also owns "local data is bound to the account that created it". This task is the fix boundary of the private workspace task. Read that file before starting: it holds the background and the device check, which stay out of this public repo. Write about this task in neutral hardening terms only, in commits, comments and the PR ("local data is bound to the account that created it; a different account never reuses it"). It comes before the R8 tasks because R8's account check (Task 11) reads the owner this task records. Shared code covers macOS, Linux and Windows. **Security-sensitive:** the mandatory review in Task 11 step 9 covers this task too.
 
 **One primitive, and where it lives (plan decision, with evidence).** The owner of the local data is stored **inside `state.db`**, in the existing `sync_state` key-value table (`state_db.rs:800-803`), as `owner_user_id` and `owner_email`. Round 2's `desktop.toml` key `signed_in_user_id` is dropped (Task 6 no longer adds it). There is now one record, and it is this one, for three reasons:
 
@@ -6720,13 +6720,13 @@ After Task 12 lands, the lead runs the `crypto-security-reviewer` agent on the c
 2. Can local data ever be used under another account's session? Check every engine start (`spawn_bound_engine`), the upgrade adoption, R8's owner recording, and the Windows refusal.
 3. Is key material ever logged, persisted twice, or left un-zeroized on the new paths?
 4. Is the revoked token's replacement atomic enough? What happens if the Keychain write succeeds and the in-memory swap fails?
-5. Spec issue 18, ruled R9 ("Keep the key, review decides"): keys are kept on the Mac after a remote revocation. Is that acceptable, and what would the reviewer require? A "no" goes back to Guus.
+5. Spec issue 18, ruled R9 ("Keep the key, review decides"): keys are kept on the Mac after a remote revocation. Is that acceptable, and what would the reviewer require? A "no" goes back to the owner.
 6. The mismatch path revokes the new session. Can it leave a dangling server session?
 7. R10: is a failed reset or a failed sign-out purge always fatal before any engine starts? Is `clear_account_data` complete (`every_table_is_classified_for_the_account_binding`)?
 8. R10 on Windows refuses instead of resetting (Spec issue 17, ruled R11: refuse here; the escape hatch is private task 1837). Is the resulting state safe?
 9. Codex P1 on PR #113 (Spec issue 24): can any retained trace be missed, so that another account gets `Fresh`? The traces are the recorded owner, the Keychain email, the vault key, the cached profile, and queued or staged data. Can the previous account's vault key ever sit next to another account's token, or be loaded for it?
 
-The findings go verbatim into the task Notes under "Security review (R8, R9, R10)", and the R10 findings also into the private task's Notes. A HIGH finding blocks the merge until it is fixed (back to the owning task) or Guus rules on it. Without this step, Lane R's PR does not merge.
+The findings go verbatim into the task Notes under "Security review (R8, R9, R10)", and the R10 findings also into the private task's Notes. A HIGH finding blocks the merge until it is fixed (back to the owning task) or the owner rules on it. Without this step, Lane R's PR does not merge.
 
 ---
 
@@ -6734,7 +6734,7 @@ The findings go verbatim into the task Notes under "Security review (R8, R9, R10
 
 **Lane R.** Today a startup 401 (`discard_unusable_startup_session`) deletes the session token **and the vault key and email**. Under R8 the same account must be able to sign in again with "keys … all stay", so on macOS and Linux only the revoked token is deleted. The Finder domain already stays: `finder_signed_out_by_choice` is not set by this path (Task 6, core `wanted`). The startup probe also caches the account profile while the session still works, so the account binding (Task 10) compares by user id instead of email. The token-only discard is not for Windows: Windows keeps today's discard. Because the key and the email now survive a startup 401, "already signed out" no longer means "nothing left". The sign-out that an account switch runs must therefore verify that no vault key and no email remain, or stop (Codex P1 on PR #113, Spec issue 24).
 
-**This task changes key retention after a remote revocation (Spec issue 18, ruled R9: "Keep the key, review decides").** It merges only with the security review's explicit OK on that point (Task 11 step 9, question 5). If the review disagrees, the lead takes the question back to Guus. The lane neither drops nor merges the change on its own. Without the change, a same-account re-sign-in still keeps Finder and the queue, but asks for the recovery phrase after a relaunch.
+**This task changes key retention after a remote revocation (Spec issue 18, ruled R9: "Keep the key, review decides").** It merges only with the security review's explicit OK on that point (Task 11 step 9, question 5). If the review disagrees, the lead takes the question back to the owner. The lane neither drops nor merges the change on its own. Without the change, a same-account re-sign-in still keeps Finder and the queue, but asks for the recovery phrase after a relaunch.
 
 **Files:**
 - Modify: `src-tauri/src/keychain.rs` (`AuthVault::clear_session_token` + a test using the existing in-module `MemoryStore`, line ~918)
@@ -7177,7 +7177,7 @@ Write the three numbers into Notes. Screenshot the new section in light and dark
 node "$SCRATCH/shot.mjs" "$WT/design/hifi/macos-settings-dialogs.html" "$EVID/design-account-switch" 'section[aria-labelledby="s-switch"]'
 ```
 
-Expected: both dialogs readable in both schemes, the confirm button red with legible text, and no horizontal overflow at 375 px. The copy is new. Guus reviews it in this PR (Spec issue 21). Task 18's copy test holds `src/accountSwitchCopy.ts` to these exact strings.
+Expected: both dialogs readable in both schemes, the confirm button red with legible text, and no horizontal overflow at 375 px. The copy is new. the owner reviews it in this PR (Spec issue 21). Task 18's copy test holds `src/accountSwitchCopy.ts` to these exact strings.
 
 - [ ] **Step 5: Commit (design first)**
 
@@ -7708,7 +7708,7 @@ describe('Onboarding Finder step on Windows/Linux is unchanged', () => {
   test('Install Finder location sends the chosen path; a failure offers Continue without install', async () => {
     const m = mount('Onboarding.tsx', 'FinderInstallStep', {
       backend: {
-        default_sync_root: () => '/home/sam/Beebeeb',
+        default_sync_root: () => '~/Beebeeb',
         finder_location_state: () => ({ installed: false, status: 'missing' }),
         install_finder_location: () => { throw new Error('File Provider is only available on macOS.') },
       },
@@ -7718,7 +7718,7 @@ describe('Onboarding Finder step on Windows/Linux is unchanged', () => {
     mounted.push(m)
     await m.flush()
     await m.click('Install Finder location')
-    expect(m.calls.find((c) => c.name === 'install_finder_location')?.args).toEqual({ path: '/home/sam/Beebeeb' })
+    expect(m.calls.find((c) => c.name === 'install_finder_location')?.args).toEqual({ path: '~/Beebeeb' })
     expect(buttons(m)).toContain('Continue without install')
   })
 })
@@ -9304,9 +9304,9 @@ It is opened after Lane R's PR has merged and Lane T has been rebased onto `orig
 
 ## Task 20: Clear the orphan with a one-off helper (spec §11, dev Macs only, R6)
 
-**Lead + Guus. Not product code**: everything lives in `$SCRATCH` and is deleted afterwards. Nothing here is committed to the desktop repo. It runs **after D0** (Task 21 step 5) has captured the real `folder_taken` error on this Mac.
+**Lead + the owner. Not product code**: everything lives in `$SCRATCH` and is deleted afterwards. Nothing here is committed to the desktop repo. It runs **after D0** (Task 21 step 5) has captured the real `folder_taken` error on this Mac.
 
-- [ ] **Step 1 (Guus): two Apple Development provisioning profiles**
+- [ ] **Step 1 (the owner): two Apple Development provisioning profiles**
 
 In the developer portal (team `R8352WDJJR`): App ID `io.beebeeb.desktop` and App ID `io.beebeeb.desktop.FileProvider`, both with the App Groups capability and the group `R8352WDJJR.io.beebeeb.desktop.fileprovider`. If May's App IDs are gone, recreate them (spec §15). Then create one macOS Development profile for each, including this Mac, and download both. The lead records their file paths and UUIDs in Notes:
 
@@ -9488,13 +9488,13 @@ rm "$APP_PROFILE" "$EXT_PROFILE"
 pluginkit -m -i io.beebeeb.desktop.FileProvider | wc -l   # 0
 ```
 
-Guus deletes the two profiles in the developer portal. If `ls -la@ ~/Library/CloudStorage` on Bram's Mac shows the same xattr, the lead offers him this task (spec §11).
+the owner deletes the two profiles in the developer portal. If `ls -la@ ~/Library/CloudStorage` on Bram's Mac shows the same xattr, the lead offers him this task (spec §11).
 
 ---
 
 ## Task 21: Gates and device checks D0–D9 (lead only)
 
-**Lead only.** Lanes never drive the Mac's File Provider, sign Guus out, or touch production. D0–D7 run against the local API with a test account (R3). D8 is the only production action (R7).
+**Lead only.** Lanes never drive the Mac's File Provider, sign the owner out, or touch production. D0–D7 run against the local API with a test account (R3). D8 is the only production action (R7).
 
 - [ ] **Step 1: Decisions queued before the run**
 
@@ -9502,7 +9502,7 @@ Guus deletes the two profiles in the developer portal. If `ls -la@ ~/Library/Clo
 
 Round 3 (replaces the round-2 paragraph; issue 1 is answered by R8, issues 6 and 16 are settled in the amended spec, and issue 18 by R9). Create `.claude/tasks/decisions/<next id>-finder-reconciler-open-questions.md` with:
 - Spec issue 11 (`/Volumes/*/Applications`).
-- ~~Spec issue 17's **Windows** gap: R10 refuses instead of resetting, Windows sign-out refuses while unsent changes exist, and Windows sign-in refuses while a session is present, so a PC in that state has no in-app way forward. Options for Guus: a Windows switch warning plus discard, as on macOS; or keep refusing and document the support path.~~
+- ~~Spec issue 17's **Windows** gap: R10 refuses instead of resetting, Windows sign-out refuses while unsent changes exist, and Windows sign-in refuses while a session is present, so a PC in that state has no in-app way forward. Options for the owner: a Windows switch warning plus discard, as on macOS; or keep refusing and document the support path.~~
   Ruled R11: Windows stays fail-closed here, and the escape hatch is private task 1837. Nothing to queue.
 - Spec issue 19 (the email fallback and the upgrade adoption), with the security review's answer to question 1 quoted.
 - Spec issue 21 (the switch-warning copy, linking the design commit).
@@ -9515,8 +9515,8 @@ Background on R10 stays in the private task. Its Notes get the security review's
 Rust (Lane R head, then again after Lane T's rebase onto merged main). Create the fresh tree with the same command each time, and remove it when done:
 
 ```bash
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-$TASK-gate origin/feat/$TASK-finder-reconciler
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-$TASK-gate origin/feat/$TASK-finder-reconciler
 cd ~/code/bb-worktrees/desktop-$TASK-gate/src-tauri
 $LOCK cargo-build -- cargo test --locked --no-run > $EVID/final-no-run.log 2>&1; echo "rc=$?"
 $LOCK cargo-build -- cargo test --locked > $EVID/final-cargo-test.log 2>&1; echo $? > $EVID/final-cargo-test.exit
@@ -9544,7 +9544,7 @@ bun run lint > $EVID/final-eslint.log 2>&1; echo "eslint rc=$?"
 - [ ] **Step 3: Build the QA app (local integration tree, never pushed)**
 
 ```bash
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-qa feat/$TASK-finder-reconciler-ui
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-qa feat/$TASK-finder-reconciler-ui
 QA=~/code/bb-worktrees/desktop-$TASK-qa
 git -C $QA merge --no-edit feat/$TASK-finder-reconciler     # local only
 security find-identity -v -p codesigning | grep "Apple Development"
@@ -9565,15 +9565,15 @@ The three angle-bracket values are read from the two listing commands directly a
 
 - [ ] **Step 4: Environment and evidence helpers**
 
-**Precondition since R8: Guus's Mac has no changes waiting to upload.** The QA build shares the installed app's container and state (same bundle id), and its Keychain items when the signing team matches. After the startup 401 his keys stay (Task 12), so the first test-account sign-in in D0 is an **account switch** away from his account. Its warning shows his pending-change count, and "Sign out and switch" removes those changes. Before running the commands below, open his installed app, confirm it reports nothing waiting to upload, and screenshot that (`$EVID/precondition-nothing-pending.png`). If anything is waiting, let it upload first, or stop and ask Guus.
+**Precondition since R8: the owner's Mac has no changes waiting to upload.** The QA build shares the installed app's container and state (same bundle id), and its Keychain items when the signing team matches. After the startup 401 his keys stay (Task 12), so the first test-account sign-in in D0 is an **account switch** away from his account. Its warning shows his pending-change count, and "Sign out and switch" removes those changes. Before running the commands below, open his installed app, confirm it reports nothing waiting to upload, and screenshot that (`$EVID/precondition-nothing-pending.png`). If anything is waiting, let it upload first, or stop and ask the owner.
 
 ```bash
-cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io && make dev-native     # API :3001, web :5173 (in its own terminal)
+cd ~/Development/Beebeeb/beebeeb.io && make dev-native     # API :3001, web :5173 (in its own terminal)
 curl -sf localhost:3001/health
 osascript -e 'quit app "Beebeeb"'; mkdir -p ~/bb-qa/$TASK && mv /Applications/Beebeeb.app ~/bb-qa/$TASK/Beebeeb-installed.app
 ditto "$APPQA" /Applications/Beebeeb.app
 launchctl setenv BB_API_BASE http://localhost:3001
-EVID=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/$TASK
+EVID=~/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/$TASK
 LOG="$HOME/Library/Containers/io.beebeeb.app/Data/Library/Logs/Beebeeb/lifecycle.log"
 mark() { date '+%Y-%m-%d %H:%M:%S' > "$EVID/$1.start"; (wc -l < "$LOG" 2>/dev/null || echo 0) | tr -d ' ' > "$EVID/$1.loglines"; }
 collect() {
@@ -9587,7 +9587,7 @@ collect() {
 }
 ```
 
-Use the test account and recovery phrase from the `beebeeb:test-accounts` skill (an `@beebeeb.io` address on the local stack). D5b also needs a **second** local test account (the skill's second one, or one made in the local web app; signup is web-only). Guus's own session is signed out by these checks (R3). The first launch of the QA build probes his stored token against the local API, gets a 401, and boots signed out. Restoring it is the last step.
+Use the test account and recovery phrase from the `beebeeb:test-accounts` skill (an `@beebeeb.io` address on the local stack). D5b also needs a **second** local test account (the skill's second one, or one made in the local web app; signup is web-only). the owner's own session is signed out by these checks (R3). The first launch of the QA build probes his stored token against the local API, gets a 401, and boots signed out. Restoring it is the last step.
 
 If `$LOG` does not exist after the first launch, the build is not sandboxed. Use `~/Library/Logs/Beebeeb/lifecycle.log` and record that in Notes. In D0, also record whether Console.app → Log Reports lists the file (Spec issue 4), with a screenshot.
 
@@ -9597,7 +9597,7 @@ The phrase `adding domain` is a guess at fileproviderd's wording. In D0, read `$
 
 | # | Do | Pass means (evidence) |
 |---|---|---|
-| D0 | Before the cleanup: `open -a /Applications/Beebeeb.app`; sign in with the test account (+ recovery phrase). Since R8 this sign-in may first show the switch warning (it does when the QA build can read Guus's Keychain items, because his account is still on this Mac). If it shows, its sentence must carry no count (D0-switch.png). Then press **Sign out and switch**, and sign in as the test account again. Record whether it showed. | Onboarding shows `An older Beebeeb installation still holds Beebeeb’s place in Finder…` **once**, with **Copy details** (D0.png). `D0-lifecycle.log` has exactly one `transition from=adding to=failed reason=folder_taken attempt=1/1` line: record its `domain=`/`code=`/`underlying=`. `D0-add-count.txt` = 1. Press Copy details, then `pbpaste > $EVID/D0-copy-details.txt; grep -cE '/Users|@' $EVID/D0-copy-details.txt` = 0. **If the domain/code is not `NSCocoaErrorDomain 516` (or underlying `NSPOSIXErrorDomain:17`)**: stop, amend Task 1's row and `COCOA_FILE_WRITE_FILE_EXISTS`, rerun Task 1 steps 7–8, rebuild, repeat D0. In every case, write the captured pair into spec §6.2's `folder_taken` cell (strike the "captured by D0" sentence, add the value + evidence path, sign and date) on the UI branch. |
+| D0 | Before the cleanup: `open -a /Applications/Beebeeb.app`; sign in with the test account (+ recovery phrase). Since R8 this sign-in may first show the switch warning (it does when the QA build can read the owner's Keychain items, because his account is still on this Mac). If it shows, its sentence must carry no count (D0-switch.png). Then press **Sign out and switch**, and sign in as the test account again. Record whether it showed. | Onboarding shows `An older Beebeeb installation still holds Beebeeb’s place in Finder…` **once**, with **Copy details** (D0.png). `D0-lifecycle.log` has exactly one `transition from=adding to=failed reason=folder_taken attempt=1/1` line: record its `domain=`/`code=`/`underlying=`. `D0-add-count.txt` = 1. Press Copy details, then `pbpaste > $EVID/D0-copy-details.txt; grep -cE '/Users|@' $EVID/D0-copy-details.txt` = 0. **If the domain/code is not `NSCocoaErrorDomain 516` (or underlying `NSPOSIXErrorDomain:17`)**: stop, amend Task 1's row and `COCOA_FILE_WRITE_FILE_EXISTS`, rerun Task 1 steps 7–8, rebuild, repeat D0. In every case, write the captured pair into spec §6.2's `folder_taken` cell (strike the "captured by D0" sentence, add the value + evidence path, sign and date) on the UI branch. |
 | D1 | Task 20. | All four proofs of Task 20 step 5. |
 | D2 | Sign out (Settings → Account → Sign out). Upload `d2-fixture.txt` (content `D2 fixture`) through the local web app. `mark D2`. Sign in again (password + recovery phrase). Click nothing in Beebeeb after the last sign-in button. | The time from the `signed_in` line to the `to=ready` line in `D2-lifecycle.log` is ≤ 30 s. `cat ~/Library/CloudStorage/Beebeeb-Beebeeb/d2-fixture.txt` prints `D2 fixture` (a cloud-only file opened). |
 | D3 | `mark D3; osascript -e 'quit app "Beebeeb"'; sleep 3; open -a /Applications/Beebeeb.app; sleep 20; collect D3` | The last transition is `to=ready`. No onboarding window (D3.png). `D3-add-count.txt` ≤ 1 (§5.5 predicts 0: a registered domain is only confirmed). |
@@ -9612,10 +9612,10 @@ The phrase `adding domain` is a guess at fileproviderd's wording. In D0, read `$
 **Optional D-S (capture a `signing` code; Spec issue 6).** Quit Beebeeb. Re-sign a copy of the QA app without its provisioning profile: `ditto "$APPQA" ~/bb-qa/$TASK/Beebeeb-adhoc.app; codesign --force --deep --sign - --entitlements src-tauri/entitlements.plist ~/bb-qa/$TASK/Beebeeb-adhoc.app`. Launch it, sign in, and read the failure's `domain=`/`code=` in the lifecycle log. If macOS refuses to launch it, write that down and skip the rung. If a new pair appears, add it to `SIGNING_CODES` with its row in `classify_covers_every_row_of_the_table` (Task 1, mutation-checked) before Lane R merges. Delete the ad-hoc copy afterwards.
 
 **D9: account binding (R10), before and after.** Follow the device check written in the private workspace task: its steps, its two local test accounts and its expected results stay in that private file. Run it twice:
-1. **Before**, on a debug build of `origin/main`. Build it with step 3's recipe in its own detached tree (`git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-$TASK-before origin/main`), and install it in place of the QA build for this run only.
+1. **Before**, on a debug build of `origin/main`. Build it with step 3's recipe in its own detached tree (`git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-$TASK-before origin/main`), and install it in place of the QA build for this run only.
 2. **After**, on the QA build, reinstalled with `ditto "$APPQA" /Applications/Beebeeb.app`.
 
-Both runs use the local API (`BB_API_BASE` as set in step 4), and the step-4 precondition holds (nothing of Guus's waiting to upload). Evidence goes to the private task's folder under `.claude/tasks/_qa-evidence/` and to `$EVID` (lifecycle lines and screenshots only). Record the outcome in the private task's Notes. Here, write one line: `D9: pass — see the private task` (or the failure). Remove the before-tree afterwards with `git -C … worktree remove ~/code/bb-worktrees/desktop-$TASK-before`.
+Both runs use the local API (`BB_API_BASE` as set in step 4), and the step-4 precondition holds (nothing of the owner's waiting to upload). Evidence goes to the private task's folder under `.claude/tasks/_qa-evidence/` and to `$EVID` (lifecycle lines and screenshots only). Record the outcome in the private task's Notes. Here, write one line: `D9: pass — see the private task` (or the failure). Remove the before-tree afterwards with `git -C … worktree remove ~/code/bb-worktrees/desktop-$TASK-before`.
 
 After D7 and D9, run `launchctl unsetenv BB_API_BASE`.
 
@@ -9640,11 +9640,11 @@ open -a /Applications/Beebeeb.app
 
 Sign in with the **production** test account from the test-accounts skill. Settings → General → update channel **Alpha** → check for updates → install → the app relaunches. Then `mark D8` just before installing, and `collect D8` 60 s after the relaunch. **Pass:** `update_downloaded`/`update_installed` lines (`from=0.8.11 to=<alpha>`), then `launch …` and `to=ready`, nothing asked (D8.png), and `D8-add-count.txt` ≤ 4. Then sign the test account out (that removes the domain, correctly).
 
-- [ ] **Step 9: Release notes, skills, and restoring Guus's Mac**
+- [ ] **Step 9: Release notes, skills, and restoring the owner's Mac**
 
 - `RELEASE_NOTES.md` for the alpha that carries A, written per `docs/RELEASING.md` before the release workflow runs. It contains What's New (Beebeeb adds itself to Finder; one sentence + one action on failure; the lifecycle log; signing in again after a revoked session keeps everything, and switching accounts warns first), Bug Fixes / Hardening (the folder collision, structured errors, no retry loops, lock/sign-out ordering, local data bound to the account that created it), and Verification with the counted `test result:` and `N pass` lines from step 2.
 - `.claude/skills/beebeeb-dev.md` (workspace): one line with the lifecycle log path (container path) under desktop debugging.
-- Restore: `rm -rf ~/bb-qa/$TASK/Beebeeb-qa.app`, keep the alpha installed (or reinstall `~/bb-qa/$TASK/Beebeeb-installed.app` if Guus prefers), and run `launchctl getenv BB_API_BASE`, which must print nothing. **Last step:** Guus signs in with his own account (his password). Since R8 that is an account switch away from the test account: the warning shows, then "Sign out and switch", then his password and recovery phrase. The lead confirms `"$CTL" status` = `installed` for his session.
+- Restore: `rm -rf ~/bb-qa/$TASK/Beebeeb-qa.app`, keep the alpha installed (or reinstall `~/bb-qa/$TASK/Beebeeb-installed.app` if the owner prefers), and run `launchctl getenv BB_API_BASE`, which must print nothing. **Last step:** the owner signs in with his own account (his password). Since R8 that is an account switch away from the test account: the warning shows, then "Sign out and switch", then his password and recovery phrase. The lead confirms `"$CTL" status` = `installed` for his session.
 
 ---
 
@@ -9672,7 +9672,7 @@ Sign in with the **production** test account from the test-accounts skill. Setti
   - R8–R9 (`lib.rs` Finder wiring)
   - **R10 (the account binding; touches every engine start)**
   - **R11–R12 (auth). The security review on R10–R12 is mandatory before the PR.**
-  - T13 (design: Guus may want the artboard and the switch-warning screenshots before T14–T18)
+  - T13 (design: the owner may want the artboard and the switch-warning screenshots before T14–T18)
   - T14–T17
   - T18 (the auth UI)
   - T19
@@ -9683,7 +9683,7 @@ Sign in with the **production** test account from the test-accounts skill. Setti
   - D0 (the classifier row is provisional until it runs).
   - The D5 relaunch variant, which depends on Task 12 surviving the security review.
   - D9, which needs a second build (`origin/main`).
-- **Decisions for Guus** (Task 21 step 1): Spec issues 11, 19, 21 and 23. The Windows gap (17) is ruled by R11, and its escape hatch is private task 1837.
+- **Decisions for the owner** (Task 21 step 1): Spec issues 11, 19, 21 and 23. The Windows gap (17) is ruled by R11, and its escape hatch is private task 1837.
 
 ### Spec coverage map
 

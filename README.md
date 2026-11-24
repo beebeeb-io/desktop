@@ -1,16 +1,10 @@
-> **Correction — 2026-09-29, task 1611:** The historical architecture/build
-> descriptions below are retained for provenance, not current instructions.
-> Shipping entrypoints are desktop-owned `src/main.tsx` and `src-tauri/src/lib.rs`;
-> `runner.rs`, `engine_bridge.rs`, and `state_db.rs` own scheduling and sync.
-> `repos/web` is not this frontend; core provides shared primitives.
-> Run `bun run tauri:dev` / `bun run tauri:build` from the desktop root.
-> macOS uses the active ~~`macos/FileProviderExtension`~~ `BeebeebFileProvider/`
-> (path corrected on resume, 2026-09-29; built by `scripts/build-fileprovider-extension.sh`), Windows
-> uses `src-tauri/src/windows_cf` (CFAPI), and Linux FUSE is an unmounted prototype.
-> The legacy native-shell build recipes and Linux online-only claims below are
-> historical. Spec 030 is historical and never authorizes raw keys in config.
-> Credentials belong in the OS store; Linux currently fails closed.
-> See [the current capability contract](docs/CAPABILITIES.md) for shell reachability and limitations.
+> **Correction — 2026-11-12:** Beebeeb Desktop 0.9.0 is a full Rust native app on Windows and
+> macOS, with no web view. The React frontend (`src/`, `tests/`, `packages/`) was removed on
+> the `v2-native` line, and so was the Tauri shell (no Tauri build on any OS in 0.9.0). The Rust sync
+> engine lives in `crates/beebeeb-engine/`; the native UI is built in `native/beebeeb-drive-rune/` (Rune).
+> macOS still uses `BeebeebFileProvider/` (built by `scripts/build-fileprovider-extension.sh`), Windows uses
+> the engine's `windows_cf` (CFAPI). Credentials belong in the OS store; Linux fails closed. The
+> install, verify and platform sections below describe the 0.8.x releases, the Tauri app.
 
 <p align="center">
   <a href="https://beebeeb.io"><img src="https://beebeeb.io/assets/beebeeb-icon.png" alt="beebeeb" width="72" height="72" /></a>
@@ -101,7 +95,7 @@ Which key to use depends on the version you downloaded:
 | **`0.8.4` and later** (current) | `C6FADFD59D732197` | `RWSXIXOd1d/6xmhr0T+FTeFjSnInaMvbhgL5vxbt51DFLwl2qIC8jU6Z` |
 | `0.8.3` and earlier | `545D7BA77EDEA7E1` | `RWThp95+p3tdVI3intgGfThMBLsjCtlCF7eV0hTY478SM1BoLKwU4Fl4` |
 
-The current key is the same one the app itself uses to check updates (it is in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json), `plugins.updater.pubkey`). The `.sig` files are in the auto-updater's format (a minisign signature, base64-encoded once more), so decode it first, then verify.
+The current key is the same one the 0.8.x app itself uses to check updates (this repo keeps it as [`crates/beebeeb-updater/keys/updater-0.8.pub`](crates/beebeeb-updater/keys/updater-0.8.pub)). The `.sig` files are in the auto-updater's format (a minisign signature, base64-encoded once more), so decode it first, then verify.
 
 **Linux** (install minisign with `apt install minisign`, `dnf install minisign`, or `brew install minisign`):
 
@@ -132,28 +126,29 @@ To update by hand (any version): download the newest installer from the [latest 
 ## Features
 
 - **Automatic sync** — files in your beebeeb folder are encrypted and synced in the background
-- **Selective sync** — choose which folders sync locally; the rest stay as online-only placeholders until you open them
+- **Selective sync** — not available on any platform in the native app yet: no screen sets it (backlog GL-0002). On macOS (File Provider) and Windows (Cloud Files) the vault is already online-only placeholders until you open a file; Linux has no placeholders
 - **Conflict resolution** — never silently drops a version: a conflict window lets you choose Keep Mine, Keep Theirs or Keep Both (see [Sync engine behavior](#sync-engine-behavior))
 - **Online-only files** — native placeholders on macOS (File Provider) and Windows (Cloud Files); not on Linux yet (the FUSE prototype is not mounted)
 - **Zero-knowledge encryption** — per-file keys derived via HKDF; the server stores only ciphertext
-- **Native shell, not Electron** — Tauri uses the OS WebView (~10 MB binaries vs ~150 MB), with a Rust backend that imports `core` directly
+- **Native app, no web view** — Rust end to end (0.9.0: the Rune UI over the engine), importing `core` directly
 
 ## Architecture
 
-The UI is the beebeeb web client running inside a native Tauri (Rust) shell. The same Rust sync engine and cryptography that power the other clients run in the background — no protocol or crypto logic is re-implemented in TypeScript.
+The native app (`native/beebeeb-drive-rune`, a Rune UI with no web view) calls the engine
+(`crates/beebeeb-engine`), which runs sync, local state and the OS integrations over the same Rust sync engine and
+cryptography that power the other clients — no protocol or crypto logic is re-implemented. The 0.8.x app was a Tauri
+shell around the web client; it is gone in 0.9.0.
 
 ```mermaid
 graph TD
-    WEB["repos/web (React 19 + Vite 6)<br/>UI for files, settings, sharing"]
-    TAURI["src-tauri (Rust)<br/>WebView host, IPC, OS integration"]
-    SYNC["beebeeb-sync (Rust, from core)<br/>File watcher, conflicts, selective sync"]
+    APP["native/beebeeb-drive-rune (Rust, Rune)<br/>windows, tray, notifications"]
+    ENGINE["crates/beebeeb-engine (Rust)<br/>sync runner, state.db, API client, credential stores"]
     CORE["beebeeb-core (Rust, from core)<br/>AES-256-GCM, Argon2id, HKDF, BIP39"]
-    OS["macOS / Windows / Linux<br/>Menu bar, tray, notifications, autostart"]
+    OS["Windows Cloud Files · macOS File Provider extension"]
 
-    WEB --> TAURI
-    TAURI -- "Cargo dep" --> SYNC
-    SYNC --> CORE
-    TAURI --> OS
+    APP --> ENGINE
+    ENGINE -- "Cargo dep" --> CORE
+    ENGINE --> OS
 ```
 
 ## Platform support
@@ -166,15 +161,16 @@ graph TD
 
 ## Build & run
 
-Requires [Rust](https://rustup.rs/) (stable, edition 2024), [bun](https://bun.sh/), and [Tauri's per-OS prerequisites](https://tauri.app/start/prerequisites/).
+Requires [Rust](https://rustup.rs/): stable for the engine; the native app needs 1.99.1 or later (Rune; its
+`Cargo.toml` says why).
 
 ```sh
-bun install
-bun run tauri:dev      # spawns Vite on :5173, opens a native window
-bun run tauri:build    # produces .dmg / .msi / .deb / .AppImage
+cd crates/beebeeb-engine && cargo test --locked       # the engine
+cd native/beebeeb-drive-rune && cargo run              # the native app (a window on Windows)
+cd native/beebeeb-drive-rune && cargo test --locked    # its tests
 ```
 
-To develop against the real web client instead of the placeholder, run `repos/web` separately (`cd ../web && bun dev`) — the Tauri window loads it automatically via `devUrl` in `tauri.conf.json`. `cargo check` from `src-tauri/` validates the Rust side without the frontend.
+More in [`native/beebeeb-drive-rune/README.md`](native/beebeeb-drive-rune/README.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Sync engine behavior
 
@@ -185,9 +181,9 @@ The sync engine (`beebeeb-sync`, from the [core](https://github.com/beebeeb-io/c
   - **Keep Mine** uploads your local copy as the new server version.
   - **Keep Theirs** replaces your local copy with the server's version.
   - **Keep Both** renames *your local copy* to `name (conflict - <device name> - <YYYY-MM-DD>).ext` (date in UTC) and downloads the server's version under the original name.
-  - **After 24 hours with no choice**, every sync tick checks for conflicts older than that and applies Keep Both automatically (`sweep_auto_resolutions` in `src-tauri/src/runner.rs`). If the download of the server's version fails, your renamed copy stays on disk and the next tick retries.
+  - **After 24 hours with no choice**, every sync tick checks for conflicts older than that and applies Keep Both automatically (`sweep_auto_resolutions`, called from `crates/beebeeb-engine/src/runner.rs`). If the download of the server's version fails, your renamed copy stays on disk and the next tick retries.
   - **On macOS, a save from Finder** that meets a newer version on the server is held instead of sent. The conflict window offers the same three choices; Keep Both adds your version beside the original as `name (<device name>, HH.MM).ext`.
-- **Selective sync** — the vault stays remote by default. Folders marked locally available are hydrated and kept in sync; other items remain online-only placeholders until opened
+- **Selective sync** — not offered in the native app on any platform (0.9.0). The engine keeps an `excluded_folder_ids` list in `desktop.toml` (reset on account switch), but no screen edits it. Items stay online-only placeholders until opened on macOS and Windows; Linux has no placeholders
 
 ## Contributing
 

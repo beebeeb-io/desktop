@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024 (Tauri 2.11, tokio, serde, chrono, reqwest; no new crate, one new tauri feature `image-ico`), Objective-C (Foundation, compiled by `src-tauri/build.rs`), React 19 + TypeScript (bun test with `tests/fixtures/componentHarness.ts`), eslint. Design mocks in plain HTML.
 
-**Spec:** `docs/specs/2026-10-07-desktop-first-run-sign-in.md` (last changed in `7c64cb0`, the wake amendment; approved by Guus 2026-10-07 in three parts with rulings C1–C7, amended by the lead's rulings in §17). It builds on spec A, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md`, and its plan `docs/superpowers/plans/2026-10-06-macos-finder-setup-reconciler.md`. Executors read the spec and this plan together. Where they disagree, "Spec issues found" below says how, with evidence; nothing there is decided silently.
+**Spec:** `docs/specs/2026-10-07-desktop-first-run-sign-in.md` (last changed in `7c64cb0`, the wake amendment; approved by the owner 2026-10-07 in three parts with rulings C1–C7, amended by the lead's rulings in §17). It builds on spec A, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md`, and its plan `docs/superpowers/plans/2026-10-06-macos-finder-setup-reconciler.md`. Executors read the spec and this plan together. Where they disagree, "Spec issues found" below says how, with evidence; nothing there is decided silently.
 
 ---
 
@@ -43,8 +43,8 @@ Each item is a place where the spec, read literally against the code on spec A's
 
 - **Environment (every task; a task's steps use these names).**
   ```bash
-  WS=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io
-  LOCK=$WS/scripts/coord/with-lock.sh                 # every cargo build or test: $LOCK cargo-build -- <cmd>
+  WS=~/Development/Beebeeb/beebeeb.io
+  LOCK=$WS/scripts/coord/the lock script                 # every cargo build or test: $LOCK cargo-build -- <cmd>
   EVID=$WS/.claude/tasks/_qa-evidence/1747
   EVID1748=$WS/.claude/tasks/_qa-evidence/1748        # the Windows rungs (Task 24)
   WTR=~/code/bb-worktrees/desktop-1747-r              # Lane R, branch feat/1747-first-run-sign-in
@@ -148,7 +148,7 @@ The five conditions a real person is most likely to meet that the spec implies b
 
 ## File map
 
-Paths are relative to the desktop repo root unless they start with `$WS` (the workspace root, `/Users/guuslangelaar/Development/Beebeeb/beebeeb.io`).
+Paths are relative to the desktop repo root unless they start with `$WS` (the workspace root, `~/Development/Beebeeb/beebeeb.io`).
 
 | File | Status | Responsibility | Task |
 |---|---|---|---|
@@ -202,7 +202,7 @@ Paths are relative to the desktop repo root unless they start with `$WS` (the wo
 - **Worktree creation** (lead, from the workspace root):
 
 ```bash
-WS=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io
+WS=~/Development/Beebeeb/beebeeb.io
 git -C $WS/repos/desktop fetch origin
 git -C $WS/repos/desktop worktree add ~/code/bb-worktrees/desktop-1747-r -b feat/1747-first-run-sign-in origin/main
 git -C $WS/repos/desktop worktree add ~/code/bb-worktrees/desktop-1747-t -b feat/1747-first-run-sign-in-ui origin/main
@@ -247,7 +247,7 @@ Create `$EVID/t0-interfaces.sh`:
 # Spec C Task 0: every spec A interface this plan consumes, grepped at origin/main.
 # Output: one TSV row per interface: status, file, name. Exit 1 when any is missing.
 set -uo pipefail
-D=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop
+D=~/Development/Beebeeb/beebeeb.io/repos/desktop
 REV=origin/main
 GREP=/usr/bin/grep
 missing=0
@@ -786,7 +786,7 @@ The lead reviews the 8 renders, the icon checks and the HTML (every string word 
 - [ ] **Step 1: Vendor the contract from the server's `main`**
 
 ```bash
-WS=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io; WT=~/code/bb-worktrees/desktop-1747-r; EVID=$WS/.claude/tasks/_qa-evidence/1747
+WS=~/Development/Beebeeb/beebeeb.io; WT=~/code/bb-worktrees/desktop-1747-r; EVID=$WS/.claude/tasks/_qa-evidence/1747
 git -C $WS/repos/server fetch origin
 git -C $WS/repos/server rev-parse origin/main > $EVID/t2-server-sha.txt
 git -C $WS/repos/server archive origin/main contracts/onboarding | tar -x -C $WT
@@ -10403,7 +10403,7 @@ Expected `rc=0` and a line counting at least 1 client copy, the desktop's among 
 
 ---
 
-## Task 23: Verification 1747 — macOS, on Guus's own Mac account (lead)
+## Task 23: Verification 1747 — macOS, on the owner's own Mac account (lead)
 
 **Lead only.** Each row below is one rung of the spec's rewritten 1747 Verification (§15), in the same order. Nothing here touches production; every sign-in is against the local API.
 
@@ -10433,7 +10433,7 @@ runu() { BB_API_BASE=http://localhost:3001 HOME="$SCRATCH" "$APPU/Contents/MacOS
   (Quit it with the app's own "Quit Beebeeb", or `kill $(cat $EVID/1747-run-u.pid)`; never by name.) Its lifecycle log is `$SCRATCH/Library/Logs/Beebeeb/lifecycle.log`.
 
   **Precondition for every Build U rung (plan review M12):** a scratch `HOME` moves the app's config and logs, but not the macOS Keychain, which belongs to the macOS user, and spec A's `keychain_session_present` keeps a legacy read fallback. Before the first rung, `runu` with the fresh `$SCRATCH` and confirm the window shows "Sign in to Beebeeb" with the crossed b (`1747-precondition-signed-out.png`). If it shows any session, **stop**: a session from this macOS user's Keychain is in play. Sign the installed app out first, or run Build U under a separate macOS user, and record which.
-- **Build S (signed, sandboxed)** for the Finder rungs and the login-launch rung: spec A's Task 21 steps 3 and 4 exactly (signing identity, both provisioning profiles, the installed app moved aside, `launchctl setenv BB_API_BASE http://localhost:3001`, `mark`/`collect`), including its precondition: Guus's installed app reports nothing waiting to upload (screenshot), and it is restored at the end.
+- **Build S (signed, sandboxed)** for the Finder rungs and the login-launch rung: spec A's Task 21 steps 3 and 4 exactly (signing identity, both provisioning profiles, the installed app moved aside, `launchctl setenv BB_API_BASE http://localhost:3001`, `mark`/`collect`), including its precondition: the owner's installed app reports nothing waiting to upload (screenshot), and it is restored at the end.
 
 The lead accepted this two-build split on 2026-10-07 and amends 1747's Verification line in the workspace (strike "and `HOME=<scratch>` for every login", write "`HOME=<scratch>` for every login on the unsandboxed bundle; the Finder rungs on the signed, sandboxed build in its own container, with spec A Task 21's precondition", signed and dated). Before the Finder rungs, check that the amended line is in 1747's task file.
 
@@ -10481,11 +10481,11 @@ The no-card trial needs `server_config.no_card_trial_enabled = 'true'` locally; 
 
 - [ ] **Step 3: Clean up and record**
 
-Build S: spec A Task 21's restore (the installed app back to `/Applications`, `launchctl unsetenv BB_API_BASE`, Guus's own sign-in). Build U: `rm -rf "$SCRATCH"` (the directory `mktemp` made, never `$HOME`). Delete the `server_config` rows step 1 added. Remove the QA tree. Write the `## Verification evidence` section of 1747's task file: one line per row (`pass — <evidence>` or the exact OPEN line), the truth lines, and every amendment made. Then `make task-verify ID=1747` only if no row is a non-OPEN failure; otherwise 1747 stays in `in-review/` with the failing rows named.
+Build S: spec A Task 21's restore (the installed app back to `/Applications`, `launchctl unsetenv BB_API_BASE`, the owner's own sign-in). Build U: `rm -rf "$SCRATCH"` (the directory `mktemp` made, never `$HOME`). Delete the `server_config` rows step 1 added. Remove the QA tree. Write the `## Verification evidence` section of 1747's task file: one line per row (`pass — <evidence>` or the exact OPEN line), the truth lines, and every amendment made. Then `make task-verify ID=1747` only if no row is a non-OPEN failure; otherwise 1747 stays in `in-review/` with the failing rows named.
 
 ---
 
-## Task 24: Verification 1748 — Windows, on the Legion (lead)
+## Task 24: Verification 1748 — Windows, on the Windows test machine (lead)
 
 **Lead only.** The same rungs on real Windows hardware (not a clean machine), against a local API. No launch rungs on Windows (§6).
 
@@ -10494,15 +10494,15 @@ Build S: spec A Task 21's restore (the installed app back to `/Applications`, `l
 - Modify (workspace, lead commits): `.claude/tasks/<dir>/1748-*.md`
 
 **Interfaces:**
-- Consumes: the merged `main`; the Legion (`ssh legion`); a local API the Legion can reach.
+- Consumes: the merged `main`; the Windows test machine (`ssh to the Windows test machine`); a local API the Windows test machine can reach.
 - Produces: the 1748 evidence.
 
 - [ ] **Step 1: Build and check the signature**
 
-On the Legion, build the Windows installer from the merged `main` with the release workflow's own steps (`docs/RELEASING.md`, "Windows Authenticode signing"), through Windows' PowerShell from the WSL session (`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`), in a build directory under the Windows user's profile, capped below 16 build jobs (the Legion is Guus's own machine). Then run `scripts/windows/verify-authenticode.ps1` against the produced `setup.exe` and MSI, and save its output to `$EVID1748/verify-authenticode.txt`.
-Expected: the script's own pass line with its file count. If the Legion cannot sign (no Azure Artifact Signing identity there), stop and amend the line in place: the signature rung is answered by the signed installer that `release.yml` builds for the same commit on an alpha channel, installed on the Legion; strike, replace, sign and date. A VM or CI run never answers a hardware rung.
+On the Windows test machine, build the Windows installer from the merged `main` with the release workflow's own steps (`docs/RELEASING.md`, "Windows Authenticode signing"), through Windows' PowerShell from the WSL session (`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`), in a build directory under the Windows user's profile, capped below 16 build jobs (the Windows test machine is the owner's own machine). Then run `scripts/windows/verify-authenticode.ps1` against the produced `setup.exe` and MSI, and save its output to `$EVID1748/verify-authenticode.txt`.
+Expected: the script's own pass line with its file count. If the Windows test machine cannot sign (no Azure Artifact Signing identity there), stop and amend the line in place: the signature rung is answered by the signed installer that `release.yml` builds for the same commit on an alpha channel, installed on the Windows test machine; strike, replace, sign and date. A VM or CI run never answers a hardware rung.
 
-The local API: run `BB_ENTRY_ALLOWANCE_BYTES=0 make dev-native` on the Mac and point the Windows app at it (`BB_API_BASE=http://<the Mac's LAN address>:3001`, set for the app's process as the Windows build documents it); `curl` its `/health` from the Legion first. Isolation: a new Windows user profile for QA, or the Windows app's state directory moved aside and restored at the end; record which.
+The local API: run `BB_ENTRY_ALLOWANCE_BYTES=0 make dev-native` on the Mac and point the Windows app at it (`BB_API_BASE=http://<the Mac's LAN address>:3001`, set for the app's process as the Windows build documents it); `curl` its `/health` from the Windows test machine first. Isolation: a new Windows user profile for QA, or the Windows app's state directory moved aside and restored at the end; record which.
 
 - [ ] **Step 2: Run the rungs**
 
@@ -10515,7 +10515,7 @@ The local API: run `BB_ENTRY_ALLOWANCE_BYTES=0 make dev-native` on the Mac and p
 | A `needs_plan` account shows "Choose a plan", sync not started | Sign in with a plan-less account | "Choose a plan" before "Files on demand" (`1748-choose-plan.png`); `main-app` shows it in place of its content (`1748-main-app-choose-plan.png`); no engine: the `tracing` log has `engine_held reason=account_blocking` and no sync activity. Start the trial in the local web app: the window continues by itself |
 | The notices, a real link in the frozen one | One account per state (Task 23's SQL), Account view | Each line (`1748-notice-<state>.png`); the frozen row is the notice "This account is frozen." with "Contact support", which opens the support address (`1748-frozen-link.png`) |
 | The crossed b `.ico` | Signed out; after a revoked session; offline (network off) | The colour crossed icon in the notification area, light and dark taskbar (`1748-tray-<state>-<theme>.png`), with its tooltip |
-| `cargo test` counts | Run `cargo test --locked` in `src-tauri` on the Legion's Windows toolchain | Every binary `test result: ok. N passed; 0 failed`; the Windows-only binaries (`windows_session_wiring`, `windows_signout_cleanup`) among them |
+| `cargo test` counts | Run `cargo test --locked` in `src-tauri` on the Windows test machine's Windows toolchain | Every binary `test result: ok. N passed; 0 failed`; the Windows-only binaries (`windows_session_wiring`, `windows_signout_cleanup`) among them |
 | First run on a clean physical Windows machine | — | "OPEN — needs a clean physical Windows machine; a VM or CI run never answers it (spec §15)" |
 | Struck rungs | — | Native signup, phrase window, ticket expiry, and acceptance item C6 (fixed by 1734, `7728a27`): listed as struck, with the reason |
 

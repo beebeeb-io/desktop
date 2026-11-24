@@ -1,0 +1,362 @@
+error[banned]: crate 'async-io = 2.6.0' is explicitly banned
+   ┌─ :29:82
+   │
+29 │     { crate = "tokio" }, { crate = "async-std" }, { crate = "smol" }, { crate = "async-io" },
+   │                                                                                  ━━━━━━━━ banned here
+   │
+   ├ async-io v2.6.0
+     ├── async-process v2.5.0
+     │   └── zbus v5.19.0
+     │       ├── accesskit_unix v0.24.0
+     │       │   └── accesskit_winit v0.34.1
+     │       │       └── egui-winit v0.37.0
+     │       │           └── eframe v0.37.0
+     │       │               ├── gridcraft v0.19.1
+     │       │               └── gridcraft-web v0.19.1
+     │       ├── atspi-common v0.13.0
+     │       │   ├── accesskit_atspi_common v0.21.0
+     │       │   │   └── accesskit_unix v0.24.0 (*)
+     │       │   ├── atspi v0.29.0
+     │       │   │   └── accesskit_unix v0.24.0 (*)
+     │       │   └── atspi-proxies v0.13.0
+     │       │       └── atspi v0.29.0 (*)
+     │       ├── atspi-proxies v0.13.0 (*)
+     │       └── gridcraft-ui-egui v0.19.1
+     │           ├── gridcraft v0.19.1 (*)
+     │           └── gridcraft-web v0.19.1 (*)
+     ├── async-signal v0.2.14
+     │   └── async-process v2.5.0 (*)
+     └── zbus v5.19.0 (*)
+
+error[banned]: crate 'h2 = 0.4.20' is explicitly banned
+   ┌─ :25:80
+   │
+25 │     { crate = "reqwest" }, { crate = "ureq" }, { crate = "hyper" }, { crate = "h2" }, { crate = "curl" },
+   │                                                                                ━━ banned here
+   │
+   ├ h2 v0.4.20
+     ├── hyper v1.12.0
+     │   ├── hyper-rustls v0.27.10
+     │   │   └── reqwest v0.13.5
+     │   │       ├── sigstore-rekor v0.6.6
+     │   │       │   ├── sigstore-bundle v0.6.6
+     │   │       │   │   └── sigstore-verify v0.6.6
+     │   │       │   │       └── (build) winprint v0.2.1
+     │   │       │   │           └── craft-print v0.1.0
+     │   │       │   │               └── gridcraft v0.19.1
+     │   │       │   └── sigstore-verify v0.6.6 (*)
+     │   │       ├── sigstore-tsa v0.6.6
+     │   │       │   ├── sigstore-bundle v0.6.6 (*)
+     │   │       │   └── sigstore-verify v0.6.6 (*)
+     │   │       └── (build) winprint v0.2.1 (*)
+     │   ├── hyper-util v0.1.21
+     │   │   ├── hyper-rustls v0.27.10 (*)
+     │   │   └── reqwest v0.13.5 (*)
+     │   └── reqwest v0.13.5 (*)
+     └── reqwest v0.13.5 (*)
+
+error[banned]: crate 'hyper = 1.12.0' is explicitly banned
+   ┌─ :25:59
+   │
+25 │     { crate = "reqwest" }, { crate = "ureq" }, { crate = "hyper" }, { crate = "h2" }, { crate = "curl" },
+   │                                                           ━━━━━ banned here
+   │
+   ├ hyper v1.12.0
+     ├── hyper-rustls v0.27.10
+     │   └── reqwest v0.13.5
+     │       ├── sigstore-rekor v0.6.6
+     │       │   ├── sigstore-bundle v0.6.6
+     │       │   │   └── sigstore-verify v0.6.6
+     │       │   │       └── (build) winprint v0.2.1
+     │       │   │           └── craft-print v0.1.0
+     │       │   │               └── gridcraft v0.19.1
+     │       │   └── sigstore-verify v0.6.6 (*)
+     │       ├── sigstore-tsa v0.6.6
+     │       │   ├── sigstore-bundle v0.6.6 (*)
+     │       │   └── sigstore-verify v0.6.6 (*)
+     │       └── (build) winprint v0.2.1 (*)
+     ├── hyper-util v0.1.21
+     │   ├── hyper-rustls v0.27.10 (*)
+     │   └── reqwest v0.13.5 (*)
+     └── reqwest v0.13.5 (*)
+
+error[banned]: crate 'mio = 1.2.4' is explicitly banned
+   ┌─ :28:39
+   │
+28 │     { crate = "socket2" }, { crate = "mio" },
+   │                                       ━━━ banned here
+   │
+   ├ mio v1.2.4
+     └── tokio v1.53.2
+         ├── h2 v0.4.20
+         │   ├── hyper v1.12.0
+         │   │   ├── hyper-rustls v0.27.10
+         │   │   │   └── reqwest v0.13.5
+         │   │   │       ├── sigstore-rekor v0.6.6
+         │   │   │       │   ├── sigstore-bundle v0.6.6
+         │   │   │       │   │   └── sigstore-verify v0.6.6
+         │   │   │       │   │       └── (build) winprint v0.2.1
+         │   │   │       │   │           └── craft-print v0.1.0
+         │   │   │       │   │               └── gridcraft v0.19.1
+         │   │   │       │   └── sigstore-verify v0.6.6 (*)
+         │   │   │       ├── sigstore-tsa v0.6.6
+         │   │   │       │   ├── sigstore-bundle v0.6.6 (*)
+         │   │   │       │   └── sigstore-verify v0.6.6 (*)
+         │   │   │       └── (build) winprint v0.2.1 (*)
+         │   │   ├── hyper-util v0.1.21
+         │   │   │   ├── hyper-rustls v0.27.10 (*)
+         │   │   │   └── reqwest v0.13.5 (*)
+         │   │   └── reqwest v0.13.5 (*)
+         │   └── reqwest v0.13.5 (*)
+         ├── hyper v1.12.0 (*)
+         ├── hyper-rustls v0.27.10 (*)
+         ├── hyper-util v0.1.21 (*)
+         ├── reqwest v0.13.5 (*)
+         ├── tokio-rustls v0.26.6
+         │   ├── hyper-rustls v0.27.10 (*)
+         │   └── reqwest v0.13.5 (*)
+         ├── tokio-util v0.7.20
+         │   └── h2 v0.4.20 (*)
+         ├── tower v0.5.3
+         │   ├── reqwest v0.13.5 (*)
+         │   └── tower-http v0.6.11
+         │       └── reqwest v0.13.5 (*)
+         └── wasm-bindgen-futures v0.4.79
+             ├── craft-ui v0.1.0
+             │   └── gridcraft-ui-egui v0.19.1
+             │       ├── gridcraft v0.19.1 (*)
+             │       └── gridcraft-web v0.19.1
+             ├── craft-web-api v0.1.0
+             │   └── gridcraft-web v0.19.1 (*)
+             ├── gridcraft-web v0.19.1 (*)
+             ├── reqwest v0.13.5 (*)
+             ├── rfd v0.17.2
+             │   ├── gridcraft v0.19.1 (*)
+             │   └── gridcraft-web v0.19.1 (*)
+             ├── wgpu v30.0.1
+             │   ├── eframe v0.37.0
+             │   │   ├── gridcraft v0.19.1 (*)
+             │   │   └── gridcraft-web v0.19.1 (*)
+             │   ├── egui-wgpu v0.37.0
+             │   │   ├── eframe v0.37.0 (*)
+             │   │   └── egui_kittest v0.37.0
+             │   │       └── (dev) gridcraft-ui-egui v0.19.1 (*)
+             │   └── egui_kittest v0.37.0 (*)
+             └── winit v0.30.13
+                 ├── accesskit_winit v0.34.1
+                 │   └── egui-winit v0.37.0
+                 │       └── eframe v0.37.0 (*)
+                 ├── eframe v0.37.0 (*)
+                 ├── egui-wgpu v0.37.0 (*)
+                 ├── egui-winit v0.37.0 (*)
+                 └── gridcraft v0.19.1 (*)
+
+error[banned]: crate 'reqwest = 0.13.5' is explicitly banned
+   ┌─ :25:16
+   │
+25 │     { crate = "reqwest" }, { crate = "ureq" }, { crate = "hyper" }, { crate = "h2" }, { crate = "curl" },
+   │                ━━━━━━━ banned here
+   │
+   ├ reqwest v0.13.5
+     ├── sigstore-rekor v0.6.6
+     │   ├── sigstore-bundle v0.6.6
+     │   │   └── sigstore-verify v0.6.6
+     │   │       └── (build) winprint v0.2.1
+     │   │           └── craft-print v0.1.0
+     │   │               └── gridcraft v0.19.1
+     │   └── sigstore-verify v0.6.6 (*)
+     ├── sigstore-tsa v0.6.6
+     │   ├── sigstore-bundle v0.6.6 (*)
+     │   └── sigstore-verify v0.6.6 (*)
+     └── (build) winprint v0.2.1 (*)
+
+error[banned]: crate 'rustls = 0.23.46' is explicitly banned
+   ┌─ :27:16
+   │
+27 │     { crate = "rustls" }, { crate = "native-tls" }, { crate = "openssl" }, { crate = "quinn" },
+   │                ━━━━━━ banned here
+   │
+   ├ rustls v0.23.46
+     ├── hyper-rustls v0.27.10
+     │   └── reqwest v0.13.5
+     │       ├── sigstore-rekor v0.6.6
+     │       │   ├── sigstore-bundle v0.6.6
+     │       │   │   └── sigstore-verify v0.6.6
+     │       │   │       └── (build) winprint v0.2.1
+     │       │   │           └── craft-print v0.1.0
+     │       │   │               └── gridcraft v0.19.1
+     │       │   └── sigstore-verify v0.6.6 (*)
+     │       ├── sigstore-tsa v0.6.6
+     │       │   ├── sigstore-bundle v0.6.6 (*)
+     │       │   └── sigstore-verify v0.6.6 (*)
+     │       └── (build) winprint v0.2.1 (*)
+     ├── reqwest v0.13.5 (*)
+     ├── rustls-platform-verifier v0.7.1
+     │   ├── reqwest v0.13.5 (*)
+     │   └── ureq v3.5.0
+     │       └── craft-update v0.1.0
+     │           ├── gridcraft v0.19.1 (*)
+     │           └── gridcraft-ui-egui v0.19.1
+     │               ├── gridcraft v0.19.1 (*)
+     │               └── gridcraft-web v0.19.1
+     ├── tokio-rustls v0.26.6
+     │   ├── hyper-rustls v0.27.10 (*)
+     │   └── reqwest v0.13.5 (*)
+     └── ureq v3.5.0 (*)
+
+error[banned]: crate 'socket2 = 0.6.5' is explicitly banned
+   ┌─ :28:16
+   │
+28 │     { crate = "socket2" }, { crate = "mio" },
+   │                ━━━━━━━ banned here
+   │
+   ├ socket2 v0.6.5
+     ├── hyper-util v0.1.21
+     │   ├── hyper-rustls v0.27.10
+     │   │   └── reqwest v0.13.5
+     │   │       ├── sigstore-rekor v0.6.6
+     │   │       │   ├── sigstore-bundle v0.6.6
+     │   │       │   │   └── sigstore-verify v0.6.6
+     │   │       │   │       └── (build) winprint v0.2.1
+     │   │       │   │           └── craft-print v0.1.0
+     │   │       │   │               └── gridcraft v0.19.1
+     │   │       │   └── sigstore-verify v0.6.6 (*)
+     │   │       ├── sigstore-tsa v0.6.6
+     │   │       │   ├── sigstore-bundle v0.6.6 (*)
+     │   │       │   └── sigstore-verify v0.6.6 (*)
+     │   │       └── (build) winprint v0.2.1 (*)
+     │   └── reqwest v0.13.5 (*)
+     └── tokio v1.53.2
+         ├── h2 v0.4.20
+         │   ├── hyper v1.12.0
+         │   │   ├── hyper-rustls v0.27.10 (*)
+         │   │   ├── hyper-util v0.1.21 (*)
+         │   │   └── reqwest v0.13.5 (*)
+         │   └── reqwest v0.13.5 (*)
+         ├── hyper v1.12.0 (*)
+         ├── hyper-rustls v0.27.10 (*)
+         ├── hyper-util v0.1.21 (*)
+         ├── reqwest v0.13.5 (*)
+         ├── tokio-rustls v0.26.6
+         │   ├── hyper-rustls v0.27.10 (*)
+         │   └── reqwest v0.13.5 (*)
+         ├── tokio-util v0.7.20
+         │   └── h2 v0.4.20 (*)
+         ├── tower v0.5.3
+         │   ├── reqwest v0.13.5 (*)
+         │   └── tower-http v0.6.11
+         │       └── reqwest v0.13.5 (*)
+         └── wasm-bindgen-futures v0.4.79
+             ├── craft-ui v0.1.0
+             │   └── gridcraft-ui-egui v0.19.1
+             │       ├── gridcraft v0.19.1 (*)
+             │       └── gridcraft-web v0.19.1
+             ├── craft-web-api v0.1.0
+             │   └── gridcraft-web v0.19.1 (*)
+             ├── gridcraft-web v0.19.1 (*)
+             ├── reqwest v0.13.5 (*)
+             ├── rfd v0.17.2
+             │   ├── gridcraft v0.19.1 (*)
+             │   └── gridcraft-web v0.19.1 (*)
+             ├── wgpu v30.0.1
+             │   ├── eframe v0.37.0
+             │   │   ├── gridcraft v0.19.1 (*)
+             │   │   └── gridcraft-web v0.19.1 (*)
+             │   ├── egui-wgpu v0.37.0
+             │   │   ├── eframe v0.37.0 (*)
+             │   │   └── egui_kittest v0.37.0
+             │   │       └── (dev) gridcraft-ui-egui v0.19.1 (*)
+             │   └── egui_kittest v0.37.0 (*)
+             └── winit v0.30.13
+                 ├── accesskit_winit v0.34.1
+                 │   └── egui-winit v0.37.0
+                 │       └── eframe v0.37.0 (*)
+                 ├── eframe v0.37.0 (*)
+                 ├── egui-wgpu v0.37.0 (*)
+                 ├── egui-winit v0.37.0 (*)
+                 └── gridcraft v0.19.1 (*)
+
+error[banned]: crate 'tokio = 1.53.2' is explicitly banned
+   ┌─ :29:16
+   │
+29 │     { crate = "tokio" }, { crate = "async-std" }, { crate = "smol" }, { crate = "async-io" },
+   │                ━━━━━ banned here
+   │
+   ├ tokio v1.53.2
+     ├── h2 v0.4.20
+     │   ├── hyper v1.12.0
+     │   │   ├── hyper-rustls v0.27.10
+     │   │   │   └── reqwest v0.13.5
+     │   │   │       ├── sigstore-rekor v0.6.6
+     │   │   │       │   ├── sigstore-bundle v0.6.6
+     │   │   │       │   │   └── sigstore-verify v0.6.6
+     │   │   │       │   │       └── (build) winprint v0.2.1
+     │   │   │       │   │           └── craft-print v0.1.0
+     │   │   │       │   │               └── gridcraft v0.19.1
+     │   │   │       │   └── sigstore-verify v0.6.6 (*)
+     │   │   │       ├── sigstore-tsa v0.6.6
+     │   │   │       │   ├── sigstore-bundle v0.6.6 (*)
+     │   │   │       │   └── sigstore-verify v0.6.6 (*)
+     │   │   │       └── (build) winprint v0.2.1 (*)
+     │   │   ├── hyper-util v0.1.21
+     │   │   │   ├── hyper-rustls v0.27.10 (*)
+     │   │   │   └── reqwest v0.13.5 (*)
+     │   │   └── reqwest v0.13.5 (*)
+     │   └── reqwest v0.13.5 (*)
+     ├── hyper v1.12.0 (*)
+     ├── hyper-rustls v0.27.10 (*)
+     ├── hyper-util v0.1.21 (*)
+     ├── reqwest v0.13.5 (*)
+     ├── tokio-rustls v0.26.6
+     │   ├── hyper-rustls v0.27.10 (*)
+     │   └── reqwest v0.13.5 (*)
+     ├── tokio-util v0.7.20
+     │   └── h2 v0.4.20 (*)
+     ├── tower v0.5.3
+     │   ├── reqwest v0.13.5 (*)
+     │   └── tower-http v0.6.11
+     │       └── reqwest v0.13.5 (*)
+     └── wasm-bindgen-futures v0.4.79
+         ├── craft-ui v0.1.0
+         │   └── gridcraft-ui-egui v0.19.1
+         │       ├── gridcraft v0.19.1 (*)
+         │       └── gridcraft-web v0.19.1
+         ├── craft-web-api v0.1.0
+         │   └── gridcraft-web v0.19.1 (*)
+         ├── gridcraft-web v0.19.1 (*)
+         ├── reqwest v0.13.5 (*)
+         ├── rfd v0.17.2
+         │   ├── gridcraft v0.19.1 (*)
+         │   └── gridcraft-web v0.19.1 (*)
+         ├── wgpu v30.0.1
+         │   ├── eframe v0.37.0
+         │   │   ├── gridcraft v0.19.1 (*)
+         │   │   └── gridcraft-web v0.19.1 (*)
+         │   ├── egui-wgpu v0.37.0
+         │   │   ├── eframe v0.37.0 (*)
+         │   │   └── egui_kittest v0.37.0
+         │   │       └── (dev) gridcraft-ui-egui v0.19.1 (*)
+         │   └── egui_kittest v0.37.0 (*)
+         └── winit v0.30.13
+             ├── accesskit_winit v0.34.1
+             │   └── egui-winit v0.37.0
+             │       └── eframe v0.37.0 (*)
+             ├── eframe v0.37.0 (*)
+             ├── egui-wgpu v0.37.0 (*)
+             ├── egui-winit v0.37.0 (*)
+             └── gridcraft v0.19.1 (*)
+
+error[banned]: crate 'ureq = 3.5.0' is explicitly banned
+   ┌─ :25:39
+   │
+25 │     { crate = "reqwest" }, { crate = "ureq" }, { crate = "hyper" }, { crate = "h2" }, { crate = "curl" },
+   │                                       ━━━━ banned here
+   │
+   ├ ureq v3.5.0
+     └── craft-update v0.1.0
+         ├── gridcraft v0.19.1
+         └── gridcraft-ui-egui v0.19.1
+             ├── gridcraft v0.19.1 (*)
+             └── gridcraft-web v0.19.1
+
+bans FAILED

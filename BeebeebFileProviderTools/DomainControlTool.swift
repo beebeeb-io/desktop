@@ -103,15 +103,15 @@ struct DomainControlTool {
     }
 
     /// What the folder macOS reported holds. The same rule as `BeebeebKeptFolderState` in
-    /// src-tauri/macos/FileProviderBridge.m (spec §4, §5): it looks through the URL's own scope,
+    /// packaging/macos/FileProviderBridge.m (spec §4, §5): it looks through the URL's own scope,
     /// stops at "something is there", and never opens a file.
     enum KeptFolder {
         case notReported, missing, empty, hasEntries, unchecked, noPath
     }
 
-    /// The app's `settle_kept_state` (src-tauri/src/finder_removal.rs, re-review D1): a folder that
-    /// reads as missing is looked at again, on the same URL. The constants are the app's;
-    /// a test pins them equal.
+    /// The 0.8.x app's `settle_kept_state` (`finder_removal.rs`, tag desktop-v0.8.25, re-review D1):
+    /// a folder that reads as missing is looked at again, on the same URL. The constants are that
+    /// app's; crates/beebeeb-engine/tests/file_provider_source_pins.rs pins them.
     static let keptMissingRechecks = 4
     static let keptMissingRecheckInterval: TimeInterval = 0.25
 

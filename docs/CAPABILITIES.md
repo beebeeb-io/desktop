@@ -1,5 +1,10 @@
 # Desktop capability contract — 2026-09-29 (task 1611)
 
+> **Status 2026-11-16:** this contract describes the 0.8.x app (a React UI in a Tauri shell). Both are gone in 0.9.0
+> on every OS; the native app is `native/beebeeb-drive-rune` over the engine `crates/beebeeb-engine`. The rules
+> below that live in the engine name their file there; the React and Tauri surfaces are the 0.8.x record (tag
+> `desktop-v0.8.25`).
+
 The shipping UI is desktop-owned React (`src/main.tsx`, compact `App.tsx`, main
 `WindowsApp.tsx`). `?platform=windows` selects a layout even on a Mac; it cannot
 authorize host actions. Rust `desktop_capabilities` supplies the actual host.
@@ -60,7 +65,7 @@ schema, dependency, installer identity, or File Provider changes.
 
 ## Capability presentation ruling — 2026-09-29 polish
 
-Guus: “style it with the existing design tokens/components used on the same
+the owner: “style it with the existing design tokens/components used on the same
 page (an info/notice row inside the card system, muted body text size, consistent
 spacing), and reuse that component for every alternative-text instance across
 shells”. Sync, cache-limit and unsupported-route explanations share a neutral
@@ -94,7 +99,7 @@ and Explorer against a non-default configured root, including after a root chang
 ## Backups protection — 2026-11-06 (LD-0113 D1, D2, Amendments 6, 7, 8a)
 
 The Backups root is the folder the server flags `system_role = "backups_root"` (state.db
-`files.system_role`), never a folder found by its name. Guus, 2026-11-06: "Protect the whole
+`files.system_role`), never a folder found by its name. the owner, 2026-11-06: "Protect the whole
 tree", and (19:30) Backups are read-only, contents included. In the drive (Explorer, Finder)
 nothing at or under the root is deleted, trashed, renamed, moved or written, and nothing is moved
 into it; backups are managed in the app, and opening and downloading them stay. The rule and its
@@ -110,7 +115,7 @@ a new item, a move into the tree (core's `Create` on the folder it goes into), a
 device's manifest. A device folder's manifest (`.device.json`) is never listed: not minted in
 Explorer, not listed in Finder, quick search or the app's recent lists (core's
 `is_hidden_backup_item`). The root carries core's `MSG_BADGE`, "Read-only". The rule is
-`src-tauri/src/backup_protect.rs`.
+`crates/beebeeb-engine/src/backup_protect.rs`.
 
 | Surface | How it refuses |
 |---|---|
@@ -139,11 +144,9 @@ Repeat data-dependent rows with empty, populated, locked and failed-load fixture
 Repeated per-file/per-folder/per-session controls are one action family; exercise
 at least two distinct fixture IDs so incorrect closure binding is detectable.
 
-The standalone `windows/` directory has **0 UI files**: its three Rust sources
-are the obsolete CLI daemon/config/API, not the shipping shell. Its `--start-minimized`,
-`--sync-path`, `--server-url`, `--log-level` flags and log-only remote polling are
-**dead to the release**. Do not run that daemon for U2. Active sources are
-`src/Windows*.tsx`, `src/windows/`, shared `src/`, and `src-tauri/src/lib.rs`.
+The standalone `windows/` directory (an obsolete CLI daemon prototype, never the shipping shell) was deleted for
+0.9.0. In 0.8.x the active sources were the React `src/Windows*.tsx`, `src/windows/`, shared `src/`, and the Tauri
+shell's `lib.rs` (tag `desktop-v0.8.25`).
 
 | ID | Surface / every action family | Handler / destination | Classification and U2 assertion |
 | --- | --- | --- | --- |

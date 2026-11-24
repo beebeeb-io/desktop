@@ -1,0 +1,934 @@
+{
+ "frame": "DW-0201",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "caption-bar": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 958,
+   "h": 32,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ]
+  },
+  "cap-mark": {
+   "kind": "icon",
+   "x": 12,
+   "y": 7.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "mark": true
+  },
+  "cap-title": {
+   "kind": "text",
+   "x": 37,
+   "y": 7.5,
+   "w": 774,
+   "h": 16,
+   "text": "Beebeeb Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "cap-min": {
+   "kind": "box",
+   "x": 820,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-min-icon": {
+   "kind": "icon",
+   "x": 838,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "cap-max": {
+   "kind": "box",
+   "x": 866,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-max-icon": {
+   "kind": "icon",
+   "x": 884,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "cap-close": {
+   "kind": "box",
+   "x": 912,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-close-icon": {
+   "kind": "icon",
+   "x": 930,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "step-0-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 139.34,
+   "w": 18,
+   "h": 18,
+   "bg": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "css": {
+    "radius": "1.67772e+07px"
+   }
+  },
+  "step-0-n": {
+   "kind": "text",
+   "x": 32,
+   "y": 141.84,
+   "w": 6,
+   "h": 13,
+   "text": "1",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    251,
+    250,
+    247,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-0": {
+   "kind": "text",
+   "x": 54,
+   "y": 139.34,
+   "w": 84.64,
+   "h": 14.5,
+   "text": "Add a passkey",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-1-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 167.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.18 0.01 70 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-1-n": {
+   "kind": "text",
+   "x": 32,
+   "y": 169.84,
+   "w": 6,
+   "h": 13,
+   "text": "2",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 10,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-1": {
+   "kind": "text",
+   "x": 54,
+   "y": 167.34,
+   "w": 81.33,
+   "h": 14.5,
+   "text": "Lock Beebeeb",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-2-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 195.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.18 0.01 70 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-2-n": {
+   "kind": "text",
+   "x": 32,
+   "y": 197.84,
+   "w": 6,
+   "h": 13,
+   "text": "3",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 10,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-2": {
+   "kind": "text",
+   "x": 54,
+   "y": 195.34,
+   "w": 117.3,
+   "h": 14.5,
+   "text": "Back up your folders",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-3-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 223.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.18 0.01 70 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-3-n": {
+   "kind": "text",
+   "x": 32,
+   "y": 225.84,
+   "w": 6,
+   "h": 13,
+   "text": "4",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 10,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-3": {
+   "kind": "text",
+   "x": 54,
+   "y": 223.34,
+   "w": 144.71,
+   "h": 14.5,
+   "text": "Thumbnails and previews",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-4-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 251.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.18 0.01 70 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-4-n": {
+   "kind": "text",
+   "x": 32,
+   "y": 253.84,
+   "w": 6,
+   "h": 13,
+   "text": "5",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 10,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-4": {
+   "kind": "text",
+   "x": 54,
+   "y": 251.34,
+   "w": 137.59,
+   "h": 14.5,
+   "text": "Beebeeb in File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-5-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 279.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.18 0.01 70 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-5-n": {
+   "kind": "text",
+   "x": 32,
+   "y": 281.84,
+   "w": 6,
+   "h": 13,
+   "text": "6",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 10,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-5": {
+   "kind": "text",
+   "x": 54,
+   "y": 279.34,
+   "w": 71.58,
+   "h": 14.5,
+   "text": "Notifications",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-6-dot": {
+   "kind": "box",
+   "x": 26,
+   "y": 307.34,
+   "w": 18,
+   "h": 18,
+   "css": {
+    "radius": "1.67772e+07px",
+    "shadow": "oklch(0.18 0.01 70 / 0.18) 0px 0px 0px 1px inset"
+   }
+  },
+  "step-6-n": {
+   "kind": "text",
+   "x": 32,
+   "y": 309.84,
+   "w": 6,
+   "h": 13,
+   "text": "7",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 10,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "step-6": {
+   "kind": "text",
+   "x": 54,
+   "y": 307.34,
+   "w": 75.48,
+   "h": 14.5,
+   "text": "Open at login",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "side-status-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 596,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M20 11a8 8 0 0 0-14.5-4.5L4 8",
+    "M4 4v4h4",
+    "M4 13a8 8 0 0 0 14.5 4.5L20 16",
+    "M20 20v-4h-4"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "side-status": {
+   "kind": "text",
+   "x": 48,
+   "y": 596.5,
+   "w": 177.75,
+   "h": 13,
+   "text": "Adding Beebeeb to File Explorer…",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "skip": {
+   "kind": "text",
+   "x": 878.38,
+   "y": 48,
+   "w": 59.62,
+   "h": 15,
+   "text": "Skip setup",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px"
+  },
+  "au-side": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 300,
+   "h": 606,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "border": "0px 0.5px 0px 0px oklch(0.18 0.01 70)",
+    "pad": "28px 26px",
+    "gap": "14px"
+   }
+  },
+  "side-mark": {
+   "kind": "icon",
+   "x": 26,
+   "y": 61.17,
+   "w": 34,
+   "h": 34,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "mark": true
+  },
+  "side-word": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 60,
+   "w": 112,
+   "h": 22.23,
+   "text": "beebeeb.io",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22.2308,
+   "weight": 700,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.62,
+   "lh": "22.2308px",
+   "align": "start"
+  },
+  "side-product": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 84.84,
+   "w": 112,
+   "h": 11.5,
+   "text": "DRIVE",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 9,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 1.62,
+   "lh": "normal",
+   "align": "start"
+  },
+  "side-tagline": {
+   "kind": "text",
+   "x": 26,
+   "y": 110.34,
+   "w": 247.5,
+   "h": 15,
+   "text": "Set up Drive on this PC",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "au-main": {
+   "kind": "box",
+   "x": 300,
+   "y": 32,
+   "w": 658,
+   "h": 606,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ],
+   "css": {
+    "pad": "20px"
+   }
+  },
+  "title": {
+   "kind": "text",
+   "x": 419,
+   "y": 214,
+   "w": 420,
+   "h": 28,
+   "text": "Add a passkey",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 650,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.48,
+   "lh": "28px",
+   "align": "start"
+  },
+  "subtitle": {
+   "kind": "text",
+   "x": 419,
+   "y": 248,
+   "w": 420,
+   "h": 30,
+   "text": "Sign in and unlock your files on a new device, with no codes. It doesn't replace your 12 words, so keep those safe.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "btn-0": {
+   "kind": "box",
+   "x": 419,
+   "y": 386,
+   "w": 420,
+   "h": 32,
+   "bg": [
+    247,
+    185,
+    0,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "btn-0-label": {
+   "kind": "text",
+   "x": 583.97,
+   "y": 392.25,
+   "w": 90.05,
+   "h": 19.5,
+   "text": "Add a passkey",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    30,
+    26,
+    22,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "19.5px",
+   "align": "center"
+  },
+  "btn-1": {
+   "kind": "box",
+   "x": 419,
+   "y": 424,
+   "w": 420,
+   "h": 32,
+   "css": {
+    "radius": "6px",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "btn-1-label": {
+   "kind": "text",
+   "x": 603.32,
+   "y": 430.25,
+   "w": 51.36,
+   "h": 19.5,
+   "text": "Not now",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "19.5px",
+   "align": "center"
+  },
+  "list-0": {
+   "kind": "box",
+   "x": 419,
+   "y": 289,
+   "w": 420,
+   "h": 80,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "radius": "10px",
+    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px"
+   }
+  },
+  "item-0": {
+   "kind": "box",
+   "x": 419,
+   "y": 289,
+   "w": 420,
+   "h": 40,
+   "css": {
+    "pad": "0px 10px",
+    "gap": "8px"
+   }
+  },
+  "item-0-icon": {
+   "kind": "icon",
+   "x": 435,
+   "y": 300,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z",
+    "M9 10v1",
+    "M15 10v1",
+    "M8.8 14.6a4.6 4.6 0 0 0 6.4 0"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-0-title": {
+   "kind": "text",
+   "x": 467,
+   "y": 292.5,
+   "w": 362,
+   "h": 17,
+   "text": "Saved by Windows",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17px",
+   "align": "start"
+  },
+  "item-0-sub": {
+   "kind": "text",
+   "x": 467,
+   "y": 310.5,
+   "w": 362,
+   "h": 15,
+   "text": "In Passwords or your password manager, behind Windows Hello",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "item-1": {
+   "kind": "box",
+   "x": 419,
+   "y": 329,
+   "w": 420,
+   "h": 40,
+   "css": {
+    "pad": "0px 10px",
+    "gap": "8px"
+   }
+  },
+  "item-1-icon": {
+   "kind": "icon",
+   "x": 435,
+   "y": 340,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2zM7 11V7a5 5 0 0 1 10 0v4"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-1-title": {
+   "kind": "text",
+   "x": 467,
+   "y": 332.5,
+   "w": 362,
+   "h": 17,
+   "text": "Private",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17px",
+   "align": "start"
+  },
+  "item-1-sub": {
+   "kind": "text",
+   "x": 467,
+   "y": 350.5,
+   "w": 362,
+   "h": 15,
+   "text": "Beebeeb can't use it to open your files by itself.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  }
+ },
+ "theme": "light"
+}

@@ -1,0 +1,110 @@
+[package]
+name = "beebeeb-media-helper"
+version = "0.0.1"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "Decodes one audio or video file inside the sandbox: no key, no name, no path, no network. Bytes in by range, frames and PCM out."
+
+# Design: the media plan's (d) "Sandbox" (decision D-MED-3): every parser and decoder of a media file runs in this
+# process, started confined by `crates/beebeeb-office-sandbox`, never in the app that holds the keys.
+# Rules:
+#   - its own workspace, its own `Cargo.lock` and `deny.toml` (the closure audited on its own: `cargo deny check
+#     licenses bans sources` here; 12 MPL-2.0 exceptions, the `symphonia` 0.5.5 crates, decision D-MED-10);
+#   - dependencies: the protocol, FilmCraft, `symphonia` for a track's title and artist (D-MB2-1 (a); pinned `=0.5.5`,
+#     the version FilmCraft brings, so it adds no package: a second version would add 15 more MPL-2.0 packages), and
+#     on Windows only `windows` + `windows-core` 0.62 (Media Foundation, the system decoder of decision 2541, reached
+#     only while `MEDIA_SYSTEM_DECODER_ON` is on); nothing else;
+#   - `panic = "abort"`: a panic ends the process, and the app sees its pipe close.
+
+[lib]
+name = "beebeeb_media_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "beebeeb-media-helper"
+path = "src/main.rs"
+
+[dependencies]
+beebeeb-media-protocol = { path = "../../crates/beebeeb-media-protocol" }
+# `default-features = false`: only the codecs named in [features] below are built in.
+filmcraft-codecs = { version = "=0.9.0", default-features = false }
+filmcraft-media = { version = "=0.9.0", default-features = false }
+symphonia = { version = "=0.5.5", default-features = false, features = ["mp1", "mp2", "mp3", "flac", "wav", "aiff", "ogg", "isomp4"] }
+
+# The system decoder (decision 2541, `src/mf/`): Media Foundation through `windows` 0.62. Loaded at run time only
+# (`tests/load_time_imports.rs` holds that no media library is a load-time import). MIT OR Apache-2.0.
+[target.'cfg(windows)'.dependencies]
+# `#[implement]` expands to paths under `windows_core`, so the crate is named directly.
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Imaging",               # WIC: HEIC and RAW pictures (src/image_decode.rs), through COM only
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",   # PROPVARIANT; IMFSourceReader::SetCurrentPosition is gated on it
+    "Win32_System_Variant",                 # VT_I8; SetCurrentPosition's second gate
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell_PropertiesSystem",      # IPropertyStore; CreateObjectFromByteStream is gated on it
+] }
+
+# `tests/confined.rs`: the helper started as the app starts it, through the sandbox, in the system-decoder profile.
+# Test-only; the sandbox brings only the `windows-sys` family.
+[target.'cfg(windows)'.dev-dependencies]
+beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
+
+# The codecs decoded with FilmCraft's own decoders (decision D-MED-2; the legal brief on media codec patents,
+# 2026-11-15, finding F1). A codec whose feature is off is NOT IN THE BINARY: its crate is not linked and its call sites
+# in FilmCraft are compiled out (the Office engine's vendored copy makes each one optional), so turning a route off is
+# never what keeps it out. Two checks hold it: `deny.toml` bans every off codec's crate, and `codec-gate.sh` counts
+# them (0 each) in the dependency tree of both release targets and in the release binary, and wants the licence record
+# of every licensed codec built in (`codec-gate-test.sh` is the gate's own test).
+# - Shipped: `h264` (the owner's ruling, 2026-11-15 18:04: H.264 under the licence's free tier; the release gate wants
+#   the signed licence record before a release with it).
+# - Off and compiled out until counsel clears them: `aac`, `ac3`, `eac3`, `mpeg2` (MPEG-1/2 video), `prores`, `dnx`.
+# - No feature at all: HEVC (the system's decoder only, permanently), APV and MXF (not needed).
+[features]
+default = ["h264"]
+h264 = ["filmcraft-codecs/h264"]
+aac = ["filmcraft-codecs/aac"]
+ac3 = ["filmcraft-codecs/ac3"]
+# E-AC-3 is a module of the AC-3 crate: on, it brings AC-3 too, so its row follows the binary.
+eac3 = ["ac3", "filmcraft-codecs/eac3"]
+mpeg2 = ["filmcraft-codecs/mpeg2"]
+prores = ["filmcraft-codecs/prores"]
+dnx = ["filmcraft-codecs/dnx"]
+
+# Decision D-MED-11 (supply chain): FilmCraft's 26 crates are taken from the Office engine's repository, where they are
+# vendored at the pin as the unmodified crates.io tarballs (the rule of its subtrees), never from crates.io. A bump is
+# its own pull request there, with the diff of every crate this helper links, and then a new `rev` here.
+# `rev`: the commit with the vendored tarballs and the patches on them (the Office engine's `filmcraft/PATCHES.md`).
+[patch.crates-io]
+filmcraft-aac = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-ac3 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-apv = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-av1 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-avi = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-bitstream = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-codecs = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-color = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-dng = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-dnx = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-frame = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-h264 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-hevc = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-isobmff = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-matroska = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-media = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-mpa = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-mpeg2v = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-mpegts = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-mxf = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-ogg = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-opus = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-prores = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-time = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-vp8 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+filmcraft-vp9 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "ae093962503d1a654199ae551fb42498ed2f613f" }
+
+[profile.release]
+panic = "abort"

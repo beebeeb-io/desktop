@@ -1,0 +1,22 @@
+# Task 2477, PR 0 of the Office editor plan: can an editing surface be built on Rune as the app pins it?
+# A standalone crate, NOT a member of any workspace and not built by CI: the native app's build stays as it is.
+# The Rune line below is the native app's own (`native/beebeeb-drive-rune/Cargo.toml`): same revision, same
+# features. `Cargo.lock` started as a copy of the native app's lock, so rune, winit and arboard resolve to the
+# versions the app builds (the result doc gives the comparison).
+[package]
+name = "rune-input-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "c92e462e", default-features = false, features = ["accessibility"] }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rune-input-check"
+path = "src/main.rs"
+
+[workspace]

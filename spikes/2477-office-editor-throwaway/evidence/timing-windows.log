@@ -1,0 +1,15 @@
+[remote-build] branch head = c5657ddb067f97d8a0890c01c91d670f3be9e926
+desktop-office main at da1d639b8ac048e9c9495e3dcbd6ca5657b352af: wordcraft subtree tree=5ca7ae4aea4c80b3847de5926f87acedc61ae80c EQUALS the upstream v0.18.1 tree
+build zz-bb-wc-edit: exit=0
+build zz-bb-wc-engine: exit=0
+machine: AMD Ryzen 9 5950X 16-Core Processor, 16 logical processors
+{"engine":"wordcraft","test":"keystroke","pages":60,"keystrokes":200,"first_full_layout_ms":69.7,"snapshot_clone_ms":0.02,"edit_ms_p50":0.006,"relayout_ms_p50":2.98,"relayout_ms_p95":3.49,"relayout_ms_max":4.18,"strip_render_ms_p50":0.66,"strip_render_ms_p95":0.91,"strip_px":"794x160","full_page_render_ms":4.4,"full_page_px":"794x1123","hit_test_round_trips_ok":200,"selection_rects_nonempty":200}
+zz-bb-wc-edit keystroke: exit=0
+{"engine":"wordcraft-engine (patched)","test":"text.insert of one character, 200 times","body_blocks":299,"ms_p50":0.019,"ms_p95":0.022,"ms_max":0.214,"undo_depth":0,"one_undo_ms":0.004,"undone":true}
+zz-bb-wc-engine keystroke: exit=0
+{"engine":"wordcraft","test":"latency_through_a_helper_process","keystrokes":200,"helper_start_to_ready_ms":79,"round_trip_ms_p50":4.16,"round_trip_ms_p95":4.64,"round_trip_ms_max":4.99,"reply_bytes":508160,"killed_helper_pid":1868,"host_saw_the_dead_helper":true}
+zz-bb-wc-edit latency: exit=0
+leftovers[before-remove]: files_under_root=4459 uninstall_entries=0 vendor_registry_keys=0 firewall_rules=0 profile_or_program_dirs=0 processes_started_from_root=0
+leftovers[after-remove]: files_under_root=0 uninstall_entries=0 vendor_registry_keys=0 firewall_rules=0 profile_or_program_dirs=0 processes_started_from_root=0
+[remote-build] exit 0
+exit=0

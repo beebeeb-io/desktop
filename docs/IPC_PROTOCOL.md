@@ -1,23 +1,22 @@
 # Daemon IPC protocol (Unix socket)
 
 Task 1670 issue 3. This is the contract between the desktop daemon
-(`src-tauri/src/ipc_socket.rs`) and its socket clients: the macOS File Provider
-extension (`BeebeebFileProvider/XPCBridge.swift`) and the Rust readiness probe
-(`wait_for_file_provider_ipc_ready`). The Linux FUSE prototype (`src-tauri/src/linux_fuse`)
-does not use this socket. Unix sockets do not exist on Windows, where Cloud Files runs
+(`crates/beebeeb-engine/src/ipc_socket.rs`) and its socket client: the macOS File Provider
+extension (`BeebeebFileProvider/XPCBridge.swift`). The 0.8.x Tauri shell also had a Rust
+readiness probe (`wait_for_file_provider_ipc_ready`); it went with that shell. The Linux FUSE
+prototype (`crates/beebeeb-engine/src/linux_fuse`) does not use this socket. Unix sockets do not exist on Windows, where Cloud Files runs
 in-process.
 
 Implementations that must stay in step:
 
 | Half | File |
 | --- | --- |
-| Rust framing | `src-tauri/src/ipc_frame.rs` |
-| Rust server | `src-tauri/src/ipc_socket.rs` (`handle_connection`, `hydrate_over_ipc`) |
+| Rust framing | `crates/beebeeb-engine/src/ipc_frame.rs` |
+| Rust server | `crates/beebeeb-engine/src/ipc_socket.rs` and `ipc_socket/` (`handle_connection` in `server.rs`, `hydrate_over_ipc` in `hydrate.rs`) |
 | Swift framing + exchange | `BeebeebFileProvider/IPCFraming.swift` |
 | Swift caller | `BeebeebFileProvider/XPCBridge.swift` |
-| Write-queue idempotency (Rust) | `src-tauri/src/ipc_write_dedup.rs` (table), `dedup_write` in `ipc_socket.rs` |
+| Write-queue idempotency (Rust) | `crates/beebeeb-engine/src/ipc_write_dedup.rs` (table), `dedup_write` in `ipc_socket/write_path.rs` |
 | Write-queue idempotency (Swift) | `IPCWriteKey` / `IPCWriteRequest` in `BeebeebFileProvider/IPCFraming.swift` |
-| Readiness probe (Rust client) | `wait_for_file_provider_ipc_ready` in `src-tauri/src/lib.rs` |
 
 ## Framing
 
@@ -807,7 +806,8 @@ path, a file name or an error's text is never logged. ~~`extension_log_pin`
 (`src-tauri/src`) fails on any other log call in the extension and on a public
 value outside that set.~~ — lead, 2026-10-11 (device fix round)
 
-What the pin checks, exactly: `extension_log_pin` (`src-tauri/src`) reads every
+What the pin checks, exactly: `extension_log_pin` (0.8.x; ported to
+`crates/beebeeb-engine/tests/file_provider_source_pins.rs`, module `extension_log`) reads every
 `BeebeebFileProvider/*.swift`, skipping lines that begin with `//`, and fails
 when: any file calls `NSLog`, `NSLogv`, `os_log`, `print` or `debugPrint`, bare
 or qualified by a module (`Foundation.`, `Swift.`, `os.`, `OSLog.`); a file

@@ -23,7 +23,7 @@
 
 set -uo pipefail
 
-EXPECTED_CHECKS=46
+EXPECTED_CHECKS=55
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUT="${BB_BLOCKER_CHECK_SUT:-$HERE/release-blockers-check.sh}"
@@ -217,6 +217,39 @@ check "arg-val proof: passall exits 0 for no-platform  (check_fails would FAIL)"
 check "arg-val proof: passall exits 0 for extra-args   (check_fails would FAIL)" \
   bash "$SUT" macos extra
 SUT="$OLD_SUT"
+
+# ---------------------------------------------------------------- 13. compare with main (LD-0014)
+# A release branch could delete a blocker that main still lists. With RELEASE_BLOCKERS_MAIN_REF set,
+# an item that main's file has and the branch's file lacks binds too, printed as "main: <item>".
+echo "== case: items of main missing from the release branch's file (LD-0014) =="
+MAINREPO="$TMP/mainrepo"
+git init -q -b main "$MAINREPO"
+git -C "$MAINREPO" config user.name t
+git -C "$MAINREPO" config user.email t@example.invalid
+printf '# Release blockers\n\n- [macOS] Item A\n- Item B\n' >"$MAINREPO/RELEASE_BLOCKERS.md"
+git -C "$MAINREPO" add RELEASE_BLOCKERS.md
+git -C "$MAINREPO" commit -q -m main
+printf '# Release blockers\n\n' >"$TMP/dropped_all.md"
+printf '# Release blockers\n\n- [macOS] Item A\n' >"$TMP/dropped_b.md"
+printf '# Release blockers\n\n- Item B\n' >"$TMP/dropped_a.md"
+printf '# Release blockers\n\n  * Item B\n- [macOS] Item A\n' >"$TMP/kept_all.md"
+run_vs_main() {  # <platform> <file> [ref]
+  (cd "$MAINREPO" && RELEASE_BLOCKERS_MAIN_REF="${3:-main}" RELEASE_BLOCKERS_FILE="$2" "$SUT" "$1")
+}
+check_fails "vs main: branch dropped every item -> windows refuses" run_vs_main windows "$TMP/dropped_all.md"
+check_fails "vs main: branch dropped every item -> macos refuses"   run_vs_main macos   "$TMP/dropped_all.md"
+check_fails "vs main: dropped unscoped Item B -> linux refuses"      run_vs_main linux   "$TMP/dropped_b.md"
+check "vs main: dropped macOS-scoped item only -> windows passes (Item B kept, fails only via its own binding)" \
+  bash -c '! (cd "$0" && RELEASE_BLOCKERS_MAIN_REF=main RELEASE_BLOCKERS_FILE="$1" "$2" windows | grep -q "^main: ")' "$MAINREPO" "$TMP/dropped_a.md" "$SUT"
+check_fails "vs main: nothing dropped (bullet style differs): still refuses via branch's own item, no main: line" \
+  bash -c '(cd "$0" && RELEASE_BLOCKERS_MAIN_REF=main RELEASE_BLOCKERS_FILE="$1" "$2" linux | grep -q "^main: ")' "$MAINREPO" "$TMP/kept_all.md" "$SUT"
+check "vs main: absent branch file, only macOS item scope: windows still refused by Item B" \
+  bash -c '! (cd "$0" && RELEASE_BLOCKERS_MAIN_REF=main RELEASE_BLOCKERS_FILE=absent.md "$1" windows)' "$MAINREPO" "$SUT"
+check "vs main: output names the dropped item with a main: prefix" \
+  bash -c 'run_out() { (cd "$1" && RELEASE_BLOCKERS_MAIN_REF=main RELEASE_BLOCKERS_FILE="$2" "$3" windows 2>&1) || true; }; run_out "$@" | grep -qF "main: - Item B"' _ "$MAINREPO" "$TMP/dropped_all.md" "$SUT"
+check_fails "vs main: unresolvable main ref fails closed" run_vs_main windows "$TMP/kept_all.md" no-such-ref
+check "no env var: behaviour unchanged (dropped file passes)" \
+  bash -c 'RELEASE_BLOCKERS_FILE="$1" "$2" windows' _ "$TMP/dropped_all.md" "$SUT"
 
 # ---------------------------------------------------------------- final count (real script)
 printf '\nrelease-blockers-check: %d passed, %d failed\n' "$PASS" "$FAIL"

@@ -1,0 +1,16 @@
+# THROWAWAY (task 2477 editor spike). Copied by run.sh into <wordcraft>/crates/zz-bb-wc-edit and built THERE,
+# inside the upstream workspace, so the upstream Cargo.lock decides every version.
+# It links WordCraft BELOW wordcraft-engine: model + edit operations, both readers, the writer, layout, render.
+[package]
+name = "zz-bb-wc-edit"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wordcraft-geom = { workspace = true }
+wordcraft-doc = { workspace = true }
+wordcraft-docx = { workspace = true }
+wordcraft-docbin = { workspace = true }
+wordcraft-layout = { workspace = true }
+wordcraft-render = { workspace = true }

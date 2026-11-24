@@ -1,125 +1,158 @@
 name: Desktop CI
 
-# Every PR and every push to main is built and tested on all three desktop
-# targets. Before this workflow the only CI was release.yml (workflow_dispatch),
-# so the Windows/Linux `#[cfg(...)]` code paths (windows_cf, linux_fuse, the
-# Windows Credential Manager store) were first compiled at release time.
+# Every PR and every push to a base branch builds and tests the desktop's Rust: the engine crate
+# (crates/beebeeb-engine) on Linux, Windows and macOS, the native Rune app (native/beebeeb-drive-rune: tests on
+# Linux, a build on Windows), the updater and the Office sandbox crates, the File Provider extension's Swift, and the
+# release scripts.
 #
 # Job names are stable on purpose: branch protection requires them by name.
+#
+# The Tauri app is gone in 0.9.0 on every OS (decision 2537), and with it its three suites ("Rust test (Linux)",
+# "Rust check (Windows)", "Rust check (macOS)"). The job "Frontend (bun test + tsc + eslint)" was removed for 0.9.0
+# by owner ruling 2026-11-12: the app has no web view. The two core pin steps that job also ran are Rust checks, not
+# React ones: they run in "Changed areas".
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [main]
+    # The long-lived base branches: a push there runs every job (the classifier below runs every area on a push).
+    branches: [main, v2-next, v2-native]
 
 permissions:
   contents: read
 
 concurrency:
   group: desktop-ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # PRs: a new push cancels the older run on the same PR.
+  # Pushes to v2-native / v2-next: a newer merge commit's run replaces an older queued one (the
+  # old run tested a commit that is already behind HEAD, so only the latest matters).
+  # Pushes to main: cancel-in-progress stays false (every merge there is verified independently).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main') }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  frontend:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    name: Frontend (bun test + tsc + eslint)
+  # Which areas the change touches (scripts/ci-changed-areas.py; it fails open). A pull request that changes only
+  # docs, design files or the native UI crates does not run the macOS-specific jobs ("File Provider Swift (macOS)",
+  # "Engine crate test (macOS)"): they are then SKIPPED, and a skipped job satisfies a required check, so the job
+  # names below still report. A push runs everything.
+  changes:
+    name: Changed areas
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
+    outputs:
+      macos: ${{ steps.areas.outputs.macos }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
+          # A pull request is checked out as its merge commit: parent 1 is the base, so two commits hold the diff.
+          fetch-depth: 2
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: No internal infra names
+        run: bash scripts/check-infra-names.sh
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - name: Classifier self-test
+        run: python3 scripts/ci-changed-areas.py --self-test
 
-      - name: Run frontend tests
-        run: bun test
-
-      - name: Typecheck
-        run: bunx tsc --noEmit -p .
-
-      - name: Lint
-        run: bun run lint
-
-  rust-linux:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    name: Rust test (Linux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-        with:
-          persist-credentials: false
-
-      - name: Install Linux dependencies
+      - name: Classify the changed paths
+        id: areas
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libfuse2 \
-            libfuse-dev
+          list="$RUNNER_TEMP/changed-paths.txt"
+          : > "$list"
+          # Only a pull request's merge commit (two parents) gives a trustworthy list; anything else leaves the
+          # list empty, and an empty list runs every area.
+          if [ "$EVENT_NAME" = pull_request ] && git rev-parse -q --verify HEAD^2 >/dev/null; then
+            # --no-renames: a file moved out of a relevant path into docs/ must be listed under its old path too.
+            git diff --name-only --no-renames HEAD^1 HEAD > "$list" || : > "$list"
+          fi
+          echo "changed paths: $(wc -l < "$list")"
+          python3 scripts/ci-changed-areas.py "$list" | tee -a "$GITHUB_OUTPUT"
+
+      # Moved here from the removed Frontend job (see the top of this file): this job runs on every event and
+      # needs no toolchain. After the classifier, so a failing pin never leaves `macos` unset.
+      - name: Core pin check self-test
+        run: sh scripts/check-core-pin.sh --self-test
+
+      - name: Core pin check (the engine crate and the native app pin the same core rev)
+        run: sh scripts/check-core-pin.sh
+
+  # The native updater (crates/beebeeb-updater): its rules decide what an install will run, so a pull request that
+  # weakens one fails here, not at the next release. The count line is asserted: a run without tests is a failure.
+  updater:
+    name: Updater crate (tests, Windows check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
-          workspaces: src-tauri
+          targets: x86_64-pc-windows-msvc
+          components: clippy
 
-      - name: Test count guard self-test
-        run: python scripts/assert-cargo-test-counts.py --self-test
-
-      - name: Run Rust tests
-        working-directory: src-tauri
-        env:
-          # Keep the app's config/lock files out of the runner's real home.
-          XDG_CONFIG_HOME: ${{ runner.temp }}/beebeeb-xdg-config
-          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+      - name: Test, lint and cross-check
+        working-directory: crates/beebeeb-updater
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
+          cargo test --locked --features net 2>&1 | tee "$RUNNER_TEMP/updater-test.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/updater-test.log"
+          cargo clippy --locked --all-targets --features net -- -D warnings
+          cargo check --locked --features net --target x86_64-pc-windows-msvc
+          test "$(cargo tree --locked -e normal --features net | grep -c tauri)" -eq 0
+
+      # The Office sandbox crate away from Windows: it must compile, lint clean for both targets, and refuse to
+      # start anything (no sandbox module, no helper). Counted like the Windows run.
+      - name: Office sandbox crate (fail closed, lint, Windows cross-check)
+        working-directory: crates/beebeeb-office-sandbox
+        shell: bash
+        run: |
+          set -uo pipefail
           cargo_exit=0
-          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
-          cat "$RUNNER_TEMP/cargo-test.log"
-          echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
-          python ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/office-sandbox-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/office-sandbox-test.log"
+          python3 ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/office-sandbox-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_office_sandbox- --expect deps/sandbox-
+          set -e
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+          test "$(cargo tree --locked -e normal --prefix none --target x86_64-pc-windows-msvc | sort -u | wc -l)" -eq 3
 
-      - name: Upload Rust test evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: rust-test-linux
-          path: |
-            ${{ runner.temp }}/cargo-test.log
-            ${{ runner.temp }}/cargo-test.exit
+      # The messages between the app and the Office helper (crates/beebeeb-office-protocol). Counted like the
+      # sandbox crate: the library's tests must be in the log, at or above their floor; and it lints clean.
+      - name: Office protocol crate
+        working-directory: crates/beebeeb-office-protocol
+        shell: bash
+        run: |
+          set -uo pipefail
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/office-protocol-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/office-protocol-test.log"
+          python3 ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/office-protocol-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_office_protocol-
+          set -e
+          cargo clippy --locked --all-targets -- -D warnings
 
-  rust-check:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    name: Rust check (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows
-            os: windows-latest
-          - name: macOS
-            os: macos-latest
+      - name: Release script self-tests
+        run: |
+          set -euo pipefail
+          bash scripts/publish-release-files.sh --self-test
+          bash scripts/native-release-ref-check.sh --self-test
+
+  # The updater's Windows-only rules (the staged installer is held so that nothing can replace it between the check
+  # and the start) exist only under cfg(windows): they are tested where they exist. Each test is named, so a run in
+  # which they were filtered out or compiled away is a failure. A hosted runner, no secret, no environment.
+  updater-windows:
+    name: Updater crate (Windows-only tests)
+    runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -129,90 +162,44 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
-        with:
-          workspaces: src-tauri
-
-      - name: Test count guard self-test
-        if: runner.os == 'Windows' || runner.os == 'macOS'
+      - name: Test on Windows
+        working-directory: crates/beebeeb-updater
         shell: bash
         run: |
-          # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
-          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
-          "$py" scripts/assert-cargo-test-counts.py --self-test
+          set -euo pipefail
+          cargo test --locked --features net 2>&1 | tee "$RUNNER_TEMP/updater-test-windows.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/updater-test-windows.log"
+          for name in \
+            'host::tests::a_held_installer_cannot_be_written_replaced_renamed_or_deleted' \
+            'machine_tests::the_staged_file_cannot_be_replaced_between_the_check_and_the_start'; do
+            grep -Fxq "test $name ... ok" "$RUNNER_TEMP/updater-test-windows.log" || { echo "::error::$name did not run"; exit 1; }
+          done
 
-      - name: Flaky-test retry self-test (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: bash scripts/ci-retry-flaky-tests.sh --self-test
-
-      - name: Cargo check
-        working-directory: src-tauri
+      # The Office helper's sandbox (crates/beebeeb-office-sandbox). Each claim runs the same probe plainly (must
+      # succeed) and confined (must be refused with the pinned code). Counted: the library and the native test
+      # binary must both be in the log, at or above their floors (scripts/cargo-test-floors.txt); the crate
+      # links itself and the two `windows-sys` packages, nothing else.
+      - name: Office sandbox tests on Windows
+        working-directory: crates/beebeeb-office-sandbox
         shell: bash
         run: |
-          check_exit=0
-          CARGO_TERM_COLOR=never cargo check --locked --all-targets > "$RUNNER_TEMP/cargo-check.log" 2>&1 || check_exit=$?
-          cat "$RUNNER_TEMP/cargo-check.log"
-          echo "$check_exit" > "$RUNNER_TEMP/cargo-check.exit"
-          exit "$check_exit"
-
-      # Task 2272 / 2271: macOS runs the tests too, not only `cargo check`. The 0.8.18 release found a macOS-only test
-      # failure on the maintainer's Mac that this job would have caught.
-      - name: Run Rust tests
-        if: runner.os == 'Windows' || runner.os == 'macOS'
-        working-directory: src-tauri
-        shell: bash
-        env:
-          # Config/cache live in the disposable runner's profile (Windows Known Folders, macOS
-          # ~/Library); keep temporary test files in their own directory. TEMP/TMP are Windows',
-          # TMPDIR is macOS'.
-          TEMP: ${{ runner.temp }}/beebeeb-tmp
-          TMP: ${{ runner.temp }}/beebeeb-tmp
-          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
-        run: |
-          mkdir -p "$TEMP"
+          set -uo pipefail
           cargo_exit=0
-          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/cargo-test.log" 2>&1 || cargo_exit=$?
-          cat "$RUNNER_TEMP/cargo-test.log"
-          echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
-          # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
-          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
-
-          # Task 2448: on Windows, retry listed flaky Cloud Files tests before the count guard.
-          retried_ok=""
-          if [ "$cargo_exit" -ne 0 ] && [ "$RUNNER_OS" = Windows ]; then
-            retry_exit=0
-            bash ../scripts/ci-retry-flaky-tests.sh "$RUNNER_TEMP/cargo-test.log" \
-              ../scripts/ci-flaky-windows-cf-tests.txt \
-              --crate-dir . --summary "${GITHUB_STEP_SUMMARY:-/dev/null}" || retry_exit=$?
-            if [ "$retry_exit" -eq 0 ]; then
-              echo "ci-retry: all failures passed on retry."
-              retried_ok="--retried-ok"
-            fi
-          fi
-
-          "$py" ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit" $retried_ok
-
-      - name: Upload Rust evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: rust-${{ matrix.name }}
-          path: |
-            ${{ runner.temp }}/cargo-check.log
-            ${{ runner.temp }}/cargo-check.exit
-            ${{ runner.temp }}/cargo-test.log
-            ${{ runner.temp }}/cargo-test.exit
+          CARGO_TERM_COLOR=never cargo test --locked -- --test-threads=1 > "$RUNNER_TEMP/office-sandbox-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/office-sandbox-test.log"
+          set -e
+          python ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/office-sandbox-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_office_sandbox- --expect deps/sandbox-
+          test "$(cargo tree --locked -e normal --prefix none | sort -u | wc -l)" -eq 3
 
   fileprovider-swift:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     # Task 1670 issue 3: until this job existed, NO CI step compiled the File
-    # Provider extension's Swift (rust-check only runs `cargo check`; the
+    # Provider extension's Swift (the Rust jobs compile no Swift; the
     # extension was first built at release time, on a developer's Mac). It now
     # compiles on every PR, unsigned and without secrets, and runs the pure
     # Foundation framing tests with a COUNTED truth line.
     name: File Provider Swift (macOS)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.macos != 'false' }}
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -268,16 +255,14 @@ jobs:
             ${{ runner.temp }}/ipc-framing-tests/run.exit
             ${{ runner.temp }}/fileprovider-build.log
 
-  release-script:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    # scripts/release-macos-local.sh is the ONE command Guus runs on a Mac to turn the
-    # CI-created desktop-v<VERSION> release into a macOS release (notarize, staple,
-    # rebuild the dmg from the stapled app, upload, sign, backfill the manifest). It
-    # cannot run here, but its ORDER and its fail-closed gates can: the test puts shims
-    # for xcrun/codesign/spctl/hdiutil/ditto/plutil/gh/bunx on PATH and runs the real
-    # script against a throwaway repo. The truth line is a count
-    # ("release-macos-local: N passed, 0 failed"), guarded by a self-test that goes red.
-    name: macOS release script (shim test)
+  release-blockers:
+    # scripts/release-blockers-check.sh is a release gate (release-native-windows.yml: "Refuse while
+    # RELEASE_BLOCKERS.md lists a Windows item"): it exits non-zero while RELEASE_BLOCKERS.md lists an item that
+    # binds the platform. The test runs the real checker on throwaway lists; the truth line is a count, and the
+    # self-test proves the count guard can go red. Until 0.9.0 this job was "macOS release script (shim test)" and
+    # also tested the Tauri macOS release script; that script went with the Tauri app (decision 2537), and its steps
+    # are carried in native/beebeeb-drive-rune/docs/macos/packaging-signing-update.md.
+    name: Release blockers checker
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -290,10 +275,6 @@ jobs:
         run: |
           shellcheck --version
           shellcheck -S warning -x \
-            scripts/release-macos-local.sh \
-            scripts/test-release-macos-local.sh \
-            scripts/fixtures/release-macos-shim.sh \
-            scripts/macos-release-preflight.sh \
             scripts/release-blockers-check.sh \
             scripts/test-release-blockers-check.sh
 
@@ -312,71 +293,8 @@ jobs:
           name: blocker-check-test
           path: ${{ runner.temp }}/blocker-check-test.log
 
-      - name: Count guard self-test
-        run: bash scripts/test-release-macos-local.sh --self-test
-
-      - name: Release script test (shims, real script)
-        run: |
-          set -o pipefail
-          bash scripts/test-release-macos-local.sh 2>&1 | tee "$RUNNER_TEMP/release-script-test.log"
-
-      - name: Upload release script test evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-script-test
-          path: ${{ runner.temp }}/release-script-test.log
-
-  release-manifest:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    # release.yml's "Generate desktop channel manifest" step writes the alpha/beta/stable
-    # manifests every installed app updates from. The test runs that step's own run: block
-    # against fixture releases with a fake gh on PATH (no network), and proves it fails closed:
-    # a half-present macOS release, a missing or empty signature, or a download that keeps
-    # failing writes no manifest. The truth line is a count
-    # ("release-channel-manifest: N passed, 0 failed"), asserted on the run's own log by the
-    # same count guard its self-test proves can go red. A red run prints each failing
-    # scenario's step output and call log.
-    name: Release channel manifest (fake gh test)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-        with:
-          persist-credentials: false
-
-      - name: shellcheck (warnings and above)
-        run: |
-          shellcheck --version
-          shellcheck -S warning -x \
-            scripts/test-release-channel-manifest.sh \
-            scripts/fixtures/release-manifest-fake-gh.sh
-          bash scripts/test-release-channel-manifest.sh --print-step > "$RUNNER_TEMP/manifest-step.sh"
-          test -s "$RUNNER_TEMP/manifest-step.sh"
-          shellcheck -s bash -S warning "$RUNNER_TEMP/manifest-step.sh"
-
-      - name: Count guard self-test
-        run: bash scripts/test-release-channel-manifest.sh --self-test
-
-      - name: Manifest step test (fake gh, real step)
-        run: |
-          set -o pipefail
-          bash scripts/test-release-channel-manifest.sh 2>&1 | tee "$RUNNER_TEMP/release-manifest-test.log"
-
-      - name: Count guard on the run's own log
-        run: bash scripts/test-release-channel-manifest.sh --assert-log "$RUNNER_TEMP/release-manifest-test.log"
-
-      - name: Upload manifest step test evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-manifest-test
-          path: ${{ runner.temp }}/release-manifest-test.log
-
   release-branch-point:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    # release.yml's `verify-branch-point` job refuses a release/* branch whose starting commit
+    # release-native-windows.yml's `verify-branch-point` job refuses a release/* branch whose starting commit
     # was never reviewed (task 2281): the branch must start at a commit on main or at the commit
     # of a published desktop-v* tag that is itself a pull request merge into main or a release/*
     # branch, and every first-parent commit since then must be a pull request merged
@@ -423,26 +341,359 @@ jobs:
           name: release-branch-point-test
           path: ${{ runner.temp }}/release-branch-point-test.log
 
-  release-workflow-ifs:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    # Pins the if: conditions on the `release` and `publish-manifest` jobs in release.yml so
-    # neither can be silently skipped after a successful `build` on a workflow_dispatch from
-    # main (task 2458, run 43141563099: verify-branch-point is skipped for a dispatch from
-    # main; without an explicit status function the implicit success() evaluated the entire
-    # transitive dependency chain and skipped `release` even though build succeeded).
-    # The truth line is a count ("release-workflow-ifs: N passed, 0 failed"), and the
-    # self-test proves the count guard can go red.
-    name: Release workflow if-condition pin
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  # ── The engine crate and the native Rune app (PR #280) ────────────────────────────────────────────────────────
+  # The desktop's Rust suites: `crates/beebeeb-engine` (the engine, every rule the app runs) and
+  # `native/beebeeb-drive-rune` (the native app). Since the Tauri app went (decision 2537) these are the only jobs
+  # that run the engine's and the app's tests.
+
+  # macOS is a separate job (engine-crate-macos below): a skipped matrix job reports under its
+  # unexpanded name, leaving the required "Engine crate test (macOS)" check waiting for ever;
+  # a standalone job reports SKIPPED under its literal name, which satisfies the required check.
+  engine-crate:
+    name: Engine crate test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    # 60, not 30: the Windows job's full test run took 28 minutes on a clean re-run, so a 30-minute limit cancels it
+    # on a slower runner. Raised rather than split so the one required check keeps its name.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: Windows
+            os: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           persist-credentials: false
 
-      - name: Count guard self-test
-        run: python3 scripts/test-release-workflow-ifs.py --self-test
+      # The running engine moved in (step 2): its Linux mount links libfuse.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2 libfuse-dev pkg-config
 
-      - name: Release workflow if-condition check
-        run: python3 scripts/test-release-workflow-ifs.py
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          workspaces: crates/beebeeb-engine
+
+      - name: Test count guard self-test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          "$py" scripts/assert-cargo-test-counts.py --self-test
+
+      # Every target of the crate is one the test run compiles: a bench target or an unknown kind fails here, and a
+      # crate with no target is a failure, not a pass (the guard prints the count per kind).
+      - name: Every target is covered by the test build
+        working-directory: crates/beebeeb-engine
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/engine-metadata.json"
+          "$py" ../../scripts/assert-test-build-covers-all-targets.py "$RUNNER_TEMP/engine-metadata.json"
+
+      - name: Flaky-test retry self-test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/ci-retry-flaky-tests.sh --self-test
+
+      # The engine's OS-gated code (Windows Cloud Files rows, the macOS release journal) compiles and runs here on
+      # its own OS; the shell's tests reach it only with the `test-support` feature on.
+      - name: Run the engine crate's tests
+        working-directory: crates/beebeeb-engine
+        shell: bash
+        env:
+          TEMP: ${{ runner.temp }}/beebeeb-tmp
+          TMP: ${{ runner.temp }}/beebeeb-tmp
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/engine-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/engine-test.log"
+          echo "$cargo_exit" > "$RUNNER_TEMP/engine-test.exit"
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+
+          # Task 2448: on Windows, retry listed flaky Cloud Files tests before the count guard.
+          retried_ok=""
+          if [ "$cargo_exit" -ne 0 ] && [ "$RUNNER_OS" = Windows ]; then
+            retry_exit=0
+            bash ../../scripts/ci-retry-flaky-tests.sh "$RUNNER_TEMP/engine-test.log" \
+              ../../scripts/ci-flaky-windows-cf-tests.txt \
+              --crate-dir . --summary "${GITHUB_STEP_SUMMARY:-/dev/null}" || retry_exit=$?
+            if [ "$retry_exit" -eq 0 ]; then
+              echo "ci-retry: all failures passed on retry."
+              retried_ok="--retried-ok"
+            fi
+          fi
+
+          # The library binary must be in the log and at or above its floor (scripts/cargo-test-floors.txt).
+          "$py" ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/engine-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_engine- $retried_ok
+
+      - name: Release build of the engine (Linux)
+        if: runner.os == 'Linux'
+        working-directory: crates/beebeeb-engine
+        run: cargo build --locked --release
+
+      - name: Clippy, zero warnings
+        working-directory: crates/beebeeb-engine
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Upload engine test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engine-test-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/engine-test.log
+            ${{ runner.temp }}/engine-test.exit
+
+  engine-crate-macos:
+    name: Engine crate test (macOS)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.macos != 'false' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          workspaces: crates/beebeeb-engine
+
+      - name: Test count guard self-test
+        run: python3 scripts/assert-cargo-test-counts.py --self-test
+
+      - name: Run the engine crate's tests
+        working-directory: crates/beebeeb-engine
+        env:
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/engine-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/engine-test.log"
+          echo "$cargo_exit" > "$RUNNER_TEMP/engine-test.exit"
+          python3 ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/engine-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_engine-
+
+      - name: Upload engine test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engine-test-macOS
+          path: |
+            ${{ runner.temp }}/engine-test.log
+            ${{ runner.temp }}/engine-test.exit
+
+  engine-boundary:
+    name: Engine boundary (no tauri, test-support dev-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      # 1.99.1: the native crate's lock and manifests need it; it reads the other two as well.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.99.1
+
+      # From cargo's dependency graph only (no build): `cargo tree -p beebeeb-engine | grep -c tauri` is 0, and the
+      # engine's test-support feature is on no normal or build edge of the native app.
+      - name: Engine boundary check
+        run: sh scripts/check-engine-boundary.sh
+
+      # A release build with the test helpers on does not compile (`compile_error!` in the engine's lib.rs).
+      - name: test-support refuses a release build
+        working-directory: crates/beebeeb-engine
+        run: |
+          if cargo check --locked --release --features test-support > "$RUNNER_TEMP/release-test-support.log" 2>&1; then
+            echo "a release build with test-support compiled"; exit 1
+          fi
+          grep -q "test-support is for tests only" "$RUNNER_TEMP/release-test-support.log" || { cat "$RUNNER_TEMP/release-test-support.log"; echo "it failed for another reason"; exit 1; }
+          echo "refused: $(grep -c 'test-support is for tests only' "$RUNNER_TEMP/release-test-support.log") compile_error line(s)"
+
+  native-rune:
+    name: Native Rune app (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux test
+            os: ubuntu-latest
+          - name: Windows build
+            os: windows-latest
+          - name: macOS check
+            os: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      # Headless rendering needs a Vulkan driver: Mesa's software one (lavapipe). There is no GPU on the runner, so
+      # a test that renders and finds no adapter fails; none is skipped for it.
+      - name: Install Linux dependencies (software Vulkan, window system headers)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libfontconfig1-dev pkg-config libfuse2 libfuse-dev
+
+      # Rune needs 1.99.1 (native/beebeeb-drive-rune/Cargo.toml).
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.99.1
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          workspaces: native/beebeeb-drive-rune
+
+      - name: Clippy, zero warnings
+        if: runner.os != 'macOS'
+        working-directory: native/beebeeb-drive-rune
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Every target is covered by the test build
+        working-directory: native/beebeeb-drive-rune
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/native-metadata.json"
+          "$py" ../../scripts/assert-test-build-covers-all-targets.py "$RUNNER_TEMP/native-metadata.json"
+
+      - name: Run the native app's tests (Linux)
+        if: runner.os == 'Linux'
+        working-directory: native/beebeeb-drive-rune
+        env:
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/native-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/native-test.log"
+          echo "$cargo_exit" > "$RUNNER_TEMP/native-test.exit"
+          # The crate has no library: its one test binary is named, must be in the log, and has a floor.
+          python3 ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/native-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_drive-
+
+      # The app binary itself, built as each identity: exactly one identity mark, the build's own; and the checker
+      # refuses the other app's name (it is seen to fail). An unnamed build is the test app.
+      - name: Each identity's binary carries exactly one identity mark (Linux)
+        if: runner.os == 'Linux'
+        working-directory: native/beebeeb-drive-rune
+        run: |
+          set -euo pipefail
+          cargo build --locked
+          bash ../../scripts/native-identity-mark.sh target/debug/beebeeb-drive io.beebeeb.app.test
+          if bash ../../scripts/native-identity-mark.sh target/debug/beebeeb-drive io.beebeeb.app; then
+            echo "::error::the checker accepted a test build as the real app"; exit 1
+          fi
+          BEEBEEB_APP_IDENTIFIER=io.beebeeb.app cargo build --locked
+          bash ../../scripts/native-identity-mark.sh target/debug/beebeeb-drive io.beebeeb.app
+          if bash ../../scripts/native-identity-mark.sh target/debug/beebeeb-drive io.beebeeb.app.test; then
+            echo "::error::the checker accepted the real app as a test build"; exit 1
+          fi
+
+      # macOS: the crate must compile with every target (tests included). Its tests that open an Engine are
+      # refused on macOS under the test identity unless the macos-test-engine dev feature is on (dc-084, in).
+      - name: Check the native app (macOS)
+        if: runner.os == 'macOS'
+        working-directory: native/beebeeb-drive-rune
+        run: cargo check --locked --all-targets
+
+      - name: Run the native app's tests (macOS)
+        if: runner.os == 'macOS'
+        working-directory: native/beebeeb-drive-rune
+        env:
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          cargo test --locked
+
+      # A non-test release build of what ships: the app and, through its path dependency, the engine.
+      - name: Release build of the native app (Linux)
+        if: runner.os == 'Linux'
+        working-directory: native/beebeeb-drive-rune
+        run: cargo build --locked --release
+
+      - name: Build the native app (Windows)
+        if: runner.os == 'Windows'
+        working-directory: native/beebeeb-drive-rune
+        shell: bash
+        run: |
+          build_exit=0
+          CARGO_TERM_COLOR=never cargo build --locked > "$RUNNER_TEMP/native-build.log" 2>&1 || build_exit=$?
+          cat "$RUNNER_TEMP/native-build.log"
+          [ "$build_exit" -eq 0 ] || exit "$build_exit"
+          ls -l "${CARGO_TARGET_DIR:-target}/debug/beebeeb-drive.exe"
+
+      - name: Upload native evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-rune-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/native-test.log
+            ${{ runner.temp }}/native-test.exit
+            ${{ runner.temp }}/native-build.log
+          if-no-files-found: ignore
+
+  # The two helper binaries the Windows release builds (release-native-windows.yml). Their Windows-only code is
+  # cfg-gated, so their tests run on Linux; the run must pass and run at least one test.
+  native-helpers:
+    name: Native helpers (${{ matrix.crate }} tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [beebeeb-media-helper, beebeeb-office-render]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          workspaces: native/${{ matrix.crate }}
+
+      - name: Run the tests
+        working-directory: native/${{ matrix.crate }}
+        run: |
+          set -uo pipefail
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/helper-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/helper-test.log"
+          # Not the count guard: it wants every test binary to run tests, and the Windows-only ones are empty here.
+          [ "$cargo_exit" -eq 0 ] || exit "$cargo_exit"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/helper-test.log"

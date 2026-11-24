@@ -1,0 +1,799 @@
+{
+ "frame": "DW-A45",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "caption-bar": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 958,
+   "h": 32,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ]
+  },
+  "cap-mark": {
+   "kind": "icon",
+   "x": 12,
+   "y": 7.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "mark": true
+  },
+  "cap-title": {
+   "kind": "text",
+   "x": 37,
+   "y": 7.5,
+   "w": 774,
+   "h": 16,
+   "text": "Beebeeb Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "cap-min": {
+   "kind": "box",
+   "x": 820,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-min-icon": {
+   "kind": "icon",
+   "x": 838,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "cap-max": {
+   "kind": "box",
+   "x": 866,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-max-icon": {
+   "kind": "icon",
+   "x": 884,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "cap-close": {
+   "kind": "box",
+   "x": 912,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-close-icon": {
+   "kind": "icon",
+   "x": 930,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "au-side": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 320,
+   "h": 606,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "border": "0px 0.5px 0px 0px oklch(0.18 0.01 70)",
+    "pad": "28px 26px",
+    "gap": "14px"
+   }
+  },
+  "side-mark": {
+   "kind": "icon",
+   "x": 26,
+   "y": 61.17,
+   "w": 34,
+   "h": 34,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "mark": true
+  },
+  "side-word": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 60,
+   "w": 112,
+   "h": 22.23,
+   "text": "beebeeb.io",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22.2308,
+   "weight": 700,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.62,
+   "lh": "22.2308px",
+   "align": "start"
+  },
+  "side-product": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 84.84,
+   "w": 112,
+   "h": 11.5,
+   "text": "DRIVE",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 9,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 1.62,
+   "lh": "normal",
+   "align": "start"
+  },
+  "side-tagline": {
+   "kind": "text",
+   "x": 26,
+   "y": 110.34,
+   "w": 267.5,
+   "h": 15,
+   "text": "Your files, encrypted on your devices.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-0-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 511,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2zM7 11V7a5 5 0 0 1 10 0v4"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "fact-0": {
+   "kind": "text",
+   "x": 51,
+   "y": 510,
+   "w": 242.5,
+   "h": 30,
+   "text": "Encrypted on this PC before anything syncs. Beebeeb can't read it.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-1-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 553,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "fact-1": {
+   "kind": "text",
+   "x": 51,
+   "y": 552,
+   "w": 242.5,
+   "h": 30,
+   "text": "One Beebeeb account for Drive, Pass, VPN, Chat and Mail.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-2-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 595,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3c-2.5 2.6-3.8 5.6-3.8 9s1.3 6.4 3.8 9"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "fact-2": {
+   "kind": "text",
+   "x": 51,
+   "y": 594,
+   "w": 97.73,
+   "h": 15,
+   "text": "Stored in Europe.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "au-main": {
+   "kind": "box",
+   "x": 320,
+   "y": 32,
+   "w": 638,
+   "h": 606,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ],
+   "css": {
+    "pad": "20px"
+   }
+  },
+  "back-icon": {
+   "kind": "icon",
+   "x": 467,
+   "y": 116.5,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M15 5l-7 7 7 7"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "back": {
+   "kind": "text",
+   "x": 485,
+   "y": 116,
+   "w": 38.43,
+   "h": 14.5,
+   "text": "Sign in",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "title": {
+   "kind": "text",
+   "x": 467,
+   "y": 142,
+   "w": 344,
+   "h": 28,
+   "text": "Trouble signing in?",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 650,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.48,
+   "lh": "28px",
+   "align": "start"
+  },
+  "subtitle": {
+   "kind": "text",
+   "x": 467,
+   "y": 176,
+   "w": 344,
+   "h": 15,
+   "text": "Choose the option that applies to you.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "btn-0": {
+   "kind": "box",
+   "x": 481,
+   "y": 277,
+   "w": 316,
+   "h": 28,
+   "bg": [
+    247,
+    185,
+    0,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "btn-0-label": {
+   "kind": "text",
+   "x": 576.13,
+   "y": 281.71,
+   "w": 125.73,
+   "h": 18.57,
+   "text": "Recover with phrase",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    30,
+    26,
+    22,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "18.5714px",
+   "align": "center"
+  },
+  "btn-1": {
+   "kind": "box",
+   "x": 481,
+   "y": 403,
+   "w": 316,
+   "h": 28,
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "border": "1px 1px 1px 1px oklch(0.9 0.008 82)",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "btn-1-label": {
+   "kind": "text",
+   "x": 555.82,
+   "y": 407.71,
+   "w": 166.35,
+   "h": 18.57,
+   "text": "Sign in with another device",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "18.5714px",
+   "align": "center"
+  },
+  "btn-2": {
+   "kind": "box",
+   "x": 481,
+   "y": 514,
+   "w": 316,
+   "h": 28,
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "border": "1px 1px 1px 1px oklch(0.9 0.008 82)",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "btn-2-label": {
+   "kind": "text",
+   "x": 586.16,
+   "y": 518.71,
+   "w": 105.68,
+   "h": 18.57,
+   "text": "Show my options",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "18.5714px",
+   "align": "center"
+  },
+  "card-0": {
+   "kind": "box",
+   "x": 467,
+   "y": 202,
+   "w": 344,
+   "h": 115,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "radius": "16px",
+    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px",
+    "pad": "12px 14px",
+    "gap": "8px"
+   }
+  },
+  "card-0-icon": {
+   "kind": "icon",
+   "x": 481,
+   "y": 214.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "card-0-title": {
+   "kind": "text",
+   "x": 507,
+   "y": 214,
+   "w": 163.49,
+   "h": 17,
+   "text": "I have my recovery phrase",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.08,
+   "lh": "17px",
+   "align": "start"
+  },
+  "card-0-text": {
+   "kind": "text",
+   "x": 481,
+   "y": 239,
+   "w": 316,
+   "h": 30,
+   "text": "The 12 words from account setup. Use them to set a new password.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "card-1": {
+   "kind": "box",
+   "x": 467,
+   "y": 328,
+   "w": 344,
+   "h": 115,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "radius": "16px",
+    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px",
+    "pad": "12px 14px",
+    "gap": "8px"
+   }
+  },
+  "card-1-icon": {
+   "kind": "icon",
+   "x": 481,
+   "y": 340.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M8 3h8a1.5 1.5 0 0 1 1.5 1.5v15A1.5 1.5 0 0 1 16 21H8a1.5 1.5 0 0 1-1.5-1.5v-15A1.5 1.5 0 0 1 8 3z",
+    "M11 18h2"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "card-1-title": {
+   "kind": "text",
+   "x": 507,
+   "y": 340,
+   "w": 192.24,
+   "h": 17,
+   "text": "I have another device signed in",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.08,
+   "lh": "17px",
+   "align": "start"
+  },
+  "card-1-text": {
+   "kind": "text",
+   "x": 481,
+   "y": 365,
+   "w": 316,
+   "h": 30,
+   "text": "Approve this PC from a device where you're already signed in. No phrase needed.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "card-2": {
+   "kind": "box",
+   "x": 467,
+   "y": 454,
+   "w": 344,
+   "h": 100,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "radius": "16px",
+    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px",
+    "pad": "12px 14px",
+    "gap": "8px"
+   }
+  },
+  "card-2-icon": {
+   "kind": "icon",
+   "x": 481,
+   "y": 466.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M18 6L6 18M6 6l12 12"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "card-2-title": {
+   "kind": "text",
+   "x": 507,
+   "y": 466,
+   "w": 83.81,
+   "h": 17,
+   "text": "I have neither",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.08,
+   "lh": "17px",
+   "align": "start"
+  },
+  "card-2-text": {
+   "kind": "text",
+   "x": 481,
+   "y": 491,
+   "w": 316,
+   "h": 15,
+   "text": "We'll explain what that means for your data.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  }
+ },
+ "theme": "light"
+}

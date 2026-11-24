@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // Fails when an updater signature was made by a different minisign key than the
-// one baked into src-tauri/tauri.conf.json (plugins.updater.pubkey).
+// one baked into every 0.8.x build (crates/beebeeb-updater/keys/updater-0.8.pub).
 //
 // Why this exists: task-1240 baked the new updater key C6FADFD59D732197 into
 // 0.3.0, but CI kept signing with the old key 545D7BA77EDEA7E1 through 0.8.3.
@@ -9,9 +9,12 @@
 // update — silently, for months. This guard makes that state a red release.
 //
 // Usage:
-//   node scripts/check-updater-signature-key.mjs [--config <tauri.conf.json>]
+//   node scripts/check-updater-signature-key.mjs [--config <tauri.conf.json> | --pubkey-file <file.pub>]
 //        (--sig <file.sig>... | --manifest <path-or-https-url>)
 //        [--allow-key-transition]
+//
+// --pubkey-file names the expected key by a Tauri `.pub` file instead of tauri.conf.json: the native line
+// (0.9.0 and later) is signed by its own key, crates/beebeeb-updater/keys/updater-v2.pub.
 //
 // --allow-key-transition is ONLY for a deliberate transition release N (see
 // docs/RELEASING.md "Updater Signing Key Rotation"): it reports mismatches as a
@@ -101,7 +104,10 @@ async function loadManifest(source) {
 
 async function main(argv) {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-  let config = path.join(repoRoot, 'src-tauri', 'tauri.conf.json')
+  // The default source of the baked key is the 0.8.x key file; `--config` still reads a Tauri config's value.
+  const defaultKeyFile = path.join(repoRoot, 'crates', 'beebeeb-updater', 'keys', 'updater-0.8.pub')
+  let config = null
+  let pubkeyFile = null
   let manifestSource = null
   let allowTransition = false
   const sigFiles = []
@@ -109,6 +115,7 @@ async function main(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (arg === '--config') config = argv[++i]
+    else if (arg === '--pubkey-file') pubkeyFile = argv[++i]
     else if (arg === '--manifest') manifestSource = argv[++i]
     else if (arg === '--allow-key-transition') allowTransition = true
     else if (arg === '--sig') {
@@ -119,8 +126,11 @@ async function main(argv) {
     throw new Error('pass exactly one of --manifest <path-or-url> or --sig <file.sig>...')
   }
 
-  const pubkey = JSON.parse(fs.readFileSync(config, 'utf8'))?.plugins?.updater?.pubkey
-  if (!pubkey) throw new Error(`${config} has no plugins.updater.pubkey`)
+  const keySource = pubkeyFile ?? (config ? null : defaultKeyFile)
+  const pubkey = keySource
+    ? fs.readFileSync(keySource, 'utf8').trim()
+    : JSON.parse(fs.readFileSync(config, 'utf8'))?.plugins?.updater?.pubkey
+  if (!pubkey) throw new Error(`${keySource ?? config} has no updater public key`)
 
   const result = manifestSource
     ? checkManifestSignatures(await loadManifest(manifestSource), pubkey)
@@ -137,7 +147,7 @@ async function main(argv) {
   const level = allowTransition ? 'warning' : 'error'
   for (const m of result.mismatches) {
     console.log(
-      `::${level}::Updater signature for ${m.target} was made by key ${m.signatureKeyId}, but tauri.conf.json bakes in ${m.expectedKeyId}. Installs of this version will reject every update signed like this.`,
+      `::${level}::Updater signature for ${m.target} was made by key ${m.signatureKeyId}, but the expected key is ${m.expectedKeyId}. Installs of this version will reject every update signed like this.`,
     )
   }
   console.log(

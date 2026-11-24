@@ -1,0 +1,675 @@
+//! `ThisPcSource`: what Sync history and Available offline ask of the engine, and the board's
+//! fixture (DW-1301 to DW-1306, DW-0428, DW-0715, DW-0120: exactly the board's sample content).
+//!
+//! The history is this PC's own record (the board: "kept on this PC only", 30 days). The items
+//! that did not sync are a list of their own ([`ThisPcSource::problems`]): the Problems filter
+//! shows that list, the other filters show the changes, and a change that failed carries the
+//! id of its problem so Try again reaches the same item from both.
+
+use chrono::NaiveDate;
+
+/// What kind of thing changed: which glyph its tile shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Document,
+    Sheet,
+    Deck,
+    Video,
+    Audio,
+    Folder,
+    /// A picture with a thumbnail; the number picks the board's sample picture until the engine
+    /// hands over pixels.
+    Photo(u8),
+}
+
+/// Where a change came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    ThisPc,
+    Phone(String),
+    Tablet(String),
+    SharedFolder,
+}
+
+impl Origin {
+    pub fn label(&self) -> &str {
+        match self {
+            Origin::ThisPc => "This PC",
+            Origin::Phone(name) | Origin::Tablet(name) => name,
+            Origin::SharedFolder => "Shared folder",
+        }
+    }
+}
+
+/// Why an item did not sync, in the board's plain words. Never a raw error code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    OpenInAnotherApp,
+    Unreachable {
+        tries: u8,
+    },
+    NameInUse {
+        place: String,
+    },
+    /// The engine's own plain words for why (`drive_v2::status::reason_for`): a fixed sentence, never a
+    /// raw error code, a path or a server's words.
+    Said(&'static str),
+    /// Task 2524: a sync-folder edit the engine holds and does not send (`drive_v2::status::held_edit_problems`).
+    /// The engine has no action for it, so the row has no Try again.
+    Held(&'static str),
+}
+
+/// Task 2530: a way out a problem row offers. The engine lists them per row (`drive_v2::status::Exit`); the window
+/// draws exactly those and no other, and the source refuses any other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Exit {
+    TryAgain,
+    KeepBoth,
+    KeepOther,
+    KeepThisPcs,
+    RemoveFromList,
+}
+
+impl Exit {
+    /// One of the two-versions answers (Keep both, Keep the other, Keep this PC's).
+    pub fn is_keep(self) -> bool {
+        matches!(self, Exit::KeepBoth | Exit::KeepOther | Exit::KeepThisPcs)
+    }
+}
+
+impl Reason {
+    /// The line under the name: why, and that nothing was lost.
+    pub fn line(&self) -> String {
+        match self {
+            Reason::OpenInAnotherApp => "Couldn't upload: the file was open in another app. Nothing was lost.".into(),
+            Reason::Unreachable { tries } => {
+                format!("Couldn't reach Beebeeb after {tries} tries. Nothing was lost.")
+            }
+            Reason::NameInUse { place } => format!("The name is already in use in {place}. Nothing was lost."),
+            Reason::Said(words) | Reason::Held(words) => (*words).to_string(),
+        }
+    }
+}
+
+/// What happened to the item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum What {
+    Uploaded {
+        place: String,
+    },
+    Added {
+        place: String,
+    },
+    Changed {
+        place: String,
+    },
+    Downloaded {
+        place: String,
+    },
+    MovedToTrash {
+        place: String,
+    },
+    /// Someone added files to a shared folder.
+    SharedAdded {
+        who: String,
+        files: u32,
+    },
+    /// It did not sync: `problem` is the id in [`ThisPcSource::problems`]; `exits`, the ways out the engine lists for
+    /// it (task 2530), in the engine's order.
+    Failed {
+        problem: String,
+        reason: Reason,
+        exits: Vec<Exit>,
+    },
+}
+
+impl What {
+    pub fn line(&self) -> String {
+        match self {
+            What::Uploaded { place } => format!("Uploaded \u{00B7} {place}"),
+            What::Added { place } => format!("Added \u{00B7} {place}"),
+            What::Changed { place } => format!("Changed \u{00B7} {place}"),
+            What::Downloaded { place } => format!("Downloaded \u{00B7} {place}"),
+            What::MovedToTrash { place } => format!("Moved to Trash \u{00B7} {place}"),
+            What::SharedAdded { who, files } => format!("{who} added {files} files"),
+            What::Failed { reason, .. } => reason.line(),
+        }
+    }
+
+    /// The folder the search also matches ("Matches names and folders").
+    pub fn place(&self) -> Option<&str> {
+        match self {
+            What::Uploaded { place }
+            | What::Added { place }
+            | What::Changed { place }
+            | What::Downloaded { place }
+            | What::MovedToTrash { place } => Some(place),
+            What::Failed {
+                reason: Reason::NameInUse { place },
+                ..
+            } => Some(place),
+            _ => None,
+        }
+    }
+}
+
+/// One line of the history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    pub id: String,
+    pub name: String,
+    pub kind: Kind,
+    pub what: What,
+    pub origin: Origin,
+    pub date: NaiveDate,
+    /// "09:39", this PC's clock.
+    pub time: String,
+}
+
+impl Change {
+    pub fn problem(&self) -> Option<&str> {
+        match &self.what {
+            What::Failed { problem, .. } => Some(problem),
+            _ => None,
+        }
+    }
+
+    /// A problem that Try again applies to: the engine listed it (a held edit or a parked change has none).
+    pub fn can_retry(&self) -> bool {
+        self.exits().contains(&Exit::TryAgain)
+    }
+
+    /// The ways out of a problem, as the engine listed them (task 2530); none for any other change.
+    pub fn exits(&self) -> &[Exit] {
+        match &self.what {
+            What::Failed { exits, .. } => exits,
+            _ => &[],
+        }
+    }
+}
+
+/// How an item kept on this PC is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeptStatus {
+    UpToDate,
+    /// Kept, but not every copy is on this PC yet (still downloading, or waiting to).
+    NotOnPcYet,
+}
+
+impl KeptStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            KeptStatus::UpToDate => "Up to date",
+            KeptStatus::NotOnPcYet => "Not on this PC yet",
+        }
+    }
+}
+
+/// What a kept item holds: a folder's item count, or the folder a file is in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Contains {
+    Items(u32),
+    In(String),
+}
+
+impl Contains {
+    pub fn label(&self) -> String {
+        match self {
+            Contains::Items(1) => "1 item".into(),
+            Contains::Items(n) => format!("{n} items"),
+            Contains::In(place) => place.clone(),
+        }
+    }
+}
+
+/// An item that stays on this PC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Kept {
+    pub id: String,
+    pub name: String,
+    pub kind: Kind,
+    pub bytes: i64,
+    pub contains: Contains,
+    pub status: KeptStatus,
+}
+
+/// Whether the source has lists to show, and when not, why ([`ThisPcSource::standing`]). The sections say it in
+/// words of their own, never as an empty list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The lists are what this PC holds.
+    Ready,
+    /// The first answer is still out.
+    Reading,
+    /// This PC's local state could not be read.
+    Unreadable,
+    /// This PC's local state is not provably the signed-in account's (another account's, or no record of whose):
+    /// nothing of it is shown.
+    AnotherAccounts,
+}
+
+/// What a source's workers answered since the last frame ([`ThisPcSource::pump`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Pumped {
+    /// Something the sections draw changed: draw again.
+    pub changed: bool,
+    /// An answer is still out: look again soon.
+    pub busy: bool,
+    /// A change the person asked for was refused: the window says so (a fixed sentence).
+    pub refusal: Option<&'static str>,
+    /// Task 2530: a way out the person picked was taken: the window says what it did (a fixed sentence).
+    pub done: Option<&'static str>,
+}
+
+/// What the two This PC sections read and ask. Engine calls: see the PR body.
+pub trait ThisPcSource {
+    /// Called at the start of every frame (`frames::this_pc::poll`): what arrived from the source's workers.
+    /// A source that answers at once has nothing to say.
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
+    }
+    /// One of the two sections opened (`frames::this_pc::poll` saw the route arrive): a source that reads late reads
+    /// again when what it holds is old.
+    fn opened(&mut self) {}
+    /// A sync check finished: the lists may have changed. A source that reads late reads again when someone looked
+    /// at them in this session; otherwise the next opening reads.
+    fn refresh(&mut self) {}
+    /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
+    /// frame instead of sample sync history.
+    fn wired(&self) -> bool {
+        true
+    }
+    /// Whether the lists below are what this PC holds, or why there are none yet.
+    fn standing(&self) -> Standing {
+        Standing::Ready
+    }
+    /// This PC's date, for "Today" and "Yesterday".
+    fn today(&self) -> NaiveDate;
+    /// The last 30 days, newest first.
+    fn history(&self) -> Vec<Change>;
+    /// The items that did not sync, newest first.
+    fn problems(&self) -> Vec<Change>;
+    /// Try one item again now.
+    fn retry(&mut self, problem: &str);
+    /// Try every item again.
+    fn retry_all(&mut self);
+    /// Task 2530: a way out of one problem other than Try again (Keep both, Keep the other, Keep this PC's, Remove from
+    /// the list), only one the problem's row lists. The answer comes back through [`Self::pump`].
+    fn settle(&mut self, problem: &str, exit: Exit);
+    /// What is kept on this PC.
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]>;
+    /// How many items [`Self::kept`] lists (the sidebar's count, every frame): a source may answer it without a
+    /// copy of the list.
+    fn kept_count(&self) -> usize {
+        self.kept().len()
+    }
+    /// Stop keeping one item here; it stays in Beebeeb and becomes online only.
+    fn remove_from_pc(&mut self, id: &str);
+    /// Stop keeping every item here.
+    fn remove_all_from_pc(&mut self);
+}
+
+/// The board's sample content. A retry in the fixture succeeds at once: the item leaves the
+/// list ("it leaves the list once it syncs").
+pub struct FixtureSource {
+    history: Vec<Change>,
+    problems: Vec<Change>,
+    kept: Vec<Kept>,
+}
+
+fn day(d: u32, m: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, m, d).unwrap_or_default()
+}
+
+/// The board's "today": Sunday is 1 Nov and Yesterday holds Monday's changes.
+pub const BOARD_TODAY: (u32, u32) = (3, 11);
+
+#[allow(clippy::too_many_arguments)]
+fn change(id: &str, date: NaiveDate, time: &str, name: &str, kind: Kind, what: What, origin: Origin) -> Change {
+    Change {
+        id: id.into(),
+        name: name.into(),
+        kind,
+        what,
+        origin,
+        date,
+        time: time.into(),
+    }
+}
+
+impl FixtureSource {
+    /// DW-1301 and its filters, DW-0428, DW-1304: 19 changes over five days, 3 items that did
+    /// not sync; and DW-0715's three kept items.
+    pub fn board() -> FixtureSource {
+        let up = |p: &str| What::Uploaded { place: p.into() };
+        let add = |p: &str| What::Added { place: p.into() };
+        let chg = |p: &str| What::Changed { place: p.into() };
+        let down = |p: &str| What::Downloaded { place: p.into() };
+        let iphone = || Origin::Phone("Anna's iPhone".into());
+        let ipad = || Origin::Tablet("Anna's iPad".into());
+        let pc = || Origin::ThisPc;
+        let studio = || What::Failed {
+            problem: "p-studio".into(),
+            reason: Reason::OpenInAnotherApp,
+            exits: vec![Exit::TryAgain],
+        };
+        let (today, yesterday, sun, sat, fri) = (day(3, 11), day(2, 11), day(1, 11), day(31, 10), day(30, 10));
+        use Kind::{Audio, Deck, Document, Folder, Photo, Sheet, Video};
+        let history = vec![
+            change(
+                "c-01",
+                today,
+                "09:39",
+                "Moodboard v3.pdf",
+                Document,
+                up("Documents"),
+                pc(),
+            ),
+            change("c-02", today, "09:38", "Studio walkthrough.mov", Video, studio(), pc()),
+            change("c-03", today, "09:12", "Budget 2026.xlsx", Sheet, up("Files"), pc()),
+            change(
+                "c-04",
+                today,
+                "08:57",
+                "IMG_4821.heic",
+                Photo(2),
+                add("Photos"),
+                iphone(),
+            ),
+            change(
+                "c-05",
+                today,
+                "08:57",
+                "IMG_4820.heic",
+                Photo(3),
+                add("Photos"),
+                iphone(),
+            ),
+            change(
+                "c-06",
+                today,
+                "07:40",
+                "Invoice 0142.pdf",
+                Document,
+                chg("Invoices 2026"),
+                ipad(),
+            ),
+            change(
+                "c-07",
+                yesterday,
+                "16:42",
+                "Contract draft.pdf",
+                Document,
+                chg("Files"),
+                iphone(),
+            ),
+            change(
+                "c-08",
+                yesterday,
+                "14:05",
+                "Notes old.md",
+                Document,
+                What::MovedToTrash {
+                    place: "Documents".into(),
+                },
+                pc(),
+            ),
+            change(
+                "c-09",
+                yesterday,
+                "11:20",
+                "Shoot selects",
+                Folder,
+                What::SharedAdded {
+                    who: "Lotte de Wit".into(),
+                    files: 6,
+                },
+                Origin::SharedFolder,
+            ),
+            change("c-10", yesterday, "10:02", "Q4 plan.key", Deck, down("Files"), pc()),
+            change("c-11", sun, "18:05", "Harbour.heic", Photo(5), add("Files"), iphone()),
+            change("c-12", sat, "17:48", "IMG_4790.heic", Photo(1), add("Photos"), iphone()),
+            change(
+                "c-13",
+                sat,
+                "12:30",
+                "Invoice 0141.pdf",
+                Document,
+                add("Invoices 2026"),
+                ipad(),
+            ),
+            change("c-14", sat, "11:15", "Rates 2026 v2.xlsx", Sheet, up("Documents"), pc()),
+            change(
+                "c-15",
+                sat,
+                "10:02",
+                "Client call 2.m4a",
+                Audio,
+                down("Documents"),
+                pc(),
+            ),
+            change(
+                "c-16",
+                fri,
+                "16:20",
+                "Proposal draft 2.pdf",
+                Document,
+                up("Documents"),
+                pc(),
+            ),
+            change("c-17", fri, "13:54", "IMG_4785.heic", Photo(6), add("Photos"), iphone()),
+            change(
+                "c-18",
+                fri,
+                "09:41",
+                "Invoice 0140.pdf",
+                Document,
+                add("Invoices 2026"),
+                ipad(),
+            ),
+            change("c-19", fri, "08:30", "Rates 2026 v3.xlsx", Sheet, up("Documents"), pc()),
+        ];
+        let failed = |problem: &str, reason: Reason| What::Failed {
+            problem: problem.into(),
+            reason,
+            exits: vec![Exit::TryAgain],
+        };
+        let problems = vec![
+            change("c-02", today, "09:38", "Studio walkthrough.mov", Video, studio(), pc()),
+            change(
+                "c-20",
+                today,
+                "09:31",
+                "Tram 28.mov",
+                Photo(3),
+                failed("p-tram", Reason::Unreachable { tries: 5 }),
+                pc(),
+            ),
+            change(
+                "c-21",
+                today,
+                "08:12",
+                "Budget 2026 (2).xlsx",
+                Sheet,
+                failed("p-budget", Reason::NameInUse { place: "Files".into() }),
+                pc(),
+            ),
+        ];
+        FixtureSource {
+            history,
+            problems,
+            kept: Self::board_kept(),
+        }
+    }
+
+    fn board_kept() -> Vec<Kept> {
+        let kept = |id: &str, name: &str, kind, bytes, contains| Kept {
+            id: id.into(),
+            name: name.into(),
+            kind,
+            bytes,
+            contains,
+            status: KeptStatus::UpToDate,
+        };
+        vec![
+            kept(
+                "k-documents",
+                "Documents",
+                Kind::Folder,
+                1_503_238_553,
+                Contains::Items(48),
+            ),
+            kept(
+                "k-invoices",
+                "Invoices 2026",
+                Kind::Folder,
+                29_150_412,
+                Contains::Items(11),
+            ),
+            kept(
+                "k-budget",
+                "Budget 2026.xlsx",
+                Kind::Sheet,
+                86_016,
+                Contains::In("Files".into()),
+            ),
+        ]
+    }
+
+    /// Task 2530, render-only (no board frame): the board's PC with two parked changes in Problems, one a viewer save
+    /// another device overtook (Keep both, Keep the other, Keep this PC's), one whose staged copy is gone (Remove from
+    /// the list). The words are the engine's (`drive_v2::status::parked_words`); the names are invented.
+    pub fn parked() -> FixtureSource {
+        let board = Self::board();
+        let today = day(BOARD_TODAY.0, BOARD_TODAY.1);
+        let parked = |id: &str, time: &str, name: &str, words: &'static str, exits: Vec<Exit>| {
+            change(
+                id,
+                today,
+                time,
+                name,
+                Kind::Document,
+                What::Failed {
+                    problem: id.into(),
+                    reason: Reason::Said(words),
+                    exits,
+                },
+                Origin::ThisPc,
+            )
+        };
+        let problems = vec![
+            parked(
+                "p-plan",
+                "10:02",
+                "Plan.txt",
+                "Not sent: this file changed in Beebeeb before this change reached it. Choose which version to keep. Nothing was lost.",
+                vec![Exit::KeepBoth, Exit::KeepOther, Exit::KeepThisPcs],
+            ),
+            parked(
+                "p-notes",
+                "09:50",
+                "Notes.md",
+                "This PC no longer has the bytes of this change, so it can\u{2019}t be sent. The file on Beebeeb is as it was.",
+                vec![Exit::RemoveFromList],
+            ),
+        ];
+        FixtureSource { problems, ..board }
+    }
+
+    /// DW-0715 and DW-1306: everything synced, three items kept.
+    pub fn synced() -> FixtureSource {
+        FixtureSource {
+            problems: Vec::new(),
+            history: Vec::new(),
+            ..Self::board()
+        }
+    }
+
+    /// DW-1305: a PC that just signed in. No history, nothing that failed; the three kept items
+    /// are the account's (the sidebar still counts them).
+    pub fn just_signed_in() -> FixtureSource {
+        Self::synced()
+    }
+
+    /// DW-0120: nothing kept on this PC.
+    pub fn nothing_kept() -> FixtureSource {
+        FixtureSource {
+            kept: Vec::new(),
+            ..Self::synced()
+        }
+    }
+}
+
+impl ThisPcSource for FixtureSource {
+    fn today(&self) -> NaiveDate {
+        day(BOARD_TODAY.0, BOARD_TODAY.1)
+    }
+
+    fn history(&self) -> Vec<Change> {
+        self.history.clone()
+    }
+
+    fn problems(&self) -> Vec<Change> {
+        self.problems.clone()
+    }
+
+    fn retry(&mut self, problem: &str) {
+        self.problems.retain(|c| c.problem() != Some(problem));
+        self.history.retain(|c| c.problem() != Some(problem));
+    }
+
+    fn retry_all(&mut self) {
+        self.problems.clear();
+        self.history.retain(|c| c.problem().is_none());
+    }
+
+    /// A sample answer works at once, as a retry does: the item leaves the list. Only a way out its row lists.
+    fn settle(&mut self, problem: &str, exit: Exit) {
+        let listed = self
+            .problems
+            .iter()
+            .any(|c| c.problem() == Some(problem) && c.exits().contains(&exit));
+        if listed {
+            self.retry(problem);
+        }
+    }
+
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(&self.kept)
+    }
+
+    fn remove_from_pc(&mut self, id: &str) {
+        self.kept.retain(|k| k.id != id);
+    }
+
+    fn remove_all_from_pc(&mut self) {
+        self.kept.clear();
+    }
+}
+
+/// The source of a build that ships before the engine lane has wired This PC: it answers
+/// nothing, and the view draws the shell's "not built yet" frame instead of sample history.
+pub struct Unwired;
+
+impl ThisPcSource for Unwired {
+    fn wired(&self) -> bool {
+        false
+    }
+    fn today(&self) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap_or_default()
+    }
+    fn history(&self) -> Vec<Change> {
+        Vec::new()
+    }
+    fn problems(&self) -> Vec<Change> {
+        Vec::new()
+    }
+    fn retry(&mut self, _problem: &str) {}
+    fn retry_all(&mut self) {}
+    fn settle(&mut self, _problem: &str, _exit: Exit) {}
+    fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
+        std::borrow::Cow::Borrowed(&[])
+    }
+    fn remove_from_pc(&mut self, _id: &str) {}
+    fn remove_all_from_pc(&mut self) {}
+}

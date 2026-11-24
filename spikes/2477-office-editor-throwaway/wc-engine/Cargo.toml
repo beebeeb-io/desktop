@@ -1,0 +1,13 @@
+# THROWAWAY (task 2477 editor spike). WordCraft edited THROUGH wordcraft-engine (commands, undo, redo), which only
+# builds without a network client after patches/wordcraft-engine-font-store-optional.patch (default-features = false).
+[package]
+name = "zz-bb-wc-engine"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wordcraft-engine = { path = "../engine", default-features = false }
+wordcraft-doc = { workspace = true }
+wordcraft-docx = { workspace = true }
+serde_json = { workspace = true }

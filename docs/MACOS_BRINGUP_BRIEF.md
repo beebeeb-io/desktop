@@ -1,6 +1,10 @@
 # Desktop macOS bring-up — what needs to happen next
 
-Written 2026-07-30 by the desktop lead session, at Guus's explicit request, for whichever
+> **Status 2026-11-16:** this brief was written for the 0.8.x Tauri app. That app is gone in 0.9.0 on every OS; the
+> macOS phase rebuilds from the carried notes in `native/beebeeb-drive-rune/docs/macos/`. The code paths below point
+> at where the code lives now; `release.yml` (its build matrix, its plumbing) is the 0.8.x line's workflow.
+
+Written 2026-07-30 by the desktop lead session, at the owner's explicit request, for whichever
 Claude session next has a real Mac available to pick this up. macOS is currently deliberately
 parked — not because the architecture doesn't work, but because every remaining blocker needs
 either a physical Mac, an Apple Developer credential, or an interactive Apple ID login, none of
@@ -29,7 +33,7 @@ notary-credentials exist anywhere this workspace's CI or any prior session could
 Development` (a *development*-tier identity, fine for local testing, useless for a distributable
 release) and an unrelated `iPhone Distribution` identity for a different bundle.
 
-**What's needed:** Guus needs to either generate a `Developer ID Application` certificate + export
+**What's needed:** the owner needs to either generate a `Developer ID Application` certificate + export
 it (as a `.p12` + password) from his own Apple Developer account, or provision an App Store
 Connect API key with notary permissions — either path requires his Apple ID and 2FA device, so
 this cannot be automated by any agent without his direct involvement at least once. Once obtained,
@@ -67,7 +71,8 @@ without full signing, but treat "verified" as still gated on a real signed unive
 ### 4. IPC socket peer-credential check has NO macOS implementation — must be done before macOS ships (task 1247, found 2026-07-30)
 
 **This is new since the rest of this brief's history** — found while fixing a P0 security bug in
-the Linux desktop build. `src-tauri/src/ipc_socket.rs`'s peer-credential check (`peer_uid`,
+the Linux desktop build. The daemon socket's peer-credential check (`peer_uid`, now in
+`crates/beebeeb-engine/src/ipc_socket/server.rs`,
 gating every connection to the daemon's Unix socket) is implemented for Linux only, using
 `SO_PEERCRED`. The non-Linux branch is **deliberately unimplemented and fails closed** (rejects
 every connection) — this was a conscious choice, not an oversight: implementing `getpeereid()` (the
@@ -128,7 +133,7 @@ to begin with.
   it (no `ExtensionProcess … bundleID: io.beebeeb.app.FileProvider` launch ever appears in the
   log, unlike a working extension such as OneDrive's in the same window) — so
   `NSFileProviderManager waitForStabilizationWithCompletionHandler:`'s completion block never
-  fires and `BeebeebWaitForDomainReady` (`src-tauri/macos/FileProviderBridge.m`) burns its full
+  fires and `BeebeebWaitForDomainReady` (`packaging/macos/FileProviderBridge.m`) burns its full
   10 s and reports "Timed out waiting for the Beebeeb File Provider domain to become available".
   **Ruled out on the same evidence:** the PlugInKit "no `+` election" tag on the real copy —
   every third-party `com.apple.fileprovider-nonui` extension on the box (ProtonMail Drive,
@@ -153,7 +158,7 @@ to begin with.
 
 - Don't attempt to script around Apple 2FA or provisioning-profile downloads non-interactively
   without an App Store Connect API key — every prior attempt (task `0351`) confirmed this fails and
-  wastes time; get the API key from Guus first.
+  wastes time; get the API key from the owner first.
 - Don't remove or weaken the `#[cfg(not(target_os = "linux"))]` fail-closed peer-cred rejection in
   `ipc_socket.rs` "to get things working" — implement the real macOS equivalent instead (item 4
   above). A daemon that accepts unauthenticated local IPC connections on macOS is exactly the P0
@@ -169,7 +174,7 @@ to begin with.
 
 ## Suggested order of operations for the next macOS session
 
-1. Confirm with Guus: does he have (or can he generate) a Developer ID Application certificate and
+1. Confirm with the owner: does he have (or can he generate) a Developer ID Application certificate and
    an App Store Connect API key with notary access? This single conversation unblocks items 1 and 2
    simultaneously and needs his direct involvement — don't try to work around it.
 2. Once credentials exist: re-verify the existing development-signed path still works end to end on

@@ -1,0 +1,470 @@
+//! The list of the Files frames (`.mk-listwrap`): the design system's headers and row, with what
+//! these frames add: several selected rows, Ctrl and Shift click, the file menu on a right-click or
+//! the Menu key, a date the source words itself ("Just now"), headers that sort, and drops.
+//!
+//! To assistive technology it is a table (DW-0401): `rows` is the table and the list's ONE Tab
+//! stop; each row reads its name, when it changed, its size, who it is shared with and where it is
+//! on this PC. Keyboard focus stays on the table and the selected row is its active one
+//! (`aria-activedescendant`), so a screen reader says the row the arrows land on (`keys.rs`).
+
+use std::borrow::Cow;
+
+use super::SortBy;
+use crate::State;
+use crate::source::DriveItem;
+use crate::theme::icons;
+use crate::theme::scale;
+use crate::theme::tokens::{Theme, type_};
+use crate::ui::file_list::{Fit, PcState, ROW_H, file_tile, format_date, pc_glyph, shared_cell};
+use crate::ui::file_row::{self, RowLook};
+use crate::ui::kit;
+use rune::{Align, Cx, El, PointerPress, Tx, col, el};
+
+const COL_DATE_W: f32 = 132.0;
+const COL_SIZE_W: f32 = 84.0;
+const COL_PC_W: f32 = 34.0;
+const COL_GAP: f32 = 12.0;
+
+/// The rows, virtualised. Keys as `ui::file_list`: `rows`, `file-list`, `row-<i>` and its parts.
+pub fn rows(s: &State, cx: &mut Cx<State>, t: &Theme) -> El {
+    let count = s.listing.items.len();
+    let t = *t;
+    // The columns this list has room for, by its own width (`ui::file_list::Fit`).
+    let fit = Fit::of_list(cx);
+    let mut table = col()
+        .key("rows")
+        .role("table")
+        .label(s.listing.folder.name.clone())
+        // The list's one Tab stop: it holds keyboard focus, the selected row is its active one.
+        .focusable(true)
+        .no_focus_ring();
+    if let Some(row) = s.selected.filter(|&i| i < count) {
+        table = table.active_descendant(format!("row-{row}"));
+    }
+    table
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .py(scale::space::S4)
+        .px(scale::space::S6)
+        .scroll(rune::ScrollSpec { stick_bottom: false })
+        // Where it is scrolled to, for the read after a check (`reread.rs`: the rows in view stay where they are).
+        .on_scroll_offset({
+            let scroll = s.actions.list_scroll.clone();
+            move |at: rune::ScrollPos| scroll.set(at.offset[1])
+        })
+        // A right-click on the empty space: the menu of the list (DW-1103). A row's own right-click
+        // opens the file menu and is heard first.
+        .on_secondary_press(|s: &mut State, at: PointerPress, tx: &mut Tx| {
+            tx.focus("rows", false);
+            s.open_background_menu((at.x, at.y));
+        })
+        // Files dragged in from File Explorer upload into the folder shown (DW-0481: "Drop on empty space").
+        .on_drop_files(|s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
+            let folder = s.listing.folder.id.clone();
+            s.upload(folder, files, tx);
+        })
+        .child(
+            col()
+                .key("file-list")
+                .w_full()
+                .growth(rune::GrowthSpec::default())
+                .virtual_rows(
+                    // A board frame of a long list starts at a later row (`Actions::board_first_row`).
+                    count.saturating_sub(s.actions.board_first_row),
+                    ROW_H,
+                    |s: &State, i| {
+                        if i + s.actions.board_first_row < s.listing.items.len() {
+                            Cow::Owned(format!("row-{i}"))
+                        } else {
+                            Cow::Borrowed("row-oob")
+                        }
+                    },
+                    move |s: &State, shown| match s.listing.items.get(shown + s.actions.board_first_row) {
+                        Some(item) => {
+                            let i = shown + s.actions.board_first_row;
+                            // The file that could not open without a connection says so in its
+                            // row, at 45 % (`frames::global`, DW-0121).
+                            let blocked = crate::frames::global::dims(s, &item.id)
+                                || super::browse_states::needs_connection(s, item);
+                            let date = if blocked {
+                                Some("Needs a connection".to_string())
+                            } else {
+                                s.actions.source.changed_label(item)
+                            };
+                            // A file that changed in two places says so where its date stands (DW-0429).
+                            let date = if super::conflict::waits(s, &item.id) {
+                                Some(super::conflict::ROW_WORDS.to_string())
+                            } else {
+                                date
+                            };
+                            // The row being renamed shows its name as a field (DW-0410).
+                            let renaming = s.actions.rename.as_ref().is_some_and(|r| r.row == i && r.id == item.id);
+                            let field = renaming.then(|| super::rename::name_field(s, &t));
+                            // What uploads shows where it lands: its bar, or that it waits (DW-0426).
+                            let uploading = s
+                                .actions
+                                .source
+                                .uploads()
+                                .and_then(|u| u.of(&item.id).map(|u| u.state.clone()));
+                            // A copy on its way down: its words and bar (DW-0412).
+                            let downloading = s.download_of(&item.id);
+                            // A folder a drag is over: outlined, on the selection's tint (DW-0481).
+                            let dropping = s.drop_row() == Some(i);
+                            // A protected folder draws its own rows (`protected.rs`).
+                            let mut row = match super::protected::row_of(s, i, item, &t) {
+                                Some(row) => row,
+                                None => {
+                                    let k = format!("row-{shown}");
+                                    let tile = super::long_list::picture_tile(s, &k, item, &t);
+                                    let lit = s.is_selected(i) || dropping;
+                                    file_row_full(shown, item, lit, date, field, tile, uploading, downloading, fit, &t)
+                                }
+                            };
+                            if dropping {
+                                row = row.border(2.0, t.text_tertiary);
+                            }
+                            if blocked {
+                                row = row.opacity(0.45);
+                            }
+                            if item.is_folder {
+                                // "Drop on a folder: uploads into that folder"; Backups refuses (`State::upload`).
+                                let id = item.id.clone();
+                                row = row
+                                    .on_drop_files(move |s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
+                                        s.upload(Some(id.clone()), files, tx);
+                                    })
+                                    .on_drop_hover(move |s: &mut State, over: bool, _: &mut Tx| s.drop_over(i, over));
+                            }
+                            row.on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                                let mods = tx.mods();
+                                tx.focus("rows", false);
+                                if mods.shift {
+                                    s.extend_to(i);
+                                } else if mods.cmd || mods.ctrl {
+                                    s.toggle_row(i);
+                                } else {
+                                    s.select_only(i);
+                                }
+                            })
+                            .on_double_press_tx(move |s: &mut State, tx: &mut Tx| {
+                                s.open_row(i, tx);
+                            })
+                            // A right-click: the menu at the pointer. (The Menu key and Shift+F10 open
+                            // it at the selected row: `keys.rs`.)
+                            .on_secondary_press(
+                                move |s: &mut State, at: PointerPress, tx: &mut Tx| {
+                                    tx.focus("rows", false);
+                                    if !s.is_selected(i) {
+                                        s.select_only(i);
+                                    }
+                                    s.open_file_menu((at.x, at.y));
+                                },
+                            )
+                        }
+                        None => el().key("empty"),
+                    },
+                ),
+        )
+}
+
+/// What a screen reader says of a row: "Contract draft.pdf, changed 28 Oct 2026, 1.2 MB, shared
+/// with 1 person, online only" (DW-0401: "name, modified, size, shared and the PC state per row").
+pub fn row_name(item: &DriveItem, date: &str, size: &str) -> String {
+    let mut parts = vec![item.name.clone()];
+    if item.is_protected {
+        parts.push("protected".into());
+    }
+    parts.push(format!("changed {date}"));
+    if !size.is_empty() {
+        parts.push(size.to_string());
+    }
+    parts.push(match (item.shared_badges.len(), item.shared_type.as_deref()) {
+        (0, Some("Link")) => "shared by link".to_string(),
+        (0, _) => "not shared".to_string(),
+        (1, _) => "shared with 1 person".to_string(),
+        (n, _) => format!("shared with {n} people"),
+    });
+    if let Some(words) = name_shared(item.pc_status.as_deref()) {
+        parts.push(words.to_lowercase());
+    } else if let Some(state) = PcState::of(item.pc_status.as_deref()) {
+        parts.push(
+            match state {
+                PcState::OnlineOnly => "online only",
+                PcState::Downloaded => "on this PC",
+                PcState::AvailableOffline => "available offline",
+            }
+            .to_string(),
+        );
+    }
+    parts.join(", ")
+}
+
+/// The column headers (`.mk-cols`), as `ui::file_list::column_headers` draws them, and each one
+/// sorts: a click sorts by that column, a second click reverses the order (DW-0404). The arrow
+/// stands beside the column the list is sorted by. Shared and PC are not sort keys.
+pub fn column_headers(sort: super::Sort, fit: Fit, t: &Theme) -> El {
+    // Ascending: A to Z, oldest first, smallest first.
+    let by = |i: usize| match i {
+        0 => Some(SortBy::Name),
+        1 => Some(SortBy::DateChanged),
+        2 => Some(SortBy::Size),
+        _ => None,
+    };
+    let sorted = [SortBy::Name, SortBy::DateChanged, SortBy::Size, SortBy::Type]
+        .iter()
+        .position(|&b| b == sort.by)
+        .filter(|&i| i < 3)
+        .map(|i| {
+            let ascending = match sort.by {
+                SortBy::Name | SortBy::Type => !sort.reversed,
+                SortBy::DateChanged | SortBy::Size => sort.reversed,
+            };
+            (i, ascending)
+        });
+    file_row::header_with(
+        &fit.columns(),
+        sorted,
+        |i, cell| match by(i) {
+            Some(by) => cell.focusable(true).on_press(move |s: &mut State| s.sort_by_column(by)),
+            None => cell,
+        },
+        t,
+    )
+}
+
+/// One row (`.mk-row`). `date`: the source's own words for the date, else the list's.
+/// `renaming`: the field that stands where the name is while it is being typed (DW-0410).
+/// "Two versions" where a date stands (`.mk-row` with `modSans`): 12/400 on a 14.5 pt line.
+pub(super) const TWO_VERSIONS: rune::TextStyle = rune::TextStyle::new(12.0, 400.0).lh(14.5);
+
+#[allow(dead_code)] // kept for the ratchet family and fixtures
+pub fn file_row(
+    i: usize,
+    item: &DriveItem,
+    selected: bool,
+    date: Option<String>,
+    renaming: Option<El>,
+    uploading: Option<super::uploads::UploadState>,
+    t: &Theme,
+) -> El {
+    file_row_full(i, item, selected, date, renaming, None, uploading, None, Fit::ALL, t)
+}
+
+/// [`file_row`], with the tile to draw in place of the kind's own (a fixture's picture).
+#[allow(dead_code)]
+pub fn file_row_with(
+    i: usize,
+    item: &DriveItem,
+    selected: bool,
+    date: Option<String>,
+    renaming: Option<El>,
+    tile: Option<El>,
+    t: &Theme,
+) -> El {
+    file_row_full(i, item, selected, date, renaming, tile, None, None, Fit::ALL, t)
+}
+
+/// The row with everything it can show: `tile` in place of the kind's own, and `uploading`,
+/// an upload that is on its way to this row (DW-0426).
+#[allow(clippy::too_many_arguments)]
+fn file_row_full(
+    i: usize,
+    item: &DriveItem,
+    selected: bool,
+    date: Option<String>,
+    renaming: Option<El>,
+    tile: Option<El>,
+    uploading: Option<super::uploads::UploadState>,
+    downloading: Option<super::keeping::Download>,
+    fit: Fit,
+    t: &Theme,
+) -> El {
+    let k = format!("row-{i}");
+    let date = date.unwrap_or_else(|| format_date(&item.modified_at));
+    let meta = if selected { t.text_secondary } else { t.text_tertiary };
+    let surface = t.bg;
+
+    // The lock after the name, and a name being typed: its field stands after the (then empty) name.
+    let marks_has_field = renaming.is_some();
+    let mut marks = Vec::new();
+    if let Some(field) = renaming {
+        marks.push(field);
+    }
+    if item.is_protected {
+        marks.push(
+            kit::glyph(format!("{k}-lock"), &icons::LOCK, 11.0, t.text_tertiary)
+                .ml(2.0)
+                .role("image")
+                .label("Protected"),
+        );
+    }
+
+    let size_text = if item.is_folder {
+        let unit = if item.is_protected { "devices" } else { "items" };
+        item.child_count.map(|c| format!("{c} {unit}")).unwrap_or_default()
+    } else {
+        item.size.map(super::long_list::size_words).unwrap_or_default()
+    };
+
+    use super::uploads::UploadState;
+    let mut pc = el().key("pc-cell").w(COL_PC_W).center();
+    match &uploading {
+        // `.mk-mac.is-up`, `.mk-mac`: an arrow in the deep Amber while it uploads, a clock while it waits.
+        Some(UploadState::Uploading { .. }) => {
+            pc = pc
+                .child(kit::state_glyph(
+                    format!("{k}-pc"),
+                    &crate::theme::icons_files::ARROW_UP,
+                    None,
+                    "uploading",
+                    14.0,
+                    t.accent_deep,
+                ))
+                // The board's export keeps the date's cell here too, holding nothing: the date and size gave way to
+                // the words and the bar (as with a copy on its way down, below).
+                .child(
+                    kit::label(format!("{k}-date"), "", type_::META_MONO, meta)
+                        .absolute(0.0, 0.0)
+                        .w(COL_PC_W)
+                        .h(14.0),
+                );
+        }
+        Some(UploadState::Waiting(_)) => {
+            pc = pc.child(kit::state_glyph(
+                format!("{k}-pc"),
+                &crate::theme::icons_settings::CLOCK,
+                None,
+                "waiting-to-upload",
+                14.0,
+                t.text_tertiary,
+            ));
+        }
+        _ => {
+            if downloading.is_some() {
+                pc = pc
+                    .child(super::keeping::pc_mark(format!("{k}-pc"), t))
+                    // The board's export keeps the date's cell here, holding nothing: the date and size gave
+                    // way to the words and the bar.
+                    .child(
+                        kit::label(format!("{k}-date"), "", type_::META_MONO, meta)
+                            .absolute(0.0, 0.0)
+                            .w(COL_PC_W)
+                            .h(14.0),
+                    );
+            } else if let Some(words) = name_shared(item.pc_status.as_deref()) {
+                // Its place on this PC is another item's: its presses on disk are refused. The neutral glyph of the
+                // column, never Amber.
+                pc = pc.child(
+                    kit::state_glyph(
+                        format!("{k}-pc"),
+                        &crate::theme::icons_files::ALERT,
+                        None,
+                        "name-shared",
+                        15.0,
+                        t.text_tertiary,
+                    )
+                    .role("image")
+                    .label(words),
+                );
+            } else if let Some(state) = PcState::of(item.pc_status.as_deref()) {
+                pc = pc.child(pc_glyph(format!("{k}-pc"), state, surface, t));
+            }
+        }
+    }
+    // An upload that moves: its words and its bar where the date and the size stand.
+    let progress = match &uploading {
+        _ if downloading.is_some() && uploading.is_none() => downloading
+            .as_ref()
+            .map(|d| super::keeping::progress(&k, item, d, COL_DATE_W + COL_GAP + COL_SIZE_W, t)),
+        Some(UploadState::Uploading { row: words, done, .. }) => Some(
+            col()
+                .key(format!("{k}-upload"))
+                .w(COL_DATE_W + COL_GAP + COL_SIZE_W)
+                .gap(scale::space::S4)
+                .child(
+                    kit::label(
+                        format!("{k}-upload-words"),
+                        words.clone(),
+                        // As the words of a copy on its way down (`keeping::progress`): the board's 11 pt caption.
+                        type_::CAPTION.lh(13.5),
+                        t.text_secondary,
+                    )
+                    .truncate(),
+                )
+                .child(super::uploads::bar(
+                    &format!("{k}-bar"),
+                    *done,
+                    &format!("{}, {words}", item.name),
+                    t,
+                )),
+        ),
+        _ => None,
+    };
+    let date = match &uploading {
+        Some(UploadState::Waiting(_)) => "Just now".to_string(),
+        _ => date,
+    };
+
+    let mut cells = Vec::new();
+    match progress {
+        Some(progress) => cells.push(progress),
+        None => {
+            cells.push(
+                kit::label(
+                    format!("{k}-date"),
+                    date.clone(),
+                    // Words in place of a date are words: Inter, as the board sets them (DW-0429).
+                    if date == super::conflict::ROW_WORDS {
+                        TWO_VERSIONS
+                    } else {
+                        type_::META_MONO
+                    },
+                    meta,
+                )
+                .w(COL_DATE_W)
+                .truncate(),
+            );
+            cells.push(
+                kit::label(format!("{k}-size"), size_text.clone(), type_::META_MONO, meta)
+                    .w(COL_SIZE_W)
+                    .align(Align::End),
+            );
+        }
+    }
+    if fit.shared {
+        cells.push(shared_cell(&k, item, meta, surface, t));
+    }
+    if fit.pc {
+        cells.push(pc);
+    }
+    let tile = tile.unwrap_or_else(|| file_tile(&k, item, t));
+    let look = RowLook {
+        selected,
+        ..RowLook::default()
+    };
+    let shown = if marks_has_field { "" } else { item.name.as_str() };
+    // The list's one Tab stop is the table (`rows`): a row takes no focus of its own.
+    file_row::row_with(
+        &k,
+        &row_name(item, &date, &size_text),
+        tile,
+        shown,
+        marks,
+        cells,
+        look,
+        t,
+    )
+    .focusable(false)
+}
+
+/// What the PC column says of a row whose place on this PC is another item's (`case_place`, the engine's mark): its
+/// presses on disk are refused, and the message of each says why. `None`: any other row.
+pub(crate) fn name_shared(pc_status: Option<&str>) -> Option<&'static str> {
+    use crate::source_engine::{NAME_SHARED, NAME_SHARED_BUT_CASE};
+    match pc_status {
+        Some(NAME_SHARED) => Some("Same name as another item here"),
+        Some(NAME_SHARED_BUT_CASE) => Some("Same name as another item here, except for capital letters"),
+        _ => None,
+    }
+}

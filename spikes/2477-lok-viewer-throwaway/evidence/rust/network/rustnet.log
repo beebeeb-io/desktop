@@ -1,0 +1,18 @@
+leftovers[before-rustnet]: files_under_root=4 uninstall_entries=0 vendor_registry_keys=0 firewall_rules=0 profile_or_program_dirs=0 processes=0
+tools: 3 of 3 zips match their pinned SHA-256
+audit setting before: 'No Auditing'
+instrument 1 (listener): hits after one curl request = 1 (wanted 1)
+no rule:   probe download.documentfoundation.org:443: CONNECTED
+with rule: probe download.documentfoundation.org:443: NO CONNECTION
+instrument 2 (Windows connection events) for our own probe: permitted=2 blocked=1 (wanted both above 0)
+instrument 2 sees loopback connections too: curl.exe permitted events = 1
+pass=open tool=wordcraft-cli.exe runs=4 exit_codes=0,0,0,0 permitted_connections=0 blocked_connections=0 destinations=''
+pass=open tool=gridcraft-cli.exe runs=5 exit_codes=0,0,0,0,0 permitted_connections=0 blocked_connections=0 destinations=''
+pass=open tool=deckcraft-cli.exe runs=4 exit_codes=0,0,0,0 permitted_connections=0 blocked_connections=0 destinations=''
+pass=open listener_hits_delta=0 (all three tools together)
+pass=blocked tool=wordcraft-cli.exe runs=4 exit_codes=0,0,0,0 permitted_connections=0 blocked_connections=0 destinations=''
+pass=blocked tool=gridcraft-cli.exe runs=5 exit_codes=0,0,0,0,0 permitted_connections=0 blocked_connections=0 destinations=''
+pass=blocked tool=deckcraft-cli.exe runs=4 exit_codes=0,0,0,0 permitted_connections=0 blocked_connections=0 destinations=''
+pass=blocked listener_hits_delta=0 (all three tools together)
+listener file: [hit GET /instrument-check HTTP/1.1]
+audit setting restored: 'No Auditing' (before: 'No Auditing'); firewall rules left: 0

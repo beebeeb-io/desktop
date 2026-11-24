@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Refuse a release branch whose starting commit was never reviewed (task 2281).
 #
-# release.yml runs this before `build`, so before the `desktop-release` environment and before
+# release-native-windows.yml runs this before `build`, so before the `desktop-release` environment and before
 # any Azure signing token exists. A `release/*` branch is only dispatched when:
 #   (a) every commit on its first-parent history from the dispatched head back to its starting
 #       point is a merge commit of a pull request that was merged into this same branch
@@ -16,8 +16,11 @@
 #       write access could tag an unreviewed commit and publish a release on it; a tag ruleset
 #       cannot prevent that (GitHub refuses the Actions app as a bypass actor, HTTP 422).
 #       A 404 / draft / failed lookup is not published.
+#   (c) (LD-0014) RELEASE_BLOCKERS.md at the dispatched head still lists every item $MAIN_REF lists
+#       (scripts/release-blockers-check.sh with RELEASE_BLOCKERS_MAIN_REF): a release branch cannot
+#       drop a blocker that main keeps. Items of every platform count.
 #
-# main is protected by pull requests, so a dispatch from main skips this check: release.yml's
+# main is protected by pull requests, so a dispatch from main skips this check: release-native-windows.yml's
 # `verify-branch-point` job only runs for refs/heads/release/*.
 #
 # Inputs (environment):
@@ -152,6 +155,19 @@ tag_at_commit() {
   return 1
 }
 
+# (c) Items that main's RELEASE_BLOCKERS.md lists and the dispatched head's file lacks.
+check_blockers_vs_main() {
+  local checker tmp out
+  checker="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-blockers-check.sh"
+  tmp="$(mktemp)"
+  git show "$HEAD_SHA:RELEASE_BLOCKERS.md" >"$tmp" 2>/dev/null || : >"$tmp"
+  out="$(RELEASE_BLOCKERS_FILE="$tmp" RELEASE_BLOCKERS_MAIN_REF="$MAIN_REF" bash "$checker" macos 2>&1 | grep '^main: ' || true)"
+  rm -f "$tmp"
+  if [[ -n "$out" ]]; then
+    fail "release branch '$BRANCH' dropped RELEASE_BLOCKERS.md item(s) that $MAIN_REF still lists; restore them (a blocker is removed by the change that resolves it, on main first): $(printf '%s' "$out" | tr '\n' ';')"
+  fi
+}
+
 # Walk first-parent from the dispatched head back to the starting point: the first commit that
 # is not a merge of a pull request into this branch.
 start=""
@@ -186,6 +202,7 @@ if [[ -n "$tag_ref" ]]; then
   tag_name="${tag_ref#refs/tags/}"
   # A published release is not enough: the tagged commit must be reviewed too.
   if is_pr_merge "$start" main 'release/*'; then
+    check_blockers_vs_main
     note "OK: $BRANCH starts at $start, the commit of tag $tag_name (GitHub release published $tag_published_at: $tag_url), which is the merge commit of a pull request merged into $IS_PR_MERGE_BASE; $merge_count first-parent commit(s) since the start are merged pull requests into $BRANCH"
     exit 0
   fi
@@ -193,6 +210,7 @@ if [[ -n "$tag_ref" ]]; then
 fi
 
 if git merge-base --is-ancestor "$start" "$MAIN_REF" 2>/dev/null; then
+  check_blockers_vs_main
   note "OK: $BRANCH starts at $start, a commit on main ($MAIN_REF); $merge_count first-parent commit(s) since the start are merged pull requests into $BRANCH"
   exit 0
 fi

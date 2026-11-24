@@ -1,0 +1,1023 @@
+//! Thumbnails and previews (DW-0744): how photos preview, the size and format of the stored
+//! previews, and what that costs. Over it: the confirm of a new size or format with its cost
+//! (DW-0744b), and the compare view (DW-0745), a large dialog that hangs from the caption.
+//!
+//! Nothing changes until Apply: a segment (or Done in the compare view) only DRAFTS a choice
+//! (`PreviewsUi::draft`); the pane keeps drawing the stored one until the source has it.
+//!
+//! The compare view is the one of first-run setup (DW-0209, `frames::signin::setup`), whose
+//! drawing is private to that group: the photo, the options and the PNG decoder are repeated
+//! here with this pane's keys. One shared component is the follow-up.
+
+use crate::State;
+use crate::frames::signin::setup::source::{BUNDLED_SAMPLE_PNG, Sample};
+use crate::theme::icons_settings as ic;
+use crate::theme::scale::space as sp;
+use crate::theme::tokens::radius as rad;
+use crate::theme::tokens::{Theme, radius, type_};
+use crate::ui::button as ui_button;
+use crate::ui::kit;
+use crate::ui::settings_controls::{self as controls, Emphasis};
+use crate::ui::settings_dialog::{self as dialogs, Weight};
+use crate::ui::settings_list::{self as lists, Item, Trailing};
+use crate::ui::settings_notice::{self as notices, Tone};
+use crate::ui::settings_shell::{self as shell, SUB};
+use crate::ui::setup::{self, SegInk, SegSize};
+use crate::ui::view_state::{ViewState, try_again, view_state};
+use rune::{Color, El, Pixels, Span, TextStyle, col, el, rich, row};
+
+pub use crate::frames::signin::setup::source::{PreviewFormat, PreviewSize};
+pub use crate::frames::signin::setup::{Compare, CompareMode};
+
+use super::{Dialog, Intent, SettingsUi};
+
+/// The compare view on the board: 700 x 560, hanging from the caption.
+pub const SHEET: (f32, f32) = (700.0, 560.0);
+/// The photo in the compare view.
+pub const PHOTO: (f32, f32) = (560.0, 330.0);
+/// One arrow key moves the wipe line this much of the photo's width.
+pub const WIPE_STEP: f32 = 0.05;
+/// What the pane says once new previews are being made.
+pub const REBUILDING: &str = "Making new previews in the background";
+
+/// What stands where a weight would, for a size and format not measured yet.
+pub const NOT_MEASURED: &str = "not measured yet";
+
+/// 11px/500 mono: what a choice weighs, in the compare view (`.t-cap.font-mono`).
+const CAP_MONO: TextStyle = type_::KBD;
+
+/// What Thumbnails and previews shows. Every figure is the engine's, as words.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Previews {
+    /// Photo previews are made at all.
+    pub on: bool,
+    /// The stored choice.
+    pub size: PreviewSize,
+    pub format: PreviewFormat,
+    /// How many photos have previews: "2,431".
+    pub photos: String,
+    /// The sample's original: "30.9 MB".
+    pub original: String,
+    /// What a preview of the sample weighs at a size and format, where it has been measured.
+    pub weights: Vec<(PreviewSize, PreviewFormat, String)>,
+    /// How many of the account's photos the average was measured on.
+    pub measured_on: u32,
+    /// What it uses of the account's storage: all of it, then previews, fallback previews
+    /// and grid thumbnails. A row with no figure (`None`) is not drawn.
+    pub total: String,
+    pub uses: [Option<String>; 3],
+    /// On this PC: what is kept, the limit, and whether every photo fits under it. `None`:
+    /// nothing is kept on this PC, and the list is not drawn.
+    pub on_pc: Option<OnPc>,
+    /// A sentence the Format caption adds (what this PC makes); `None`: the board's caption.
+    pub format_note: Option<&'static str>,
+    /// "Made automatically" lists the fallback preview made with HEIC, and says why. `false`:
+    /// neither is drawn (no app makes one).
+    pub fallback: bool,
+    /// What the pane says by itself while it holds (previews being made, or why that stopped).
+    pub notice: Option<&'static str>,
+    /// The person's own photo to compare, measured on this PC. `None`: the picture that ships
+    /// inside the app.
+    pub sample: Option<Sample>,
+}
+
+/// What is kept on this PC, against its limit.
+#[derive(Clone, PartialEq, Debug)]
+pub struct OnPc {
+    pub kept: String,
+    pub limit: String,
+    pub all_fit: bool,
+}
+
+impl Previews {
+    pub fn weight(&self, size: PreviewSize, format: PreviewFormat) -> Option<String> {
+        self.weights
+            .iter()
+            .find(|(s, f, _)| *s == size && *f == format)
+            .map(|(_, _, w)| w.clone())
+    }
+}
+
+/// "4K HEIC".
+pub fn name(size: PreviewSize, format: PreviewFormat) -> String {
+    format!("{} {}", size.label(), format.label())
+}
+
+/// What the source answers for this pane.
+#[derive(Clone, PartialEq, Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum PhotoPreviews {
+    /// Nothing answers yet (the default of `DriveSettings::photo_previews`): no value is drawn.
+    Unavailable,
+    /// The source is reading: the pane draws a loading state, never a value.
+    Loading,
+    /// The read failed: the pane says why (a fixed sentence) and offers Try again.
+    Failed(&'static str),
+    /// The vault is not this account's (locked, or signed out): the pane says why and what to do, never a
+    /// loading state that does not end. The sentence says both.
+    NotBound(&'static str),
+    Ready(Previews),
+}
+
+/// What is open or drafted inside Thumbnails and previews.
+pub struct PreviewsUi {
+    /// A size and format chosen and not applied yet (DW-0744b asks; DW-0745 chooses).
+    pub draft: Option<(PreviewSize, PreviewFormat)>,
+    /// How the open compare view shows the two pictures (DW-0745).
+    pub compare: Compare,
+    original: Pixels,
+    preview: Pixels,
+    /// The sample the two pictures were decoded from (`None`: the bundled one). Shared: compared
+    /// without reading its bytes.
+    shown: std::sync::Mutex<Option<Sample>>,
+}
+
+impl PreviewsUi {
+    /// The two pictures of `sample` (the bundled ones for `None`), decoded only when it changed.
+    fn show(&self, sample: Option<&Sample>) {
+        let mut shown = self.shown.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if shown.as_ref() == sample {
+            return;
+        }
+        let bundled = bundled_decoded;
+        for (pixels, png) in [
+            (&self.original, sample.map(|s| &s.original_png)),
+            (&self.preview, sample.map(|s| &s.preview_png)),
+        ] {
+            match png.and_then(|png| decode_rgba(png)) {
+                Some((w, h, rgba)) => pixels.set(w, h, rgba),
+                None => {
+                    if let Some((w, h, rgba)) = bundled() {
+                        pixels.set(w, h, rgba);
+                    }
+                }
+            }
+        }
+        *shown = sample.cloned();
+    }
+}
+
+impl Default for PreviewsUi {
+    fn default() -> Self {
+        Self {
+            draft: None,
+            compare: fresh_compare(),
+            // The sample that ships inside the app; the engine lane hands over the person's own.
+            original: bundled_sample(),
+            preview: bundled_sample(),
+            shown: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+/// The bundled sample as pixels of the caller's own. The PNG is decoded once per process (every window state
+/// holds two of these, and a decode is the slowest step of building one); each call copies the decoded bytes.
+fn bundled_sample() -> Pixels {
+    let pixels = Pixels::new();
+    if let Some((width, height, rgba)) = bundled_decoded() {
+        pixels.set(width, height, rgba);
+    }
+    pixels
+}
+
+/// The bundled sample, decoded once per process; each call copies the decoded bytes.
+fn bundled_decoded() -> Option<(u32, u32, Vec<u8>)> {
+    static DECODED: std::sync::OnceLock<Option<(u32, u32, Vec<u8>)>> = std::sync::OnceLock::new();
+    DECODED.get_or_init(|| decode_rgba(BUNDLED_SAMPLE_PNG)).clone()
+}
+
+fn fresh_compare() -> Compare {
+    Compare {
+        mode: CompareMode::Wipe,
+        wipe: 0.5,
+        original_showing: false,
+    }
+}
+
+/// Decode a PNG into RGBA bytes Rune draws (width, height, bytes). `None`: a file that does not decode draws
+/// nothing.
+fn decode_rgba(png_bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes)).read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let bytes = &buf[..info.buffer_size()];
+    let rgba: Vec<u8> = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Rgba, png::BitDepth::Eight) => bytes.to_vec(),
+        (png::ColorType::Rgb, png::BitDepth::Eight) => bytes
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        _ => return None,
+    };
+    Some((info.width, info.height, rgba))
+}
+
+impl SettingsUi {
+    fn stored_previews(&self) -> Option<(PreviewSize, PreviewFormat)> {
+        match self.drive.photo_previews() {
+            PhotoPreviews::Ready(p) => Some((p.size, p.format)),
+            _ => None,
+        }
+    }
+
+    /// The choice in hand: the draft, or what is stored.
+    pub fn previews_choice(&self) -> Option<(PreviewSize, PreviewFormat)> {
+        self.previews.draft.or(self.stored_previews())
+    }
+
+    /// A segment on the pane: draft this size or format and ask with its cost (DW-0744b).
+    /// The stored choice asks nothing.
+    pub fn choose_previews(&mut self, size: Option<PreviewSize>, format: Option<PreviewFormat>) {
+        let Some(stored) = self.stored_previews() else {
+            return;
+        };
+        self.toast = None;
+        let want = (size.unwrap_or(stored.0), format.unwrap_or(stored.1));
+        if want == stored {
+            self.previews.draft = None;
+            return;
+        }
+        self.previews.draft = Some(want);
+        self.dialog = Some(Dialog::ApplyPreviews);
+    }
+
+    /// "Compare" (DW-0745): the view opens on the stored choice, wiping.
+    pub fn open_compare(&mut self) {
+        if self.stored_previews().is_none() {
+            return;
+        }
+        self.toast = None;
+        self.previews.draft = None;
+        self.previews.compare = fresh_compare();
+        self.dialog = Some(Dialog::Compare);
+    }
+
+    /// A size or a format in the compare view: the choice in hand, nothing stored.
+    pub fn pick_in_compare(&mut self, size: Option<PreviewSize>, format: Option<PreviewFormat>) {
+        if let Some(now) = self.previews_choice() {
+            self.previews.draft = Some((size.unwrap_or(now.0), format.unwrap_or(now.1)));
+        }
+    }
+
+    /// Done or Esc in the compare view: back, with the choice set. A choice that differs
+    /// from the stored one is confirmed with its cost first (DW-0744b).
+    pub fn close_compare(&mut self) {
+        if self.dialog != Some(Dialog::Compare) {
+            return;
+        }
+        self.dialog = None;
+        if self.previews.draft.is_some() && self.previews.draft != self.stored_previews() {
+            self.dialog = Some(Dialog::ApplyPreviews);
+        } else {
+            self.previews.draft = None;
+        }
+    }
+
+    /// "Apply to 2,431 photos": the source makes the new previews in the background.
+    pub fn apply_previews(&mut self) {
+        if let Some((size, format)) = self.previews.draft.take() {
+            self.drive.apply_previews(size, format);
+            self.toast = Some(REBUILDING);
+        }
+        self.dialog = None;
+    }
+
+    /// Cancel: the stored choice stays.
+    pub fn cancel_previews(&mut self) {
+        self.previews.draft = None;
+        self.dialog = None;
+    }
+
+    pub fn set_compare_mode(&mut self, mode: CompareMode) {
+        self.previews.compare.mode = mode;
+        self.previews.compare.original_showing = false;
+    }
+
+    /// Move the wipe line by `by` of the photo's width.
+    pub fn move_wipe(&mut self, by: f32) {
+        let compare = &mut self.previews.compare;
+        if compare.mode == CompareMode::Wipe {
+            compare.wipe = (compare.wipe + by).clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn flip(&mut self) {
+        let compare = &mut self.previews.compare;
+        if compare.mode == CompareMode::Flip {
+            compare.original_showing = !compare.original_showing;
+        }
+    }
+}
+
+pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
+    const HEAD_SUB: &str = "Photos open instantly from a saved preview, instead of downloading the full original.";
+    let mut children = vec![shell::heading("Thumbnails and previews", Some(HEAD_SUB), t)];
+    let p = match ui.drive.photo_previews() {
+        PhotoPreviews::Ready(p) => p,
+        // Not drawn: `settings::view` shows the shell's "not built yet" frame for a source
+        // that does not answer for this pane. Never a value, never a false error.
+        PhotoPreviews::Unavailable => {
+            return (shell::pane(children, t), None);
+        }
+        PhotoPreviews::Loading => {
+            children.push(loading(t));
+            return (shell::pane(children, t), None);
+        }
+        PhotoPreviews::Failed(why) => {
+            children.push(failed(why, t));
+            return (shell::pane(children, t), None);
+        }
+        PhotoPreviews::NotBound(words) => {
+            children.push(not_bound(words, t));
+            return (shell::pane(children, t), None);
+        }
+    };
+    ui.previews.show(p.sample.as_ref());
+
+    let on = p.on;
+    children.push(lists::list(
+        0,
+        None,
+        vec![lists::item_with(
+            0,
+            0,
+            &Item::new(Some(&ic::IMAGE), "Photo previews")
+                .sub("Photos open instantly, without downloading the original"),
+            vec![
+                crate::ui::switch::switch_sized(
+                    &format!("{}-switch", "item-0-0"),
+                    "",
+                    on,
+                    true,
+                    crate::ui::button::Size::Md,
+                    t,
+                )
+                .label("Photo previews")
+                .on_press(move |s: &mut State| s.settings.drive.set_photo_previews(!on)),
+            ],
+            t,
+        )],
+        None,
+        t,
+    ));
+    children.push(sample_card(ui, &p, t));
+
+    let sizes: Vec<&str> = PreviewSize::ALL.iter().map(|s| s.label()).collect();
+    let formats: Vec<&str> = PreviewFormat::ALL.iter().map(|f| f.label()).collect();
+    let size_at = PreviewSize::ALL.iter().position(|s| *s == p.size).unwrap_or(0);
+    let format_at = PreviewFormat::ALL.iter().position(|f| *f == p.format).unwrap_or(0);
+    let seg_row = |key: &str, seg: El| el().key(key.to_string()).w_full().px(sp::S12).py(sp::S10).child(seg);
+    children.push(lists::list(
+        1,
+        Some("Preview size"),
+        vec![seg_row(
+            "size-row",
+            setup::segmented(
+                "seg-size",
+                "Preview size",
+                &sizes,
+                size_at,
+                SegSize::Md,
+                None,
+                t,
+                |j, tab| tab.on_press(move |s: &mut State| s.settings.choose_previews(Some(PreviewSize::ALL[j]), None)),
+            ),
+        )],
+        None,
+        t,
+    ));
+    children.push(lists::list(
+        2,
+        Some("Format"),
+        vec![seg_row(
+            "format-row",
+            setup::segmented(
+                "seg-format",
+                "Format",
+                &formats,
+                format_at,
+                SegSize::Md,
+                None,
+                t,
+                |j, tab| {
+                    tab.on_press(move |s: &mut State| s.settings.choose_previews(None, Some(PreviewFormat::ALL[j])))
+                },
+            ),
+        )],
+        Some(&match p.format_note {
+            Some(note) => format!("{FORMAT_CAPTION} {note}"),
+            None => FORMAT_CAPTION.to_string(),
+        }),
+        t,
+    ));
+
+    // A row with no figure is not drawn (the engine has none for fallback previews or grid
+    // thumbnails); the rows that are keep the board's keys and rules.
+    let uses = ["Previews", "Fallback previews", "Grid thumbnails"]
+        .iter()
+        .zip(&p.uses)
+        .enumerate()
+        .filter_map(|(i, (title, value))| {
+            let mut it = Item::new(None, *title).trailing(Trailing::Mono(value.clone()?));
+            if i > 0 {
+                it = it.ruled();
+            }
+            Some(lists::item(3, i, &it, t))
+        })
+        .collect();
+    let mut counts = format!(
+        "This counts toward your Beebeeb storage. All {} photos at {}",
+        p.photos,
+        name(p.size, p.format)
+    );
+    match p.weight(p.size, p.format) {
+        Some(average) => counts.push_str(&format!(
+            "; average {average} per preview, measured on {} of your photos.",
+            p.measured_on
+        )),
+        None => counts.push('.'),
+    }
+    children.push(lists::list(3, Some("What it uses"), uses, Some(&counts), t));
+
+    if let Some(on_pc) = &p.on_pc {
+        children.push(lists::roving_list(
+            4,
+            Some("On this PC"),
+            vec![
+                lists::item(
+                    4,
+                    0,
+                    &Item::new(None, format!("{} of {} limit", on_pc.kept, on_pc.limit))
+                        .sub(if on_pc.all_fit {
+                            "All photos fit. Change the limit or clear these in Storage."
+                        } else {
+                            "Not every photo fits. Change the limit or clear these in Storage."
+                        })
+                        .opens(),
+                    t,
+                )
+                .on_press(|s: &mut State| super::go(s, "DW-0712")),
+            ],
+            None,
+            t,
+        ));
+    }
+    let mut made = vec![lists::item(
+        5,
+        0,
+        &Item::new(None, "Grid thumbnails").trailing(Trailing::Value("WebP, 384 and 768 px".into())),
+        t,
+    )];
+    if p.fallback {
+        made.push(lists::item(
+            5,
+            1,
+            &Item::new(None, "Fallback preview, with HEIC")
+                .trailing(Trailing::Value("WebP, 720p".into()))
+                .ruled(),
+            t,
+        ));
+    }
+    children.push(lists::list(
+        5,
+        Some("Made automatically"),
+        made,
+        Some(if p.fallback {
+            "Thumbnails are made for every photo and can't be changed. If you choose HEIC, a 720p WebP is also stored so your photos still preview on devices that can't open HEIC."
+        } else {
+            "Thumbnails are made for every photo and can't be changed."
+        }),
+        t,
+    ));
+    children.push(lists::roving_list(
+        6,
+        Some("Rebuild"),
+        vec![
+            lists::item(6, 0, &Item::new(Some(&ic::REBUILD), "Rebuild previews"), t)
+                .role("button")
+                .hover(t.hover)
+                .press(t.press)
+                .focusable(true)
+                .on_press(|s: &mut State| {
+                    s.settings.drive.rebuild_previews();
+                    s.settings.toast = Some(REBUILDING);
+                }),
+        ],
+        Some("Clearing the cache never rebuilds anything. Previews just download again when you open a photo."),
+        t,
+    ));
+
+    let overlay = match ui.dialog {
+        Some(Dialog::ApplyPreviews) => Some(apply_question(ui, &p, t)),
+        Some(Dialog::Compare) => Some(compare_view(ui, &p, t)),
+        _ => ui.toast.or(p.notice).map(|words| notices::toast(0, words, t)),
+    };
+    (shell::pane(children, t), overlay)
+}
+
+/// The Format caption on the board.
+const FORMAT_CAPTION: &str = "HEIC is about half the size at the same quality. JPEG opens anywhere.";
+
+/// While the source reads: the shared loading state, never a value.
+fn loading(t: &Theme) -> El {
+    view_state(
+        ViewState::Loading {
+            words: "Loading your preview settings",
+        },
+        t,
+    )
+}
+
+/// The read failed: said plainly, with a Try again that reads again.
+fn failed(why: &'static str, t: &Theme) -> El {
+    let again = try_again("previews-failed", t).on_press(|s: &mut State| s.settings.drive.reload_previews());
+    view_state(
+        ViewState::Failed {
+            key: "previews-failed",
+            title: "Couldn't load your preview settings",
+            why,
+            retry: Some(again),
+        },
+        t,
+    )
+}
+
+/// The vault is not this account's: why, and what to do.
+fn not_bound(words: &'static str, t: &Theme) -> El {
+    view_state(
+        ViewState::Empty {
+            key: "previews-locked",
+            icon: &ic::PADLOCK,
+            title: "Preview settings are locked",
+            body: words,
+            action: None,
+        },
+        t,
+    )
+}
+
+/// The sample: the photo, what its preview weighs against the original, and Compare
+/// (`.kit-card.p-3`). The board's line is one text of mixed runs; so is this (`card-0-sub`).
+fn sample_card(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
+    let strong = format!("{} \u{b7} ", name(p.size, p.format));
+    // A size and format nobody has measured yet says so, in words.
+    let measured = p.weight(p.size, p.format);
+    let weight = measured.clone().unwrap_or_else(|| NOT_MEASURED.to_string());
+    let middle = ", original ";
+    let words = format!("{strong}{weight}{middle}{}", p.original);
+    let weight_at = strong.len()..strong.len() + weight.len();
+    let original_at = weight_at.end + middle.len()..words.len();
+    let mut spans = vec![Span::new(0, weight_at.start).weight(500.0).color(t.text)];
+    if measured.is_some() {
+        spans.push(
+            Span::new(weight_at.start, weight_at.end)
+                .weight(500.0)
+                .color(t.text)
+                .mono(),
+        );
+    }
+    spans.push(Span::new(original_at.start, original_at.end).mono());
+    kit::note_text("card-0-sub", "card-0-sub", &words, SUB, t.text_tertiary);
+    row()
+        .key("card-0")
+        .role("group")
+        .label(format!("Sample: {words}"))
+        .w_full()
+        .padding(sp::S12)
+        .gap(sp::S12)
+        .center_y()
+        .radius(radius::LG)
+        .fill(t.card)
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
+        .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
+        .child(
+            el().key("card-0-thumb")
+                .role("image")
+                .label("Sample photo")
+                .size(84.0, 64.0)
+                .radius(rad::MD)
+                .pixels(&ui.previews.original),
+        )
+        .child(
+            rich(words, spans)
+                .key("card-0-sub")
+                .font(SUB)
+                .color(t.text_tertiary)
+                .grow(1.0)
+                .min_w(0.0),
+        )
+        .child(
+            controls::button(0, "Compare", None, Emphasis::Plain, t)
+                .on_press(|s: &mut State| s.settings.open_compare()),
+        )
+}
+
+/// DW-0744b: a change of size or format, confirmed with its cost.
+fn apply_question(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
+    let (size, format) = ui.previews.draft.unwrap_or((p.size, p.format));
+    let stays = "The old ones stay until the new ones have uploaded.";
+    let says = match ui.drive.previews_cost(size, format) {
+        Some(cost) => format!(
+            "Previews go from about {} to about {cost} of your storage. {stays}",
+            p.total
+        ),
+        None => stays.to_string(),
+    };
+    let foot = vec![
+        dialogs::button(1, &format!("Apply to {} photos", p.photos), Weight::Primary, t)
+            .default_button()
+            .on_press(|s: &mut State| s.settings.apply_previews()),
+        dialogs::button(2, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| s.settings.cancel_previews()),
+    ];
+    dialogs::alert(
+        "Apply new previews",
+        380.0,
+        notices::tile(0, Tone::Neutral, &ic::IMAGE, t),
+        &format!("Apply {} to {} photos?", name(size, format), p.photos),
+        &says,
+        foot,
+        t,
+    )
+    .modal(false, |s: &mut State| s.settings.cancel_previews())
+}
+
+/// The compare view's ground: "color-mix(in oklch, black 88%, paper)".
+fn stage(t: &Theme) -> Color {
+    if t.dark {
+        Color::BLACK
+    } else {
+        rune::color::hex("#060505").unwrap_or(Color::BLACK)
+    }
+}
+
+fn tag(key: &str, words: &str) -> El {
+    el().key(format!("{key}-box"))
+        .h(18.0)
+        .px(sp::S8)
+        .center()
+        .radius(rad::SM)
+        .fill(Color::BLACK.alpha(0.5))
+        .child(kit::label(key.to_string(), words, type_::CAPTION, Color::WHITE))
+}
+
+fn photo(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
+    let (original, preview) = (&ui.previews.original, &ui.previews.preview);
+    let compare = ui.previews.compare;
+    let (w, h) = PHOTO;
+    let (size, format) = ui.previews.draft.unwrap_or((p.size, p.format));
+    let original_tag = format!("Original \u{b7} {}", p.original);
+    let preview_tag = match p.weight(size, format) {
+        Some(weight) => format!("{} \u{b7} {weight}", name(size, format)),
+        None => name(size, format),
+    };
+    let frame = |key: &str| el().key(key.to_string()).size(w, h).radius(rad::SM);
+    match compare.mode {
+        CompareMode::Wipe => {
+            let x = (compare.wipe * w).round();
+            frame("cmp-photo")
+                .role("slider")
+                .label("Wipe between the original and the preview")
+                .range_value(f64::from(compare.wipe * 100.0), 0.0, 100.0)
+                .on_step(|s: &mut State, delta: i32, _: &mut rune::Tx| {
+                    s.settings.move_wipe(delta as f32 * WIPE_STEP);
+                })
+                .focusable(true)
+                .focus_ring(2.0, 2.0, t.accent_deep)
+                .pixels(original)
+                // The preview from the line to the right edge, cut from the same picture box.
+                .child(
+                    el().key("cmp-preview-at")
+                        .absolute(x, 0.0)
+                        .size(w - x, h)
+                        .clip_corners([0.0, 4.0, 4.0, 0.0])
+                        .child(el().absolute(-x, 0.0).size(w, h).pixels(preview)),
+                )
+                .child(
+                    el().key("cmp-wipe")
+                        .absolute(x - 1.0, 0.0)
+                        .size(2.0, h)
+                        .fill(Color::WHITE),
+                )
+                .child(el().absolute(12.0, 12.0).child(tag("cmp-tag-0", &original_tag)))
+                .child(
+                    el().pin(None, Some(12.0), Some(12.0), None)
+                        .child(tag("cmp-tag-1", &preview_tag)),
+                )
+        }
+        CompareMode::Stacked => {
+            // Two pictures of half the height, the original above the preview.
+            let half = (h - 10.0) / 2.0;
+            let one = |key: &str, pixels: &Pixels, words: &str, name: &str| {
+                el().key(format!("{key}-pic"))
+                    .role("image")
+                    .label(name.to_string())
+                    .size(half * w / h, half)
+                    .radius(rad::SM)
+                    .pixels(pixels)
+                    .child(el().absolute(12.0, 12.0).child(tag(key, words)))
+            };
+            col()
+                .key("cmp-photo")
+                .size(w, h)
+                .gap(sp::S10)
+                .items_center()
+                .child(one("cmp-tag-0", original, &original_tag, "The original"))
+                .child(one("cmp-tag-1", preview, &preview_tag, "The preview"))
+        }
+        CompareMode::Flip => {
+            let (pixels, key, words) = if compare.original_showing {
+                (original, "cmp-tag-0", original_tag.as_str())
+            } else {
+                (preview, "cmp-tag-1", preview_tag.as_str())
+            };
+            frame("cmp-photo")
+                .role("button")
+                .label(if compare.original_showing {
+                    "Showing the original. Press to show the preview."
+                } else {
+                    "Showing the preview. Press to show the original."
+                })
+                .focusable(true)
+                .focus_ring(2.0, 2.0, t.accent_deep)
+                .cursor(rune::Cursor::Pointer)
+                .pixels(pixels)
+                .on_press(|s: &mut State| s.settings.flip())
+                .child(el().absolute(12.0, 12.0).child(tag(key, words)))
+        }
+    }
+}
+
+/// One choice at the foot of the compare view: a size or a format, with what it weighs.
+fn option(j: usize, label: &str, weight: Option<String>, on: bool, t: &Theme) -> El {
+    let dim = Color::WHITE.alpha(0.7);
+    let mut o = col()
+        .key(format!("cmp-opt-{j}-tab"))
+        .role("radio")
+        .label(match &weight {
+            Some(weight) => format!("{label}, {weight}"),
+            None => label.to_string(),
+        })
+        .checked(on)
+        // As wide as its wider line, to the fraction of a point: the row is centred.
+        .w(24.0
+            + rune::text::advance(label, type_::HEAD)
+                .max(weight.as_deref().map_or(0.0, |w| rune::text::advance(w, CAP_MONO))))
+        .h(43.0)
+        .py(sp::S6)
+        .items_center()
+        .radius(rad::CONTROL)
+        .focusable(true)
+        .focus_ring(2.0, 0.0, t.accent_deep)
+        .cursor(rune::Cursor::Pointer)
+        .child(
+            kit::label(format!("cmp-opt-{j}"), label, type_::HEAD, Color::WHITE)
+                .w(rune::text::advance(label, type_::HEAD))
+                .a11y_hidden(),
+        );
+    if on {
+        o = o.fill(Color::WHITE.alpha(0.18));
+    }
+    if let Some(weight) = weight {
+        let wide = rune::text::advance(&weight, CAP_MONO);
+        o = o.child(
+            kit::label(format!("cmp-opt-{j}-bytes"), weight, CAP_MONO, dim)
+                .w(wide)
+                .a11y_hidden(),
+        );
+    }
+    o
+}
+
+/// DW-0745: a preview against the original, before choosing a size.
+fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
+    let dim = Color::WHITE.alpha(0.7);
+    let compare = ui.previews.compare;
+    let (now_size, now_format) = ui.previews.draft.unwrap_or((p.size, p.format));
+    let modes: Vec<&str> = CompareMode::ALL.iter().map(|m| m.label()).collect();
+    let mode = CompareMode::ALL.iter().position(|m| *m == compare.mode).unwrap_or(1);
+    let head = row()
+        .key("cmp-head")
+        .w_full()
+        .h(48.0)
+        .px(sp::S16)
+        .gap(sp::S12)
+        .center_y()
+        .child(
+            ui_button::button(
+                ui_button::keys("btn-1"),
+                "Done",
+                None,
+                ui_button::Variant::Secondary,
+                ui_button::Size::Sm,
+                ui_button::ButtonState::Enabled,
+                t,
+            )
+            .default_button()
+            .on_press(|s: &mut State| s.settings.close_compare()),
+        )
+        .child(setup::segmented(
+            "cmp-seg",
+            "How to compare",
+            &modes,
+            mode,
+            SegSize::Sm,
+            Some(SegInk {
+                track: Color::WHITE.alpha(0.14),
+                rest: Color::WHITE.alpha(0.75),
+            }),
+            t,
+            |j, tab| tab.on_press(move |s: &mut State| s.settings.set_compare_mode(CompareMode::ALL[j])),
+        ))
+        .child(el().grow(1.0))
+        .child(kit::label(
+            "cmp-hint",
+            match compare.mode {
+                CompareMode::Wipe => "Pinch to zoom \u{b7} double-click for 1:1",
+                CompareMode::Stacked => "The original above, the preview below",
+                CompareMode::Flip => "Press the photo to flip",
+            },
+            type_::CAPTION,
+            dim,
+        ));
+    let mut foot = row()
+        .key("cmp-foot")
+        .w_full()
+        .pb(16.0)
+        .gap(sp::S24)
+        .center()
+        .role("group")
+        .focus_group()
+        .label("Preview size and format");
+    for (j, size) in PreviewSize::ALL.iter().enumerate() {
+        let size = *size;
+        foot = foot.child(
+            option(j, size.label(), p.weight(size, now_format), size == now_size, t)
+                .position_in_set(j + 1, PreviewSize::ALL.len())
+                .on_press(move |s: &mut State| s.settings.pick_in_compare(Some(size), None)),
+        );
+    }
+    foot = foot.child(
+        el().key("cmp-sep")
+            .a11y_hidden()
+            .size(kit::HAIR, 18.0)
+            .mx(2.0)
+            .fill(Color::WHITE.alpha(0.3)),
+    );
+    for (j, format) in PreviewFormat::ALL.iter().enumerate() {
+        let format = *format;
+        foot = foot.child(
+            option(
+                PreviewSize::ALL.len() + j,
+                format.label(),
+                p.weight(now_size, format),
+                format == now_format,
+                t,
+            )
+            .position_in_set(j + 1, PreviewFormat::ALL.len())
+            .on_press(move |s: &mut State| s.settings.pick_in_compare(None, Some(format))),
+        );
+    }
+    foot = foot.child(
+        ui_button::button(
+            ui_button::keys("btn-2"),
+            "Choose photo",
+            None,
+            ui_button::Variant::Secondary,
+            ui_button::Size::Sm,
+            ui_button::ButtonState::Enabled,
+            t,
+        )
+        .on_press(|s: &mut State| s.settings.ask(Intent::Open("choose-photo"))),
+    );
+    // The buttons are the light theme's paper on the dark ground in both themes, as the
+    // board draws them; the sheet hangs from the caption, centred across the window.
+    let sheet = setup::sheet(
+        "Compare a preview with the original",
+        SHEET.0,
+        SHEET.1,
+        col()
+            .key("cmp")
+            .w_full()
+            .h_full()
+            .corners([0.0, 0.0, 14.0, 14.0])
+            .fill(stage(t))
+            .child(head)
+            .child(
+                el().key("cmp-stage")
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .center()
+                    .child(photo(ui, p, t)),
+            )
+            .child(foot),
+        t,
+    );
+    col()
+        .key("scrim")
+        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .items_center()
+        // The sheet hangs from the caption: its shadow and ring never reach over it.
+        .clip_rounded(0.0)
+        .fill(dialogs::scrim_color(t))
+        .child(sheet)
+        .modal(false, |s: &mut State| s.settings.close_compare())
+}
+
+/// The board's sample content for Thumbnails and previews (DW-0744).
+pub struct BoardPreviews {
+    pub previews: Previews,
+}
+
+/// The board's 2,431 photos.
+const BOARD_PHOTOS: f32 = 2431.0;
+
+/// What a preview of the board's sample weighs, in KB, where the board says.
+fn board_kb(size: PreviewSize, format: PreviewFormat) -> Option<f32> {
+    Some(match (size, format) {
+        (PreviewSize::P720, PreviewFormat::Heic) => 213.0,
+        (PreviewSize::P1080, PreviewFormat::Heic) => 420.0,
+        (PreviewSize::K2, PreviewFormat::Heic) => 640.0,
+        (PreviewSize::K4, PreviewFormat::Heic) => 1000.0,
+        (PreviewSize::K4, PreviewFormat::Jpeg) => 2100.0,
+        _ => return None,
+    })
+}
+
+fn words_of(kb: f32) -> String {
+    if kb >= 1_000_000.0 {
+        format!("{:.1} GB", kb / 1_000_000.0)
+    } else if kb >= 1000.0 {
+        format!("{:.1} MB", kb / 1000.0)
+    } else {
+        format!("{kb:.0} KB")
+    }
+}
+
+impl BoardPreviews {
+    pub fn new() -> Self {
+        let mut weights = Vec::new();
+        for size in PreviewSize::ALL {
+            for format in PreviewFormat::ALL {
+                if let Some(kb) = board_kb(size, format) {
+                    weights.push((size, format, words_of(kb)));
+                }
+            }
+        }
+        Self {
+            previews: Previews {
+                on: true,
+                size: PreviewSize::K4,
+                format: PreviewFormat::Heic,
+                photos: "2,431".into(),
+                original: "30.9 MB".into(),
+                weights,
+                measured_on: 50,
+                total: "3.1 GB".into(),
+                uses: [Some("2.4 GB".into()), Some("420 MB".into()), Some("300 MB".into())],
+                on_pc: Some(OnPc {
+                    kept: "3.1 GB".into(),
+                    limit: "20 GB".into(),
+                    all_fit: true,
+                }),
+                format_note: None,
+                fallback: true,
+                notice: None,
+                sample: None,
+            },
+        }
+    }
+
+    /// What all previews would take at a size and format: the board's own figure where it
+    /// gives one (DW-0744b: 2K HEIC, about 1.6 GB), otherwise the photos times the sample's
+    /// weight, plus the fallback previews (with HEIC) and the grid thumbnails.
+    pub fn cost(&self, size: PreviewSize, format: PreviewFormat) -> Option<String> {
+        if (size, format) == (PreviewSize::K2, PreviewFormat::Heic) {
+            return Some("1.6 GB".into());
+        }
+        let fallback = if format == PreviewFormat::Heic { 420_000.0 } else { 0.0 };
+        board_kb(size, format).map(|kb| words_of(kb * BOARD_PHOTOS + fallback + 300_000.0))
+    }
+
+    pub fn apply(&mut self, size: PreviewSize, format: PreviewFormat) {
+        if let Some(total) = self.cost(size, format) {
+            self.previews.total = total.clone();
+            if let Some(on_pc) = &mut self.previews.on_pc {
+                on_pc.kept = total;
+            }
+        }
+        self.previews.uses[0] = Some(match board_kb(size, format) {
+            Some(kb) => words_of(kb * BOARD_PHOTOS),
+            None => "Not measured yet".into(),
+        });
+        self.previews.uses[1] = Some(if format == PreviewFormat::Heic {
+            "420 MB".into()
+        } else {
+            "0 MB".into()
+        });
+        self.previews.size = size;
+        self.previews.format = format;
+    }
+}

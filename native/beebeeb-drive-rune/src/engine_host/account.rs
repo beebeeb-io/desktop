@@ -1,0 +1,1214 @@
+//! The account sections on the real engine: [`EngineAccountSource`], the `AccountSource` of the running app.
+//!
+//! What it answers, and from where:
+//! - Account (DW-A51) and the plan over it (DW-0708): the email, the name the account shows (the email stands in
+//!   when none is set or it could not be read) and the plan's size, use, billing period and how its period ends,
+//!   in ONE engine call ([`Engine::account_basics`]: three requests at the same time on one client). The period's
+//!   end is said in the words of the plan's status as Beebeeb sends it ([`plan_of`]): a status this file does not
+//!   know gets no date, and "renews" is said only for a plan Beebeeb says is charged again, for a day that is
+//!   still ahead. "This account uses" lists Drive only: this app. Which other Beebeeb products hold a
+//!   session on this PC is not read here.
+//! - Devices and sessions (DW-A55): the account's sessions ([`Engine::account_sessions`]), ONE ROW PER SESSION as
+//!   Beebeeb lists them (it names no device and no product per session; see the PR record). Sign out (DW-A56)
+//!   ends that one session ([`Engine::end_account_session`]); "Sign out everywhere else" ends every session
+//!   but this one ([`Engine::revoke_other_account_sessions`]). Both are sent once per press, only for a row of
+//!   the list that shows, never for this session, and the list is read again after EVERY answer (taken, already
+//!   gone, refused, not known): a row goes only when Beebeeb's list no longer has it. A sign-out Beebeeb did not
+//!   take is said with a way to send it again ([`AccountSource::notice_action`]); for "everywhere else" that sends
+//!   again only for the sessions that were listed at the confirm, one by one, never for a session made since.
+//! - What it says ([`AccountSource::notice`]): the toasts wait in a line, each for its own time
+//!   ([`STAYS_DONE`], [`STAYS_FAILED`]), and a thing that was not done is never replaced by one that worked. A
+//!   read that failed over values that were already drawn keeps them, and the pane says it could not refresh,
+//!   with Try again, for as long as that is so.
+//! - Sign-in and security (the one page): two-factor from the Account read (the profile's mark; absent: not
+//!   known) and how many sessions are signed in (the list's length, never of a list read before a sign-out that
+//!   was sent). Everything else is not known ([`AccountSource::security_facts`]): no mark, no control.
+//! - Change email and two-factor (`account_twofactor.rs`, `account_email.rs`): started on a worker, answered later.
+//! - Every other account pane: `PaneState::Unwired`; their methods here do nothing and no drawn pane reaches them.
+//!
+//! Session rule: every answer carries the session ([`Engine::session_turn`]) and the account it was made for; one
+//! that is not the current session's and account's is dropped, every accessor checks before it hands anything
+//! out, and the window's poll ([`AccountSource::pump`]) drops what it holds the moment the session moves on.
+//! "Your session ended" is the engine's word alone ([`Engine::account_session_refused`]: its run of 401s, which
+//! this file's calls count in): while it says so nothing is asked or sent and nothing of the account is held, and
+//! when its next call works the pane reads again. One 401 on a call of this file is a call that failed, with
+//! Try again, as it is for the engine's own loop.
+//!
+//! Thread rule: each call runs on a worker of its own and sends its answer down one channel, taken in by `pump`;
+//! the worker wakes the window ([`Engine::wake_host`]). It reads when a pane opens and what it holds is missing
+//! or older than [`FRESH_FOR`], and again for a new session only while one of its panes is on screen
+//! ([`AccountSource::closed`]); never from a draw. A worker that panicked answers as a call that failed.
+//!
+//! Must not: log an email, a name, a device's name, an id or a server's words; only a call's kind. Nothing is
+//! written to disk here.
+
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
+
+use beebeeb_engine::account::SessionGeneration;
+use beebeeb_engine::app::account_api::SessionEnd;
+use beebeeb_engine::app::settings_api::AccountCallError;
+use beebeeb_engine::app::{CredentialStores, Engine};
+use chrono::Utc;
+
+use super::passkeys::PasskeyCalls;
+use super::stamp::{Stamp, account_of, stamp};
+use super::{app_lock::AppLockPart, log};
+use crate::frames::account::Pane;
+use crate::frames::account::approve::{Approval, Denial, Lookup, SignInRequest};
+use crate::frames::account::source::{
+    AccountSource, Answered, CallKind, CodeRefused, Count, Deletion, DeletionRefused, Event, Identity, NameAnswer,
+    PaneState, Passkey, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped, Purpose, Refused, Secret,
+    SecurityFacts, Session, SignOutAnswer, StepUp, Strength, TwoFactor,
+};
+
+#[path = "account_actions.rs"]
+mod actions;
+#[path = "account_activity.rs"]
+mod activity;
+// The approval (A5) and the deletion (A6), each in its own file.
+#[path = "account_approve.rs"]
+mod account_approve;
+#[path = "account_deletion.rs"]
+mod account_deletion;
+#[path = "account_email.rs"]
+mod email;
+#[path = "account_password.rs"]
+mod password_change;
+#[path = "account_said.rs"]
+mod said;
+#[path = "account_sign_out_session.rs"]
+mod sign_out_session;
+#[cfg(test)]
+#[path = "account_tests.rs"]
+mod tests;
+#[path = "account_twofactor.rs"]
+mod twofactor;
+#[path = "account_twofactor_status.rs"]
+mod twofactor_status;
+#[path = "account_values.rs"]
+mod values;
+
+use said::*;
+use values::*;
+
+/// What a pane holds is not read again, when it opens, for this long.
+pub const FRESH_FOR: Duration = Duration::from_secs(30);
+
+/// What was read, for one session of one account.
+struct Held<T> {
+    session: SessionGeneration,
+    account: Option<String>,
+    value: T,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Overview,
+    Sessions,
+}
+
+impl Kind {
+    fn of(pane: Pane) -> Option<Kind> {
+        match pane {
+            // The Security page stands on the Account read (the profile says whether two-factor is on).
+            // The Name page stands on the Account read too (it opens on the name that read holds).
+            Pane::Account | Pane::Security | Pane::Name | Pane::TwoFactor => Some(Kind::Overview),
+            Pane::Sessions => Some(Kind::Sessions),
+            _ => None,
+        }
+    }
+}
+
+/// Where the reads of one kind stand.
+#[derive(Default)]
+struct Reads {
+    /// The read on its way, by number.
+    reading: Option<u64>,
+    /// When the last read answered with a value (a failed read never stamps this).
+    read_at: Option<Instant>,
+    /// The session the last read failed for. With a value still held (and drawn) for that session, the pane
+    /// says it could not refresh.
+    failed_for: Option<SessionGeneration>,
+    /// The session the last read was asked for.
+    asked_for: Option<SessionGeneration>,
+    /// The last failure (`failed_for`) was Beebeeb out of reach, not an answer.
+    offline: bool,
+}
+
+#[allow(clippy::large_enum_variant)] // one value per answer, moved once through a channel: boxing would only add a hop
+enum Answer {
+    Overview {
+        number: u64,
+        made_for: Option<Stamp>,
+        result: Result<Overview, AccountCallError>,
+    },
+    Sessions {
+        number: u64,
+        /// The count of changes Beebeeb had taken when the read began.
+        changes: u64,
+        made_for: Option<Stamp>,
+        result: Result<Vec<Row>, AccountCallError>,
+    },
+    /// A sign-out sent for the session `sent_for`. `about.ids`: the sessions it was for; after a failure, the
+    /// ones that were not ended.
+    SignedOut {
+        about: About,
+        sent_for: SessionGeneration,
+        made_for: Option<Stamp>,
+        /// How many sessions Beebeeb said it ended, when they were sent by id.
+        ended: usize,
+        /// Beebeeb answered "no such session" for one that was sent by id: a request went out.
+        gone: bool,
+        /// "Everywhere else", sent again by the toast's button: by id, for the confirmed sessions only.
+        one_by_one: bool,
+        result: Result<SessionEnd, AccountCallError>,
+    },
+}
+
+/// The stamp, when it is still the engine's after the call: else `None` (the answer is dropped).
+fn still<C: CredentialStores>(engine: &Engine<C>, before: Stamp) -> Option<Stamp> {
+    (stamp(engine) == before).then_some(before)
+}
+
+/// Run `work` on a worker named `name`; its answer (or `fallback` if it panicked) goes down `answers` and wakes
+/// the window. `false`: no worker could start.
+fn spawn<C: CredentialStores + 'static>(
+    name: &str,
+    engine: &Arc<Engine<C>>,
+    answers: &mpsc::Sender<Answer>,
+    work: impl FnOnce(&Engine<C>) -> Answer + Send + 'static,
+    fallback: impl FnOnce() -> Answer + Send + 'static,
+) -> bool {
+    let (engine, answers) = (engine.clone(), answers.clone());
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let answer =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&engine))).unwrap_or_else(|_| fallback());
+            let _ = answers.send(answer);
+            engine.wake_host();
+        })
+        .is_ok()
+}
+
+/// The account sections on the real engine. See the module's doc.
+pub struct EngineAccountSource<C: CredentialStores> {
+    engine: Arc<Engine<C>>,
+    overview: Option<Held<Overview>>,
+    sessions: Option<Held<Vec<Row>>>,
+    overview_reads: Reads,
+    sessions_reads: Reads,
+    reads: u64,
+    /// Counts the sign-outs that were answered: a list read before one of them is stale when it lands.
+    changes: u64,
+    /// Counts the sign-outs Beebeeb said it took. `sessions_as_of`: this count when the list that is held was
+    /// read. A list from before a sign-out that was taken is never kept over a read that failed.
+    taken: u64,
+    sessions_as_of: u64,
+    /// The sign-outs on their way, by session and key: a second press for one of them sends nothing.
+    changing: Vec<(SessionGeneration, String)>,
+    /// The engine held the session as ended at the last poll.
+    was_refused: bool,
+    /// The pane the window shows, when it is one this source answers for.
+    showing: Option<Kind>,
+    /// Sign-in and security is on screen: it says how many are signed in, so the sessions are read with it.
+    counting_devices: bool,
+    /// The count of sign-outs sent when the held list was read: a list behind `changes` is not counted.
+    counted_at: u64,
+    /// Sign out of Drive, the name, the step-up (`account_actions.rs`).
+    actions: actions::Actions<C>,
+    /// Sign-in activity (`account_activity.rs`).
+    activity: activity::ActivityPart<C>,
+    two_factor_status: twofactor_status::StatusPart<C>,
+    passkeys: PasskeyCalls<C>,
+    pub(super) app_lock: AppLockPart<C>,
+    notices: Line,
+    /// How sign-outs ended that the person has not been told: answered after they left Devices and sessions,
+    /// or still waiting in the line when they left. Only what was not done: said when that pane shows again (a
+    /// toast belongs to the pane it is about).
+    later: Line,
+    /// The last toast drawn with a button for one session's sign-out (`said::fade`).
+    drawn: Drawn,
+    dirty: bool,
+    /// Tests: the next worker panics before it asks anything.
+    #[cfg(test)]
+    panic_next: Arc<std::sync::atomic::AtomicBool>,
+    /// Tests: how far the toasts' clock is ahead of the real one.
+    #[cfg(test)]
+    ahead: Duration,
+    /// Change password: its strength, and the change (`account_password.rs`).
+    password: password_change::PasswordCalls<C>,
+    answers: mpsc::Sender<Answer>,
+    inbox: mpsc::Receiver<Answer>,
+    calls: twofactor::Calls,
+    /// `account_approve.rs`: what it keeps between a press and its answer. Empty until it binds.
+    account_approve: account_approve::ApproveCalls,
+    /// `account_deletion.rs`: what it keeps between a press and its answer. Empty until it binds.
+    account_deletion: account_deletion::DeletionCalls,
+}
+
+impl<C: CredentialStores + 'static> EngineAccountSource<C> {
+    /// Nothing is asked of Beebeeb until a pane opens.
+    pub fn new(engine: Arc<Engine<C>>) -> Self {
+        let (answers, inbox) = mpsc::channel();
+        let password = password_change::PasswordCalls::new(engine.clone());
+        Self {
+            actions: actions::Actions::new(engine.clone()),
+            activity: activity::ActivityPart::new(engine.clone()),
+            two_factor_status: twofactor_status::StatusPart::new(engine.clone()),
+            passkeys: PasskeyCalls::new(engine.clone()),
+            app_lock: AppLockPart::new(engine.clone()),
+            engine,
+            overview: None,
+            sessions: None,
+            overview_reads: Reads::default(),
+            sessions_reads: Reads::default(),
+            reads: 0,
+            changes: 0,
+            taken: 0,
+            sessions_as_of: 0,
+            changing: Vec::new(),
+            was_refused: false,
+            showing: None,
+            counting_devices: false,
+            counted_at: 0,
+            notices: Line::new(),
+            later: Line::new(),
+            drawn: Drawn::default(),
+            dirty: false,
+            #[cfg(test)]
+            panic_next: Arc::default(),
+            #[cfg(test)]
+            ahead: Duration::ZERO,
+            password,
+            answers,
+            inbox,
+            calls: twofactor::Calls::new(),
+            account_approve: Default::default(),
+            account_deletion: Default::default(),
+        }
+    }
+
+    /// The engine holds the session as one Beebeeb no longer accepts: the one source of "your session ended".
+    fn refused(&self) -> bool {
+        self.engine.has_session() && self.engine.account_session_refused()
+    }
+
+    /// Whether the engine holds a session that it does not hold as ended.
+    fn open(&self) -> bool {
+        self.engine.has_session() && !self.engine.account_session_refused()
+    }
+
+    /// The toasts' clock.
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        return Instant::now() + self.ahead;
+        #[cfg(not(test))]
+        Instant::now()
+    }
+
+    /// Put a toast in the line, for the session that is the engine's now.
+    fn say(&mut self, said: Said) {
+        line_up(&mut self.notices, self.engine.session_turn(), said);
+        self.dirty = true;
+    }
+
+    /// The toast that shows, when it was said in the session that is the engine's now and that session is not
+    /// held as ended (nothing is said over "your session ended").
+    fn said(&self) -> Option<&Said> {
+        self.notices
+            .front()
+            .filter(|(session, _)| self.open() && *session == self.engine.session_turn())
+            .map(|(_, said)| said)
+    }
+
+    /// A list read after the last answer landed: the toasts about a sign-out follow it (`said::follow`).
+    fn words_follow(&mut self, list: &[Row]) {
+        follow([&mut self.notices, &mut self.later], self.engine.session_turn(), list);
+        // Only what was not done is said on return, and what the list answered to a check.
+        self.later
+            .retain(|(_, said)| said.failed || said.stage == Stage::Answered);
+        self.dirty = true;
+    }
+
+    /// A worker's work: in a test build it panics first when the test asked for that.
+    fn work<F>(&self, work: F) -> impl FnOnce(&Engine<C>) -> Answer + Send + 'static
+    where
+        F: FnOnce(&Engine<C>) -> Answer + Send + 'static,
+    {
+        #[cfg(test)]
+        let panic_next = self.panic_next.clone();
+        move |engine: &Engine<C>| {
+            #[cfg(test)]
+            if panic_next.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                panic!("a test asked this worker to panic");
+            }
+            work(engine)
+        }
+    }
+
+    /// Whether a stamp is the engine's session and account now, with the session open.
+    fn is_now(&self, session: SessionGeneration, account: &Option<String>) -> bool {
+        self.open() && session == self.engine.session_turn() && *account == account_of(&self.engine)
+    }
+
+    fn current<'a, T>(&self, held: &'a Option<Held<T>>) -> Option<&'a T> {
+        held.as_ref()
+            .filter(|held| self.is_now(held.session, &held.account))
+            .map(|held| &held.value)
+    }
+
+    fn reads_of(&mut self, kind: Kind) -> &mut Reads {
+        match kind {
+            Kind::Overview => &mut self.overview_reads,
+            Kind::Sessions => &mut self.sessions_reads,
+        }
+    }
+
+    /// Ask Beebeeb on a worker, unless a read of this kind is on its way or the session is not open.
+    fn read(&mut self, kind: Kind) {
+        if !self.open() || self.reads_of(kind).reading.is_some() {
+            return;
+        }
+        self.reads += 1;
+        let (number, changes, turn) = (self.reads, self.changes, self.engine.session_turn());
+        // Taken here, on the window's thread: a worker that panics still answers for this session, as a read
+        // that failed (never a pane left on "Loading").
+        let asked_as = stamp(&self.engine);
+        let started = match kind {
+            Kind::Overview => spawn(
+                "account-overview",
+                &self.engine,
+                &self.answers,
+                self.work(move |engine| {
+                    let before = stamp(engine);
+                    let result = engine.account_basics();
+                    let made_for =
+                        still(engine, before.clone()).filter(|_| !matches!(&result, Ok(s) if s.session != before.0));
+                    Answer::Overview {
+                        number,
+                        made_for,
+                        result: result.map(|basics| overview_of(basics.value, Utc::now())),
+                    }
+                }),
+                move || Answer::Overview {
+                    number,
+                    made_for: Some(asked_as),
+                    result: Err(AccountCallError::Offline),
+                },
+            ),
+            Kind::Sessions => spawn(
+                "account-sessions",
+                &self.engine,
+                &self.answers,
+                self.work(move |engine| {
+                    let before = stamp(engine);
+                    let result = engine.account_sessions();
+                    let made_for =
+                        still(engine, before.clone()).filter(|_| !matches!(&result, Ok(s) if s.session != before.0));
+                    Answer::Sessions {
+                        number,
+                        changes,
+                        made_for,
+                        result: result.map(|list| list.value.sessions.into_iter().map(row_of).collect()),
+                    }
+                }),
+                move || Answer::Sessions {
+                    number,
+                    changes,
+                    made_for: Some(asked_as),
+                    result: Err(AccountCallError::Offline),
+                },
+            ),
+        };
+        let reads = self.reads_of(kind);
+        reads.asked_for = Some(turn);
+        if started {
+            reads.reading = Some(number);
+            reads.failed_for = None;
+        } else {
+            log("account: could not start a thread for a read");
+            reads.failed_for = Some(turn);
+        }
+        self.dirty = true;
+    }
+
+    /// Drop everything of the account, every mark of a change on its way, and every toast.
+    fn forget(&mut self) {
+        self.calls.drop_held();
+        self.overview = None;
+        self.sessions = None;
+        self.overview_reads.read_at = None;
+        self.sessions_reads.read_at = None;
+        self.changing.clear();
+        self.notices.clear();
+        self.later.clear();
+        self.drawn = Drawn::default();
+        self.dirty = true;
+    }
+
+    /// A read failed (a 401 among them: one 401 is a call that failed, and "your session ended" is the
+    /// engine's word, `refused`). What was drawn for this session and account STAYS, and is not fresh: the pane
+    /// says it could not refresh and offers to try again (`stale_words`). With nothing held it is the pane's
+    /// "couldn't load" state. One list is never kept: the one from before a sign-out Beebeeb took.
+    ///
+    /// `check_follows` (the list only): a sign-out was answered while this read was out, so the read that checks
+    /// it is still to come, and "checking" stays true.
+    fn read_failed(&mut self, kind: Kind, made_for: Option<Stamp>, error: AccountCallError, check_follows: bool) {
+        // Made for a session that went during the call: the poll reads again for the next one. One the engine
+        // refused while the session stayed (a session step held the lock for a moment) is a read that failed.
+        let Some((session, _)) = made_for.filter(|(s, a)| self.is_now(*s, a)) else {
+            return;
+        };
+        log(format!("account: a read did not answer ({error})"));
+        if kind == Kind::Sessions {
+            if self.sessions_as_of != self.taken {
+                self.sessions = None;
+            }
+            if !check_follows {
+                check_failed([&mut self.notices, &mut self.later]);
+                self.dirty = true;
+            }
+        }
+        let reads = self.reads_of(kind);
+        reads.read_at = None;
+        reads.failed_for = Some(session);
+        reads.offline = error == AccountCallError::Offline;
+    }
+
+    fn take_in(&mut self, answer: Answer) {
+        match answer {
+            Answer::Overview {
+                number,
+                made_for,
+                result,
+            } => {
+                if self.overview_reads.reading == Some(number) {
+                    self.overview_reads.reading = None;
+                }
+                match result {
+                    Ok(value) => {
+                        // Made for a session or an account that is not the current one: never drawn.
+                        let Some((session, account)) = made_for.filter(|(s, a)| self.is_now(*s, a)) else {
+                            return;
+                        };
+                        // A part that failed keeps what was drawn for it (this session's, this account's).
+                        let value = match self.current(&self.overview) {
+                            Some(before) => value.over(before),
+                            None => value,
+                        };
+                        // A read with a part that failed is not fresh: the next opening reads.
+                        self.overview_reads.read_at = value.whole().then(Instant::now);
+                        self.overview_reads.failed_for = None;
+                        self.overview = Some(Held {
+                            session,
+                            account,
+                            value,
+                        });
+                    }
+                    Err(error) => self.read_failed(Kind::Overview, made_for, error, false),
+                }
+            }
+            Answer::Sessions {
+                number,
+                changes,
+                made_for,
+                result,
+            } => {
+                if self.sessions_reads.reading == Some(number) {
+                    self.sessions_reads.reading = None;
+                }
+                match result {
+                    // A sign-out that was answered after this read began is newer than what the read says: it
+                    // is read again while the pane shows, and when it opens otherwise.
+                    Ok(_) if changes != self.changes => {
+                        self.sessions_reads.read_at = None;
+                        if self.showing == Some(Kind::Sessions) || self.counting_devices {
+                            self.read(Kind::Sessions);
+                        }
+                    }
+                    Ok(value) => {
+                        let Some((session, account)) = made_for.filter(|(s, a)| self.is_now(*s, a)) else {
+                            return;
+                        };
+                        self.words_follow(&value);
+                        self.sessions = Some(Held {
+                            session,
+                            account,
+                            value,
+                        });
+                        self.sessions_as_of = self.taken;
+                        self.counted_at = self.changes;
+                        self.sessions_reads.read_at = Some(Instant::now());
+                        self.sessions_reads.failed_for = None;
+                    }
+                    Err(error) => {
+                        // A sign-out was answered while this read was out: the read after that answer has
+                        // not been made yet (the Ok arm above makes it the same way).
+                        let again =
+                            changes != self.changes && (self.showing == Some(Kind::Sessions) || self.counting_devices);
+                        self.read_failed(Kind::Sessions, made_for, error, again);
+                        if again {
+                            self.read(Kind::Sessions);
+                        }
+                    }
+                }
+            }
+            Answer::SignedOut {
+                about,
+                sent_for,
+                made_for,
+                ended,
+                gone,
+                one_by_one,
+                result,
+            } => {
+                self.changing
+                    .retain(|(session, key)| !(*session == sent_for && *key == about.key));
+                // Beebeeb said it ended a session: the list from before is never drawn as the list of now.
+                let took = ended > 0 || matches!(result, Ok(SessionEnd::Ended));
+                if took {
+                    self.taken += 1;
+                }
+                // Made for a session that is not the current one (or one the engine holds as ended): nothing
+                // is said. A sign-out Beebeeb took still makes every list read before it stale.
+                if !made_for.as_ref().is_some_and(|(s, a)| self.is_now(*s, a)) {
+                    if took {
+                        self.changes += 1;
+                    }
+                    return;
+                }
+                // "Still signing out" is over with the answer.
+                self.notices.retain(|(_, said)| said.stage != Stage::Busy);
+                // Not sent (a session step held the lock for a moment): nothing changed at Beebeeb. One that
+                // Beebeeb answered "no such session" WAS sent, whatever the next one met.
+                let sent = ended > 0 || gone || result != Err(AccountCallError::NotSignedIn);
+                let said = match result {
+                    Ok(SessionEnd::Ended) if about.elsewhere() => {
+                        // Sent one by one for the sessions that were confirmed: "everywhere else" only when
+                        // the list holds no other.
+                        let others = one_by_one
+                            && self.current(&self.sessions).is_some_and(|rows| {
+                                rows.iter().any(|row| !row.current && !about.ids.contains(&row.id))
+                            });
+                        Said::done(if others { SIGNED_OUT_THOSE } else { SIGNED_OUT_ELSEWHERE })
+                    }
+                    Ok(SessionEnd::Ended) => Said::done(SIGNED_OUT),
+                    // Beebeeb has no such session. That is "signed out" only once its list no longer has
+                    // the session (`words_follow`): until then it is not known, and said so.
+                    Ok(SessionEnd::AlreadyGone) => Said::checking(about),
+                    Err(AccountCallError::NotSignedIn) if !sent => Said::failed(NOT_SENT, Some(about), true),
+                    Err(error) => {
+                        log(format!("account: a sign-out was not confirmed ({error})"));
+                        let words = if ended > 0 {
+                            NOT_ALL_SIGNED_OUT
+                        } else {
+                            about.not_signed_out()
+                        };
+                        match error {
+                            // Beebeeb answered with an error (a gateway's 5xx can hide a sign-out that was
+                            // taken, so "nothing changed" is not claimed), with one 401, or the session was
+                            // busy part of the way: it can be sent again.
+                            AccountCallError::ServerError
+                            | AccountCallError::SessionEnded
+                            | AccountCallError::NotSignedIn => Said::failed(words, Some(about), true),
+                            // A timeout, a broken connection, an answer that does not read: it may have
+                            // landed. The list that is read next says which.
+                            _ => Said::checking(about),
+                        }
+                    }
+                };
+                if sent {
+                    // A list read before this answer is never drawn after it.
+                    self.changes += 1;
+                    self.sessions_reads.read_at = None;
+                }
+                if self.showing == Some(Kind::Sessions) {
+                    self.say(said);
+                    // After every answer: the row goes (or stays) by what Beebeeb's list says now.
+                    if sent {
+                        self.read(Kind::Sessions);
+                    }
+                } else if said.failed {
+                    // The person left Devices and sessions before the answer. A toast belongs to the pane
+                    // it is about, and nothing is read for a pane that does not show: what was not done is
+                    // said when the pane shows again, where the list is read.
+                    line_up(&mut self.later, self.engine.session_turn(), said);
+                }
+                // The Security page shows the count of that list: it is read again for it too.
+                if self.counting_devices && sent {
+                    self.read(Kind::Sessions);
+                }
+            }
+        }
+    }
+
+    /// What the pane says, with no toast up, about values it draws that are not what Beebeeb has now: a read
+    /// failed and what was read before stands, or a part of Account was never read. It stays for as long as that
+    /// is so (it is not a toast: it does not fade), and its button reads again.
+    fn stale_words(&self) -> Option<&'static str> {
+        let turn = self.engine.session_turn();
+        match self.showing? {
+            Kind::Overview => {
+                let overview = self.current(&self.overview)?;
+                let reads = &self.overview_reads;
+                if reads.reading.is_some() {
+                    None
+                } else if overview.name_from == Part::Missing || overview.plan_from == Part::Missing {
+                    Some(NOT_ALL_READ)
+                } else if !overview.whole() || reads.failed_for == Some(turn) {
+                    Some(NOT_REFRESHED)
+                } else {
+                    None
+                }
+            }
+            Kind::Sessions => {
+                self.current(&self.sessions)?;
+                let reads = &self.sessions_reads;
+                (reads.reading.is_none() && reads.failed_for == Some(turn)).then_some(NOT_REFRESHED)
+            }
+        }
+    }
+}
+
+impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
+    fn pane_state(&self, pane: Pane) -> PaneState {
+        if pane == Pane::Activity {
+            return self.activity.pane_state();
+        }
+        if pane == Pane::Password {
+            return self.password.pane_state(self.refused());
+        }
+        if let Some(state) = self.wired_pane(pane) {
+            return state;
+        }
+        if let Some(state) = self.account_approve_pane_state(pane) {
+            return state;
+        }
+        if let Some(state) = self.account_deletion_pane_state(pane) {
+            return state;
+        }
+        if pane == Pane::Passkeys {
+            return self.passkeys.pane_state();
+        }
+        let Some(kind) = Kind::of(pane) else {
+            return PaneState::Unwired;
+        };
+        if !self.engine.has_session() {
+            return PaneState::SignedOut;
+        }
+        let turn = self.engine.session_turn();
+        if self.refused() {
+            return PaneState::SessionEnded;
+        }
+        // The Security page draws from the facts, where every part read from Beebeeb may be unknown, and Sign out
+        // is local first: it never waits on (or fails with) a read, so a PC that is offline can still sign out.
+        if pane == Pane::Security {
+            return PaneState::Ready;
+        }
+        let (held, reads) = match kind {
+            Kind::Overview => (
+                self.current(&self.overview)
+                    .is_some_and(|overview| pane != Pane::TwoFactor || overview.two_factor.is_some()),
+                &self.overview_reads,
+            ),
+            Kind::Sessions => (self.current(&self.sessions).is_some(), &self.sessions_reads),
+        };
+        if held {
+            PaneState::Ready
+        } else if reads.reading.is_none() && reads.failed_for == Some(turn) {
+            PaneState::Failed
+        } else {
+            PaneState::Loading
+        }
+    }
+
+    fn opened(&mut self, pane: Pane) {
+        self.activity.opened(pane);
+        self.two_factor_status.opened(pane);
+        self.password.forget();
+        self.passkeys.opened(pane);
+        self.app_lock.opened(pane);
+        self.showing = Kind::of(pane);
+        self.counting_devices = pane == Pane::Security;
+        let Some(kind) = self.showing else {
+            return;
+        };
+        if self.counting_devices
+            && !(self.current(&self.sessions).is_some()
+                && self.sessions_reads.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR))
+        {
+            self.read(Kind::Sessions);
+        }
+        // Sign-outs that were not done, and not said yet: said now, over their own pane, with a new list read.
+        let mut said_later = false;
+        if kind == Kind::Sessions {
+            let turn = self.engine.session_turn();
+            for (session, said) in std::mem::take(&mut self.later) {
+                if self.open() && session == turn {
+                    self.say(said);
+                    said_later = true;
+                }
+            }
+        }
+        let held = match kind {
+            Kind::Overview => self.current(&self.overview).is_some(),
+            Kind::Sessions => self.current(&self.sessions).is_some(),
+        };
+        let fresh = held && self.reads_of(kind).read_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
+        if !fresh || said_later {
+            self.read(kind);
+        }
+    }
+
+    fn closed(&mut self) {
+        self.activity.closed();
+        self.two_factor_status.closed();
+        self.password.forget();
+        self.passkeys.closed();
+        self.app_lock.closed();
+        self.showing = None;
+        self.counting_devices = false;
+        self.calls.drop_held();
+    }
+
+    fn reload(&mut self, pane: Pane) {
+        if activity::ActivityPart::<C>::shows(pane) {
+            self.activity.reload();
+        }
+        if pane == Pane::Passkeys {
+            self.passkeys.reload();
+        }
+        if let Some(kind) = Kind::of(pane) {
+            self.read(kind);
+        }
+        if pane == Pane::Security {
+            self.read(Kind::Sessions);
+        }
+    }
+
+    fn pump(&mut self) -> Pumped {
+        self.password.forget_if_moved();
+        self.account_deletion_tell_late();
+        let mut changed = std::mem::take(&mut self.dirty);
+        let refused = self.refused();
+        let stale = |held: Option<(SessionGeneration, &Option<String>)>| {
+            held.is_some_and(|(session, account)| !self.is_now(session, account))
+        };
+        // The session moved on, or the engine holds it as ended: nothing of the account stays, no toast either.
+        if stale(self.overview.as_ref().map(|h| (h.session, &h.account)))
+            || stale(self.sessions.as_ref().map(|h| (h.session, &h.account)))
+            || self
+                .changing
+                .iter()
+                .any(|(session, _)| *session != self.engine.session_turn())
+            || (refused && !(self.notices.is_empty() && self.later.is_empty()))
+        {
+            self.forget();
+            changed = true;
+        }
+        while let Ok(answer) = self.inbox.try_recv() {
+            self.take_in(answer);
+            changed = true;
+        }
+        let turn = self.engine.session_turn();
+        let refused = self.refused();
+        if refused != self.was_refused {
+            self.was_refused = refused;
+            changed = true;
+            if !refused {
+                // The engine held the session as ended, and its next call worked: the session is asked again.
+                self.overview_reads.asked_for = None;
+                self.sessions_reads.asked_for = None;
+            }
+        }
+        // Another sign-in or an unlock while a pane shows: its own values are read once, without a reopening.
+        // Only while one shows: nothing is asked for a pane nobody looks at.
+        if let Some(kind) = self.showing
+            && self.open()
+            && self.reads_of(kind).reading.is_none()
+            && self.reads_of(kind).asked_for != Some(turn)
+        {
+            self.read(kind);
+            changed = true;
+        }
+        // The same for the count of the Security page.
+        if self.counting_devices
+            && self.open()
+            && self.sessions_reads.reading.is_none()
+            && self.sessions_reads.asked_for != Some(turn)
+        {
+            self.read(Kind::Sessions);
+            changed = true;
+        }
+        // The toasts: one of another session is never shown; the first one shows, for its time from the
+        // moment it first showed, and then the next.
+        let now = self.now();
+        let before = self.notices.len() + self.later.len();
+        self.notices.retain(|(session, _)| *session == turn);
+        self.later.retain(|(session, _)| *session == turn);
+        let wake_in = fade(
+            &mut self.notices,
+            now,
+            self.sessions_reads.reading.is_some(),
+            &mut self.drawn,
+        );
+        changed |= self.notices.len() + self.later.len() != before;
+        // The other parts: sign-in activity, and the confirmations and waits of what the window asks to do.
+        let (log_changed, log_busy, log_wake) = self.activity.pump();
+        let (status_changed, status_busy) = self.two_factor_status.pump();
+        changed |= log_changed | status_changed | self.actions.pump();
+        let wake_in = match (wake_in, log_wake) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        // A wait before "Send again" counts down: look again every second while it does.
+        let resend_tick = self.resend_tick();
+        changed |= resend_tick.is_some();
+        let wake_in = [wake_in, resend_tick].into_iter().flatten().min();
+        self.dirty = false;
+        let (passkeys_changed, passkeys_busy, passkeys_wake) = self.app_lock.pump_with(self.passkeys.pump());
+        let (changed, wake_in) = (
+            changed || passkeys_changed,
+            [wake_in, passkeys_wake].into_iter().flatten().min(),
+        );
+        Pumped {
+            changed,
+            busy: self.overview_reads.reading.is_some()
+                || self.sessions_reads.reading.is_some()
+                || !self.changing.is_empty()
+                || log_busy
+                || status_busy
+                || self.actions.busy()
+                || passkeys_busy,
+            // Nothing wakes the window when the engine's flag clears: look again while a pane says so.
+            watch: self.showing.is_some() && refused,
+            wake_in,
+        }
+    }
+
+    fn notice(&self) -> Option<&'static str> {
+        if let Some((words, _)) = self.app_lock.notice_over(self.passkeys.notice()) {
+            return Some(words);
+        }
+        match self.said() {
+            Some(said) => Some(said.shown()),
+            None => self
+                .stale_words()
+                .or_else(|| self.activity.notice().map(|(words, _)| words)),
+        }
+    }
+
+    fn notice_failed(&self) -> bool {
+        if let Some((_, failed)) = self.app_lock.notice_over(self.passkeys.notice()) {
+            return failed;
+        }
+        match self.said() {
+            Some(said) => said.failed,
+            None => self.stale_words().is_some() || self.activity.notice().is_some_and(|(_, failed)| failed),
+        }
+    }
+
+    fn notice_action(&self) -> Option<&'static str> {
+        if self.app_lock.notice_over(self.passkeys.notice()).is_some() {
+            return None;
+        }
+        match self.said() {
+            Some(said) => (said.again && said.about.is_some()).then_some(TRY_AGAIN),
+            None => self
+                .stale_words()
+                .map(|_| TRY_AGAIN)
+                .or_else(|| self.activity.notice_is_stale().then_some(TRY_AGAIN)),
+        }
+    }
+
+    /// The toast's button: send the sign-out the toast is about again, through every check a first press goes
+    /// through (and for "everywhere else", only for the sessions that were confirmed). With no toast up, the
+    /// "couldn't refresh" button: read the pane again.
+    fn run_notice_action(&mut self) {
+        match self.said().map(|said| said.about.clone().filter(|_| said.again)) {
+            Some(Some(about)) => {
+                let key = about.key.clone();
+                self.sign_out(&key, Some(about));
+            }
+            Some(None) => {}
+            None => {
+                if let Some(kind) = self.showing.filter(|_| self.stale_words().is_some()) {
+                    self.read(kind);
+                } else if self.activity.notice_is_stale() {
+                    self.activity.reload();
+                }
+            }
+        }
+    }
+
+    /// The window shows another pane: the toasts go (`said::leave` keeps what must still be said).
+    fn clear_notice(&mut self) {
+        self.activity.clear();
+        self.passkeys.clear_notice();
+        self.app_lock.clear_notice();
+        self.dirty |= !self.notices.is_empty();
+        leave(&mut self.notices, &mut self.later);
+    }
+
+    fn identity(&self) -> Identity {
+        self.current(&self.overview)
+            .map(|overview| overview.identity.clone())
+            .unwrap_or(Identity {
+                name: String::new(),
+                initials: String::new(),
+                email: String::new(),
+            })
+    }
+
+    /// Drive, this app. Which other Beebeeb products hold a session on this PC is not read here, so none of
+    /// them is listed (never "Not signed in" for a product that was not checked).
+    fn products(&self) -> Vec<(ProductKind, ProductState)> {
+        if self.current(&self.overview).is_some() {
+            vec![(ProductKind::Drive, ProductState::ThisApp)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn plan(&self) -> Option<Plan> {
+        self.current(&self.overview)?
+            .plan
+            .as_ref()
+            .map(|(plan, _)| plan.clone())
+    }
+
+    fn plan_details(&self) -> Option<PlanDetails> {
+        self.current(&self.overview)?.plan.as_ref()?.1.clone()
+    }
+
+    fn sessions(&self) -> Vec<Session> {
+        let now = Utc::now().timestamp();
+        self.current(&self.sessions)
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| Session {
+                        id: row.id.clone(),
+                        kind: row.kind,
+                        name: row.name.clone(),
+                        apps: row.client.into(),
+                        apps_sentence: row.client.into(),
+                        last_active: ago(row.at, now),
+                        country: row.country.clone(),
+                        this_device: row.current,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn sign_out_device(&mut self, id: &str) -> bool {
+        // `ELSEWHERE` is not a session's id: a row can never ask for the plural by its id.
+        id != ELSEWHERE && self.sign_out(id, None)
+    }
+
+    fn sign_out_everywhere_else(&mut self) {
+        self.sign_out(ELSEWHERE, None);
+    }
+
+    /// The Security page: two-factor as THIS session's profile marks it, how many sessions are signed in when
+    /// this session's list is held (Beebeeb names no device per session), app lock (`app_lock.rs`), nothing else.
+    fn security_facts(&self) -> SecurityFacts {
+        SecurityFacts {
+            two_factor: self.current(&self.overview).and_then(|overview| overview.two_factor),
+            sessions: match self.current(&self.sessions) {
+                Some(rows) if self.counted_at == self.changes => Count::Known(rows.len()),
+                _ if self.sessions_reads.reading.is_some() => Count::Reading,
+                _ => Count::NotKnown,
+            },
+            // Signing this app out is bound; "all apps" has nothing to mean here (Drive is the one app).
+            can_sign_out: self.open(),
+            activity: self.activity.facts(),
+            app_lock: self.app_lock.facts(),
+            app_lock_password: self.app_lock.password_offer(),
+            ..SecurityFacts::unknown()
+        }
+    }
+
+    /// A read of this session's that the page draws found Beebeeb out of reach, and none answered after it.
+    fn offline(&self) -> bool {
+        let turn = self.engine.session_turn();
+        let out = |reads: &Reads| reads.reading.is_none() && reads.failed_for == Some(turn) && reads.offline;
+        self.open() && (out(&self.overview_reads) || out(&self.sessions_reads))
+    }
+
+    fn set_app_lock(&mut self, on: bool) {
+        self.app_lock.set(on);
+    }
+    /// "Locks again after" (`app_lock.rs`): longer asks Windows Hello first; the engine stores it.
+    fn set_lock_after(&mut self, delay: &str) {
+        self.app_lock.set_after(delay);
+    }
+    /// "Use your password" (`app_lock.rs`): the change Windows Hello did not confirm, with the account password.
+    fn app_lock_with_password(&mut self, password: crate::frames::account::app_lock_password::LockPassword) {
+        self.app_lock.with_password(password.into_proof());
+    }
+
+    fn sign_out_this_app(&mut self) -> SignOutAnswer {
+        self.actions.sign_out_this_app()
+    }
+
+    fn sign_out_discarding_unsaved(&mut self) -> SignOutAnswer {
+        self.actions.sign_out_discarding_unsaved()
+    }
+
+    fn sign_out_result(&mut self) -> Option<SignOutAnswer> {
+        self.actions.sign_out_result()
+    }
+
+    /// Core's step-up for this session, waited for here (see `actions::Actions::step_up`).
+    fn step_up(&mut self, password: Password<'_>, purpose: Purpose) -> Result<StepUp, Refused> {
+        if purpose == Purpose::ChangePassword {
+            return self.password.keep(password);
+        }
+        if purpose == Purpose::DeleteAccount {
+            return self.account_deletion_step_up(password);
+        }
+        self.actions.step_up(password, purpose)
+    }
+
+    fn save_name(&mut self, name: &str) -> NameAnswer {
+        self.dirty = true;
+        self.actions.save_name(name)
+    }
+
+    /// The save's answer. Beebeeb has the new name: the Account read is asked again, and the name is drawn only
+    /// with that read.
+    fn name_result(&mut self) -> Option<NameAnswer> {
+        let (answer, saved) = self.actions.name_result()?;
+        if saved {
+            self.overview_reads.read_at = None;
+            self.read(Kind::Overview);
+        }
+        Some(answer)
+    }
+
+    fn activity(&self) -> Option<Vec<(String, Vec<Event>)>> {
+        self.activity.periods()
+    }
+
+    fn start_activity(&mut self) {
+        self.activity.start();
+    }
+
+    fn can_stop_activity(&self) -> bool {
+        self.activity.can_stop()
+    }
+
+    // ---- Not bound: each pane these belong to is `PaneState::Unwired`, or the page that shows them draws no
+    // control for them (`security_facts`), so no drawn control reaches them. Each does nothing and claims nothing.
+
+    /// "All apps": Drive is the only Beebeeb app on this PC in this version, so the row is not drawn
+    /// (`can_sign_out_all` is false); never reached from a drawn control.
+    fn sign_out_all_apps(&mut self) -> SignOutAnswer {
+        SignOutAnswer::Refused(NOT_BOUND)
+    }
+    fn resend_wait(&self) -> u32 {
+        self.resend_left()
+    }
+    fn email_code_sent_to(&self) -> Option<String> {
+        self.pending_address()
+    }
+    fn send_again(&mut self) -> bool {
+        false
+    }
+    fn can_send_again_deletion(&self) -> bool {
+        false
+    }
+    fn password_strength(&self, candidate: &Password<'_>) -> Strength {
+        self.password.strength(candidate)
+    }
+    fn change_password(&mut self, confirmation: StepUp, new: Password<'_>) -> Result<(), Refused> {
+        self.password.change(confirmation, new)
+    }
+    fn two_factor(&self) -> TwoFactor {
+        self.two_factor_known()
+    }
+    fn start_call(&mut self, kind: CallKind, input: &str, password: &str) -> bool {
+        self.start_a_call(kind, input, password)
+    }
+    fn call_answer(&mut self) -> Option<(CallKind, Answered)> {
+        self.a_call_answer()
+    }
+    #[rustfmt::skip]
+    fn call_mark(&self, kind: CallKind) -> Option<crate::frames::account::source::CallMark> { self.a_call_mark(kind) }
+    fn late_codes(&mut self) -> Option<(CallKind, Vec<Secret>)> {
+        self.a_late_codes()
+    }
+    fn keep_codes(&mut self, codes: Vec<Secret>) {
+        self.a_keep_codes(codes);
+    }
+    fn passkeys(&self) -> Vec<Passkey> {
+        self.passkeys.passkeys()
+    }
+    /// The password is asked (`passkeys_need_password`): without it nothing is asked and it is refused as not
+    /// confirmed.
+    fn add_passkey(&mut self, password: Option<Password<'_>>) -> Result<(), Refused> {
+        match password {
+            Some(password) => super::passkeys::add_confirmed(&mut self.passkeys, password),
+            None => super::passkeys::add_without_password(),
+        }
+    }
+    fn rename_passkey(&mut self, id: &str, name: &str) -> bool {
+        self.passkeys.rename(id, name)
+    }
+    fn remove_passkey(&mut self, id: &str, password: Option<Password<'_>>) -> bool {
+        password.is_some_and(|password| super::passkeys::remove_confirmed(&mut self.passkeys, id, password))
+    }
+    fn passkeys_need_password(&self) -> bool {
+        true
+    }
+    fn can_add_passkey(&self) -> bool {
+        self.passkeys.can_add()
+    }
+    fn can_rename_passkey(&self) -> bool {
+        self.passkeys.can_rename()
+    }
+    fn stop_activity_confirmed(&mut self, password: Password<'_>) -> bool {
+        super::passkeys::wiping(&password).is_some_and(|password| self.activity.stop(password))
+    }
+    // Deleting the account (`account_deletion.rs`).
+    fn deletion(&self) -> Deletion {
+        self.account_deletion_deletion()
+    }
+    fn request_deletion(&mut self, confirmation: StepUp, code: &str) -> Result<(), DeletionRefused> {
+        self.account_deletion_request_deletion(confirmation, code)
+    }
+    fn cancel_deletion_request(&mut self, confirmation: StepUp) -> Result<Deletion, Refused> {
+        self.account_deletion_cancel_deletion_request(confirmation)
+    }
+    fn deletion_link_used(&mut self) -> bool {
+        self.account_deletion_deletion_link_used()
+    }
+    fn undo_deletion(&mut self, confirmation: StepUp) -> Result<Deletion, Refused> {
+        self.account_deletion_undo_deletion(confirmation)
+    }
+    // Approving a sign-in from another device (`account_approve.rs`).
+    fn find_sign_in_request(&mut self, code: &str) -> Lookup {
+        self.account_approve_find_sign_in_request(code)
+    }
+    fn waiting_sign_in_request(&self, request: &str) -> Option<SignInRequest> {
+        self.account_approve_waiting_sign_in_request(request)
+    }
+    fn begin_approval(&mut self, request: &str, code: &str, password: Password<'_>) {
+        self.account_approve_begin_approval(request, code, password)
+    }
+    fn approval_answer(&mut self) -> Option<(String, Approval)> {
+        self.account_approve_approval_answer()
+    }
+    fn cancel_approval(&mut self, request: &str) {
+        self.account_approve_cancel_approval(request)
+    }
+    fn deny_sign_in(&mut self, request: &str) -> Denial {
+        self.account_approve_deny_sign_in(request)
+    }
+    fn sign_in_request_gone(&mut self, request: &str) -> Option<Denial> {
+        self.account_approve_sign_in_request_gone(request)
+    }
+}

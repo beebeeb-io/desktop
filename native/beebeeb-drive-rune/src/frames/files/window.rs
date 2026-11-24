@@ -1,0 +1,460 @@
+//! The Files window with what the Files frames add: several selected rows, the menus, the toasts,
+//! the selected item's own details.
+
+use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
+use super::{select_bar, toolbar};
+use crate::State;
+use crate::theme::icons;
+use crate::theme::scale;
+use crate::theme::tokens::{self, Theme};
+use crate::ui::{button, caption, empty, file_list, kit, menu, status_line, toast};
+use rune::{Cx, El, Tx, col, el, row};
+
+/// "4 on this PC · 3 available offline · 4 online only", counted from the rows. While the first list still
+/// arrives the rows are only those listed so far, and the words say so: "Listed so far: …" (RC2-10, the large
+/// account read "483 online only" for a folder of thousands).
+pub fn pc_summary(s: &State) -> String {
+    if s.listing.items.is_empty() {
+        // The whole account is empty (DW-0114), or this folder is (DW-1106).
+        return if s.listing.folder.id.is_none() {
+            "Nothing on this PC yet".to_string()
+        } else {
+            "Nothing in this folder yet".to_string()
+        };
+    }
+    let count = |status: &str| {
+        s.listing
+            .items
+            .iter()
+            .filter(|i| i.pc_status.as_deref() == Some(status))
+            .count()
+    };
+    let grouped = |n: usize| super::protected::grouped(i64::try_from(n).unwrap_or(i64::MAX));
+    let counts = format!(
+        "{} on this PC \u{00B7} {} available offline \u{00B7} {} online only",
+        grouped(count("on_this_pc")),
+        grouped(count("available_offline")),
+        grouped(count("online_only"))
+    );
+    if s.global.source.status().loading.is_some() {
+        format!("Listed so far: {counts}")
+    } else {
+        counts
+    }
+}
+
+fn pick(s: &mut State, index: usize, tx: &mut Tx) {
+    s.pick_menu(index, tx);
+}
+
+fn hover(s: &mut State, index: usize) {
+    if let Some(open) = s.actions.menu.as_mut() {
+        open.hot = Some(index);
+    }
+}
+
+fn close(s: &mut State, tx: &mut Tx) {
+    s.close_menu_tx(tx);
+}
+
+fn undo(s: &mut State, tx: &mut Tx) {
+    s.undo(tx);
+}
+
+fn retry(s: &mut State, tx: &mut Tx) {
+    s.retry(tx);
+}
+
+/// Whether the Files window has something of its own over its list: the same list [`view`] builds its layers
+/// from (a menu, a name being typed, a drop hovering, Uploads while it is drawn, a dialog, the protected-folder
+/// message). What is in front has the keyboard; the first-time guide draws no tip over it.
+pub fn has_in_front(s: &State) -> bool {
+    let a = &s.actions;
+    a.menu.is_some()
+        || a.rename.is_some()
+        || a.drop_hover.is_some()
+        // Uploads is drawn only while something uploads (`uploads::layer`): its flag alone can outlive the panel.
+        || ((a.uploads_open || a.upload_menu.is_some()) && a.source.uploads().is_some())
+        || a.dialog.is_some()
+        || a.protected.alert.is_some()
+}
+
+/// The open menu, where the board puts it: the file menu at its point, Sort and New under the toolbar.
+fn menu_layer(s: &State, t: &Theme) -> Option<El> {
+    let open = s.actions.menu?;
+    let layer = |right: f32, surface: El| {
+        row()
+            .key("menu-layer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .pt(112.0)
+            .pr(right)
+            .justify_end()
+            .items_start()
+            .child(surface)
+    };
+    let entries = s.menu_entries(open.kind);
+    let (name, width) = match open.kind {
+        MenuKind::File => ("File", menus::FILE_MENU_W),
+        MenuKind::Sort => ("Sort", menus::SORT_MENU_W),
+        MenuKind::New => ("New", menus::NEW_MENU_W),
+        MenuKind::Background => ("List", super::background_menu::MENU_W),
+    };
+    // The menu is modal, so what is outside it hears no key: its keys are heard on the menu itself.
+    let surface =
+        menu::menu("menu", name, width, &entries, open.hot, t, pick, hover, close).on_key(super::keys::on_key);
+    Some(match open.kind {
+        // Open With's apps belong to the file menu: a press on them is a press inside it (DW-1562).
+        MenuKind::File => match super::open_with_menu::flyout(s, t) {
+            Some(flyout) => surface.child(flyout),
+            None => surface,
+        }
+        .absolute(open.at.0, open.at.1),
+        // `.wn-menu` of Sort: under its button, 226 pt from the window's right edge on the board,
+        // and 36 more with the Open in File Explorer button beside it; of New: 42 pt.
+        MenuKind::Sort => layer(226.0 + 36.0, surface),
+        MenuKind::New => layer(42.0, surface),
+        MenuKind::Background => {
+            // Sort by's choices belong to the menu: a press on them is a press inside it.
+            let surface = match background_sort_flyout(s, t) {
+                Some(flyout) => surface.child(flyout),
+                None => surface,
+            };
+            surface.absolute(open.at.0, open.at.1)
+        }
+    })
+}
+
+/// Sort by's choices beside the background menu (DW-1103), while "Sort by" is the highlighted entry.
+fn background_sort_flyout(s: &State, t: &Theme) -> Option<El> {
+    let (x, y) = s.background_sort_at()?;
+    let at = s.actions.menu?.at;
+    let entries = super::background_menu::sort_entries(s);
+    // Its own keys, `menu-1`: the board names the second menu so.
+    Some(
+        menu::flyout(
+            "menu-1",
+            "Sort by",
+            super::background_menu::SUB_W,
+            &entries,
+            t,
+            pick_sort,
+            |_, _| {},
+            close,
+        )
+        .absolute(x - at.0, y - at.1),
+    )
+}
+
+fn pick_sort(s: &mut State, index: usize, tx: &mut Tx) {
+    s.pick_background_sort(index, tx);
+}
+
+/// The toast's button (`ui::button`, Sm): `<key>-action`, with the words and its name for assistive technology.
+fn toast_button(
+    words: &'static str,
+    name: &'static str,
+    shortcut: Option<&'static str>,
+    run: fn(&mut State, &mut Tx),
+    t: &Theme,
+) -> El {
+    let mut keys = button::keys("toast-action");
+    keys.label = "toast-action-text".to_string();
+    let b = button::button(
+        keys,
+        words,
+        None,
+        button::Variant::Ghost,
+        button::Size::Sm,
+        button::ButtonState::Enabled,
+        t,
+    )
+    .label(name)
+    .on_press_tx(move |s: &mut State, tx: &mut Tx| run(s, tx));
+    match shortcut {
+        Some(keys) => b.shortcut_hint(keys),
+        None => b,
+    }
+}
+
+/// `again`: does a failure's message offer Try again (`State::offers_try_again`)?
+fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
+    use toast::Lead;
+    let plain = |words: &str, lead| toast::toast_with("toast", words, lead, None, t);
+    match kind {
+        Toast::Trashed => toast::toast_with(
+            "toast",
+            "Moved to Trash",
+            Lead::None,
+            Some(toast_button("Undo Ctrl+Z", "Undo", Some("Ctrl+Z"), undo, t)),
+            t,
+        ),
+        Toast::Duplicated => plain("Duplicated", Lead::Check),
+        Toast::Keeping => plain("Keeping on this PC", Lead::None),
+        Toast::UploadCancelled => plain("Upload cancelled. The copy is in the Recycle Bin.", Lead::None),
+        Toast::LinkCopied => plain("Link copied", Lead::Check),
+        Toast::ReadOneAtATime => plain(Toast::READ_ONE_AT_A_TIME, Lead::Warn),
+        Toast::Downloading(size) => plain(&crate::frames::open_file::downloading_words(size), Lead::None),
+        Toast::KeptEdits(count) => plain(
+            &crate::frames::office::edit::recovery::unlocked_words(usize::from(count), None).unwrap_or_default(),
+            Lead::Warn,
+        ),
+        Toast::FreedUp => plain("Freed up space on this PC", Lead::Check),
+        Toast::Failed(action, why) => toast::toast_with(
+            "toast",
+            &Toast::failure(action, why),
+            Lead::Warn,
+            // Only where Try again repeats something (`State::offers_try_again`).
+            again.then(|| toast_button("Try again", "Try again", None, retry, t)),
+            t,
+        )
+        // A failure is read at once.
+        .role("alert"),
+    }
+}
+
+/// An empty folder (`.kit-empty`): what to do, and that it is encrypted before it uploads.
+fn empty_folder(root: bool, t: &Theme) -> El {
+    let body = empty::empty_state(
+        "empty",
+        &icons::FILES,
+        "Nothing here yet",
+        // The board's two sentences: a new account's Files (DW-0114), an empty folder (DW-1106).
+        if root {
+            "Add files or photos. They're encrypted on this PC before they upload."
+        } else {
+            "Add files or photos, and they're encrypted on this PC before they upload."
+        },
+        t,
+    )
+    .child(
+        col()
+            .key("empty-actions")
+            .mt(8.0)
+            .gap(scale::space::S8)
+            .items_center()
+            .child(
+                button::outline_button("empty-add", "Add files", Some(&icons::PLUS), t)
+                    .expanded(false)
+                    .on_press(|s: &mut State| s.toggle_menu(MenuKind::New)),
+            )
+            .child(kit::label(
+                "empty-hint",
+                "or drop files here from File Explorer",
+                empty::CAP,
+                t.text_tertiary,
+            )),
+    );
+    el().key("empty-area")
+        .role("list")
+        .label("Nothing here yet")
+        .focusable(true)
+        .no_focus_ring()
+        .grow(1.0)
+        .h_full()
+        .center()
+        .on_drop_files(|s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
+            let folder = s.listing.folder.id.clone();
+            s.upload(folder, files, tx);
+        })
+        .child(body)
+}
+
+pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    let t = tokens::theme(cx.system_dark());
+
+    // "Nothing here yet · Add files" is for a folder that takes files. One that takes none
+    // (Backups, a service folder) shows its headers over no rows.
+    let empty = s.listing.items.is_empty() && s.can_add();
+    let mut body = row().key("list-body").grow(1.0).min_h(0.0).w_full();
+    if super::session::blanks(s) {
+        // The session ended and the rows are not to be shown (`session::KEEP_THE_LIST`): only the banner's ask.
+        body = body.child(el().key("list-blank").grow(1.0).h_full());
+    } else if empty {
+        // Nothing in the folder: no headers, no panel, one way forward (DW-1106).
+        body = body.child(empty_folder(s.listing.folder.id.is_none(), &t));
+    } else {
+        // The folder as a grid, where the person chose that view (`frames::global::grid`, DW-0119).
+        body = body.child(crate::frames::global::grid_body(s, &t).unwrap_or_else(|| {
+            // F6 stop: the list pane, its first Tab stop is the rows.
+            crate::ui::focus::pane(col(), "pane-list")
+                .grow(1.0)
+                .min_w(0.0)
+                .h_full()
+                .child(
+                    super::protected::column_headers(s, &t)
+                        .unwrap_or_else(|| list::column_headers(s.actions.sort, file_list::Fit::of_list(cx), &t)),
+                )
+                // A folder that could not be read says so. It never draws as an empty folder.
+                .child(match s.list_error {
+                    // It holds the keyboard while it shows, so Back still works from the keys.
+                    Some(error) => file_list::list_error(error, &t).focusable(true).no_focus_ring(),
+                    None => list::rows(s, cx, &t),
+                })
+        }));
+        if s.show_detail_pane {
+            // A copy on its way down is not on this PC yet, and says so on the Available offline card (DW-0412).
+            let selected = s
+                .selected
+                .and_then(|i| s.listing.items.get(i))
+                .map(|item| match s.download_of(&item.id) {
+                    Some(d) => (
+                        crate::source::DriveItem {
+                            pc_status: Some("downloading".into()),
+                            ..item.clone()
+                        },
+                        Some(d),
+                    ),
+                    None => (item.clone(), None),
+                });
+            let facts = selected.as_ref().map(|(item, download)| {
+                let mut facts = s.actions.source.details(item, &s.listing.folder.name);
+                if let Some(d) = download {
+                    // A copy that comes down for another reason (a player reading it) is not a keep.
+                    if d.kept {
+                        facts.offline_note = d.panel_words();
+                        facts.kept_offline = true;
+                    }
+                }
+                (item, facts)
+            });
+            let details_pane = if s.selects_several() {
+                let items: Vec<_> = s
+                    .selected_rows()
+                    .iter()
+                    .filter_map(|&i| s.listing.items.get(i))
+                    .collect();
+                select_bar::panel(&items, &t)
+            } else {
+                details::details_pane(facts, s.pin_state(), &t)
+            };
+            body = body.child(crate::ui::focus::pane(
+                col().h_full().child(details_pane),
+                "pane-details",
+            ));
+        }
+    }
+
+    let mut main = col()
+        .key("content-area")
+        .role("main")
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .fill(t.bg)
+        .child(crate::ui::focus::pane(
+            col().w_full().child(toolbar::toolbar(s, &t, 0.0)),
+            "pane-toolbar",
+        ))
+        // The one banner of the whole window, or the loading strip (`frames::global`).
+        .children(
+            super::browse_states::card(s, &t)
+                .or_else(|| crate::frames::global::under_toolbar(s, &t))
+                .or_else(|| super::protected::rebuilt_notice(s, &t))
+                .or_else(|| super::protected::notice(s, &t)),
+        )
+        // Several rows selected: what can be done to all of them (DW-0403).
+        .children(select_bar::bar(s, &t))
+        .child(body)
+        .child({
+            // The sync state is the source's; a click shows the b's flyout (DW-0401 to DW-1201).
+            let state = s.actions.source.sync_state();
+            let details = crate::frames::global::status_words(s)
+                .or_else(|| super::browse_states::status_words(s))
+                .or_else(|| super::protected::status_words(s))
+                .unwrap_or_else(|| pc_summary(s));
+            let name = match &state {
+                Some(state) => format!("{state}. {details}"),
+                None => details.clone(),
+            };
+            // Without a connection the line says so (`frames::global`, DW-0121).
+            // While something uploads the line says so, and opens Uploads (DW-0426, DW-0427).
+            let uploading = super::uploads::status(s, &details, &t);
+            let name = match &uploading {
+                Some((_, words)) => format!("{words}. {details}"),
+                None => name,
+            };
+            super::session::status_line(s, &t)
+                .or_else(|| super::browse_states::status_line(s, &details, &t))
+                .or_else(|| crate::frames::global::status_line(state.as_deref(), &details, &t))
+                .or(uploading.map(|(line, _)| line))
+                .unwrap_or_else(|| status_line::status_line(state.as_deref(), &details, &t))
+                .role("button")
+                .label(name)
+                .description("Shows sync status")
+                .focusable(true)
+                .on_press(|s: &mut State| s.status_pressed())
+        });
+    if let Some(kind) = s.live_toast() {
+        let again = matches!(kind, Toast::Failed(action, why) if s.offers_try_again(action, why));
+        main = main.child(toast::layer(toast_of(kind, again, &t)));
+    }
+
+    let crop = s.actions.board_crop_top;
+    let mut body = row()
+        .key("body")
+        .w_full()
+        .child(crate::ui::sidebar::sidebar(s, &t))
+        .child(main)
+        // What is in front of the whole body: a preview that needs a connection (`frames::global`).
+        .children(crate::frames::global::over_body(s, s.actions.window, &t));
+    body = if crop > 0.0 {
+        // A board frame that draws the lower part of the window only (`.mk-cropfade.at-top`): the
+        // body keeps its full height and moves up under the caption, its top fading into it.
+        let fade = t.sidebar_bg;
+        el().key("body-crop")
+            .grow(1.0)
+            .min_h(0.0)
+            .w_full()
+            .clip_rounded(0.0)
+            .child(body.absolute(0.0, -crop).h(768.0))
+            .child(
+                el().key("crop-fade")
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h(44.0)
+                    .gradient(fade, fade.alpha(0.0)),
+            )
+    } else {
+        crate::frames::global::fit(s, body, &t)
+    };
+    let window = col()
+        .key("window")
+        .role("window")
+        .label(s.identity.main_window_title())
+        .on_key(super::keys::on_key)
+        .on_layout(|s: &mut State, [_, _, w, h]| s.actions.window = (w, h))
+        .w_full()
+        .h_full()
+        .fill(t.bg)
+        .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
+        .child(body);
+    // What lies over the window: the open menu, the reason a name cannot be given, a dialog.
+    let layers: Vec<El> = [
+        menu_layer(s, &t),
+        rename::tip_layer(s, &t),
+        super::uploads::drop_layer(s, &t),
+        super::uploads::layer(s, &t),
+        dialogs::layer(s, &t),
+        super::protected::layer(s, &t),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if layers.is_empty() {
+        return window;
+    }
+    let mut root = el().key("files-root").w_full().h_full().child(window);
+    for layer in layers {
+        root = root.child(layer);
+    }
+    root
+}
+
+/// The dialog Files holds (Share, Version history, Details…) as a layer, for a window that is not Files' own: the
+/// viewer asks for the share and the versions of the open file, and the dialog stands over it. The caller puts this
+/// over what it draws (`frames::viewers::frame`).
+pub fn dialog_over_viewer(s: &State, t: &Theme) -> Option<El> {
+    dialogs::layer(s, t)
+}

@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Build the Beebeeb macOS File Provider extension bundle that Tauri embeds at
-# Beebeeb.app/Contents/PlugIns/BeebeebFileProvider.appex.
+# Build the Beebeeb macOS File Provider extension bundle that the macOS app embeds at
+# Beebeeb.app/Contents/PlugIns/BeebeebFileProvider.appex. The 0.8.x Tauri app was the
+# last one to embed it; the native macOS app's packaging is specified in
+# native/beebeeb-drive-rune/docs/macos/packaging-signing-update.md.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-OUT_DIR="src-tauri/target/fileprovider/BeebeebFileProvider.appex"
-HELPER_OUT="src-tauri/target/fileprovider/BeebeebFileProviderCtl"
+OUT_DIR="target/fileprovider/BeebeebFileProvider.appex"
+HELPER_OUT="target/fileprovider/BeebeebFileProviderCtl"
 TARGET_TRIPLE="${BEEBEEB_FILE_PROVIDER_TARGET:-}"
 SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-}"
-EXTENSION_PROVISION_PROFILE="${MACOS_FILE_PROVIDER_PROVISION_PROFILE:-src-tauri/target/profiles/BeebeebFileProvider.provisionprofile}"
+EXTENSION_PROVISION_PROFILE="${MACOS_FILE_PROVIDER_PROVISION_PROFILE:-target/profiles/BeebeebFileProvider.provisionprofile}"
 # Task 1608: a notarized Developer ID release needs every nested executable —
-# not just the containing app (which Tauri's own bundler already handles) —
+# not just the containing app (which the app's own signing step handles) —
 # signed with hardened runtime AND a secure (network) timestamp; Apple's
 # notarization service rejects a submission over "The signature does not
 # include a secure timestamp" or a missing hardened-runtime flag on ANY
@@ -51,7 +53,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TARGET_TRIPLE" ]]; then
-  arch="${TAURI_ENV_ARCH:-$(uname -m)}"
+  arch="$(uname -m)"
   case "$arch" in
     arm64|aarch64) TARGET_TRIPLE="aarch64-apple-macos14.0" ;;
     x86_64) TARGET_TRIPLE="x86_64-apple-macos14.0" ;;
@@ -74,10 +76,17 @@ require_cmd python3
 require_cmd plutil
 require_cmd codesign
 
+# The extension's version is the native app's: the `version` of the [package] table of
+# native/beebeeb-drive-rune/Cargo.toml (read as text: no TOML module is needed on the runner).
 VERSION="$(python3 - <<'PY'
-import json
+import re
 from pathlib import Path
-print(json.loads(Path("package.json").read_text())["version"])
+text = Path("native/beebeeb-drive-rune/Cargo.toml").read_text()
+package = re.search(r"^\[package\]\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+version = re.search(r'^version\s*=\s*"([^"]+)"', package.group(1) if package else "", re.M)
+if not version:
+    raise SystemExit("native/beebeeb-drive-rune/Cargo.toml: no version in [package]")
+print(version.group(1))
 PY
 )"
 

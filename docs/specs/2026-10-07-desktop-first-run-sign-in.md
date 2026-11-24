@@ -1,12 +1,12 @@
 # 2026-10-07 — Desktop: the first run is sign-in only (spec C of 3)
 
-**Status:** design approved by Guus on 2026-10-07 in three parts, with rulings C1–C7; this written spec awaits his review.
+**Status:** design approved by the owner on 2026-10-07 in three parts, with rulings C1–C7; this written spec awaits his review.
 **Amended:** 2026-10-07 for the lead's rulings on the six open points and the browser sign-in outcome (§17, C-S1). — lead, 2026-10-07
 **Amended:** 2026-10-07 for the lead's rulings on the independent spec review (§17.2). — lead, 2026-10-07
-**Amended:** 2026-10-24 for Guus's ruling of at most two macOS surfaces ([two-surface spec](2026-10-24-macos-two-surface-app.md)): the account window is the one Beebeeb window, the popover replaces the compact window, and "spec B" below means that spec. Rules C-W3 (Ready), C-W4 (Ready), C-W7 (Keychain), C-W8, C-W9 (Ready), §7.5 (where) and §7.6 (Ready) are struck and replaced in place; every state, copy string and Rust rule is unchanged. — two-surface design, 2026-10-24
+**Amended:** 2026-10-24 for the owner's ruling of at most two macOS surfaces ([two-surface spec](2026-10-24-macos-two-surface-app.md)): the account window is the one Beebeeb window, the popover replaces the compact window, and "spec B" below means that spec. Rules C-W3 (Ready), C-W4 (Ready), C-W7 (Keychain), C-W8, C-W9 (Ready), §7.5 (where) and §7.6 (Ready) are struck and replaced in place; every state, copy string and Rust rule is unchanged. — two-surface design, 2026-10-24
 **Date:** 7 Oct 2026
 **Repo:** desktop. macOS and Windows; Linux shares the Rust account state and the sign-in window (§7.8).
-**Tasks:** 1747 (macOS) and 1748 (Windows), re-scoped by Guus on 2026-10-06: "Signup only web, signin web or direct". Server dependency: 1844.
+**Tasks:** 1747 (macOS) and 1748 (Windows), re-scoped by the owner on 2026-10-06: "Signup only web, signin web or direct". Server dependency: 1844.
 **Builds on:** spec A, `docs/specs/2026-10-06-macos-finder-setup-reconciler.md` (task 1834). Work starts after spec A's two lanes merge.
 **Siblings:** spec B (the popover becomes the only macOS surface) follows this one (spec A R1: A, then C, then B).
 **Citations:**
@@ -16,7 +16,7 @@
 
 ## 1. Why
 
-Guus, 2026-10-06 (spec A §1): "… it should just show to me to login and thats it."
+the owner, 2026-10-06 (spec A §1): "… it should just show to me to login and thats it."
 
 - **Launch keys on the sync folder, not the session.** `startup_surface` opens onboarding only when no `sync_root` is set (`src-tauri/src/surfaces/policy.rs:44-50`, called at `src-tauri/src/lib.rs:8994-9027`). Sign-out never clears `sync_root`: the only `None` assignments are the default (`src-tauri/src/config/types.rs`, the `Default` impl) and the rejection of a relative path (`:503`). A Mac that was set up once and is now signed out opens the compact window on its "Drive status" page (`src/pages/Status.tsx:160,172`; landing page `src/App.tsx:27`). That page says "Signed out" (`src/App.tsx:163`) and offers no way to sign in.
 - **macOS sign-in is email and password only** (`src/Onboarding.tsx:183`). The browser handoff exists, but only Windows offers it (`src/WindowsFirstRun.tsx:300-715`).
@@ -27,10 +27,10 @@ This spec makes the first run "sign in, and that's it". You sign in natively, br
 ## 2. Scope
 
 - **In:** native sign-in on macOS (1747) and Windows (1748); a "Create account" link to the web; one account state derived in Rust from the session, the onboarding document and connectivity; a screen per state and the macOS launch policy; a crossed b in the menu bar when disconnected; notices for trial, read-only, frozen and failed-payment accounts.
-- **Re-scoped out (Guus, 2026-10-06):** native signup on every platform. Accounts are created on the web.
+- **Re-scoped out (owner, 2026-10-06):** native signup on every platform. Accounts are created on the web.
 - **Out:** see Non-goals (§18).
 
-## 3. Rulings (Guus, 2026-10-07)
+## 3. Rulings (owner, 2026-10-07)
 
 Quoted as given. C6-links is not item C6 of 1748, which is a Windows copy fix (§15).
 
@@ -467,7 +467,7 @@ The plan's first task draws these screens as hi-fi mocks, light and dark, into t
 - the Windows equivalents
 - the crossed b on light and dark menu bars, and the colour `.ico`
 
-Guus approves the mocks before any code. The icon is variant B. Where an approved mock and this spec disagree, the mock wins, and the spec is amended in the same change.
+the owner approves the mocks before any code. The icon is variant B. Where an approved mock and this spec disagree, the mock wins, and the spec is amended in the same change.
 
 ## 13. Units and interfaces
 
@@ -554,7 +554,7 @@ Every new test is seen failing before it passes, and its failure output is paste
 
 ## 15. Verification (rewritten)
 
-Each task file keeps its original line struck through. These are the replacements, amended 2026-10-07 by the desktop team lead and approved by Guus, and amended again after the review.
+Each task file keeps its original line struck through. These are the replacements, amended 2026-10-07 by the desktop team lead and approved by the owner, and amended again after the review.
 
 ### 1747 (macOS)
 
@@ -590,7 +590,7 @@ Each task file keeps its original line struck through. These are the replacement
 - **macOS:** a clean-machine first run of a notarized, Gatekeeper-checked build.
 - **macOS, autostart:** enable "Start at login" on the signed, sandboxed build, find the agent file, and log out and in. This answers the §6.1 finding. The autostart fix itself is a separate task.
 - **macOS, the login-item property:** does `keyAELaunchedAsLogInItem` arrive under the registration mechanism the shipped build uses? If it never arrives, every launch counts as manual (C-W1).
-- **macOS, the login-launch rung** needs a real OS login on Guus's Mac account (spec A R3).
+- **macOS, the login-launch rung** needs a real OS login on the owner's Mac account (spec A R3).
 - **Windows:** the first run on a clean physical machine.
 - **Linux:** "Linux UI not checked on hardware".
 - **Server links:** the plan, support and payment links equal the document's `fallback.url`. These rungs run against the built-in addresses until 1844 ships, and are re-run then.

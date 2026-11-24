@@ -1,1 +1,11 @@
 /.github/ @guuslangelaar
+# The public key every native build trusts, and the code that decides what an install will run. A change to
+# either is a change to who can ship code to every install: it needs the owner's review (the key file's SHA-256 is
+# also pinned in tests/nativeChannelManifest.test.ts and in release-native-windows.yml).
+/crates/beebeeb-updater/ @guuslangelaar
+/crates/beebeeb-updater/keys/updater-v2.pub @guuslangelaar
+/packaging/windows/ @guuslangelaar
+/scripts/native-release-ref-check.sh @guuslangelaar
+/scripts/native-channel-manifest.mjs @guuslangelaar
+/scripts/publish-release-files.sh @guuslangelaar
+/scripts/check-updater-signature-key.mjs @guuslangelaar

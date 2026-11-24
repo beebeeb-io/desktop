@@ -1,0 +1,55 @@
+# celldiff.py: the unedited save against the original, hand-made fixtures
+big-30-pages.docx: body characters 102189 -> 102189: SAME
+feat-cfdv.xlsx: cells 58 -> 58; lost 0; value or formula changed 0; formula results filled in 19; new 0: SAME
+feat-chart.pptx: slides 3 -> 3; text runs 6 -> 6: SAME
+feat-comments.docx: body characters 1670 -> 1670: SAME
+feat-comments.pptx: slides 3 -> 3; text runs 6 -> 6: SAME
+feat-comments.xlsx: cells 84 -> 84; lost 0; value or formula changed 0; formula results filled in 2; new 0: SAME
+feat-macro.docm: body characters 1638 -> 1638: SAME
+feat-macro.pptm: slides 3 -> 3; text runs 6 -> 6: SAME
+feat-macro.xlsm: cells 84 -> 84; lost 0; value or formula changed 0; formula results filled in 2; new 0: SAME
+feat-media.pptx: slides 4 -> 4; text runs 22 -> 22: SAME
+feat-notes.pptx: slides 3 -> 3; text runs 6 -> 6: SAME
+feat-pivot.xlsx: cells 58 -> 58; lost 0; value or formula changed 0; formula results filled in 19; new 0: SAME
+feat-tracked.docx: body characters 1698 -> 1698: SAME
+hard.docx: body characters 1141 -> 1141: SAME
+hard.pptx: slides 4 -> 4; text runs 22 -> 22: SAME
+hard.xlsx: cells 58 -> 58; lost 0; value or formula changed 0; formula results filled in 19; new 0: SAME
+remote.docx: body characters 67 -> 67: SAME
+remote.pptx: slides 3 -> 3; text runs 6 -> 6: SAME
+remote.xlsx: cells 4 -> 4; lost 0; value or formula changed 0; formula results filled in 2; new 0: SAME
+spike.docx: body characters 1638 -> 1638: SAME
+spike.pptx: slides 3 -> 3; text runs 6 -> 6: SAME
+spike.xlsx: cells 84 -> 84; lost 0; value or formula changed 0; formula results filled in 2; new 0: SAME
+files compared: 22; different: 0
+
+# LibreOffice-saved fixtures
+lo-feat-cfdv.xlsx: cells 58 -> 58; lost 0; value or formula changed 0; formula results filled in 0; new 0: SAME
+lo-feat-chart.pptx: slides 3 -> 3; text runs 6 -> 6: SAME
+lo-feat-comments.docx: body characters 1670 -> 1670: SAME
+lo-feat-comments.pptx: slides 3 -> 3; text runs 6 -> 6: SAME
+lo-feat-comments.xlsx: cells 84 -> 84; lost 0; value or formula changed 0; formula results filled in 0; new 0: SAME
+lo-feat-macro.docm: body characters 1638 -> 1638: SAME
+lo-feat-macro.pptm: slides 3 -> 3; text runs 6 -> 6: SAME
+lo-feat-macro.xlsm: cells 84 -> 84; lost 0; value or formula changed 0; formula results filled in 0; new 0: SAME
+lo-feat-media.pptx: slides 4 -> 4; text runs 22 -> 22: SAME
+lo-feat-notes.pptx: slides 3 -> 3; text runs 6 -> 6: SAME
+lo-feat-pivot.xlsx: cells 68 -> 68; lost 0; value or formula changed 0; formula results filled in 0; new 0: SAME
+lo-feat-tracked.docx: body characters 1698 -> 1698: SAME
+lo-hard.docx: body characters 1141 -> 1141: SAME
+lo-hard.pptx: slides 4 -> 4; text runs 22 -> 22: SAME
+lo-hard.xlsx: cells 58 -> 58; lost 0; value or formula changed 0; formula results filled in 0; new 0: SAME
+lo-spike.docx: body characters 1638 -> 1638: SAME
+lo-spike.pptx: slides 3 -> 3; text runs 6 -> 6: SAME
+lo-spike.xlsx: cells 84 -> 84; lost 0; value or formula changed 0; formula results filled in 0; new 0: SAME
+files compared: 18; different: 0
+
+# the comparison can fail: one cell removed from the saved side of every workbook (--mutant), hand-made
+feat-cfdv.xlsx: cells 58 -> 57; lost 1; value or formula changed 0; formula results filled in 19; new 0: DIFFERENT
+feat-comments.xlsx: cells 84 -> 83; lost 1; value or formula changed 0; formula results filled in 2; new 0: DIFFERENT
+feat-macro.xlsm: cells 84 -> 83; lost 1; value or formula changed 0; formula results filled in 2; new 0: DIFFERENT
+feat-pivot.xlsx: cells 58 -> 57; lost 1; value or formula changed 0; formula results filled in 19; new 0: DIFFERENT
+hard.xlsx: cells 58 -> 57; lost 1; value or formula changed 0; formula results filled in 19; new 0: DIFFERENT
+remote.xlsx: cells 4 -> 3; lost 1; value or formula changed 0; formula results filled in 2; new 0: DIFFERENT
+spike.xlsx: cells 84 -> 83; lost 1; value or formula changed 0; formula results filled in 2; new 0: DIFFERENT
+files compared: 22; different: 7

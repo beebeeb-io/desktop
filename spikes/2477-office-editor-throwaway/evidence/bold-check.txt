@@ -1,0 +1,15 @@
+# final run (bab82d10), files returned from the Linux VM
+word below the engine: bold stored in 12 of 12 saved files
+word through the engine: bold stored in 12 of 12 saved files
+excel: bold stored in 13 of 13 saved files
+
+# earlier run (c5657ddb): the sheet spike did not pass on:true, so home.bold toggled against the active cell
+NOT bold: feat-cfdv.edited.xlsx
+NOT bold: feat-pivot.edited.xlsx
+NOT bold: hard.edited.xlsx
+NOT bold: lo-feat-cfdv.edited.xlsx
+NOT bold: lo-feat-pivot.edited.xlsx
+NOT bold: lo-hard.edited.xlsx
+word below the engine: bold stored in 12 of 12 saved files
+word through the engine: bold stored in 12 of 12 saved files
+excel: bold stored in 7 of 13 saved files

@@ -1,0 +1,5 @@
+[remote-build] desktop@native/2477-office-editor-contract = c456fa80bc54ab9fa81b34c601779d26fd2e44b5
+found native_2477-office-viewer-contract/audit-2477: 7047 files
+after removal: 0 files, directory exists: no
+spike directories left: 0; spike processes: 0
+[remote-build] exit 0

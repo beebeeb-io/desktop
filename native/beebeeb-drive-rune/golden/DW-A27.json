@@ -1,0 +1,796 @@
+{
+ "frame": "DW-A27",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "caption-bar": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 958,
+   "h": 32,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ]
+  },
+  "cap-mark": {
+   "kind": "icon",
+   "x": 12,
+   "y": 7.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "mark": true
+  },
+  "cap-title": {
+   "kind": "text",
+   "x": 37,
+   "y": 7.5,
+   "w": 774,
+   "h": 16,
+   "text": "Beebeeb Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "cap-min": {
+   "kind": "box",
+   "x": 820,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-min-icon": {
+   "kind": "icon",
+   "x": 838,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "cap-max": {
+   "kind": "box",
+   "x": 866,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-max-icon": {
+   "kind": "icon",
+   "x": 884,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "cap-close": {
+   "kind": "box",
+   "x": 912,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-close-icon": {
+   "kind": "icon",
+   "x": 930,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "au-side": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 320,
+   "h": 606,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "border": "0px 0.5px 0px 0px oklch(0.18 0.01 70)",
+    "pad": "28px 26px",
+    "gap": "14px"
+   }
+  },
+  "side-mark": {
+   "kind": "icon",
+   "x": 26,
+   "y": 61.17,
+   "w": 34,
+   "h": 34,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "mark": true
+  },
+  "side-word": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 60,
+   "w": 112,
+   "h": 22.23,
+   "text": "beebeeb.io",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22.2308,
+   "weight": 700,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.62,
+   "lh": "22.2308px",
+   "align": "start"
+  },
+  "side-product": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 84.84,
+   "w": 112,
+   "h": 11.5,
+   "text": "DRIVE",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 9,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 1.62,
+   "lh": "normal",
+   "align": "start"
+  },
+  "side-tagline": {
+   "kind": "text",
+   "x": 26,
+   "y": 110.34,
+   "w": 267.5,
+   "h": 15,
+   "text": "Your files, encrypted on your devices.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-0-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 511,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2zM7 11V7a5 5 0 0 1 10 0v4"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "fact-0": {
+   "kind": "text",
+   "x": 51,
+   "y": 510,
+   "w": 242.5,
+   "h": 30,
+   "text": "Encrypted on this PC before anything syncs. Beebeeb can't read it.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-1-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 553,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "fact-1": {
+   "kind": "text",
+   "x": 51,
+   "y": 552,
+   "w": 242.5,
+   "h": 30,
+   "text": "One Beebeeb account for Drive, Pass, VPN, Chat and Mail.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-2-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 595,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3c-2.5 2.6-3.8 5.6-3.8 9s1.3 6.4 3.8 9"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "fact-2": {
+   "kind": "text",
+   "x": 51,
+   "y": 594,
+   "w": 97.73,
+   "h": 15,
+   "text": "Stored in Europe.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "au-main": {
+   "kind": "box",
+   "x": 320,
+   "y": 32,
+   "w": 638,
+   "h": 606,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ],
+   "css": {
+    "pad": "20px"
+   }
+  },
+  "back-icon": {
+   "kind": "icon",
+   "x": 467,
+   "y": 170,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M15 5l-7 7 7 7"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "back": {
+   "kind": "text",
+   "x": 485,
+   "y": 169.5,
+   "w": 38.43,
+   "h": 14.5,
+   "text": "Sign in",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "title": {
+   "kind": "text",
+   "x": 467,
+   "y": 195.5,
+   "w": 344,
+   "h": 28,
+   "text": "Two-factor authentication",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 650,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.48,
+   "lh": "28px",
+   "align": "start"
+  },
+  "subtitle": {
+   "kind": "text",
+   "x": 467,
+   "y": 229.5,
+   "w": 344,
+   "h": 30,
+   "text": "Your account is protected with two-factor. Enter the 6-digit code from your authenticator app.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "btn-0": {
+   "kind": "box",
+   "x": 467,
+   "y": 468.5,
+   "w": 344,
+   "h": 32,
+   "bg": [
+    247,
+    185,
+    0,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "btn-0-label": {
+   "kind": "text",
+   "x": 620.71,
+   "y": 474.75,
+   "w": 36.58,
+   "h": 19.5,
+   "text": "Verify",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    30,
+    26,
+    22,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "19.5px",
+   "align": "center"
+  },
+  "banner-0": {
+   "kind": "box",
+   "x": 467,
+   "y": 333.5,
+   "w": 344,
+   "h": 92,
+   "bg": [
+    230,
+    58,
+    66,
+    31
+   ],
+   "css": {
+    "radius": "13px",
+    "pad": "11px 13px",
+    "gap": "10px"
+   }
+  },
+  "banner-0-icon": {
+   "kind": "icon",
+   "x": 480,
+   "y": 345.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01"
+   ],
+   "filled": false,
+   "color": [
+    234,
+    60,
+    63,
+    255
+   ]
+  },
+  "banner-0-title": {
+   "kind": "text",
+   "x": 506,
+   "y": 344.5,
+   "w": 292,
+   "h": 17,
+   "text": "That code isn't right",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "banner-0-text": {
+   "kind": "text",
+   "x": 506,
+   "y": 363.5,
+   "w": 292,
+   "h": 51,
+   "text": "Codes change every 30 seconds. Check the time on this PC, then try the next one. Nothing was signed in.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "link-0": {
+   "kind": "text",
+   "x": 584.2,
+   "y": 436.5,
+   "w": 109.61,
+   "h": 14.5,
+   "text": "Use a backup code",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "digit-0": {
+   "kind": "box",
+   "x": 487,
+   "y": 270.5,
+   "w": 44,
+   "h": 52,
+   "bg": [
+    244,
+    241,
+    237,
+    255
+   ],
+   "css": {
+    "radius": "12px",
+    "shadow": "oklch(0.62 0.21 25) 0px 0px 0px 1.5px inset"
+   }
+  },
+  "digit-0-text": {
+   "kind": "text",
+   "x": 502.4,
+   "y": 282,
+   "w": 13.2,
+   "h": 29,
+   "text": "4",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 22,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "digit-1": {
+   "kind": "box",
+   "x": 539,
+   "y": 270.5,
+   "w": 44,
+   "h": 52,
+   "bg": [
+    244,
+    241,
+    237,
+    255
+   ],
+   "css": {
+    "radius": "12px",
+    "shadow": "oklch(0.62 0.21 25) 0px 0px 0px 1.5px inset"
+   }
+  },
+  "digit-1-text": {
+   "kind": "text",
+   "x": 554.4,
+   "y": 282,
+   "w": 13.2,
+   "h": 29,
+   "text": "8",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 22,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "digit-2": {
+   "kind": "box",
+   "x": 591,
+   "y": 270.5,
+   "w": 44,
+   "h": 52,
+   "bg": [
+    244,
+    241,
+    237,
+    255
+   ],
+   "css": {
+    "radius": "12px",
+    "shadow": "oklch(0.62 0.21 25) 0px 0px 0px 1.5px inset"
+   }
+  },
+  "digit-2-text": {
+   "kind": "text",
+   "x": 606.4,
+   "y": 282,
+   "w": 13.2,
+   "h": 29,
+   "text": "2",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 22,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "digit-3": {
+   "kind": "box",
+   "x": 643,
+   "y": 270.5,
+   "w": 44,
+   "h": 52,
+   "bg": [
+    244,
+    241,
+    237,
+    255
+   ],
+   "css": {
+    "radius": "12px",
+    "shadow": "oklch(0.62 0.21 25) 0px 0px 0px 1.5px inset"
+   }
+  },
+  "digit-3-text": {
+   "kind": "text",
+   "x": 658.4,
+   "y": 282,
+   "w": 13.2,
+   "h": 29,
+   "text": "0",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 22,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "digit-4": {
+   "kind": "box",
+   "x": 695,
+   "y": 270.5,
+   "w": 44,
+   "h": 52,
+   "bg": [
+    244,
+    241,
+    237,
+    255
+   ],
+   "css": {
+    "radius": "12px",
+    "shadow": "oklch(0.62 0.21 25) 0px 0px 0px 1.5px inset"
+   }
+  },
+  "digit-4-text": {
+   "kind": "text",
+   "x": 710.4,
+   "y": 282,
+   "w": 13.2,
+   "h": 29,
+   "text": "1",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 22,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "digit-5": {
+   "kind": "box",
+   "x": 747,
+   "y": 270.5,
+   "w": 44,
+   "h": 52,
+   "bg": [
+    244,
+    241,
+    237,
+    255
+   ],
+   "css": {
+    "radius": "12px",
+    "shadow": "oklch(0.62 0.21 25) 0px 0px 0px 1.5px inset"
+   }
+  },
+  "digit-5-text": {
+   "kind": "text",
+   "x": 762.4,
+   "y": 282,
+   "w": 13.2,
+   "h": 29,
+   "text": "9",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 22,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  }
+ },
+ "theme": "light"
+}

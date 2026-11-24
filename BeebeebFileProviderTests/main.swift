@@ -763,7 +763,7 @@ check("1701: the root container item grants .allowsReading + .allowsAddingSubIte
 
 // The two new capability bits cross the bridge with the SAME numbering as the
 // Rust payload builder (CAP_REPARENT = 1 << 5, CAP_TRASH = 1 << 6 in
-// src-tauri/src/ipc_socket.rs). Finder blocks drag-MOVE and drag-to-Trash on
+// crates/beebeeb-engine/src/ipc_socket/protocol.rs). Finder blocks drag-MOVE and drag-to-Trash on
 // items whose mapped NSFileProviderItemCapabilities lacks them.
 
 func item1697(capabilities: Int, kind: BeebeebItemKind = .file) -> BeebeebProviderItem {
@@ -1904,8 +1904,8 @@ check("WriteRetryLater decodes to the transient uploadStagingFailed, never canno
 // MARK: - ExtensionLog: what each line logs (spec 2026-10-09 §11)
 
 // The unified log shows a value only when the line marks it public, so a line must be built
-// from closed values. These tests check what each line is built from; `extension_log_pin` in
-// src-tauri checks the source by matching text (its module doc says exactly what it checks).
+// from closed values. These tests check what each line is built from;
+// crates/beebeeb-engine/tests/file_provider_source_pins.rs checks the source by matching text.
 
 check("the write-options line carries the call, the raw bitmask and a UUID item id") {
     let uuid = "4f1c2a9e-0d3b-4c5e-9a7f-1b2c3d4e5f60"

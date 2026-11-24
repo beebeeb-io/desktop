@@ -13,7 +13,7 @@ IDs, names, bytes, SHA-256 and versions are stable; synthetic keys, tokens and
 encryption nonces are generated per setup and never serialized or logged.
 Video poster retrieval does not certify video decoding or poster generation.
 
-Review-fix contract (Guus, 2026-09-30): each stored object's active manifest
+Review-fix contract (owner, 2026-09-30): each stored object's active manifest
 version owns its version ID (`<object-id>-v<version-number>`), size and chunk
 plan. Upload init/complete, metadata and snapshot listing use that same state;
 object 10 keeps its ID through completion and retries. Object 7's remote version
@@ -64,22 +64,23 @@ the named assertions. Preserve command exits, executed counts and limitations.
 - `fixtures/native-parity/plaintext/`: synthetic text, zero-byte file, 20-byte
   three-chunk upload, generated 32×32 PNGs and a one-second 32×32 H.264 MP4.
   All assets were generated locally for this test; no stock/personal media.
-- `src-tauri/tests/support/native_parity.rs`: `Corpus`, `Fixture` and the local
-  API. No runtime dependency was added. `lib.rs` includes the bridge checks
-  only with `cfg(test)`; there is no fixture code in a shipping build.
-- `src-tauri/tests/support/bridge.rs`: working example using the private
-  production `ApiClient`, `EngineBridge`, sync snapshot/delta and StateDb.
+- `crates/beebeeb-engine/tests/native_parity/fixture.rs`: `Corpus`, `Fixture` and the local
+  API. No runtime dependency was added. It is an integration test of the engine crate;
+  there is no fixture code in a shipping build.
+- `crates/beebeeb-engine/tests/native_parity/bridge.rs`: working example using the engine's
+  `ApiClient`, `EngineBridge`, sync snapshot/delta and StateDb.
 
-Run from the desktop checkout (keep the corpus beside `src-tauri`):
+Run from the desktop checkout (the corpus is read in place from `fixtures/native-parity/`):
 
 ```sh
 bun test tests/nativeParityCorpus.test.ts
-cd src-tauri
-cargo test --locked --lib native_parity_tests::corpus -- --nocapture
-cargo test --locked --lib native_parity_tests::http_ -- --nocapture
+cd crates/beebeeb-engine
+cargo test --locked --test native_parity bridge::corpus -- --nocapture
+cargo test --locked --test native_parity bridge::http_ -- --nocapture
+cargo test --locked --test native_parity   # all 16: 14 bridge + 2 transport
 ```
 
-The first Rust filter executes 11 socket-free tests; the second executes 3
+The first Rust filter executes the socket-free tests; the second executes the
 loopback integration tests. A socket bind failure is a failed/unavailable rung,
 never an ignored or successful case. Run both filters twice. Each cycle owns a
 new temporary directory, listener and in-memory account pair. `cleanup()`
@@ -88,7 +89,7 @@ upload sessions, owned paths and listeners remaining. The HTTP tree test also
 runs its entire cycle twice internally. DB/bridge handles must drop before
 cleanup on Windows. RAII joins the listener and removes its TempDir on failure.
 
-For 1615's Windows test module, include the support module using `#[path]`, call
+For 1615's Windows test module, include the fixture module using `#[path]`, call
 `Fixture::setup()` and `start_http()`, then `credentials("alice")` or `("bob")`.
 Pass these memory values to `ApiClient::new`/the native test runtime; never print
 or persist them. Use a fresh native provider process/root per scenario plus the

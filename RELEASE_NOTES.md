@@ -1,55 +1,30 @@
-# Beebeeb Desktop 0.8.25 - Windows: file and folder names come back after a full re-sync, and updates are checked more strictly
+# Beebeeb Desktop 0.9.0 - Windows: the new native app
 
-0.8.25 is a fix release for Windows and Linux. It repairs a fault that made the app show "Unavailable file" instead of the names of your files and folders after it read your whole file list again, and it makes the app stricter about which update it accepts. It also prepares Windows installs for the next version of the app, 0.9.0. Your files in your vault were never changed by the naming fault: only what this PC showed was wrong.
+0.9.0 is a new Beebeeb for Windows, rebuilt from the ground up as a native app. It starts faster, uses less memory and no longer needs a web view. This release is for Windows and Linux; macOS follows in a later version.
 
 **Known limitations:**
-- **Windows, after the names come back:** the app renames each affected file and folder on this PC back to its real name, one by one. With many files this can take a while. What Explorer shows for the old "Unavailable file ..." entries after the heal has not been observed on an installed build yet. The heal is covered by tests on Windows (48 passed, 0 failed), Linux (47 passed, 0 failed) and macOS (within CI's 2981-test library run), and 22 of 22 deliberate breakages of the heal were caught by a test. No installed 0.8.24 was updated to 0.8.25 before this alpha; the alpha channel is where that is checked first. 0.8.25 goes to beta and stable only after it has been seen on a real install and after one 0.8.25 install has taken a later update. If you see leftover "Unavailable file ..." entries after updating: they are safe to leave; please report them.
-- **Windows, moving to 0.9.0:** an install must be on 0.8.25 before it is offered 0.9.0. This happens by itself through two updates: first to 0.8.25, then to 0.9.0.
-- **macOS is not protected by the stricter update rules yet.** 0.8.25 is not released for macOS, so a Mac stays on its current version and keeps reading today's update address, checked with the first update key only. Someone able to change the update list there could still make a Mac show an update that is not the newest one. A Mac on 0.8.21 or later never installs an update by itself: it shows a "Download update" link to the Beebeeb site.
-- **Linux:** the Linux app still cannot sign in: it has no support for a system password store, and its sign-in window says "This feature is not available on this device."
-- **Still as in 0.8.24:** the limitations listed in 0.8.24's notes still apply.
+- **Linux:** the Linux app cannot sign in yet, because it has no support for a system password store.
+- **Office files:** you can open and view Word, Excel and PowerPoint files. Editing them follows in a later version.
 
 ### What's New
 
-- **[Windows] Ready for the next version of the app.** 0.9.0 will be a new build of Beebeeb for Windows. From 0.8.25 on, a Windows install looks for it at a new update address first. A list of updates at that address must be signed by Beebeeb with the new update key, for this app and for the channel you follow, before the app uses it, and it may only offer 0.9.0 or later. The app also refuses a list that says it was signed before the new key existed, one signed more than 24 hours ahead of this PC's clock, and one older than a list it already accepted. If the list is not there yet, the app uses today's address as before. If the list is there and anything about it is wrong, the app refuses it and installs nothing: it does not fall back to the old address.
-- **[Windows] [Linux] Two update keys, each for its own versions.** 0.8.25 trusts two Beebeeb update keys and never mixes them. The key every release so far was signed with is accepted only at today's update address and only for versions below 0.9.0. The new key is accepted only at the new address and only for 0.9.0 and later. An update signed with the right key for the wrong kind of version is refused. 0.8.25 itself is signed with the first key, so every earlier install accepts it.
-- **[Windows] Sync is stopped cleanly before 0.9.0 installs.** Before the installer of 0.9.0 or later starts, the app lets uploads that are running finish (it waits up to two minutes), stops sync, and disconnects the Beebeeb folder from Explorer. If an upload is still running after two minutes, the app does not install the update, interrupts nothing, and says so; try again when the upload has finished. An upload that starts in the last moment before sync stops can still be cut; it stays queued and is sent again after the update.
+- **A new native app.** Files, Photos, Shared, Trash and Search are built into one fast window.
+- **Photos, PDFs, Office files, video and audio open inside Beebeeb.** Video and audio play in the app.
+- **Sharing.** Create a link, set when it expires, add a password, or ask others to send you files.
+- **Backups.** Back up your Documents, Desktop and Pictures folders.
+- **Settings.** Choose your theme, storage location, notifications and speed limit, and lock Beebeeb again after a set time.
+- **Sign-in.** Sign in with a password, a passkey or Windows Hello. If you quit while Windows Hello is asking, the prompt closes.
 
 ### Bug Fixes / Hardening
 
-- **[Windows] File and folder names show again after a full re-sync (task 2446).**
-  - **Before:** since 2 November 2026 the server's full file list carries three empty fields on every ordinary file. The app read an empty field as "this file came in through a file request", could not make sense of it, and marked the file as unavailable before it even tried the file's own key. Every file and folder of a fresh sign-in, or of an install that read the full list again, showed as "Unavailable file" followed by a code.
-  - **Now:** an empty field means what it says, and the file's own key is used. An install that was already hit reads the full list once more by itself and gives every file and folder its name back. A file that is rightly unavailable stays unavailable: the repair never unlocks anything by itself. If that read fails, sync goes on as before and the app tries again later: after a minute, then after twice as long each time, at most once an hour, also after a restart. A file this PC cannot store at that moment, or one that still has a change of yours waiting to be sent, is left as it is and read again at the next try.
-  - **Tests:** the fault was first reproduced on the 0.8.24 code with rows shaped like the server's (2 new tests, 2 failed), then fixed (2 passed). 4 more tests cover the repair: a failed read leaves it pending, the next good read completes it, a healthy install reads nothing extra, and a rightly unavailable file stays so. Each of 4 deliberate breakages of the repair was caught by a test.
-- **[Windows] [Linux] An update cannot be swapped for an older build (task 2449).**
-  - **Before:** the app checked that an update was signed by Beebeeb, but not that it was the version the update list claimed. Someone able to change that list could have pointed the app at an older, signed installer with its known faults. This needed control of the release host first; no key was at risk and nothing unsigned could run.
-  - **Now:** before it offers or installs an update, the app requires that the version is newer than the installed one, and that the update's signature names the very file being offered and that file's name carries the version. An older installer under a newer version number is refused. Choosing an older version on purpose in Settings (a channel downgrade) still works, and installs exactly the version it names.
-  - **Tests:** 23 new tests of the update rules, with keys made inside the tests. Each of 29 deliberate breakages (8 of the first rules, 21 of the key, time and pre-install rules) was caught by a test.
-- **[Windows] The app records which channel an update came from.** After an in-app update on Windows, "current channel" in About could be wrong, because the app wrote it down after the installer had already closed it. It is now written before the installer starts, and taken back if the installer could not be started. If the installer starts and is then cancelled or fails, "current channel" can still name the channel of the update that did not finish.
-- **[Windows] A safer sign-in when two accounts used one PC (task 2447).**
-  - **Before:** if signing out could not remove an account's saved vault key from Windows, and another account then signed in on the same Windows user, the app could have started with the first account's key: the second account's names would not have been readable, and new uploads would have been unreadable on its other devices. No key ever left the PC.
-  - **Now:** each time the app saves a sign-in or a vault key, it records which account it belongs to. A sign-in removes a saved key that is not shown to be its own account's before it saves anything, and is refused while that key cannot be removed. A saved key that is recorded for another account is not used: the app asks for the recovery phrase instead. An update from 0.8.24 keeps you signed in and does not ask for your recovery phrase.
-  - **What this does not do:** it prevents a new mix-up; it does not repair one that already happened. A key saved by 0.8.24 or earlier has no record of its account, and 0.8.25 keeps using it as before. If this PC already shows unreadable names since a second account signed in on it, sign out, sign in again and enter your recovery phrase.
-  - **Going back to 0.8.24:** 0.8.24 does not have this fix and does not keep the records up to date. If you go back to it, sign in there with a different account and then update to 0.8.25 again, the app may ask that account for its recovery phrase again: once, or twice if that account had not yet entered its phrase under 0.8.24. Entering the phrase settles it. A mix-up that happens while you are back on 0.8.24 is not repaired by updating again; sign out and sign in as above.
-  - **Tests:** 49 new tests. 9 of them run the app's own sign-in, startup and recovery-phrase steps against a stand-in server and a stand-in for the Windows password store, on Windows, Linux and macOS, including the three going-back cases above. Each of 15 deliberate breakages was caught by a test. The check on the real Windows Credential Manager is part of the native rehearsal, not run before this alpha (see Verification).
+- **Sign-out:** signing out clears what the app kept for your account on this PC.
+- **Window size:** the window stays inside your screen the first time you open it.
+- **Shared view:** the footer shows your own account and storage use.
 
 ### Verification
 
-- Release code: PR #289, merged as `0e9154dc` on `main`.
-- Test suite: continuous integration at `0e9154dc` (Desktop CI run 43033685500):
-  - Linux, `cargo test --locked`: the library reported `test result: ok. 2639 passed; 0 failed; 7 ignored`, and three integration suites ran 33, 10 and 3 tests, all with 0 failed.
-  - Windows (GitHub's Windows runner), `cargo test`: the library reported `test result: ok. 2506 passed; 0 failed; 7 ignored`, and the same three suites ran 33, 10 and 3, all with 0 failed.
-  - macOS (not in this release), `cargo test`: the library reported `test result: ok. 2981 passed; 0 failed; 9 ignored`, and the three suites 33, 10 and 3.
-  - Frontend: `bun test` 2211 pass / 0 fail; the same job's `tsc --noEmit` and `eslint` steps passed.
-- Native Windows 11 (build VM, Windows 11 Pro 23H2, build 22631), at `0e9154dc`:
-  - Filtered library run (filter `2446 update_window:: mac_update name_heal finder_setup_wiring_tests::becoming_active`): `test result: ok. 48 passed; 0 failed; 0 ignored`.
-  - Three integration suites: keychain 33 passed, windows_session_wiring 10 passed, windows_signout_cleanup 3 passed, all with 0 failed.
-  - Full unfiltered library run: `test result: FAILED. 2504 passed; 2 failed; 7 ignored`. Both failures are in code this release does not change: `windows_cf::ld0105_native_tests::ld0105_w1_native_the_upgrade_from_partial_to_progressive_keeps_every_placeholder` (the known Cloud Files test on 23H2, task 2452) and `engine_bridge::tests::finder_queue::round7_signout_retries_completed_identity_without_reupload` (passed in the 48-test filtered run at the same commit). At PR head `be5b6828`, the filter `engine_bridge owner_keys 2446 name_heal update_window` gave 670 passed, 0 failed, 2 ignored.
-- Real hardware smoke test: not run before the alpha publish. The heal and the update rules are covered by tests on Windows (48 passed, 0 failed), Linux (47 passed, 0 failed) and macOS (within CI's 2981-test library run), but no installed 0.8.24 was updated to 0.8.25 before this alpha. The alpha channel is where that is checked first, and 0.8.25 goes to beta and stable only after it has been seen on a real install and after one 0.8.25 install has taken a later update.
-- Release workflow check: `node scripts/release-channel-checks.mjs notes 0.8.25 alpha --no-macos` passes on these notes.
-- Not verified:
-  - the move from 0.8.25 to 0.9.0: no 0.9.0 exists yet, so the new update address was tested against a local server with test keys only, and stopping sync before the installer starts was tested without a running sync engine;
-  - Linux on real hardware.
+- Real hardware smoke test: not run on this release yet.
+- Not verified: Linux on real hardware; macOS is not in this release.
 
 ### Install / Update
 
@@ -58,3 +33,24 @@ This release is published to the alpha channel first. Windows installs following
 macOS: not in this release; it follows in a later version.
 
 For a fresh Windows install, download the NSIS `setup.exe` from the GitHub release assets.
+
+<!-- changelog
+title: Desktop 0.9.0: the new native app for Windows
+date: 2026-11-21
+tags: desktop
+release: https://github.com/beebeeb-io/desktop/releases/tag/desktop-v0.9.0
+summary: Beebeeb for Windows is now a native app that starts faster and opens your files inside Beebeeb.
+new:
+- A new native app with Files, Photos, Shared, Trash and Search in one window
+- Photos, PDFs, Word, Excel and PowerPoint files open inside Beebeeb, and video and audio play there
+- Create share links with an expiry date and a password
+- Back up your Documents, Desktop and Pictures folders
+- Sign in with a password, a passkey or Windows Hello
+improved:
+- The window stays inside your screen the first time you open it
+fixed:
+- The Shared view now shows your own account and storage use
+- Signing out clears what the app kept for your account on this PC
+security:
+note: Windows only for now: macOS follows in a later version.
+-->

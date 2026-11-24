@@ -1,0 +1,160 @@
+//! The details panel of the selected item (`.mk-det`), its facts from `FilesSource::details`.
+//! Its three controls act on the selection: the Available offline switch, Share… (DW-0407) and
+//! Version history (DW-0413).
+
+use super::Intent;
+use super::source::Details;
+use crate::State;
+use crate::source::DriveItem;
+use crate::theme::icons;
+use crate::theme::scale;
+use crate::theme::tokens::{Theme, radius, type_};
+use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview};
+use crate::ui::{file_list, kit};
+use rune::{El, Span, Tx, col, el, row};
+
+/// `ui::detail_pane::switch_card`, with a switch that switches: a card with a title, a second line
+/// and the switch. Keys: `<key>-card`, `<key>-label`, `<key>-detail`, `<key>-switch`, `<key>-knob`.
+fn offline_card(key: &str, title: &str, sub: &str, on: bool, t: &Theme) -> El {
+    row()
+        .key(format!("{key}-card"))
+        .w_full()
+        .min_h(40.0)
+        .px(scale::space::S10)
+        .gap(scale::space::S8)
+        .center_y()
+        .radius(radius::LG)
+        .fill(t.card)
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
+        .child(
+            col()
+                .key(format!("{key}-text"))
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(1.0)
+                .child(kit::label(format!("{key}-label"), title, type_::ITEM_TITLE, t.text).truncate())
+                .child(kit::label(format!("{key}-detail"), sub, type_::BODY.lh(15.0), t.text_tertiary).truncate()),
+        )
+        .child(
+            crate::ui::switch::switch_sized(&format!("{key}-switch"), "", on, true, crate::ui::button::Size::Md, t)
+                .label(title)
+                .description(sub)
+                .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                    s.toggle_keep_offline(tx);
+                }),
+        )
+}
+
+/// The width of `ui::detail_pane`'s pane, kept free while nothing is selected.
+const PANE_W_EMPTY: f32 = 284.0;
+
+/// `pin`: `Some(pinned)` when the item is a folder that can be pinned to the sidebar.
+pub fn details_pane(item: Option<(&DriveItem, Details)>, pin: Option<bool>, t: &Theme) -> El {
+    let Some((item, d)) = item else {
+        // Its place stays, bare: the list must not shrink under the pointer when a click selects a row, or
+        // the second click of a double-click lands on the pane that just opened and the row never opens.
+        return el().key("detail-pane-empty").w(PANE_W_EMPTY).h_full();
+    };
+    // Free up space, under the Available offline card: where the item has a copy on this PC.
+    let on_this_pc = matches!(item.pc_status.as_deref(), Some("on_this_pc" | "available_offline"));
+    let kind_line = if d.size.is_empty() {
+        d.kind.clone()
+    } else {
+        format!("{} \u{00B7} {}", d.kind, d.size)
+    };
+    // The size is a figure: JetBrains Mono inside the Inter line.
+    let figure = Span {
+        start: (kind_line.len() - d.size.len()) as u32,
+        end: kind_line.len() as u32,
+        mono: true,
+        ..Span::default()
+    };
+    let picture = if d.picture {
+        // The file's own picture fills the well (`.mk-prev.mk-ph`).
+        file_list::thumbnail(preview(el().key("preview-picture"), t))
+    } else {
+        preview(page_preview(t), t)
+    };
+
+    let mut facts = col()
+        .key("detail-meta")
+        .role("list")
+        .gap(scale::space::S6)
+        .child(meta_row("detail-changed", "Changed", &d.changed, true, t));
+    if let Some(v) = &d.changed_on {
+        facts = facts.child(meta_row("detail-changed-on", "Changed on", v, false, t));
+    }
+    if let Some(v) = &d.added {
+        facts = facts.child(meta_row("detail-added", "Added", v, true, t));
+    }
+    facts = facts.child(meta_row("detail-where", "Where", &d.where_, false, t));
+    if let Some(v) = &d.versions {
+        facts = facts.child(meta_row("detail-version-history", "Version history", v, true, t));
+    }
+    facts = facts.child(meta_row("detail-shared", "Shared", &d.shared, false, t));
+
+    let offline = offline_card("offline", "Available offline", &d.offline_note, d.kept_offline, t);
+    // `.mk-det > button.kit-btn-ghost`: as wide as the panel, words and mark in its middle, no
+    // box. It is a child of the panel like the card above it and the two buttons below it.
+    let free_up = on_this_pc.then(|| {
+        row()
+            .key("free-up-box")
+            .role("button")
+            .label("Free up space")
+            .description("Removes the copy on this PC. It stays in Beebeeb and downloads again when you open it.")
+            .w_full()
+            .h(22.0)
+            .gap(scale::space::S7)
+            .center()
+            .radius(radius::MD)
+            .hover(t.hover)
+            .press(t.press)
+            .focusable(true)
+            .child(kit::glyph("free-up-icon", &icons::CLOUD, 14.0, t.text_secondary))
+            .child(kit::label(
+                "free-up-btn",
+                "Free up space",
+                type_::BUTTON_SM,
+                t.text_secondary,
+            ))
+            .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                s.free_up_space(tx);
+            })
+    });
+
+    let pin_row = pin.map(|pinned| {
+        let words = if pinned { "Unpin from sidebar" } else { "Pin to sidebar" };
+        action_button("pin", words, &icons::PIN, t).on_press_tx(|s: &mut State, tx: &mut Tx| s.toggle_pin(tx))
+    });
+
+    pane(t)
+        .child(picture)
+        .child(
+            col()
+                .key("detail-name-group")
+                .child(kit::label("detail-name", item.name.clone(), type_::HEAD, t.text).truncate())
+                .child(
+                    kit::label("detail-kind", kind_line, type_::CAPTION, t.text_tertiary)
+                        .spans(vec![figure])
+                        .mt(2.0),
+                ),
+        )
+        .child(encrypted_badge(t))
+        .child(facts)
+        .child(offline)
+        .children(free_up)
+        .children(pin_row)
+        .child(
+            row()
+                .key("detail-actions")
+                .gap(scale::space::S8)
+                .child(
+                    action_button("share", "Share\u{2026}", &icons::SHARE, t)
+                        .on_press_tx(|s: &mut State, tx: &mut rune::Tx| s.ask_share(tx)),
+                )
+                .child(
+                    action_button("versions", "Version history", &icons::VERSION_HISTORY, t)
+                        .on_press(|s: &mut State| s.intent(Intent::Frame("DW-0413"))),
+                ),
+        )
+}

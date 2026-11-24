@@ -1,5 +1,11 @@
+# Rust source is LF on every checkout, a Windows one with core.autocrlf included: the source guards read it as text
+# (`include_str!`, `read_to_string`) and look for "\n", so a CRLF checkout turned them red (v2 W2, R1r).
+*.rs text eol=lf
+
 # Fixture bytes are test oracles: never rewrite line endings on add or checkout.
 # Use -text (rather than binary) so textual fixtures retain readable diffs.
 fixtures/** -text
 tests/fixtures/** -text
-src-tauri/src/update_window/fixtures/** -text
+
+# The pinned OS vocabulary is hashed byte for byte by allow_list_tests: LF on every checkout (CRLF broke the pin on Windows).
+native/beebeeb-drive-rune/src/log_file/vocabulary_os.txt text eol=lf

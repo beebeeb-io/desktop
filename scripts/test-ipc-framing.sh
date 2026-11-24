@@ -79,7 +79,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
 fi
 
 cd "$ROOT_DIR"
-OUT_DIR="${IPC_FRAMING_TEST_OUT:-src-tauri/target/ipc-framing-tests}"
+OUT_DIR="${IPC_FRAMING_TEST_OUT:-target/ipc-framing-tests}"
 mkdir -p "$OUT_DIR"
 BIN="$OUT_DIR/ipc-framing-tests"
 LOG="$OUT_DIR/run.log"

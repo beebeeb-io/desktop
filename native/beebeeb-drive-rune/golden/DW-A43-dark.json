@@ -1,0 +1,425 @@
+{
+ "frame": "DW-A43",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "caption-bar": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 958,
+   "h": 32,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ]
+  },
+  "cap-mark": {
+   "kind": "icon",
+   "x": 12,
+   "y": 7.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "mark": true
+  },
+  "cap-title": {
+   "kind": "text",
+   "x": 37,
+   "y": 7.5,
+   "w": 774,
+   "h": 16,
+   "text": "Beebeeb Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "cap-min": {
+   "kind": "box",
+   "x": 820,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-min-icon": {
+   "kind": "icon",
+   "x": 838,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "cap-max": {
+   "kind": "box",
+   "x": 866,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-max-icon": {
+   "kind": "icon",
+   "x": 884,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "cap-close": {
+   "kind": "box",
+   "x": 912,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-close-icon": {
+   "kind": "icon",
+   "x": 930,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "au-side": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 320,
+   "h": 606,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "css": {
+    "border": "0px 0.5px 0px 0px oklch(0.92 0.006 85)",
+    "pad": "28px 26px",
+    "gap": "14px"
+   }
+  },
+  "side-mark": {
+   "kind": "icon",
+   "x": 26,
+   "y": 61.17,
+   "w": 34,
+   "h": 34,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "mark": true
+  },
+  "side-word": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 60,
+   "w": 112,
+   "h": 22.23,
+   "text": "beebeeb.io",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22.2308,
+   "weight": 700,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.62,
+   "lh": "22.2308px",
+   "align": "start"
+  },
+  "side-product": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 84.84,
+   "w": 112,
+   "h": 11.5,
+   "text": "DRIVE",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 9,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 1.62,
+   "lh": "normal",
+   "align": "start"
+  },
+  "side-tagline": {
+   "kind": "text",
+   "x": 26,
+   "y": 110.34,
+   "w": 267.5,
+   "h": 15,
+   "text": "Your files, encrypted on your devices.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-0-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 511,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2zM7 11V7a5 5 0 0 1 10 0v4"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "fact-0": {
+   "kind": "text",
+   "x": 51,
+   "y": 510,
+   "w": 242.5,
+   "h": 30,
+   "text": "Encrypted on this PC before anything syncs. Beebeeb can't read it.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-1-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 553,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "fact-1": {
+   "kind": "text",
+   "x": 51,
+   "y": 552,
+   "w": 242.5,
+   "h": 30,
+   "text": "One Beebeeb account for Drive, Pass, VPN, Chat and Mail.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-2-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 595,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3c-2.5 2.6-3.8 5.6-3.8 9s1.3 6.4 3.8 9"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "fact-2": {
+   "kind": "text",
+   "x": 51,
+   "y": 594,
+   "w": 97.73,
+   "h": 15,
+   "text": "Stored in Europe.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "au-main": {
+   "kind": "box",
+   "x": 320,
+   "y": 32,
+   "w": 638,
+   "h": 606,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "css": {
+    "pad": "20px"
+   }
+  },
+  "title": {
+   "kind": "text",
+   "x": 528.13,
+   "y": 342.5,
+   "w": 221.74,
+   "h": 28,
+   "text": "Creating your account",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 650,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.48,
+   "lh": "28px",
+   "align": "center"
+  },
+  "subtitle": {
+   "kind": "text",
+   "x": 467,
+   "y": 376.5,
+   "w": 344,
+   "h": 30,
+   "text": "Setting up account encryption on this PC. This takes a few seconds.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "center"
+  },
+  "hero": {
+   "kind": "box",
+   "x": 607,
+   "y": 263.5,
+   "w": 64,
+   "h": 64,
+   "css": {}
+  },
+  "hero-ring": {
+   "kind": "box",
+   "x": 607,
+   "y": 263.5,
+   "w": 64,
+   "h": 64,
+   "css": {}
+  }
+ },
+ "theme": "dark"
+}

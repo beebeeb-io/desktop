@@ -1,0 +1,106 @@
+{
+ "frame": "DW-A11",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "os-toast": {
+   "kind": "box",
+   "x": 582,
+   "y": 476,
+   "w": 364,
+   "h": 102,
+   "bg": [
+    22,
+    22,
+    22,
+    255
+   ],
+   "css": {
+    "radius": "8px",
+    "shadow": "oklch(0 0 none / 0.24) 0px 12px 34px 0px, oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px",
+    "pad": "12px 14px 14px",
+    "gap": "6px"
+   }
+  },
+  "os-toast-mark": {
+   "kind": "icon",
+   "x": 596,
+   "y": 488.5,
+   "w": 16,
+   "h": 16,
+   "icon": [],
+   "filled": false,
+   "color": [
+    228,
+    228,
+    228,
+    255
+   ],
+   "mark": true
+  },
+  "os-toast-app": {
+   "kind": "text",
+   "x": 620,
+   "y": 488,
+   "w": 271,
+   "h": 17,
+   "text": "Beebeeb",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    183,
+    183,
+    183,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "os-toast-title": {
+   "kind": "text",
+   "x": 596,
+   "y": 511,
+   "w": 336,
+   "h": 17,
+   "text": "Allow Drive on Anna's iPhone?",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 600,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.08,
+   "lh": "17px",
+   "align": "start"
+  },
+  "os-toast-body": {
+   "kind": "text",
+   "x": 596,
+   "y": 534,
+   "w": 336,
+   "h": 30,
+   "text": "Sign-in request from Germany. Open to review it. Don't approve it if it wasn't you.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    134,
+    134,
+    134,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  }
+ },
+ "theme": "dark"
+}

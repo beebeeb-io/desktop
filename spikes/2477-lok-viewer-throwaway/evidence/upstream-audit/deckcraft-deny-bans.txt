@@ -1,0 +1,106 @@
+error[banned]: crate 'async-io = 2.6.0' is explicitly banned
+   ┌─ :29:82
+   │
+29 │     { crate = "tokio" }, { crate = "async-std" }, { crate = "smol" }, { crate = "async-io" },
+   │                                                                                  ━━━━━━━━ banned here
+   │
+   ├ async-io v2.6.0
+     ├── async-process v2.5.0
+     │   └── zbus v5.19.0
+     │       ├── accesskit_unix v0.24.0
+     │       │   └── accesskit_winit v0.34.1
+     │       │       └── egui-winit v0.37.0
+     │       │           └── eframe v0.37.0
+     │       │               ├── deckcraft v0.18.1
+     │       │               └── deckcraft-web v0.18.1
+     │       ├── atspi-common v0.13.0
+     │       │   ├── accesskit_atspi_common v0.21.0
+     │       │   │   └── accesskit_unix v0.24.0 (*)
+     │       │   ├── atspi v0.29.0
+     │       │   │   └── accesskit_unix v0.24.0 (*)
+     │       │   └── atspi-proxies v0.13.0
+     │       │       └── atspi v0.29.0 (*)
+     │       └── atspi-proxies v0.13.0 (*)
+     ├── async-signal v0.2.14
+     │   └── async-process v2.5.0 (*)
+     └── zbus v5.19.0 (*)
+
+error[banned]: crate 'rustls = 0.23.46' is explicitly banned
+   ┌─ :27:16
+   │
+27 │     { crate = "rustls" }, { crate = "native-tls" }, { crate = "openssl" }, { crate = "quinn" },
+   │                ━━━━━━ banned here
+   │
+   ├ rustls v0.23.46
+     ├── rustls-platform-verifier v0.7.1
+     │   └── ureq v3.5.0
+     │       └── craft-update v0.1.0
+     │           ├── deckcraft v0.18.1
+     │           └── deckcraft-ui-egui v0.18.1
+     │               ├── deckcraft v0.18.1 (*)
+     │               └── deckcraft-web v0.18.1
+     └── ureq v3.5.0 (*)
+
+error[banned]: crate 'tokio = 1.53.2' is explicitly banned
+   ┌─ :29:16
+   │
+29 │     { crate = "tokio" }, { crate = "async-std" }, { crate = "smol" }, { crate = "async-io" },
+   │                ━━━━━ banned here
+   │
+   ├ tokio v1.53.2
+     └── wasm-bindgen-futures v0.4.79
+         ├── cpal v0.16.0
+         │   └── deckcraft v0.18.1
+         ├── craft-ui v0.1.0
+         │   └── deckcraft-ui-egui v0.18.1
+         │       ├── deckcraft v0.18.1 (*)
+         │       └── deckcraft-web v0.18.1
+         ├── craft-web-api v0.1.0
+         │   └── deckcraft-web v0.18.1 (*)
+         ├── deckcraft-web v0.18.1 (*)
+         ├── rfd v0.17.2
+         │   ├── deckcraft v0.18.1 (*)
+         │   └── deckcraft-web v0.18.1 (*)
+         ├── wasm-bindgen-test v0.3.79
+         │   └── (dev) deckcraft-pdf v0.18.1
+         │       └── deckcraft-engine v0.18.1
+         │           ├── deckcraft v0.18.1 (*)
+         │           ├── deckcraft-cli v0.18.1
+         │           ├── deckcraft-mcp v0.18.1
+         │           │   └── deckcraft-cli v0.18.1 (*)
+         │           ├── (dev) deckcraft-pptx v0.18.1
+         │           │   └── deckcraft-engine v0.18.1 (*)
+         │           ├── deckcraft-ui-egui v0.18.1 (*)
+         │           └── deckcraft-web v0.18.1 (*)
+         ├── wgpu v30.0.1
+         │   ├── eframe v0.37.0
+         │   │   ├── deckcraft v0.18.1 (*)
+         │   │   └── deckcraft-web v0.18.1 (*)
+         │   ├── egui-wgpu v0.37.0
+         │   │   ├── eframe v0.37.0 (*)
+         │   │   └── egui_kittest v0.37.0
+         │   │       └── (dev) deckcraft-ui-egui v0.18.1 (*)
+         │   └── egui_kittest v0.37.0 (*)
+         └── winit v0.30.13
+             ├── accesskit_winit v0.34.1
+             │   └── egui-winit v0.37.0
+             │       └── eframe v0.37.0 (*)
+             ├── deckcraft v0.18.1 (*)
+             ├── eframe v0.37.0 (*)
+             ├── egui-wgpu v0.37.0 (*)
+             └── egui-winit v0.37.0 (*)
+
+error[banned]: crate 'ureq = 3.5.0' is explicitly banned
+   ┌─ :25:39
+   │
+25 │     { crate = "reqwest" }, { crate = "ureq" }, { crate = "hyper" }, { crate = "h2" }, { crate = "curl" },
+   │                                       ━━━━ banned here
+   │
+   ├ ureq v3.5.0
+     └── craft-update v0.1.0
+         ├── deckcraft v0.18.1
+         └── deckcraft-ui-egui v0.18.1
+             ├── deckcraft v0.18.1 (*)
+             └── deckcraft-web v0.18.1
+
+bans FAILED

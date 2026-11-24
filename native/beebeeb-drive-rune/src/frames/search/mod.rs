@@ -1,0 +1,658 @@
+//! Search (`DW-0801` Recent, `DW-0802` results, `DW-0802b` results during a first sign-in,
+//! `DW-0803` no results): a state of the Files window. The board: "Ctrl+F puts the cursor in the
+//! toolbar's search field; results replace the list until Esc." The checklist is `FRAMES.md`.
+//!
+//! - **Where it shows.** The registry's Files line (`shell/files_frame.rs`) asks [`over_files`]
+//!   first: while search is open (Ctrl+F, or words in the window's search field) this group draws
+//!   the window, and [`files_key`] takes its keys, so no key reaches the Files list behind it.
+//! - **The query** is the window's search field (`State::search`), the one the Files toolbar edits:
+//!   a word typed there opens search, and the field keeps the keyboard across the switch (both
+//!   windows key it on the same path: `window/body/content-area/toolbar/search-box/search-input`).
+//! - **Data**: [`source::SearchSource`]. A window starts on `source::Unwired` and says search is
+//!   not available yet; only a board frame's scene sets the board's sample (`source::BoardSearch`).
+//! - **What it asks of the rest of the app** goes to `frames::Ui::intents`: open a result
+//!   (`OpenItem`), its file menu (`About("DW-0402")`), Details, Share…, Version history, Available
+//!   offline, and the toolbar's Sort, New and grid view.
+
+pub mod actions;
+pub mod source;
+#[cfg(test)]
+mod tests;
+mod view;
+#[cfg(test)]
+pub use view::PLAIN_NOTE;
+
+use std::sync::Arc;
+use rune::{El, Key, KeyEvent, TextEdit, Tx};
+
+use crate::State;
+use crate::frames::{self, Intent};
+use crate::shell::app::Section;
+use crate::ui::gate::Scene;
+use crate::ui::keys::SEARCH_KEY;
+use source::{Answer, BoardSearch, Hit, Loading, Narrow, SearchSource, Unwired};
+
+/// What the Search group keeps on `State` (`frames::Ui::find`).
+pub struct SearchUi {
+    pub source: Box<dyn SearchSource>,
+    /// Search was opened (Ctrl+F) and shows until Esc or ×, also with an empty field (DW-0801).
+    pub open: bool,
+    pub narrow: Narrow,
+    /// The selected result, by its id: it stays selected while it is among the results. With
+    /// none, the first result is the selected one (DW-0802).
+    pub selected: Option<String>,
+    /// A board frame's focused field: the board draws the field focused, with its caret, and a
+    /// headless render has no focus to draw either. Only a scene sets it; the first key clears it.
+    pub pictured: bool,
+    /// The list-on-this-PC view of the board (DW-1105): the status line holds the note of what
+    /// search can't do, and no details panel opens beside the results. Only a scene sets it.
+    pub plain_note: bool,
+    /// The gate and account the last poll saw: a change drops every name the source holds at once.
+    seen: Option<(crate::shell::app::GateState, Option<String>)>,
+    /// Whether search was open at the last poll.
+    was_open: bool,
+    /// The words and the pill the source was last asked for.
+    asked: Option<(String, Narrow)>,
+    /// The shell's session gate was open at the last poll (`shell::session_gate`).
+    gate_open: bool,
+    /// The results' order (the toolbar's Sort); `None`: the source's own order.
+    pub sort: Option<crate::frames::files::Sort>,
+    /// The results as a grid of tiles (the toolbar's view switch) instead of the list.
+    pub grid: bool,
+    /// The open menu of this window (Sort, or a result's menu).
+    pub menu: Option<actions::Menu>,
+    /// Where the pointer asked for the result's menu (a right-click); none for the Menu key.
+    pub menu_at: Option<(f32, f32)>,
+    /// What Available offline was last set to, by result id, until the source says so itself.
+    pub kept: std::collections::HashMap<String, bool>,
+    /// A line for what could not be done, with the time it was said.
+    pub notice: Option<(String, std::time::Instant)>,
+    /// Files' dialog (Share, Version history) was opened from here: it stands over the results.
+    pub dialog_over: bool,
+}
+
+impl Default for SearchUi {
+    /// What a window on the engine starts on: nothing to search with until the engine lane wires
+    /// Search.
+    fn default() -> Self {
+        SearchUi {
+            source: Box::new(Unwired),
+            open: false,
+            narrow: Narrow::All,
+            selected: None,
+            pictured: false,
+            plain_note: false,
+            seen: None,
+            was_open: false,
+            asked: None,
+            gate_open: false,
+            sort: None,
+            grid: false,
+            menu: None,
+            menu_at: None,
+            kept: Default::default(),
+            notice: None,
+            dialog_over: false,
+        }
+    }
+}
+
+/// How often the poll runs again while an answer is on its way.
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The window's poll (`shell::host::poll`), for a source that answers late: a gate or account change drops the
+/// source's names at once, on the window's side; search opening lets the source read; the words or the pill
+/// changing asks the source for that query; what arrived is taken in. Nothing of this happens in a draw.
+/// `true`: something drawn changed.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let gate = (s.shell.app.gate(), s.shell.app.account().map(str::to_owned));
+    // The shell's session gate, read from the engine as it is now: it is also closed for a session
+    // that ended under a Ready gate and for a change this poll's refresh has not applied yet.
+    let gate_open = crate::shell::session_gate::open(s);
+    if s.actions.dialog.is_none() {
+        s.frames.find.dialog_over = false;
+    }
+    let open = is_open(s) && !files_busy(s) && gate_open;
+    let typed = s.search.text.trim().to_string();
+    let ui = &mut s.frames.find;
+    let mut changed = false;
+    if ui.seen.as_ref() != Some(&gate) {
+        if ui.seen.is_some() {
+            ui.source.forget();
+            ui.selected = None;
+            ui.was_open = false;
+            ui.asked = None;
+            changed = true;
+        }
+        ui.seen = Some(gate);
+    }
+    // The session gate closed in any way: the source's names go at once, as for a gate change.
+    if std::mem::replace(&mut ui.gate_open, gate_open) && !gate_open {
+        ui.source.forget();
+        ui.selected = None;
+        ui.was_open = false;
+        ui.asked = None;
+        changed = true;
+    }
+    // While it is closed the source is not told search opened, not asked and not pumped: an
+    // answer that was on its way is not taken in.
+    if !gate_open {
+        return changed;
+    }
+    if open && !ui.was_open {
+        ui.source.opened();
+        changed = true;
+    }
+    ui.was_open = open;
+    if open {
+        let now = (typed, ui.narrow);
+        if ui.asked.as_ref() != Some(&now) {
+            ui.source.ask(&now.0, now.1);
+            ui.asked = Some(now);
+            changed = true;
+        }
+    } else {
+        ui.asked = None;
+    }
+    let pumped = ui.source.pump();
+    if pumped.busy {
+        tx.wake_after(POLL_EVERY);
+    }
+    changed | pumped.changed
+}
+
+impl SearchUi {
+    /// What a window without an engine starts on (`source::first`).
+    pub fn first(dev_build: bool) -> Self {
+        SearchUi {
+            source: source::first(dev_build),
+            ..SearchUi::default()
+        }
+    }
+}
+
+/// The reason under "not available" while this PC's local state is another account's (Photos' words, for Search):
+/// the title, then the line. No account's name, email or count.
+pub const NOT_THIS_ACCOUNTS: (&str, &str) = (
+    "This PC holds another account\u{2019}s files",
+    "Search shows your files once this PC has synced with your account.",
+);
+
+/// What the content area shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Shows {
+    /// Nothing can search here yet (`SearchSource::wired` is false).
+    Unavailable,
+    /// The field is empty: the recent searches (DW-0801).
+    Recent(Vec<String>),
+    /// The matches (DW-0802), and how far the list has loaded while it still loads (DW-0802b).
+    Results { hits: Arc<[Hit]>, loading: Option<Loading> },
+    /// No match (DW-0803).
+    Nothing { loading: Option<Loading> },
+    /// The query is being answered.
+    Searching,
+}
+
+impl Shows {
+    /// The toolbar's line under "Search".
+    pub fn count_words(&self) -> String {
+        let so_far = |loading: &Option<Loading>| if loading.is_some() { " so far" } else { "" };
+        match self {
+            Shows::Unavailable => "Not available yet".into(),
+            Shows::Searching => "Searching\u{2026}".into(),
+            Shows::Recent(_) => "Files".into(),
+            Shows::Results { hits, loading } if hits.len() == 1 => format!("1 result{}", so_far(loading)),
+            Shows::Results { hits, loading } => format!("{} results{}", hits.len(), so_far(loading)),
+            Shows::Nothing { loading } => format!("No results{}", so_far(loading)),
+        }
+    }
+}
+
+impl SearchUi {
+    /// What the content area shows for the words in the field.
+    pub fn shows(&self, typed: &str) -> Shows {
+        if !self.source.wired() {
+            return Shows::Unavailable;
+        }
+        let query = typed.trim();
+        if query.is_empty() {
+            return Shows::Recent(self.source.recent());
+        }
+        match self.source.search(query, self.narrow) {
+            // The same body; the reason line is `unavailable_reason`'s.
+            Answer::Unavailable | Answer::NotThisAccounts => Shows::Unavailable,
+            Answer::Searching => Shows::Searching,
+            Answer::Found { hits, loading } if hits.is_empty() => Shows::Nothing { loading },
+            Answer::Found { hits, loading } => Shows::Results { hits, loading },
+        }
+    }
+
+    /// Why search is not available, when there is a reason to say: this PC's local state is another account's
+    /// (`Answer::NotThisAccounts`). The title and the line drawn under the "not available" body
+    /// ([`NOT_THIS_ACCOUNTS`]); never an account's name, email or count, and no recent search. `None`: search shows
+    /// something else, or there is nothing to add. Reads only (a draw calls it): the source answers from what it
+    /// holds. Asked while the source is not wired too: a source refused another account's state is never wired.
+    #[cfg_attr(not(test), allow(dead_code))] // waits for its caller in `view.rs` (the reason line; branch notes)
+    pub fn unavailable_reason(&self, typed: &str) -> Option<(&'static str, &'static str)> {
+        if !matches!(self.shows(typed), Shows::Unavailable) {
+            return None;
+        }
+        match self.source.search(typed.trim(), self.narrow) {
+            Answer::NotThisAccounts => Some(NOT_THIS_ACCOUNTS),
+            Answer::Unavailable | Answer::Searching | Answer::Found { .. } => None,
+        }
+    }
+
+    /// The selected result's place among `hits`: the one chosen, else the first.
+    pub fn selected_index(&self, hits: &[Hit]) -> Option<usize> {
+        self.selected
+            .as_ref()
+            .and_then(|id| hits.iter().position(|h| &h.id == id))
+            .or(if hits.is_empty() { None } else { Some(0) })
+    }
+
+    /// Narrow to `narrow` (a pill): the selection starts again at the first result.
+    pub fn narrow_to(&mut self, narrow: Narrow) {
+        self.narrow = narrow;
+        self.selected = None;
+    }
+}
+
+/// Is search open: opened with Ctrl+F, or words in the window's search field.
+pub fn is_open(s: &State) -> bool {
+    s.frames.find.open || !s.search.text.trim().is_empty()
+}
+
+/// Something of the Files window that takes the keyboard on its own (a menu, a dialog, a name
+/// being typed in a row) keeps it: search does not open over it.
+fn files_busy(s: &State) -> bool {
+    s.actions.menu.is_some()
+        || (s.actions.dialog.is_some() && !s.frames.find.dialog_over)
+        || s.actions.rename.is_some()
+}
+
+/// While search shows, Alt+Left and Alt+Right are not the window's Back and Forward: the board
+/// draws both off ("Esc: ends search"), and a route change would leave search open over the
+/// place it arrives at. The shell asks before it takes the two keys (`host::shell_keys`).
+pub fn holds_back(s: &State) -> bool {
+    crate::shell::registry::group_for(&s.shell.app) == crate::shell::registry::FrameGroup::Section(Section::Files)
+        && s.shell.app.dialog().is_none()
+        && is_open(s)
+        && !files_busy(s)
+}
+
+/// Whether Search's window is what the Files window shows now ([`over_files`]).
+pub fn shows_over_files(s: &State) -> bool {
+    is_open(s) && !files_busy(s)
+}
+
+/// The Files window's view while search is open (the registry's Files line asks first).
+pub fn over_files(s: &State, cx: &mut rune::Cx<State>) -> Option<El> {
+    shows_over_files(s).then(|| view::window(s, cx))
+}
+
+/// The Files window's keys while search is open: `Some` takes the key (no key reaches the list
+/// behind), `None` leaves it to Files. With search closed, Ctrl+F opens it (DW-0801).
+pub fn files_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
+    if files_busy(s) {
+        return None;
+    }
+    if !is_open(s) {
+        if ev.is_command('f') {
+            open(s, tx);
+            return Some(true);
+        }
+        return None;
+    }
+    // The window's section shortcuts stay the window's (Ctrl+1 to Ctrl+7).
+    if matches!(ev.key, Key::Command('1'..='7')) {
+        return None;
+    }
+    Some(on_key(s, ev, tx))
+}
+
+/// Search reads the account's file names: not while the shell's session gate is closed. `true`:
+/// refused; the keyboard goes to the banner's Sign in, as the Files window's refusals do.
+fn refused(s: &mut State, tx: &mut Tx) -> bool {
+    if !crate::shell::session_gate::refuse(s) {
+        return false;
+    }
+    tx.focus("banner-action", true);
+    true
+}
+
+/// Open search with the field focused (DW-0801).
+pub fn open(s: &mut State, tx: &mut Tx) {
+    if refused(s, tx) {
+        return;
+    }
+    s.frames.find.open = true;
+    tx.focus(SEARCH_KEY, true);
+}
+
+/// End search (Esc, ×): the field is emptied and the window shows the view it came from.
+pub fn close(s: &mut State, tx: &mut Tx) {
+    let ui = &mut s.frames.find;
+    ui.open = false;
+    ui.selected = None;
+    ui.narrow = Narrow::All;
+    ui.pictured = false;
+    ui.menu = None;
+    s.search.clear();
+    tx.focus(SEARCH_KEY, false);
+}
+
+/// Run a recent search: its words in the field, the results under it (DW-0801 to DW-0802).
+pub fn run(s: &mut State, query: &str, tx: &mut Tx) {
+    if refused(s, tx) {
+        return;
+    }
+    s.search = TextEdit::new(query);
+    s.frames.find.selected = None;
+    s.frames.find.source.remember(query);
+    tx.focus(SEARCH_KEY, true);
+}
+
+/// The results for the field as it is now (empty while there is none).
+fn hits(s: &State) -> Arc<[Hit]> {
+    match actions::shows(s) {
+        Shows::Results { hits, .. } => hits,
+        _ => Arc::from([]),
+    }
+}
+
+/// The result of `id` among the results shown now (`frames::item`'s Details over Search).
+pub fn hit(s: &State, id: &str) -> Option<Hit> {
+    hits(s).iter().find(|hit| hit.id == id).cloned()
+}
+
+/// The result of `id` is no longer among results that are all here: the field changed, or the search answered
+/// without it. While results still load, or the query is still being answered, it is not gone.
+pub fn hit_gone(s: &State, id: &str) -> bool {
+    match s.frames.find.shows(&s.search.text) {
+        Shows::Results { hits, loading } => loading.is_none() && !hits.iter().any(|hit| hit.id == id),
+        Shows::Searching | Shows::Nothing { loading: Some(_) } => false,
+        _ => true,
+    }
+}
+
+/// The selected result's row key, where focus goes back after a dialog over the results.
+pub fn selected_row_key(s: &State) -> Option<String> {
+    let hits = hits(s);
+    s.frames.find.selected_index(&hits).map(row_key)
+}
+
+/// The key of result `i` in the list: focus goes where the selection goes.
+fn row_key(i: usize) -> String {
+    format!("row-{i}")
+}
+
+/// Select result `i` and give it the keyboard.
+fn select(s: &mut State, hits: &[Hit], i: usize, tx: &mut Tx) {
+    if let Some(hit) = hits.get(i) {
+        s.frames.find.selected = Some(hit.id.clone());
+        tx.focus(row_key(i), true);
+    }
+}
+
+/// Open result `i` (Enter, a double-click): the search is kept as a recent one.
+fn open_result(s: &mut State, hits: &[Hit], i: usize) -> bool {
+    let Some(hit) = hits.get(i) else { return false };
+    if crate::shell::session_gate::refuse(s) {
+        return true;
+    }
+    s.frames.find.selected = Some(hit.id.clone());
+    let query = s.search.text.trim().to_string();
+    s.frames.find.source.remember(&query);
+    // "Double-click a result: opens it" (DW-0408). The search stays as it is behind the open
+    // item, so Back shows the same results again.
+    // A folder goes to its place; a file goes through `open_file` like every other open in the app.
+    if hit.kind == crate::frames::shared::parts::table::Kind::Folder {
+        crate::shell::host::dispatch(s, crate::shell::app::Event::OpenItem(hit.id.clone()));
+        return true;
+    }
+    let item = crate::frames::open_file::item_named(&hit.id, &hit.name);
+    // A refusal says nothing here: the viewer's own frame says why a file could not be shown, and an outside open
+    // that failed is logged by the source.
+    let _ = crate::frames::open_file::open_file(s, crate::frames::open_file::Target::Item(&item));
+    true
+}
+
+/// Search's keys, wherever focus is in its window (the window's `on_key`, and [`files_key`]
+/// while nothing has focus). Esc ends search; Ctrl+F goes to the field; Alt+Shift+P shows or
+/// hides the details panel. In the field: Down goes into what is under it, Enter keeps the
+/// search as a recent one. On the pills: Left and Right narrow. In the results (or with focus
+/// nowhere): the arrows, Home and End select, Enter opens, the Menu key asks for the file menu,
+/// Alt+Enter for Details. In the recent searches: the arrows move, Enter runs one.
+pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // An item's Details over the results: its keys first, and none reaches the results behind it. (The one place:
+    // `files_key` hands its keys here once search is open, so a Files key with search closed never touches it.)
+    if let Some(took) = crate::frames::shared::dialogs::section_keys(s, ev, tx, Section::Files) {
+        return took;
+    }
+    // Files' own dialog over the results (Share, Version history) takes every key.
+    if s.actions.dialog.is_some() && s.frames.find.dialog_over {
+        return crate::frames::files::keys::on_key(s, ev, tx);
+    }
+    s.frames.find.pictured = false;
+    if ev.key == Key::Escape && frames::plain(ev) {
+        close(s, tx);
+        return true;
+    }
+    // Every other key of Search reads or opens something of the account.
+    if refused(s, tx) {
+        return true;
+    }
+    if ev.is_command('f') {
+        // Asked for by name: search now stays open over an emptied field too (DW-0801).
+        s.frames.find.open = true;
+        tx.focus(SEARCH_KEY, true);
+        return true;
+    }
+    let m = ev.mods;
+    if m.alt && m.shift && !m.ctrl && !m.cmd && matches!(&ev.key, Key::Text(p) if p.eq_ignore_ascii_case("p")) {
+        s.show_detail_pane = !s.show_detail_pane;
+        return true;
+    }
+    let focused = tx.focused().map(str::to_owned);
+    match focused.as_deref() {
+        Some(SEARCH_KEY) => field_key(s, ev, tx),
+        Some(key) if key.starts_with("seg-0-") => narrow_key(s, ev, tx),
+        Some(key) if key.starts_with(view::RECENT_ITEM) => recent_key(s, key, ev, tx),
+        Some(key) if !key.starts_with("row-") => false,
+        _ => results_key(s, ev, tx),
+    }
+}
+
+/// The search field's own keys (`on_input_key`): what the field does not use itself.
+fn field_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    s.frames.find.pictured = false;
+    if !frames::plain(ev) {
+        return false;
+    }
+    match ev.key {
+        // Esc clears the words first, then closes.
+        Key::Escape if !s.search.text.is_empty() => {
+            s.search = TextEdit::new("");
+            true
+        }
+        Key::Escape => {
+            close(s, tx);
+            true
+        }
+        // "↓ from the field: moves into the results" (DW-0802); into the recent searches (DW-0801).
+        Key::Down => match s.frames.find.shows(&s.search.text) {
+            Shows::Results { hits, .. } => {
+                let i = s.frames.find.selected_index(&hits).unwrap_or(0);
+                select(s, &hits, i, tx);
+                true
+            }
+            Shows::Recent(recent) if !recent.is_empty() => {
+                tx.focus(view::recent_key(0), true);
+                true
+            }
+            _ => false,
+        },
+        Key::Enter => {
+            let query = s.search.text.trim().to_string();
+            if query.is_empty() {
+                return false;
+            }
+            s.frames.find.source.remember(&query);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The pills' keys while one of them has focus.
+fn narrow_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if !frames::plain(ev) {
+        return false;
+    }
+    let at = Narrow::ALL.iter().position(|n| *n == s.frames.find.narrow).unwrap_or(0);
+    let to = match ev.key {
+        Key::Left => at.saturating_sub(1),
+        Key::Right => (at + 1).min(Narrow::ALL.len() - 1),
+        Key::Home => 0,
+        Key::End => Narrow::ALL.len() - 1,
+        Key::Down => {
+            let hits = hits(s);
+            if hits.is_empty() {
+                return false;
+            }
+            let i = s.frames.find.selected_index(&hits).unwrap_or(0);
+            select(s, &hits, i, tx);
+            return true;
+        }
+        _ => return false,
+    };
+    let narrow = Narrow::ALL[to];
+    s.frames.find.narrow_to(narrow);
+    tx.focus(
+        crate::frames::shared::parts::controls::segment_key(0, narrow.words()),
+        true,
+    );
+    true
+}
+
+/// The recent searches' keys while one of them has focus (`item-0-<m>`, the board's grouped list).
+fn recent_key(s: &mut State, key: &str, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if !frames::plain(ev) {
+        return false;
+    }
+    let Shows::Recent(recent) = s.frames.find.shows(&s.search.text) else {
+        return false;
+    };
+    let Some(m) = key
+        .strip_prefix(view::RECENT_ITEM)
+        .and_then(|n| n.parse::<usize>().ok())
+    else {
+        return false;
+    };
+    let runs = ev.key == Key::Enter || frames::is_space(ev);
+    match ev.key {
+        Key::Down if m + 1 < recent.len() => tx.focus(view::recent_key(m + 1), true),
+        Key::Up if m > 0 => tx.focus(view::recent_key(m - 1), true),
+        Key::Up => tx.focus(SEARCH_KEY, true),
+        _ if runs => match recent.get(m) {
+            Some(query) => run(s, &query.clone(), tx),
+            None => return false,
+        },
+        _ => return false,
+    }
+    true
+}
+
+/// Results one PageUp or PageDown moves.
+const PAGE: usize = 10;
+
+/// The results' keys, with focus on a result or nowhere.
+fn results_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let hits = hits(s);
+    let Some(at) = s.frames.find.selected_index(&hits) else {
+        return false;
+    };
+    let id = hits[at].id.clone();
+    if frames::is_menu_key(ev) {
+        // The usual file menu, plus Show in enclosing folder (DW-0402).
+        s.frames.intents.push(Intent::About("DW-0402", id));
+        return true;
+    }
+    if frames::is_alt_enter(ev) {
+        s.frames.intents.push(Intent::About("DW-0411", id));
+        return true;
+    }
+    if !frames::plain(ev) {
+        return false;
+    }
+    let last = hits.len() - 1;
+    match ev.key {
+        Key::Down => select(s, &hits, (at + 1).min(last), tx),
+        Key::Up if at == 0 => tx.focus(SEARCH_KEY, true),
+        Key::Up => select(s, &hits, at - 1, tx),
+        Key::Home => select(s, &hits, 0, tx),
+        Key::End => select(s, &hits, last, tx),
+        Key::PageDown => select(s, &hits, (at + PAGE).min(last), tx),
+        Key::PageUp => select(s, &hits, at.saturating_sub(PAGE), tx),
+        // Typed letters jump to the next result whose name starts with them.
+        Key::Text(ref t) if t.chars().count() == 1 && !t.trim().is_empty() => {
+            let t = t.to_lowercase();
+            let at_t = (1..=hits.len())
+                .map(|d| (at + d) % hits.len())
+                .find(|i| hits[*i].name.to_lowercase().starts_with(&t));
+            match at_t {
+                Some(i) => select(s, &hits, i, tx),
+                None => return false,
+            }
+        }
+        Key::Enter => return open_result(s, &hits, at),
+        _ => return false,
+    }
+    true
+}
+
+/// A board frame: the Files window searching, the field focused (as the board draws it).
+fn scene(s: &mut State, typed: &str, source: BoardSearch) {
+    crate::frames::go(s, Section::Files);
+    s.search = TextEdit::new(typed);
+    s.frames.find = SearchUi {
+        source: Box::new(source),
+        open: true,
+        narrow: Narrow::All,
+        selected: None,
+        pictured: true,
+        ..SearchUi::default()
+    };
+}
+
+/// Search opened: Recent, Clear, what search covers.
+pub fn dw_0801(s: &mut State) {
+    scene(s, "", BoardSearch::new());
+}
+/// Results for "Contr": the pills, three rows with Where, the first one's details.
+pub fn dw_0802(s: &mut State) {
+    scene(s, "Contr", BoardSearch::new());
+}
+/// Instant search on the list on this PC (DW-1105): the results as DW-0802 has them, with the note of what
+/// search can't do in the status line and no details panel. Called by `files::scenes_waveb`.
+pub fn dw_1105(s: &mut State) {
+    scene(s, "Contr", BoardSearch::new());
+    s.frames.find.plain_note = true;
+}
+/// The same during a first sign-in: the note with the live count.
+pub fn dw_0802b(s: &mut State) {
+    scene(s, "Contr", BoardSearch::loading());
+}
+/// No results for "harbr".
+pub fn dw_0803(s: &mut State) {
+    scene(s, "harbr", BoardSearch::new());
+}
+
+/// The board frames of Search (`--scene DW-0801`, the frame gate).
+pub const FRAMES: &[Scene<State>] = &[
+    ("DW-0801", dw_0801),
+    ("DW-0802", dw_0802),
+    ("DW-0802b", dw_0802b),
+    ("DW-0803", dw_0803),
+];

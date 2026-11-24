@@ -1,0 +1,15 @@
+id	reason	evidence
+DW-0415	Windows draws the file picker over the window, titled Upload to Files	open
+DW-0416	Windows draws the file picker's Photos section; no Photos access is needed	open
+DW-0480	Windows draws the folder picker, Documents > Projects selected	open
+DW-0738	Windows draws the folder picker to choose a folder to back up	open
+DW-1180	Windows draws File Explorer on the Beebeeb folder, with a Status column	open
+DW-1181	Windows draws File Explorer's right-click menu with its own Cloud Files verbs	open
+DW-1182	Windows draws File Explorer on Backups and the toast saying Beebeeb manages this folder	open
+DW-1183	Windows draws File Explorer's classic right-click menu, where Beebeeb's own verbs sit	open
+DW-1201	Windows draws the taskbar and the b in the notification area, pressed while the flyout is open	open
+DW-1230	Windows draws the b in the notification area; its badge shows the state	open
+DW-1231	Windows draws the b's menu above it; Pause syncing, no shortcuts	open
+DW-1231b	Windows draws the b's menu while sync is paused; Resume syncing	open
+DW-1901	Windows draws the installer's Installing page, with a progress bar	open
+DW-1902	Windows draws the installer's last page; Run Beebeeb ticked	open

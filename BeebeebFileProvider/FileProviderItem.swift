@@ -59,7 +59,7 @@ struct BeebeebProviderItem: Codable {
     static let rename = 1 << 2
     static let delete = 1 << 3
     /// .allowsAddingSubItems — task 1694. Bit 4, identical numbering to the
-    /// Rust payload builder's CAP_ADD_SUBITEMS (src-tauri/src/ipc_socket.rs);
+    /// Rust payload builder's CAP_ADD_SUBITEMS (crates/beebeeb-engine/src/ipc_socket/protocol.rs);
     /// the payload crosses the XPC bridge as this plain Int.
     static let addSubItems = 1 << 4
     /// .allowsReparenting — task 1697. Bit 5, same numbering as Rust's

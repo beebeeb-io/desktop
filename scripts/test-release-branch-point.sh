@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux-runnable, offline test for scripts/verify-release-branch-point.sh, the check release.yml
+# Linux-runnable, offline test for scripts/verify-release-branch-point.sh, the check release-native-windows.yml
 # runs before `build` (and so before any signing): a release branch may only be dispatched when
 # its first-parent history since its starting point is all merges of pull requests into that
 # branch, and the starting point is a published `desktop-v*` tag commit that is itself a pull
@@ -14,7 +14,7 @@
 #   3. starting point on neither tag nor main    -> fails, names that commit;
 #   4. a direct, non-PR commit after the start   -> fails, names that commit;
 #   5. a PR merge whose base was another branch  -> fails, names that merge commit;
-#   6. a non-release ref                         -> fails (defense in depth; release.yml only
+#   6. a non-release ref                         -> fails (defense in depth; the release workflow only
 #      calls this for refs/heads/release/*);
 #   7. a tag with no GitHub release              -> fails: a tag alone is not trusted;
 #   8. a tag whose release is a draft            -> fails: a draft is not published;
@@ -37,7 +37,7 @@
 # shellcheck disable=SC2329  # predicates are invoked indirectly through `check`
 set -uo pipefail
 
-EXPECTED_CHECKS=49
+EXPECTED_CHECKS=54
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$HERE/.." && pwd)"
@@ -253,6 +253,27 @@ TAGPULLERR="$(commit "legacy3: tagged desktop-v0.8.23; the pulls lookup for it f
 git -C "$REPO_DIR" tag desktop-v0.8.23 "$TAGPULLERR"
 git -C "$REPO_DIR" switch -q -c release/0.8.33 "$TAGPULLERR"
 
+# Scenarios 14-15 (LD-0014): main lists release blockers; the release branch must not have dropped any.
+git -C "$REPO_DIR" switch -q -c main-blk "$M1"
+printf '# Release blockers\n\n- [macOS] Item A\n- Item B\n' >"$REPO_DIR/RELEASE_BLOCKERS.md"
+git -C "$REPO_DIR" add RELEASE_BLOCKERS.md
+MB="$(commit "main: lists two release blockers")"
+MAIN_BLK_REF="refs/remotes/origin/main-blk"
+git -C "$REPO_DIR" update-ref "$MAIN_BLK_REF" "$MB"
+# 14: cut from M1 (an ancestor of main), the file has no items: both main items were dropped.
+git -C "$REPO_DIR" switch -q -c release/0.8.40 "$M1"
+git -C "$REPO_DIR" switch -q -c feat/14 "$M1"
+commit "feat: fourteen reviewed changes" >/dev/null
+git -C "$REPO_DIR" switch -q release/0.8.40
+MERGE14="$(merge feat/14 "Merge pull request #114 from feat/14")"
+# 15: cut from MB, the file still lists both items.
+git -C "$REPO_DIR" switch -q -c release/0.8.41 "$MB"
+git -C "$REPO_DIR" switch -q -c feat/15 "$MB"
+commit "feat: fifteen reviewed changes" >/dev/null
+git -C "$REPO_DIR" switch -q release/0.8.41
+MERGE15="$(merge feat/15 "Merge pull request #115 from feat/15")"
+git -C "$REPO_DIR" switch -q main
+
 # ---------------------------------------------------------------- fake GitHub data
 printf '[{"ref":"refs/tags/desktop-v0.8.18","object":{"type":"tag","sha":"%s"}},{"ref":"refs/tags/desktop-v0.8.17","object":{"type":"commit","sha":"%s"}},{"ref":"refs/tags/desktop-v0.8.16","object":{"type":"commit","sha":"%s"}},{"ref":"refs/tags/desktop-v0.8.15","object":{"type":"commit","sha":"%s"}},{"ref":"refs/tags/desktop-v0.8.20","object":{"type":"commit","sha":"%s"}},{"ref":"refs/tags/desktop-v0.8.21","object":{"type":"commit","sha":"%s"}},{"ref":"refs/tags/desktop-v0.8.22","object":{"type":"commit","sha":"%s"}},{"ref":"refs/tags/desktop-v0.8.23","object":{"type":"commit","sha":"%s"}}]\n' \
   "$TAG_OBJECT" "$NOREL" "$DRAFT" "$APIERR" "$TAGMAIN" "$TAGDIRECT" "$TAGOTHER" "$TAGPULLERR" >"$FIX/tags.json"
@@ -284,6 +305,8 @@ pr_json "$TAGGED" 118 release/0.8.18
 pr_json "$TAGMAIN" 110 main
 pr_json "$MERGE10" 1100 release/0.8.30
 pr_json "$TAGOTHER" 112 feature/x
+pr_json "$MERGE14" 114 release/0.8.40
+pr_json "$MERGE15" 115 release/0.8.41
 
 OUT="$TMP/out.log"
 CODE=0
@@ -295,7 +318,7 @@ run_case() { # <ref> <head sha>
       REPO="$FAKE_REPO" \
       REF="$1" \
       HEAD_SHA="$2" \
-      MAIN_REF="$MAIN_REF" \
+      MAIN_REF="${RUN_MAIN_REF:-$MAIN_REF}" \
       BB_FAKE_GH_DIR="$FIX" \
       BB_FAKE_GH_LOG="$GH_LOG" \
       GH_TOKEN="fake" \
@@ -403,7 +426,20 @@ run_case refs/heads/release/0.8.33 "$TAGPULLERR"
 check "pulls lookup error for the tag commit: fails" test "$CODE" -ne 0
 check "pulls lookup error for the tag commit: says it refuses to guess" grep -q 'refusing to guess' "$OUT"
 
-# --- 6. a non-release ref is refused (release.yml only calls this for release/*)
+# --- 14. the branch dropped blockers that main lists (LD-0014)
+FX="blockers-dropped"
+RUN_MAIN_REF="$MAIN_BLK_REF" run_case refs/heads/release/0.8.40 "$MERGE14"
+check "dropped blockers: fails" test "$CODE" -ne 0
+check "dropped blockers: names the unscoped item" grep -q 'Item B' "$OUT"
+check "dropped blockers: names the macOS item (every platform's items count here)" grep -q 'Item A' "$OUT"
+check "dropped blockers: says main lists them" grep -q 'RELEASE_BLOCKERS' "$OUT"
+
+# --- 15. the branch keeps main's blockers
+FX="blockers-kept"
+RUN_MAIN_REF="$MAIN_BLK_REF" run_case refs/heads/release/0.8.41 "$MERGE15"
+check "blockers kept: passes" test "$CODE" -eq 0
+
+# --- 6. a non-release ref is refused (the release workflow only calls this for release/*)
 FX="non-release-ref"
 run_case refs/heads/main "$M1"
 check "non-release ref: fails closed" test "$CODE" -ne 0

@@ -1,0 +1,1293 @@
+//! Desktop auth, unlock, and secret-storage primitives.
+//!
+//! This module backs the Tauri runner's login, lock, unlock, and logout flow.
+//! It establishes the fail-closed state model and Keychain-backed storage
+//! surface used before the sync engine receives any file-content key material.
+
+use std::fmt;
+
+// The service every platform store (and the test store) names its items with comes from the identity the store
+// was made for (`EngineIdentity::credential_service`): no store has a constructor without one, and none has a
+// `Default`. `super`, not `crate`: the 0.8.x Tauri shell's tests included this file and `identity.rs` by path.
+use super::identity::EngineIdentity;
+const MASTER_KEY_BYTES: usize = 32;
+
+#[derive(PartialEq, Eq)]
+pub struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    /// The load path of the macOS and Windows stores, and of tests: stored bytes become a secret only once proven
+    /// non-empty. A vault key is built with `new_master_key` instead, never from raw bytes.
+    #[cfg(any(any(test, feature = "test-support"), target_os = "macos", target_os = "windows"))]
+    pub fn new(bytes: impl Into<Vec<u8>>) -> AuthResult<Self> {
+        let bytes = bytes.into();
+        if bytes.is_empty() {
+            return Err(AuthStoreError::InvalidSecret("secret bytes are empty"));
+        }
+        Ok(Self(bytes))
+    }
+
+    /// The vault key, copied once into the wiped buffer (`Drop` zeroizes it). Borrowed, so the caller's array is the
+    /// only other copy and stays the caller's to wipe: no by-value copy is left on this function's stack.
+    pub fn new_master_key(bytes: &[u8; MASTER_KEY_BYTES]) -> Self {
+        Self(bytes.to_vec())
+    }
+
+    pub fn expose_for_crypto(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl zeroize::Zeroize for SecretBytes {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        // Volatile writes (`zeroize`): a plain fill before the free may be removed as a dead store.
+        zeroize::Zeroize::zeroize(self);
+    }
+}
+
+impl fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SecretBytes(<redacted>, len={})", self.0.len())
+    }
+}
+
+// ── Keychain account segmentation (task 0800 — multi-account Phase 1) ─────────
+//
+// Every store carries an optional `account_prefix`. When set, all six secret
+// leaves are stored under `<account_id>/<leaf>` (e.g.
+// `io.beebeeb.app/<uuid>/session-token`) instead of the bare legacy leaf
+// (`io.beebeeb.app/session-token`). `account_path` composes that. The platform
+// free functions (`macos_keychain::save/load/delete`, `windows_credentials::…`)
+// are UNCHANGED — they already take an `account: &str`, so the segmentation is
+// purely a matter of what string we pass them. `AuthVault` is likewise
+// unchanged: the id lives entirely in the store.
+//
+// `None` prefix = the legacy flat layout, used ONLY by `legacy_platform_keychain_store`
+// for the one-time migration read/sweep. New code must construct stores via
+// `platform_keychain_store_for(id)` so a reviewer can grep every legacy access.
+
+// The real Keychain store does not EXIST in a macOS test build: a test that names it
+// fails to compile, instead of reaching the developer's own Keychain items. `TestKeychainStore` takes its
+// place (see `PlatformKeychainStore`).
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
+pub struct MacOsKeychainStore {
+    account_prefix: Option<AccountId>,
+    /// `EngineIdentity::credential_service` of the identity this store was made for.
+    service: &'static str,
+}
+
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
+impl MacOsKeychainStore {
+    /// Legacy flat store (no account segmentation). Prefer `with_account`.
+    pub fn new(identity: &'static EngineIdentity) -> Self {
+        Self {
+            account_prefix: None,
+            service: identity.credential_service(),
+        }
+    }
+
+    /// Store segmented under `account_id` (Phase 1).
+    pub fn with_account(identity: &'static EngineIdentity, account_id: impl Into<AccountId>) -> Self {
+        Self {
+            account_prefix: Some(account_id.into()),
+            service: identity.credential_service(),
+        }
+    }
+
+    fn account_path(&self, account: KeychainAccount) -> String {
+        account_path(self.account_prefix.as_ref(), account)
+    }
+
+    /// The whole name this store keeps `account` under ([`item_name`]): what a test pins per identity.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn item_name_of(&self, account: KeychainAccount) -> String {
+        item_name(self.service, &self.account_path(account))
+    }
+}
+
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
+impl AuthSecretStore for MacOsKeychainStore {
+    fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
+        macos_keychain::save(
+            self.service,
+            &self.account_path(KeychainAccount::SessionToken),
+            token.expose_for_request().as_bytes(),
+        )
+    }
+
+    fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+        macos_keychain::load(self.service, &self.account_path(KeychainAccount::SessionToken))?
+            .map(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|_| AuthStoreError::InvalidSecret("session token is not UTF-8"))
+                    .and_then(SessionToken::new)
+            })
+            .transpose()
+    }
+
+    fn delete_session_token(&self) -> AuthResult<()> {
+        macos_keychain::delete(self.service, &self.account_path(KeychainAccount::SessionToken))
+    }
+
+    fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+        macos_keychain::save(
+            self.service,
+            &self.account_path(KeychainAccount::WrappedMasterKey),
+            wrapped.expose_for_crypto(),
+        )
+    }
+
+    fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+        macos_keychain::load(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))?
+            .map(SecretBytes::new)
+            .transpose()
+    }
+
+    fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+        macos_keychain::delete(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))
+    }
+
+    fn save_account_email(&self, email: &str) -> AuthResult<()> {
+        macos_keychain::save(
+            self.service,
+            &self.account_path(KeychainAccount::AccountEmail),
+            email.as_bytes(),
+        )
+    }
+
+    fn load_account_email(&self) -> AuthResult<Option<String>> {
+        macos_keychain::load(self.service, &self.account_path(KeychainAccount::AccountEmail))?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_account_email(&self) -> AuthResult<()> {
+        macos_keychain::delete(self.service, &self.account_path(KeychainAccount::AccountEmail))
+    }
+
+    fn holds_session_token(&self) -> AuthResult<bool> {
+        macos_keychain::exists(self.service, &self.account_path(KeychainAccount::SessionToken))
+    }
+
+    fn holds_wrapped_master_key(&self) -> AuthResult<bool> {
+        macos_keychain::exists(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))
+    }
+
+    fn holds_account_email(&self) -> AuthResult<bool> {
+        macos_keychain::exists(self.service, &self.account_path(KeychainAccount::AccountEmail))
+    }
+
+    fn save_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
+        macos_keychain::save(
+            self.service,
+            &self.account_path(KeychainAccount::VaultKeyOwner),
+            user_id.as_bytes(),
+        )
+    }
+
+    fn load_vault_key_owner(&self) -> AuthResult<Option<String>> {
+        macos_keychain::load(self.service, &self.account_path(KeychainAccount::VaultKeyOwner))?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("vault key owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_vault_key_owner(&self) -> AuthResult<()> {
+        macos_keychain::delete(self.service, &self.account_path(KeychainAccount::VaultKeyOwner))
+    }
+
+    fn save_session_owner(&self, user_id: &str) -> AuthResult<()> {
+        macos_keychain::save(
+            self.service,
+            &self.account_path(KeychainAccount::SessionOwner),
+            user_id.as_bytes(),
+        )
+    }
+
+    fn load_session_owner(&self) -> AuthResult<Option<String>> {
+        macos_keychain::load(self.service, &self.account_path(KeychainAccount::SessionOwner))?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("session owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_session_owner(&self) -> AuthResult<()> {
+        macos_keychain::delete(self.service, &self.account_path(KeychainAccount::SessionOwner))
+    }
+
+    fn save_lock_flag(&self, flag: LockFlag, bytes: &[u8]) -> AuthResult<()> {
+        macos_keychain::save(self.service, &flag_path(self.account_prefix.as_ref(), flag), bytes)
+    }
+
+    fn load_lock_flag(&self, flag: LockFlag) -> AuthResult<Option<Vec<u8>>> {
+        macos_keychain::load(self.service, &flag_path(self.account_prefix.as_ref(), flag))
+    }
+
+    fn delete_lock_flag(&self, flag: LockFlag) -> AuthResult<()> {
+        macos_keychain::delete(self.service, &flag_path(self.account_prefix.as_ref(), flag))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub struct MacOsKeychainStore {
+    // Carried for type parity with the macOS store so the same
+    // `with_account`/`platform_keychain_store_for` plumbing compiles on every
+    // target. Unused on the stub path (every method returns Unsupported).
+    #[allow(dead_code)]
+    account_prefix: Option<AccountId>,
+    /// `EngineIdentity::credential_service` of the identity this store was made for.
+    #[allow(dead_code)] // the stub stores nothing, so it names nothing
+    service: &'static str,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl MacOsKeychainStore {
+    pub fn new(identity: &'static EngineIdentity) -> Self {
+        Self {
+            account_prefix: None,
+            service: identity.credential_service(),
+        }
+    }
+
+    pub fn with_account(identity: &'static EngineIdentity, account_id: impl Into<AccountId>) -> Self {
+        Self {
+            account_prefix: Some(account_id.into()),
+            service: identity.credential_service(),
+        }
+    }
+
+    /// The whole name this store would keep `account` under ([`item_name`]): what a test pins per identity.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn item_name_of(&self, account: KeychainAccount) -> String {
+        item_name(self.service, &account_path(self.account_prefix.as_ref(), account))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl AuthSecretStore for MacOsKeychainStore {
+    fn save_session_token(&self, _token: &SessionToken) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported(
+            "macOS Keychain is unavailable on this platform",
+        ))
+    }
+
+    fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+        Err(AuthStoreError::Unsupported(
+            "macOS Keychain is unavailable on this platform",
+        ))
+    }
+
+    fn delete_session_token(&self) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported(
+            "macOS Keychain is unavailable on this platform",
+        ))
+    }
+
+    fn save_wrapped_master_key(&self, _wrapped: SecretBytes) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported(
+            "macOS Keychain is unavailable on this platform",
+        ))
+    }
+
+    fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+        Err(AuthStoreError::Unsupported(
+            "macOS Keychain is unavailable on this platform",
+        ))
+    }
+
+    fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+        Err(AuthStoreError::Unsupported(
+            "macOS Keychain is unavailable on this platform",
+        ))
+    }
+}
+
+// ── Windows Credential Manager store ──────────────────────────────────────────
+//
+// Win32-Credential-Manager-backed parallel to `MacOsKeychainStore`. Mirrors the
+// same two-item model the macOS store uses:
+//   - "io.beebeeb.app/session-token"      → UTF-8 session token blob
+//   - "io.beebeeb.app/wrapped-master-key" → raw wrapped master-key bytes
+//
+// Target names embed the service prefix so credentials are namespaced under the
+// app identifier, the same way the macOS store scopes items by service
+// `io.beebeeb.app` + account. Generic credentials (`CRED_TYPE_GENERIC`) persisted
+// per-user (`CRED_PERSIST_ENTERPRISE`) so the secrets follow the signed-in user
+// rather than the machine.
+
+#[cfg(target_os = "windows")]
+pub struct WindowsCredentialStore {
+    account_prefix: Option<AccountId>,
+    /// `EngineIdentity::credential_service` of the identity this store was made for.
+    service: &'static str,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsCredentialStore {
+    /// Legacy flat store (no account segmentation). Prefer `with_account`.
+    pub fn new(identity: &'static EngineIdentity) -> Self {
+        Self {
+            account_prefix: None,
+            service: identity.credential_service(),
+        }
+    }
+
+    /// Store segmented under `account_id` (Phase 1).
+    pub fn with_account(identity: &'static EngineIdentity, account_id: impl Into<AccountId>) -> Self {
+        Self {
+            account_prefix: Some(account_id.into()),
+            service: identity.credential_service(),
+        }
+    }
+
+    fn account_path(&self, account: KeychainAccount) -> String {
+        account_path(self.account_prefix.as_ref(), account)
+    }
+
+    /// The whole name this store keeps `account` under ([`item_name`]): what a test pins per identity.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn item_name_of(&self, account: KeychainAccount) -> String {
+        item_name(self.service, &self.account_path(account))
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl AuthSecretStore for WindowsCredentialStore {
+    fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
+        windows_credentials::save(
+            self.service,
+            &self.account_path(KeychainAccount::SessionToken),
+            token.expose_for_request().as_bytes(),
+        )
+    }
+
+    fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+        windows_credentials::load(self.service, &self.account_path(KeychainAccount::SessionToken))?
+            .map(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|e| {
+                        // Bearer-token hygiene: the raw blob is the (malformed)
+                        // session token. Recover the bytes from the error and
+                        // zero them (with `zeroize`, not a plain fill the
+                        // compiler may drop) before discarding so the secret
+                        // doesn't linger in a freed allocation.
+                        let mut raw = e.into_bytes();
+                        zeroize::Zeroize::zeroize(&mut raw);
+                        AuthStoreError::InvalidSecret("session token is not UTF-8")
+                    })
+                    .and_then(SessionToken::new)
+            })
+            .transpose()
+    }
+
+    fn delete_session_token(&self) -> AuthResult<()> {
+        windows_credentials::delete(self.service, &self.account_path(KeychainAccount::SessionToken))
+    }
+
+    fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+        windows_credentials::save(
+            self.service,
+            &self.account_path(KeychainAccount::WrappedMasterKey),
+            wrapped.expose_for_crypto(),
+        )
+    }
+
+    fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+        windows_credentials::load(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))?
+            .map(SecretBytes::new)
+            .transpose()
+    }
+
+    fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+        windows_credentials::delete(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))
+    }
+
+    fn save_account_email(&self, email: &str) -> AuthResult<()> {
+        windows_credentials::save(
+            self.service,
+            &self.account_path(KeychainAccount::AccountEmail),
+            email.as_bytes(),
+        )
+    }
+
+    fn load_account_email(&self) -> AuthResult<Option<String>> {
+        windows_credentials::load(self.service, &self.account_path(KeychainAccount::AccountEmail))?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_account_email(&self) -> AuthResult<()> {
+        windows_credentials::delete(self.service, &self.account_path(KeychainAccount::AccountEmail))
+    }
+
+    fn save_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
+        windows_credentials::save(
+            self.service,
+            &self.account_path(KeychainAccount::VaultKeyOwner),
+            user_id.as_bytes(),
+        )
+    }
+
+    fn load_vault_key_owner(&self) -> AuthResult<Option<String>> {
+        windows_credentials::load(self.service, &self.account_path(KeychainAccount::VaultKeyOwner))?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("vault key owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_vault_key_owner(&self) -> AuthResult<()> {
+        windows_credentials::delete(self.service, &self.account_path(KeychainAccount::VaultKeyOwner))
+    }
+
+    fn save_session_owner(&self, user_id: &str) -> AuthResult<()> {
+        windows_credentials::save(
+            self.service,
+            &self.account_path(KeychainAccount::SessionOwner),
+            user_id.as_bytes(),
+        )
+    }
+
+    fn load_session_owner(&self) -> AuthResult<Option<String>> {
+        windows_credentials::load(self.service, &self.account_path(KeychainAccount::SessionOwner))?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("session owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_session_owner(&self) -> AuthResult<()> {
+        windows_credentials::delete(self.service, &self.account_path(KeychainAccount::SessionOwner))
+    }
+
+    fn save_lock_flag(&self, flag: LockFlag, bytes: &[u8]) -> AuthResult<()> {
+        windows_credentials::save(self.service, &flag_path(self.account_prefix.as_ref(), flag), bytes)
+    }
+
+    fn load_lock_flag(&self, flag: LockFlag) -> AuthResult<Option<Vec<u8>>> {
+        windows_credentials::load(self.service, &flag_path(self.account_prefix.as_ref(), flag))
+    }
+
+    fn delete_lock_flag(&self, flag: LockFlag) -> AuthResult<()> {
+        windows_credentials::delete(self.service, &flag_path(self.account_prefix.as_ref(), flag))
+    }
+}
+
+// ── In-memory store for unit tests (macOS test builds) ───────────────────────
+
+/// Every item a test-build store holds, keyed `<service>/<account path>`, shared by the whole test
+/// process like the real Keychain is shared by the whole machine (but never touching it).
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+static TEST_KEYCHAIN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Which account ids a test-build store was asked about (`None` prefix: the legacy flat layout).
+/// Lets a test prove that the code it ran went through THIS store: `test_store_touched`.
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+static TEST_KEYCHAIN_TOUCHED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Option<String>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Account prefixes whose email writes fail, as a locked Keychain's would. Tests only.
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+static TEST_KEYCHAIN_EMAIL_WRITES_FAIL: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<Option<String>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Make the test-build store's email writes for this account prefix fail (`true`) or work again (`false`).
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+#[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
+pub fn test_fail_account_email_writes(account_prefix: Option<&str>, fail: bool) {
+    let mut failing = TEST_KEYCHAIN_EMAIL_WRITES_FAIL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if fail {
+        failing.insert(account_prefix.map(str::to_string));
+    } else {
+        failing.remove(&account_prefix.map(str::to_string));
+    }
+}
+
+/// Account prefixes whose deletes fail, as a Keychain that refuses a removal would (task 1886). Tests only.
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+static TEST_KEYCHAIN_DELETES_FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Option<String>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Make the test-build store's deletes for this account prefix fail (`true`) or work again (`false`).
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+#[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
+pub fn test_fail_deletes(account_prefix: Option<&str>, fail: bool) {
+    let mut failing = TEST_KEYCHAIN_DELETES_FAIL.lock().unwrap_or_else(|e| e.into_inner());
+    if fail {
+        failing.insert(account_prefix.map(str::to_string));
+    } else {
+        failing.remove(&account_prefix.map(str::to_string));
+    }
+}
+
+/// Whether any test-build store with this account prefix has been read, written or cleared.
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+#[allow(dead_code)] // used by the lib's tests; `tests/keychain.rs` includes this file and does not
+pub fn test_store_touched(account_prefix: Option<&str>) -> bool {
+    TEST_KEYCHAIN_TOUCHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&account_prefix.map(str::to_string))
+}
+
+/// The in-memory stand-in for `MacOsKeychainStore` (which does not exist in a test build), with the same semantics (absent → `None`, a
+/// delete of an absent item succeeds) and the same item layout.
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+#[allow(dead_code)] // `tests/keychain.rs` includes this file and never uses it
+pub struct TestKeychainStore {
+    account_prefix: Option<AccountId>,
+    /// `EngineIdentity::credential_service` of the identity this store was made for.
+    service: &'static str,
+}
+
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+#[allow(dead_code)]
+impl TestKeychainStore {
+    pub fn new(identity: &'static EngineIdentity) -> Self {
+        Self {
+            account_prefix: None,
+            service: identity.credential_service(),
+        }
+    }
+
+    pub fn with_account(identity: &'static EngineIdentity, account_id: impl Into<AccountId>) -> Self {
+        Self {
+            account_prefix: Some(account_id.into()),
+            service: identity.credential_service(),
+        }
+    }
+
+    /// The whole name this store keeps `account` under ([`item_name`]): what a test pins per identity.
+    pub fn item_name_of(&self, account: KeychainAccount) -> String {
+        item_name(self.service, &account_path(self.account_prefix.as_ref(), account))
+    }
+
+    fn key(&self, account: KeychainAccount) -> String {
+        TEST_KEYCHAIN_TOUCHED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(self.account_prefix.as_deref().map(str::to_string));
+        item_name(self.service, &account_path(self.account_prefix.as_ref(), account))
+    }
+
+    fn save(&self, account: KeychainAccount, bytes: &[u8]) -> AuthResult<()> {
+        TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(self.key(account), bytes.to_vec());
+        Ok(())
+    }
+
+    fn load(&self, account: KeychainAccount) -> Option<Vec<u8>> {
+        TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&self.key(account))
+            .cloned()
+    }
+
+    fn delete(&self, account: KeychainAccount) -> AuthResult<()> {
+        if TEST_KEYCHAIN_DELETES_FAIL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&self.account_prefix.as_deref().map(str::to_string))
+        {
+            return Err(AuthStoreError::Backend(
+                "the test Keychain refuses this removal".to_string(),
+            ));
+        }
+        TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.key(account));
+        Ok(())
+    }
+}
+
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+impl AuthSecretStore for TestKeychainStore {
+    fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
+        self.save(KeychainAccount::SessionToken, token.expose_for_request().as_bytes())
+    }
+
+    fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
+        self.load(KeychainAccount::SessionToken)
+            .map(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|_| AuthStoreError::InvalidSecret("session token is not UTF-8"))
+                    .and_then(SessionToken::new)
+            })
+            .transpose()
+    }
+
+    fn delete_session_token(&self) -> AuthResult<()> {
+        self.delete(KeychainAccount::SessionToken)
+    }
+
+    fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
+        self.save(KeychainAccount::WrappedMasterKey, wrapped.expose_for_crypto())
+    }
+
+    fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
+        self.load(KeychainAccount::WrappedMasterKey)
+            .map(SecretBytes::new)
+            .transpose()
+    }
+
+    fn delete_wrapped_master_key(&self) -> AuthResult<()> {
+        self.delete(KeychainAccount::WrappedMasterKey)
+    }
+
+    fn save_account_email(&self, email: &str) -> AuthResult<()> {
+        if TEST_KEYCHAIN_EMAIL_WRITES_FAIL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&self.account_prefix.as_deref().map(str::to_string))
+        {
+            return Err(AuthStoreError::Backend(
+                "the test Keychain refuses this write".to_string(),
+            ));
+        }
+        self.save(KeychainAccount::AccountEmail, email.as_bytes())
+    }
+
+    fn load_account_email(&self) -> AuthResult<Option<String>> {
+        self.load(KeychainAccount::AccountEmail)
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_account_email(&self) -> AuthResult<()> {
+        self.delete(KeychainAccount::AccountEmail)
+    }
+
+    fn save_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
+        self.save(KeychainAccount::VaultKeyOwner, user_id.as_bytes())
+    }
+
+    fn load_vault_key_owner(&self) -> AuthResult<Option<String>> {
+        self.load(KeychainAccount::VaultKeyOwner)
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("vault key owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_vault_key_owner(&self) -> AuthResult<()> {
+        self.delete(KeychainAccount::VaultKeyOwner)
+    }
+
+    fn save_session_owner(&self, user_id: &str) -> AuthResult<()> {
+        self.save(KeychainAccount::SessionOwner, user_id.as_bytes())
+    }
+
+    fn load_session_owner(&self) -> AuthResult<Option<String>> {
+        self.load(KeychainAccount::SessionOwner)
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("session owner is not UTF-8"))
+            })
+            .transpose()
+    }
+
+    fn delete_session_owner(&self) -> AuthResult<()> {
+        self.delete(KeychainAccount::SessionOwner)
+    }
+
+    fn save_lock_flag(&self, flag: LockFlag, bytes: &[u8]) -> AuthResult<()> {
+        let key = item_name(self.service, &flag_path(self.account_prefix.as_ref(), flag));
+        TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, bytes.to_vec());
+        Ok(())
+    }
+
+    fn load_lock_flag(&self, flag: LockFlag) -> AuthResult<Option<Vec<u8>>> {
+        let key = item_name(self.service, &flag_path(self.account_prefix.as_ref(), flag));
+        Ok(TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned())
+    }
+
+    fn delete_lock_flag(&self, flag: LockFlag) -> AuthResult<()> {
+        let key = item_name(self.service, &flag_path(self.account_prefix.as_ref(), flag));
+        TEST_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        Ok(())
+    }
+}
+
+// ── Per-OS store selection ────────────────────────────────────────────────────
+//
+// `PlatformKeychainStore` is the concrete store the Tauri runner constructs.
+// It mirrors macOS wiring: on macOS the secrets live in the Keychain, on Windows
+// in Credential Manager.
+//
+// On Linux (and any other non-macOS, non-Windows target) the alias resolves to
+// `MacOsKeychainStore`, which on those targets is compiled from its
+// `#[cfg(not(target_os = "macos"))]` stub — every `AuthSecretStore` method
+// returns `AuthStoreError::Unsupported`. So Linux has no native secret backend
+// yet and stays fail-closed (no persistence, no silent plaintext fallback);
+// its behaviour is unchanged by the Windows work.
+
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
+pub type PlatformKeychainStore = MacOsKeychainStore;
+
+/// A unit-test build of the lib never reaches the real Keychain: `PlatformKeychainStore` is an
+/// in-memory store, so no test can read, write or clear the developer's own items (the installed app
+/// uses the same service name; a full sign-out also clears the legacy flat items). Task 9 fix round 1:
+/// the sign-out tests wrote to the real Keychain through `clear_keychain_session`. Pinned by
+/// `keychain_isolation_tests` in `lib.rs`. Windows and Linux are unchanged.
+#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+#[allow(dead_code)] // `tests/keychain.rs` includes this file and never uses the alias
+pub type PlatformKeychainStore = TestKeychainStore;
+
+#[cfg(target_os = "windows")]
+pub type PlatformKeychainStore = WindowsCredentialStore;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub type PlatformKeychainStore = MacOsKeychainStore;
+
+// ── Lazy migration: legacy flat trio → id-segmented trio (task 0800) ─────────
+//
+// VAULT-LOCKOUT-class change. The contract that protects against lockout:
+//   • write-new → VERIFY readback → ONLY THEN delete legacy (§3.4-3.6); and
+//   • a legacy READ FALLBACK on the unlock path (lib.rs) — two independent nets.
+// The function is IDEMPOTENT and INTERRUPT-CONVERGENT: interrupted after a crash
+// at any step, a re-run ends fully-migrated-with-legacy-gone.
+
+// ─── Forget the saved sign-in (RC2-7) ─────────────────────────────────────────
+//
+// The uninstaller's "delete … the saved sign-in" box: every Credential Manager entry of ONE identity's service
+// (session tokens, wrapped keys, account emails, parked sessions: all named `<credential_service>/…`) goes. Only
+// that identity's: `io.beebeeb.app` never matches `io.beebeeb.app.test/…`, nor the reverse.
+
+/// Whether the Credential Manager target name `target` belongs to `service`: `<service>/` and at least one more
+/// character. Windows compares target names without regard to case, so this does too.
+pub fn forget_sign_in_is_own(service: &str, target: &str) -> bool {
+    let Some(head) = target.get(..service.len()) else {
+        return false;
+    };
+    head.eq_ignore_ascii_case(service) && target[service.len()..].strip_prefix('/').is_some_and(|rest| !rest.is_empty())
+}
+
+/// The names among `targets` that [`forget_sign_in`] deletes for `service`.
+pub fn forget_sign_in_targets<'a>(service: &str, targets: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    targets.into_iter().filter(|target| forget_sign_in_is_own(service, target)).collect()
+}
+
+/// What [`forget_sign_in`] did (counts only: a name is never logged or printed).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ForgetSignInReport {
+    /// Entries of this identity found.
+    pub found: usize,
+    /// Of those, deleted.
+    pub deleted: usize,
+    /// Enumerate or delete steps that failed.
+    pub failures: usize,
+}
+
+/// Delete every saved credential of `identity` (and nothing of any other identity). Run by the uninstaller.
+#[cfg(target_os = "windows")]
+pub fn forget_sign_in(identity: &'static EngineIdentity) -> ForgetSignInReport {
+    windows_credentials::forget_all(identity.credential_service())
+}
+
+#[cfg(target_os = "windows")]
+mod windows_credentials {
+    //! Win32 Credential Manager backing for `WindowsCredentialStore`.
+    //!
+    //! Uses generic credentials (`CRED_TYPE_GENERIC`). Each call builds a
+    //! wide (UTF-16) target name `io.beebeeb.app/<account>` and round-trips
+    //! the secret as an opaque blob via `CredWriteW` / `CredReadW` /
+    //! `CredDeleteW`. `CredReadW` allocates a `CREDENTIALW`; we copy the blob
+    //! out and free it with `CredFree` before returning.
+
+    use super::{AuthResult, AuthStoreError};
+    use windows::Win32::Security::Credentials::{
+        CRED_PERSIST_ENTERPRISE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
+    };
+    use windows::core::{HRESULT, PCWSTR, PWSTR};
+
+    /// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` — `ERROR_NOT_FOUND` (1168) wrapped as
+    /// an `HRESULT` (`0x80070490`). The windows 0.58 wrappers for `CredReadW` /
+    /// `CredDeleteW` already capture the Win32 error and surface it through
+    /// `Error::code()`, so we compare against this instead of a second, racy
+    /// `GetLastError()`. The `u32 as i32` cast reproduces the correct negative
+    /// `HRESULT` bit pattern (the literal exceeds `i32::MAX`).
+    const HRESULT_ERROR_NOT_FOUND: HRESULT = HRESULT(0x80070490u32 as i32);
+
+    /// Build the UTF-16, NUL-terminated target name `<service>/<account>` (`io.beebeeb.app/<account>` for the
+    /// real app).
+    /// Returned `Vec<u16>` must outlive every pointer derived from it.
+    fn target_name(service: &str, account: &str) -> Vec<u16> {
+        let combined = super::item_name(service, account);
+        combined.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn save(service: &str, account: &str, secret: &[u8]) -> AuthResult<()> {
+        // `target` and `secret` must stay alive for the whole `CredWriteW` call
+        // because the struct holds raw pointers into them.
+        let mut target = target_name(service, account);
+        if secret.len() > u32::MAX as usize {
+            return Err(AuthStoreError::InvalidSecret("secret too large for credential blob"));
+        }
+
+        // SAFETY: zeroed CREDENTIALW is a valid "empty" credential; we fill in
+        // every field the API reads (Type, TargetName, CredentialBlob*, Persist).
+        let mut cred: CREDENTIALW = unsafe { std::mem::zeroed() };
+        cred.Type = CRED_TYPE_GENERIC;
+        // `cred.TargetName` is a raw PWSTR borrowing `target`'s buffer; the
+        // borrow is untracked by the type system, so `target` (and `secret`,
+        // borrowed by `CredentialBlob` below) MUST outlive `cred` and the
+        // `CredWriteW` call. Both are owned locals dropped after the call, so
+        // the pointers stay valid for the entire `unsafe` block.
+        cred.TargetName = PWSTR(target.as_mut_ptr());
+        cred.CredentialBlobSize = secret.len() as u32;
+        // Cast away const — the API treats the blob as read-only for a write.
+        cred.CredentialBlob = secret.as_ptr() as *mut u8;
+        cred.Persist = CRED_PERSIST_ENTERPRISE;
+
+        // SAFETY: `cred` is fully initialised above and all its pointers
+        // (`target`, `secret`) outlive this call. Flags = 0 per the API.
+        let result = unsafe { CredWriteW(&cred, 0) };
+        result.map_err(|e| status_error("CredWriteW", e.code().0))
+    }
+
+    pub fn load(service: &str, account: &str) -> AuthResult<Option<Vec<u8>>> {
+        let target = target_name(service, account);
+        let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+
+        // SAFETY: `target` is a valid NUL-terminated UTF-16 string that outlives
+        // the call; `credential` receives an owned pointer we must `CredFree`.
+        let result = unsafe { CredReadW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0, &mut credential) };
+
+        if let Err(e) = result {
+            // The windows 0.58 `CredReadW` wrapper already captured the failing
+            // Win32 code into `e`; use it directly rather than a second,
+            // stale-race `GetLastError()`. On failure the out-pointer is
+            // normally left null, but guard CredFree anyway in case the API
+            // populated it before erroring (latent-leak hardening).
+            if !credential.is_null() {
+                // SAFETY: `credential` was allocated by `CredReadW`; free once.
+                unsafe { CredFree(credential as *const _ as *const core::ffi::c_void) };
+            }
+            // Map "no such credential" to `Ok(None)`, mirroring the macOS
+            // store's ERR_SEC_ITEM_NOT_FOUND → Ok(None) handling.
+            if e.code() == HRESULT_ERROR_NOT_FOUND {
+                return Ok(None);
+            }
+            return Err(status_error("CredReadW", e.code().0));
+        }
+
+        if credential.is_null() {
+            return Ok(None);
+        }
+
+        // SAFETY: `credential` is non-null and owned by us until `CredFree`.
+        // Copy the blob out before freeing. A zero-length blob yields an empty
+        // Vec, which the caller's `SecretBytes::new` rejects as InvalidSecret.
+        let bytes = unsafe {
+            let cred_ref = &*credential;
+            let len = cred_ref.CredentialBlobSize as usize;
+            if len == 0 || cred_ref.CredentialBlob.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(cred_ref.CredentialBlob, len).to_vec()
+            }
+        };
+
+        // SAFETY: `credential` was allocated by `CredReadW`; free exactly once.
+        unsafe { CredFree(credential as *const _ as *const core::ffi::c_void) };
+
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+
+    pub fn delete(service: &str, account: &str) -> AuthResult<()> {
+        let target = target_name(service, account);
+
+        // SAFETY: `target` is a valid NUL-terminated UTF-16 string for the call.
+        let result = unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0) };
+
+        if let Err(e) = result {
+            // Deleting a missing credential is a no-op success, matching the
+            // macOS store's `delete` (find returns None → Ok(())). The 0.58
+            // `CredDeleteW` wrapper already captured the Win32 code in `e`, so
+            // compare against it rather than a second, racy `GetLastError()`.
+            if e.code() == HRESULT_ERROR_NOT_FOUND {
+                return Ok(());
+            }
+            return Err(status_error("CredDeleteW", e.code().0));
+        }
+        Ok(())
+    }
+
+    /// RC2-7: enumerate `<service>/*` (CredEnumerateW's filter), keep only what [`super::forget_sign_in_is_own`]
+    /// accepts and delete each with its own type. No name leaves this function.
+    pub fn forget_all(service: &str) -> super::ForgetSignInReport {
+        use windows::Win32::Security::Credentials::{CRED_ENUMERATE_FLAGS, CRED_TYPE, CredEnumerateW};
+
+        let mut report = super::ForgetSignInReport::default();
+        let filter: Vec<u16> = format!("{service}/*").encode_utf16().chain(std::iter::once(0)).collect();
+        let mut count: u32 = 0;
+        let mut list: *mut *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: `filter` is NUL-terminated and outlives the call; `list` receives one allocation we `CredFree`.
+        let result =
+            unsafe { CredEnumerateW(PCWSTR(filter.as_ptr()), CRED_ENUMERATE_FLAGS(0), &mut count, &mut list) };
+        if let Err(e) = result {
+            if !list.is_null() {
+                // SAFETY: allocated by CredEnumerateW; freed once.
+                unsafe { CredFree(list as *const core::ffi::c_void) };
+            }
+            if e.code() != HRESULT_ERROR_NOT_FOUND {
+                report.failures += 1;
+            }
+            return report;
+        }
+        // Copy the names out (with their types) before freeing the list.
+        let mut own: Vec<(Vec<u16>, CRED_TYPE)> = Vec::new();
+        if !list.is_null() {
+            for index in 0..count as usize {
+                // SAFETY: `list` holds `count` valid CREDENTIALW pointers until CredFree.
+                let cred = unsafe { &**list.add(index) };
+                if cred.TargetName.is_null() {
+                    continue;
+                }
+                // SAFETY: TargetName is a NUL-terminated wide string inside the list's allocation.
+                let Ok(name) = (unsafe { cred.TargetName.to_string() }) else {
+                    continue;
+                };
+                if super::forget_sign_in_is_own(service, &name) {
+                    own.push((name.encode_utf16().chain(std::iter::once(0)).collect(), cred.Type));
+                }
+            }
+            // SAFETY: allocated by CredEnumerateW; freed exactly once, after the last read above.
+            unsafe { CredFree(list as *const core::ffi::c_void) };
+        }
+        report.found = own.len();
+        for (target, kind) in &own {
+            // SAFETY: `target` is NUL-terminated and outlives the call.
+            match unsafe { CredDeleteW(PCWSTR(target.as_ptr()), *kind, 0) } {
+                Ok(()) => report.deleted += 1,
+                // Gone meanwhile: nothing left of it.
+                Err(e) if e.code() == HRESULT_ERROR_NOT_FOUND => report.deleted += 1,
+                Err(_) => report.failures += 1,
+            }
+        }
+        report
+    }
+
+    fn status_error(action: &'static str, code: i32) -> AuthStoreError {
+        // Never include secret bytes — only the API name and the HRESULT.
+        // Format as hex (`0x{:08X}`, via `u32`) so the high bit reads as the
+        // canonical HRESULT (e.g. 0x80070490) rather than a signed decimal.
+        AuthStoreError::Backend(format!(
+            "Credential Manager {action} failed with code 0x{:08X}",
+            code as u32
+        ))
+    }
+}
+
+#[cfg(test)]
+mod forget_sign_in_tests {
+    use super::{forget_sign_in_is_own, forget_sign_in_targets};
+
+    const REAL_SERVICE: &str = "io.beebeeb.app";
+    const TEST_SERVICE: &str = "io.beebeeb.app.test";
+    const NAMES: &[&str] = &[
+        "io.beebeeb.app/acct-1/session_token",
+        "io.beebeeb.app/acct-1/wrapped_master_key",
+        "io.beebeeb.app/parked/acct-2/session_token",
+        "io.beebeeb.app.test/acct-9/session_token",
+        "io.beebeeb.app.test/acct-9/account_email",
+        "io.beebeeb.application/x",
+        "io.beebeeb.app.tester/x",
+        "io.beebeeb.app",
+        "io.beebeeb.app/",
+        "io.beebeeb.app.test",
+        "xio.beebeeb.app/x",
+        "LegacyGeneric:target=io.beebeeb.app/x",
+        "git:https://github.com",
+    ];
+
+    #[test]
+    fn forget_sign_in_real_keeps_test_identity_and_look_alikes() {
+        assert_eq!(
+            forget_sign_in_targets(REAL_SERVICE, NAMES.iter().copied()),
+            vec![
+                "io.beebeeb.app/acct-1/session_token",
+                "io.beebeeb.app/acct-1/wrapped_master_key",
+                "io.beebeeb.app/parked/acct-2/session_token",
+            ]
+        );
+    }
+
+    #[test]
+    fn forget_sign_in_test_keeps_real_identity_and_look_alikes() {
+        assert_eq!(
+            forget_sign_in_targets(TEST_SERVICE, NAMES.iter().copied()),
+            vec!["io.beebeeb.app.test/acct-9/session_token", "io.beebeeb.app.test/acct-9/account_email"]
+        );
+    }
+
+    #[test]
+    fn forget_sign_in_matches_without_case_and_never_on_a_bare_service() {
+        assert!(forget_sign_in_is_own(REAL_SERVICE, "IO.Beebeeb.App/acct/session_token"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.app"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.app/"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.ap"));
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, ""));
+        // A multi-byte character at the service's length never panics.
+        assert!(!forget_sign_in_is_own(REAL_SERVICE, "io.beebeeb.apé/x"));
+    }
+
+    #[test]
+    fn forget_sign_in_names_the_store_writes_are_its_own() {
+        use super::{AccountId, KeychainAccount, account_path, item_name};
+        let id = AccountId::new("acct-1");
+        for service in [REAL_SERVICE, TEST_SERVICE] {
+            for account in [KeychainAccount::SessionToken, KeychainAccount::WrappedMasterKey] {
+                let name = item_name(service, &account_path(Some(&id), account));
+                assert!(forget_sign_in_is_own(service, &name));
+                let other = if service == REAL_SERVICE { TEST_SERVICE } else { REAL_SERVICE };
+                assert!(!forget_sign_in_is_own(other, &name));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../src/keychain/debug_tests.rs"]
+mod debug_tests;
+#[allow(clippy::module_inception)] // the file holds `mod tests` itself
+#[path = "../src/keychain/tests.rs"]
+mod tests;
+
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
+mod macos_keychain {
+    use super::{AuthResult, AuthStoreError};
+    use std::ffi::c_void;
+    use std::ptr;
+
+    type OSStatus = i32;
+    type UInt32 = u32;
+    type SecKeychainRef = *const c_void;
+    type SecKeychainItemRef = *mut c_void;
+
+    const ERR_SEC_SUCCESS: OSStatus = 0;
+    const ERR_SEC_DUPLICATE_ITEM: OSStatus = -25299;
+    const ERR_SEC_ITEM_NOT_FOUND: OSStatus = -25300;
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn SecKeychainAddGenericPassword(
+            keychain: SecKeychainRef,
+            service_name_length: UInt32,
+            service_name: *const i8,
+            account_name_length: UInt32,
+            account_name: *const i8,
+            password_length: UInt32,
+            password_data: *const c_void,
+            item_ref: *mut SecKeychainItemRef,
+        ) -> OSStatus;
+        fn SecKeychainFindGenericPassword(
+            keychain: SecKeychainRef,
+            service_name_length: UInt32,
+            service_name: *const i8,
+            account_name_length: UInt32,
+            account_name: *const i8,
+            password_length: *mut UInt32,
+            password_data: *mut *mut c_void,
+            item_ref: *mut SecKeychainItemRef,
+        ) -> OSStatus;
+        fn SecKeychainItemModifyAttributesAndData(
+            item_ref: SecKeychainItemRef,
+            attr_list: *const c_void,
+            length: UInt32,
+            data: *const c_void,
+        ) -> OSStatus;
+        fn SecKeychainItemDelete(item_ref: SecKeychainItemRef) -> OSStatus;
+        fn SecKeychainItemFreeContent(attr_list: *mut c_void, data: *mut c_void) -> OSStatus;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+
+    pub fn save(service: &str, account: &str, secret: &[u8]) -> AuthResult<()> {
+        let service = service.as_bytes();
+        let account = account.as_bytes();
+        let status = unsafe {
+            SecKeychainAddGenericPassword(
+                ptr::null(),
+                service.len() as UInt32,
+                service.as_ptr().cast(),
+                account.len() as UInt32,
+                account.as_ptr().cast(),
+                secret.len() as UInt32,
+                secret.as_ptr().cast(),
+                ptr::null_mut(),
+            )
+        };
+        if status == ERR_SEC_SUCCESS {
+            return Ok(());
+        }
+        if status != ERR_SEC_DUPLICATE_ITEM {
+            return Err(status_error("add generic password", status));
+        }
+
+        let Some(item) = find_item(service, account)? else {
+            return Err(AuthStoreError::NotFound);
+        };
+        let update_status = unsafe {
+            SecKeychainItemModifyAttributesAndData(item, ptr::null(), secret.len() as UInt32, secret.as_ptr().cast())
+        };
+        unsafe { CFRelease(item.cast()) };
+        status_ok("update generic password", update_status)
+    }
+
+    /// Is there an item for `account`? Asks the item's attributes only: no password out-parameter, so no secret is
+    /// read (the same lookup `delete` and `save` use to find the item).
+    pub fn exists(service: &str, account: &str) -> AuthResult<bool> {
+        match find_item(service.as_bytes(), account.as_bytes())? {
+            Some(item) => {
+                unsafe { CFRelease(item.cast()) };
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub fn load(service: &str, account: &str) -> AuthResult<Option<Vec<u8>>> {
+        let service = service.as_bytes();
+        let account = account.as_bytes();
+        let mut password_len: UInt32 = 0;
+        let mut password_data: *mut c_void = ptr::null_mut();
+        let status = unsafe {
+            SecKeychainFindGenericPassword(
+                ptr::null(),
+                service.len() as UInt32,
+                service.as_ptr().cast(),
+                account.len() as UInt32,
+                account.as_ptr().cast(),
+                &mut password_len,
+                &mut password_data,
+                ptr::null_mut(),
+            )
+        };
+        if status == ERR_SEC_ITEM_NOT_FOUND {
+            return Ok(None);
+        }
+        status_ok("find generic password", status)?;
+        let mut bytes =
+            unsafe { std::slice::from_raw_parts(password_data.cast::<u8>(), password_len as usize).to_vec() };
+        let free_status = unsafe { SecKeychainItemFreeContent(ptr::null_mut(), password_data) };
+        if let Err(error) = status_ok("free keychain content", free_status) {
+            // The copy is a secret: it is wiped (with `zeroize`, not a plain fill the compiler may drop before the
+            // free) before the error leaves, not dropped as it is.
+            zeroize::Zeroize::zeroize(&mut bytes);
+            return Err(error);
+        }
+        Ok(Some(bytes))
+    }
+
+    pub fn delete(service: &str, account: &str) -> AuthResult<()> {
+        let account = account.as_bytes();
+        let Some(item) = find_item(service.as_bytes(), account)? else {
+            return Ok(());
+        };
+        let status = unsafe { SecKeychainItemDelete(item) };
+        unsafe { CFRelease(item.cast()) };
+        status_ok("delete generic password", status)
+    }
+
+    fn find_item(service: &[u8], account: &[u8]) -> AuthResult<Option<SecKeychainItemRef>> {
+        let mut item: SecKeychainItemRef = ptr::null_mut();
+        let status = unsafe {
+            SecKeychainFindGenericPassword(
+                ptr::null(),
+                service.len() as UInt32,
+                service.as_ptr().cast(),
+                account.len() as UInt32,
+                account.as_ptr().cast(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut item,
+            )
+        };
+        if status == ERR_SEC_ITEM_NOT_FOUND {
+            return Ok(None);
+        }
+        status_ok("find generic password item", status)?;
+        Ok(Some(item))
+    }
+
+    fn status_ok(action: &'static str, status: OSStatus) -> AuthResult<()> {
+        if status == ERR_SEC_SUCCESS {
+            Ok(())
+        } else {
+            Err(status_error(action, status))
+        }
+    }
+
+    fn status_error(action: &'static str, status: OSStatus) -> AuthStoreError {
+        AuthStoreError::Backend(format!("Keychain {action} failed with OSStatus {status}"))
+    }
+}
+
+#[path = "../src/keychain/errors.rs"]
+mod errors;
+pub use errors::{AuthResult, AuthStoreError, VaultLockState};
+
+#[path = "../src/keychain/owed_revocations.rs"]
+pub(crate) mod owed_revocations;
+
+#[path = "../src/keychain/session.rs"]
+mod session;
+pub use session::SessionToken;
+
+#[path = "../src/keychain/vault.rs"]
+mod vault;
+pub use vault::{AuthSecretStore, AuthVault, LockFlag};
+/// The non-Windows trace and "what is left of this account" paths ask these, and so do the keychain tests.
+#[cfg(any(any(test, feature = "test-support"), not(target_os = "windows")))]
+pub use vault::{holds_account_email, holds_session_token, holds_vault_key};
+
+#[path = "../src/keychain/accounts.rs"]
+mod accounts;
+use accounts::*;
+pub use accounts::{legacy_platform_keychain_store, platform_keychain_store_for};
+
+#[path = "../src/keychain/legacy.rs"]
+mod legacy;
+/// The engine handle moves a flat-layout session with the two-store variant at open, and clears the flat layout with
+/// the sweep at every clear (`app::credential_stores`).
+pub use legacy::migrate_legacy_keychain_between;
+pub use legacy::migrate_legacy_keychain_to_account;
+pub(crate) use legacy::sweep_legacy;

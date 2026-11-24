@@ -1,0 +1,35 @@
+# Floors for scripts/assert-cargo-test-counts.py: `<os> <floor> <part of the test binary's "Running ..." header>`.
+# A binary that executes fewer tests than its floor fails the run, so a suite cannot shrink unseen (a test module
+# that stops compiling in, a filter left on, a crate that lost its tests in a move).
+# A floor is the count measured in CI on that OS minus a margin of about 5%, rounded down to a ten (the native
+# app's: minus 1). Raise it when the suite grows by more than the margin; lowering one needs a reason in the commit.
+# Measured on ce212efd (2026-11-11), executed tests: desktop lib 2,404 Linux / 2,269 Windows / 2,754 macOS;
+# engine lib 334 / 334 / 329; native app 17 after the merge of PR #278 (Linux only: Windows builds it and runs no tests).
+# Step 2 of the engine move (2026-11-11, e9b696ab): the running engine's tests moved from the desktop lib to the
+# engine crate, so the desktop floors go DOWN and the engine floors go UP by the same tests. Executed: desktop lib
+# 954 Linux / 921 Windows (build VM); engine lib 1,788 Linux / 1,685 Windows (build VM); native app 19.
+# macOS, first CI run that compiles it (run 43022179510 on 91eadeb2, 2026-11-11), executed: desktop lib 1,236
+# (1,234 passed, 2 source pins failed and were re-pointed), engine lib 1,854. Floors raised from the provisional
+# Linux values to 5% under those counts.
+# Step 3 of the engine move (2026-11-11, PR 296): 60 tests moved from the desktop lib to the engine crate (the
+# gate's rules, the key-owner rules, the password legs) and the engine gained 11 of its own, so the desktop floors
+# go DOWN by 60 and the engine floors go UP by 70. Executed on Linux (the Windows test machine): desktop lib 894, engine lib 1,863.
+# Windows and macOS are the last measured counts (921 / 1,236 and 1,689 / 1,854) moved by the same tests, not yet
+# measured after the move.
+linux 840 deps/beebeeb_desktop_lib-
+windows 810 deps/beebeeb_desktop_lib-
+macos 1110 deps/beebeeb_desktop_lib-
+linux 1760 deps/beebeeb_engine-
+windows 1670 deps/beebeeb_engine-
+macos 1830 deps/beebeeb_engine-
+linux 18 deps/beebeeb_drive-
+# The Office sandbox crate (2026-11-13, Windows build VM): library 13 on Windows (12 rules + the profile clean-up),
+# 13 on Linux (12 rules + "nothing is started"); native tests 16 on Windows; 1 on Linux and macOS (fail closed).
+# Exact counts, no margin: every test is a security claim.
+windows 13 deps/beebeeb_office_sandbox-
+linux 13 deps/beebeeb_office_sandbox-
+windows 16 deps/sandbox-
+linux 1 deps/sandbox-
+# The Office protocol crate (2026-11-15, the Office viewer's first checkpoint, Linux build VM): library 48. CI runs it on
+# Linux only. Floor = 48 minus about 5 %, rounded down to a ten; re-check against the first CI count.
+linux 40 deps/beebeeb_office_protocol-

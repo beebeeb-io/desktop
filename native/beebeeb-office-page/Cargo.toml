@@ -1,0 +1,36 @@
+[package]
+name = "beebeeb-office-page"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "A development tool: page 1 of an Office document, rendered by the confined helper through the app's own host, in a window"
+
+# The Office viewer's window proof (O-CP2 step 3, O-CP3's process count). It was an example of beebeeb-drive-rune, but
+# an example links its package's dev-dependencies, and there those turn on the engine's test support, which refuses a
+# release build. Here: the engine without test support, so it builds in release.
+# - The engine is a dependency because the host's working copies (`office_host/held.rs`, `edit.rs`, `worker.rs`, the scratch
+#   store and the session end) use it; `default-features = false` and no `test-support`, as in the app's own build.
+# - The app's host is compiled in by path (`src/main.rs`: `#[path]` to `engine_host/office_host.rs`), unchanged: what
+#   runs here is what the app runs.
+# - The versions follow beebeeb-drive-rune's: the same Rune revision and features, the same windows-sys.
+# - The lockfile is written by the integration lane, not by hand.
+
+# Its own workspace: built on its own, like the helper and the two Office crates it links.
+[workspace]
+
+[[bin]]
+name = "office_page"
+path = "src/main.rs"
+# No tests of its own: the host's are in beebeeb-drive-rune.
+test = false
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "c92e462e", default-features = false, features = ["accessibility"] }
+zeroize = "1"
+beebeeb-engine = { path = "../../crates/beebeeb-engine", default-features = false }
+beebeeb-office-protocol = { path = "../../crates/beebeeb-office-protocol" }
+beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
+
+[target.'cfg(windows)'.dependencies]
+# The host writes the crash-report exclusion for the helper through the registry (`office_host/crash_reports.rs`).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry"] }
