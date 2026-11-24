@@ -114,7 +114,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     // Search is the Files window's state: a section press that left it (Photos, Settings…) ends it, wherever the
     // press came from. A viewer opened from a result keeps it (Back shows the results again).
-    if is_open(s) && !on_files_section(s) {
+    if s.frames.find.open && !on_files_section(s) {
         close(s, tx);
     }
     let open = is_open(s) && !files_busy(s) && gate_open;

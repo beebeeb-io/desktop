@@ -342,6 +342,7 @@ fn esc_with_words_closes_search_and_another_section_ends_it() {
     let mut state = init();
     state.frames.find.source = Box::new(BoardSearch::new());
     let mut rt = window(state);
+    rt.poll = Some(crate::shell::host::poll);
     press(&mut rt, Key::Command('f'), CTRL);
     type_text(&mut rt, "contr");
     assert_eq!(text(&rt, "folder-title"), "Search");
