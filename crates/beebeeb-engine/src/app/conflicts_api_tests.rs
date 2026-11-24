@@ -29,6 +29,7 @@ struct Rig {
     fake: FakeApi,
     session: SessionGeneration,
     root: PathBuf,
+    phrase: String,
     _dir: tempfile::TempDir,
 }
 
@@ -73,7 +74,7 @@ fn sign_out(engine: &TestEngine) {
 }
 
 fn rig() -> Rig {
-    let (account, _phrase) = FakeAccount::register("conflicts-api@example.eu", "an invented password", TEST_PHRASE);
+    let (account, phrase) = FakeAccount::register("conflicts-api@example.eu", "an invented password", TEST_PHRASE);
     let account = Arc::new(account);
     for (id, name) in [
         (WAITING, "Invented draft.txt"),
@@ -117,6 +118,7 @@ fn rig() -> Rig {
         fake,
         session,
         root,
+        phrase,
         _dir: dir,
     }
 }
@@ -253,16 +255,26 @@ fn choice_list_of_an_empty_state_with_no_owner_is_empty_not_a_failure() {
 #[test]
 fn choice_list_behind_a_locked_screen_is_empty_not_a_failure() {
     let rig = rig();
+    // Through the lock's own flow: a sign-in and an unlock, so the screen can lock.
+    rig.engine.restore();
+    rig.engine
+        .sign_in_password(&rig.account.email, Zeroizing::new("an invented password".into()))
+        .expect("the fake accepts the password");
+    rig.engine
+        .unlock_with_phrase(Zeroizing::new(rig.phrase.clone()))
+        .expect("the phrase unlocks");
+    let before_lock = rig.engine.session_turn();
     rig.engine.lock_screen().expect("the screen locks");
+    let asked = requests(&rig);
     let now = rig.engine.session_turn();
     let listed = rig.engine.conflicts_for(now).expect("an empty list, not a refusal");
     assert!(
         listed.files.is_empty() && listed.unread == 0,
         "nothing is shown behind the lock"
     );
-    assert_eq!(requests(&rig), 0, "no request");
+    assert_eq!(requests(&rig), asked, "no request");
     assert_eq!(
-        rig.engine.conflicts_for(rig.session).unwrap_err(),
+        rig.engine.conflicts_for(before_lock).unwrap_err(),
         ConflictsRefused::NotSignedIn,
         "the session from before the lock gets nothing"
     );
