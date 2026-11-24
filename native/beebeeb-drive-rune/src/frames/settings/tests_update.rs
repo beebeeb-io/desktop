@@ -4,7 +4,7 @@
 
 use super::source::{BoardSettings, Press, UPDATE_CAPTION};
 use super::{Dialog, Intent};
-use crate::{State, init, view};
+use crate::{init, view, State};
 use rune::{Env, Runtime};
 
 /// `frame` drawn on `source`, with the app's own keys and poll.
@@ -159,4 +159,24 @@ fn about_draws_no_row_to_release_notes_that_do_not_open() {
     click(&mut rt, "item-1-2");
     assert_eq!(rt.state.settings.dialog, None);
     assert!(rt.state.settings.intents.is_empty(), "{:?}", rt.state.settings.intents);
+}
+
+/// A test or local build has no updater: About still draws the Updates section, disabled, with the one plain line.
+/// Check now takes no press and the Release channel row opens no menu.
+#[test]
+fn about_draws_the_updates_section_disabled_without_an_updater() {
+    let mut rt = about_on(BoardSettings::new().with_no_updater().with_notes_closed());
+    assert_eq!(text(&rt, "item-1-0-title"), "Check for updates");
+    assert_eq!(text(&rt, "item-1-0-sub"), "Unavailable in this test build");
+    assert_eq!(text(&rt, "item-1-1-sub"), "Unavailable in this test build");
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref() == Some(super::about::NO_UPDATER_LINE)),
+        "the one line says why"
+    );
+    click(&mut rt, "btn-1");
+    click(&mut rt, "item-1-1");
+    assert!(rt.state.settings.intents.is_empty());
+    assert!(rt.state.settings.menu.is_none());
 }

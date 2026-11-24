@@ -260,6 +260,8 @@ jobs:
         shell: bash
         env:
           BEEBEEB_RELEASE_VERSION: ${{ inputs.version }}
+          # The channel this build is cut on: a fresh install starts there (settings/updates.rs).
+          BEEBEEB_RELEASE_CHANNEL: ${{ inputs.channel }}
           # A release names its identity: the build script refuses a release build without it, and one with the
           # test identifier (native/beebeeb-drive-rune/build.rs).
           BEEBEEB_APP_IDENTIFIER: io.beebeeb.app

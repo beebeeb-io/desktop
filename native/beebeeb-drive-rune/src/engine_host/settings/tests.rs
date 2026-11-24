@@ -953,8 +953,8 @@ fn the_running_apps_settings_show_no_sample_value() {
         "About is drawn, not the shell's not-built frame"
     );
     assert!(shows(&rt, "Encryption core"), "About draws the versions");
-    assert!(!shows(&rt, "Check now"), "no updater runs: no Check now");
-    assert!(!shows(&rt, "Release channel"), "no updater runs: no channel");
+    assert!(shows(&rt, "Check for updates"), "the Updates section is always drawn");
+    assert!(shows(&rt, crate::frames::settings::about::NO_UPDATER_LINE), "no updater runs: it says so");
     check_but(&rt, "About", &["311"]);
     // Storage is wired (w15-storage-wired): drawn, with no sample value in it (the rows read nothing here).
     {
