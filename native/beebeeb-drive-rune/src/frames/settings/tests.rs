@@ -161,9 +161,20 @@ fn esc_goes_back_from_every_settings_section() {
         });
         settle(&mut rt);
         assert_eq!(on_settings(&rt), Some(pane), "{pane:?} opened");
-        key(&mut rt, Key::Escape);
-        if on_settings(&rt).is_some() {
-            failed.push(pane.label());
+        // Esc with nothing focused, and with each of the first Tab stops focused.
+        for tabs in 0..4 {
+            let mut rt = runtime("");
+            rt.update(|s, _| {
+                host::dispatch(s, Event::OpenSettings(pane));
+            });
+            settle(&mut rt);
+            for _ in 0..tabs {
+                key(&mut rt, Key::Tab);
+            }
+            key(&mut rt, Key::Escape);
+            if on_settings(&rt).is_some() {
+                failed.push(format!("{} after {tabs} tabs", pane.label()));
+            }
         }
     }
     assert!(failed.is_empty(), "Esc did nothing in: {failed:?}");
