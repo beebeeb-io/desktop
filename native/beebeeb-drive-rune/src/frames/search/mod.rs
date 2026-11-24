@@ -112,6 +112,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if s.actions.dialog.is_none() {
         s.frames.find.dialog_over = false;
     }
+    // Search is the Files window's state: a section press that left it (Photos, Settings…) ends it, wherever the
+    // press came from. A viewer opened from a result keeps it (Back shows the results again).
+    if is_open(s) && !on_files_section(s) {
+        close(s, tx);
+    }
     let open = is_open(s) && !files_busy(s) && gate_open;
     let typed = s.search.text.trim().to_string();
     let ui = &mut s.frames.find;
@@ -153,6 +158,8 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         }
     } else {
         ui.asked = None;
+        // Closed: the source stops rebuilding its index by itself and polling.
+        ui.source.closed();
     }
     let pumped = ui.source.pump();
     if pumped.busy {
@@ -279,6 +286,16 @@ pub fn holds_back(s: &State) -> bool {
         && s.shell.app.dialog().is_none()
         && is_open(s)
         && !files_busy(s)
+}
+
+/// The route shows the Files window or something over it (a viewer, a dialog), not another section's own page.
+fn on_files_section(s: &State) -> bool {
+    use crate::shell::registry::{FrameGroup, group_for};
+    match group_for(&s.shell.app) {
+        FrameGroup::Section(section) => section == Section::Files,
+        FrameGroup::Settings(_) => false,
+        _ => true,
+    }
 }
 
 /// Whether Search's window is what the Files window shows now ([`over_files`]).
@@ -471,11 +488,8 @@ fn field_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return false;
     }
     match ev.key {
-        // Esc clears the words first, then closes.
-        Key::Escape if !s.search.text.is_empty() => {
-            s.search = TextEdit::new("");
-            true
-        }
+        // Esc ends search at once, words or not: "results replace the list until Esc" (RD-a: a first Esc that only
+        // emptied the field left the Search page up).
         Key::Escape => {
             close(s, tx);
             true
