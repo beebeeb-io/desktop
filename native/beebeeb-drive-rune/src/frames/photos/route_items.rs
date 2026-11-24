@@ -74,7 +74,7 @@ fn open_in_os_app(s: &mut State, id: super::PhotoId) {
     }
 }
 
-const NOT_HERE: &str = "Couldn\u{2019}t find that file on this PC";
+const NOT_HERE: &str = concat!("Couldn\u{2019}t find that file on ", beebeeb_engine::device_word!());
 
 /// What did not happen and why, in a line.
 pub(super) fn words(action: Action, why: ActionError) -> &'static str {

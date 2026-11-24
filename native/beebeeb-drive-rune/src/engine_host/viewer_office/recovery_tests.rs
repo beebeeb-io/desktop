@@ -123,7 +123,7 @@ fn recovery_pending_lists_the_accounts_blobs_for_the_notice() {
     assert!(pending.iter().all(|p| p.at == local_1432()));
     assert_eq!(
         words::unlocked_words(2, None).unwrap(),
-        "Unsaved changes to 2 files were kept on this PC."
+        concat!("Unsaved changes to 2 files were kept on ", beebeeb_engine::device_word!(), ".")
     );
 }
 

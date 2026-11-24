@@ -109,7 +109,7 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
 /// The status line's words for an open item.
 pub fn status(viewing: &Viewing) -> String {
     match viewing.kind {
-        Kind::Video(_) => "Streaming \u{00B7} decrypted on this PC as it plays".into(),
+        Kind::Video(_) => concat!("Streaming \u{00B7} decrypted on ", beebeeb_engine::device_word!(), " as it plays").into(),
         Kind::Photo => format!(
             "Photo {} of {} \u{00B7} \u{2190} \u{2192} for the next one",
             thousands(viewing.position.0),
@@ -404,7 +404,7 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
             .center()
             .child(act(0, "Share", &icons::SHARE).on_press(|s: &mut State| s.photos.open_share()))
             .child(
-                act(1, if kept { "On this PC" } else { "Offline" }, &icons::OFFLINE)
+                act(1, if kept { concat!("On ", beebeeb_engine::device_word!()) } else { "Offline" }, &icons::OFFLINE)
                     .on_press(|s: &mut State| s.photos.press_offline()),
             )
             .child(act(2, "Details", &icons::INFO).on_press(|s: &mut State| s.photos.open_details()))

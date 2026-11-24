@@ -27,7 +27,7 @@ pub const WORD_ON: OfficeShips = OfficeShips {
 };
 
 /// The board's status line: it counts the rows without the Word file (ruling R-OW2 b: the scene matches the board).
-pub const BOARD_STATUS: &str = "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only";
+pub const BOARD_STATUS: &str = concat!("4 on ", beebeeb_engine::device_word!(), " \u{00B7} 3 available offline \u{00B7} 4 online only");
 
 /// The board's row for the Word file (the fixture's "today" is Thursday 5 Nov 2026).
 pub fn agreement() -> DriveItem {

@@ -212,7 +212,33 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool, api_base: 
             launch.feedback_dir = None;
         }
     }
+    // macOS has no `--autostart`: the OS says it in the launch Apple event.
+    #[cfg(target_os = "macos")]
+    if !launch.tooling && !launch.quit_for_update {
+        launch.autostart |= login_launch(read_login_item_flag());
+    }
     launch
+}
+
+/// Menu-bar only, no window, only when the launch event SAYS it was a login item. Not readable
+/// (no event yet, no such field) is a manual launch: until it is known, every launch is manual.
+pub fn login_launch(flag: Option<bool>) -> bool {
+    flag == Some(true)
+}
+
+/// `keyAEPropData` (`prdt`) of the current Apple event holds `keyAELaunchedAsLogInItem` (`lgit`).
+#[cfg(target_os = "macos")]
+fn read_login_item_flag() -> Option<bool> {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::msg_send;
+    let class = AnyClass::get(c"NSAppleEventManager")?;
+    let manager: Option<Retained<AnyObject>> = unsafe { msg_send![class, sharedAppleEventManager] };
+    let event: Option<Retained<AnyObject>> = unsafe { msg_send![&*manager?, currentAppleEvent] };
+    let data: Option<Retained<AnyObject>> =
+        unsafe { msg_send![&*event?, paramDescriptorForKeyword: 0x7072_6474u32] };
+    let code: u32 = unsafe { msg_send![&*data?, enumCodeValue] };
+    Some(code == 0x6c67_6974)
 }
 
 /// What a later launch asks of the running instance.
@@ -438,6 +464,13 @@ mod tests {
     /// Beebeeb. Creating our own pipe fails (the name exists), so the launch tries to hand
     /// over, the platform refuses to write to a stranger (`Delivery::Unreachable`), and the
     /// start is refused with words and exit code 1: never a second instance, never "forwarded".
+    #[test]
+    fn a_login_launch_needs_the_event_to_say_so() {
+        assert!(login_launch(Some(true)));
+        assert!(!login_launch(Some(false)));
+        assert!(!login_launch(None));
+    }
+
     #[test]
     fn a_channel_served_by_someone_else_refuses_the_start_with_a_clear_message() {
         for list in [

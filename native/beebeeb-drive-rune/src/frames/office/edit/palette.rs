@@ -65,8 +65,8 @@ fn mark(name: &'static str, key: &'static str, mark: Mark) -> Entry {
 
 fn history() -> Vec<Entry> {
     vec![
-        e("Edit", "Undo", Some("Ctrl+Z"), Run::Op(EditOp::Undo)),
-        e("Edit", "Redo", Some("Ctrl+Y"), Run::Op(EditOp::Redo)),
+        e("Edit", "Undo", Some(concat!(beebeeb_engine::primary_key!(), "Z")), Run::Op(EditOp::Undo)),
+        e("Edit", "Redo", Some(concat!(beebeeb_engine::primary_key!(), "Y")), Run::Op(EditOp::Redo)),
     ]
 }
 
@@ -84,9 +84,9 @@ fn catalogue(kind: EditKind) -> Vec<Entry> {
             ] {
                 all.push(e(STYLES, name, None, Run::Op(EditOp::ParaStyle(style))));
             }
-            all.push(mark("Bold", "Ctrl+B", Mark::Bold));
-            all.push(mark("Italic", "Ctrl+I", Mark::Italic));
-            all.push(mark("Underline", "Ctrl+U", Mark::Underline));
+            all.push(mark("Bold", concat!(beebeeb_engine::primary_key!(), "B"), Mark::Bold));
+            all.push(mark("Italic", concat!(beebeeb_engine::primary_key!(), "I"), Mark::Italic));
+            all.push(mark("Underline", concat!(beebeeb_engine::primary_key!(), "U"), Mark::Underline));
             all.push(mark("Strikethrough", "", Mark::Strike));
             all.push(e("Format", "Bulleted list", None, Run::Op(EditOp::List(ListKind::Bullet))));
             all.push(e("Format", "Numbered list", None, Run::Op(EditOp::List(ListKind::Number))));
@@ -103,11 +103,11 @@ fn catalogue(kind: EditKind) -> Vec<Entry> {
             all.push(e("Insert", "Insert image", None, Run::Insert(Insert::Image)));
             all.push(e("Insert", "Page break", None, Run::Insert(Insert::PageBreak)));
             all.extend(history());
-            all.push(e("Edit", "Select all", Some("Ctrl+A"), Run::Op(EditOp::SelectAll)));
+            all.push(e("Edit", "Select all", Some(concat!(beebeeb_engine::primary_key!(), "A")), Run::Op(EditOp::SelectAll)));
         }
         EditKind::Xlsx => {
-            all.push(mark("Bold", "Ctrl+B", Mark::Bold));
-            all.push(mark("Italic", "Ctrl+I", Mark::Italic));
+            all.push(mark("Bold", concat!(beebeeb_engine::primary_key!(), "B"), Mark::Bold));
+            all.push(mark("Italic", concat!(beebeeb_engine::primary_key!(), "I"), Mark::Italic));
             for (name, f) in [
                 ("Currency", NumberFormat::Currency),
                 ("Percent", NumberFormat::Percent),
@@ -126,8 +126,8 @@ fn catalogue(kind: EditKind) -> Vec<Entry> {
         }
         EditKind::Pptx => {
             all.push(e("Slides", "New slide", None, Run::Op(EditOp::NewSlide { layout: None })));
-            all.push(mark("Bold", "Ctrl+B", Mark::Bold));
-            all.push(mark("Italic", "Ctrl+I", Mark::Italic));
+            all.push(mark("Bold", concat!(beebeeb_engine::primary_key!(), "B"), Mark::Bold));
+            all.push(mark("Italic", concat!(beebeeb_engine::primary_key!(), "I"), Mark::Italic));
             all.extend(history());
         }
     }
@@ -137,7 +137,7 @@ fn catalogue(kind: EditKind) -> Vec<Entry> {
 /// Duplicate and Delete slide: only with a slide on the stage; a deck keeps one slide, so Delete needs two.
 fn slide_entries(stage: Option<Stage>) -> Vec<Entry> {
     let Some(stage) = stage else { return Vec::new() };
-    let mut all = vec![e("Slides", "Duplicate slide", Some("Ctrl+D"), Run::Slide(SlideCmd::Duplicate))];
+    let mut all = vec![e("Slides", "Duplicate slide", Some(concat!(beebeeb_engine::primary_key!(), "D")), Run::Slide(SlideCmd::Duplicate))];
     if stage.count > 1 {
         all.push(e("Slides", "Delete slide", Some("Delete"), Run::Slide(SlideCmd::Delete)));
     }

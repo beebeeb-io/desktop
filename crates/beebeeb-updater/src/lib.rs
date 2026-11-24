@@ -33,8 +33,9 @@ mod real_release_tests;
 pub mod testkit;
 
 pub use machine::{
-    Apply, Clock, Config, EngineStopped, Event, Failure, Freshness, Http, Intent, Persisted, Response, State, Store,
-    Unreachable, Updater, VerifiedInstaller,
+    Apply, Clock, Config, EngineStopped, Event, Failure, Freshness, Http, INSTALL_UNSUPPORTED,
+    INSTALL_UNSUPPORTED_CODE, Intent, Persisted, Response, State, Store, Unreachable, Updater, VerifiedInstaller,
+    install_unsupported_message,
 };
 pub use manifest::{Channel, Manifest, ManifestError, Platform};
 pub use policy::{HighWater, KeyScope, NATIVE_FLOOR, Offer, Refusal, Trust, TrustedKey, V2_KEY_CREATED, Verdict};

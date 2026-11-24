@@ -58,8 +58,8 @@ pub enum OfficeState {
 pub const TITLE: &str = "We couldn't show this file here.";
 pub const NOT_CHANGED: &str = "The file was not changed.";
 pub const OPEN_ELSEWHERE: &str = "Open in another app\u{2026}";
-pub const KEEP_FIRST: &str = "Keep this file on this PC first.";
-pub const KEEP_ACTION: &str = "Keep on this PC";
+pub const KEEP_FIRST: &str = concat!("Keep this file on ", beebeeb_engine::device_word!(), " first.");
+pub const KEEP_ACTION: &str = concat!("Keep on ", beebeeb_engine::device_word!());
 pub const QUIET_LINE: &str = "Some content isn't shown.";
 pub const OPENING: &str = "Opening\u{2026}";
 pub const ENCRYPTED: &str = "Encrypted";

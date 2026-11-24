@@ -524,7 +524,7 @@ impl PhotosSource for FixturePhotos {
     }
 
     fn origin(&self) -> String {
-        "Photos from Anna's iPhone, Old iPhone and iPad \u{00B7} none from this PC".into()
+        concat!("Photos from Anna's iPhone, Old iPhone and iPad \u{00B7} none from ", beebeeb_engine::device_word!()).into()
     }
 
     fn days(&self, device: Option<usize>) -> Vec<Day> {
