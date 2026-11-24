@@ -28,3 +28,19 @@ impl std::fmt::Display for RemovalFailure {
         f.write_str(&self.message)
     }
 }
+
+impl DomainRemoval {
+    /// The kept folder to show the person, if any. Never logged: the path is shown only in the UI.
+    pub fn kept_location(self, _context: &'static str) -> Option<String> {
+        match self.kept {
+            KeptFolder::Kept { path, .. } => Some(path),
+            KeptFolder::Nothing | KeptFolder::Unknown => None,
+        }
+    }
+}
+
+impl RemovalFailure {
+    pub fn kept_location(self, context: &'static str) -> Option<String> {
+        DomainRemoval { kept: self.kept }.kept_location(context)
+    }
+}
