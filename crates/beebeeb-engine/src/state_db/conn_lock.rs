@@ -354,6 +354,7 @@ mod tests {
 
     /// dc-170 (1): slow rows commit by time, long before the row count is reached.
     #[test]
+    #[ignore = "timing: wall-clock batch-length budget; runs in the non-blocking Timing tests job (scripts/ci-timing-tests.txt)"]
     fn batch_commits_once_open_max_time_whatever_its_rows() {
         let lock = lock_with_table();
         let mut batch = WriteBatch::open_capped(&lock, 1_000, Duration::from_millis(30)).unwrap();

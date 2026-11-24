@@ -748,6 +748,7 @@ async fn delete_while_app_closed_restored_on_start_zero_server_calls() {
 
 /// Risk §15: every delete in the sync root now waits for this answer. 1,000 deletes from another
 /// process, each answered from the DB; the p99 is recorded (and bounded far below Explorer's patience).
+#[ignore = "timing: p99 50 ms budget; runs in the non-blocking Timing tests job (scripts/ci-timing-tests.txt)"]
 #[test]
 fn pre_operation_answer_p99_over_1000_deletes() {
     let mut qa = QaRoot::new(pictures_on());

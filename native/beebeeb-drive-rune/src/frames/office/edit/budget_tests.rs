@@ -156,6 +156,7 @@ fn caret_answer(revision: u64, y: f32) -> EditAnswer {
 }
 
 /// A 60-page document: the helper's answer to a keystroke (a caret and a dirty strip) taken in, and the frame drawn.
+#[ignore = "timing: wall-clock frame budget; runs in the non-blocking Timing tests job (scripts/ci-timing-tests.txt)"]
 #[test]
 fn office_word_budget_a_caret_move_and_a_dirty_strip_fit_a_frame() {
     let (mut rt, shared) = rig(doc_of(60, 100, 30), EditKind::Docx);
@@ -198,6 +199,7 @@ fn full() -> SheetView {
 
 /// A sheet at the cell cap: type into a cell and press Enter (one `SetCell`, the editor closing, the current cell
 /// moving) and draw the frame after it.
+#[ignore = "timing: wall-clock frame budget; runs in the non-blocking Timing tests job (scripts/ci-timing-tests.txt)"]
 #[test]
 fn office_sheets_budget_a_commit_at_the_cell_cap_fits_a_frame() {
     let (mut rt, shared) = rig(Body::Sheet(full()), EditKind::Xlsx);

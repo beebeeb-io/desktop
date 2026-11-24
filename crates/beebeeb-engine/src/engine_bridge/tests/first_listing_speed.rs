@@ -54,6 +54,7 @@ fn count(db: &Path, sql: &str) -> i64 {
         .unwrap()
 }
 
+#[ignore = "timing: 60 s wall-clock budget; runs in the non-blocking Timing tests job (scripts/ci-timing-tests.txt)"]
 #[tokio::test]
 async fn first_listing_of_42k_rows_is_whole_in_budget_and_reports_every_second() {
     let dir = tempfile::tempdir().unwrap();
