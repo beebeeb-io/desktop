@@ -15,7 +15,7 @@
 
 use zeroize::Zeroizing;
 
-use super::settings_api::{AccountCallError, kind_of};
+use super::settings_api::{kind_of, AccountCallError};
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
 use crate::account_dto::DesktopTrashItem;
@@ -49,6 +49,10 @@ impl std::fmt::Debug for TrashListing {
             .finish()
     }
 }
+
+#[cfg(test)]
+#[path = "trash_api_tests.rs"]
+mod local_mark_tests;
 
 impl<C: CredentialStores> Engine<C> {
     /// Every item in the account's Trash (`GET /api/v1/files?trashed=true`, every page), from the server only, for
@@ -150,6 +154,7 @@ impl<C: CredentialStores> Engine<C> {
         let mut trashed = false;
         let mut outcome = Ok(());
         for id in file_ids {
+            let id_str = *id;
             let id = id.to_string();
             let sent = self.account_call_for(session, move |api| async move {
                 match api.trash_file_sent(&id).await {
@@ -159,7 +164,10 @@ impl<C: CredentialStores> Engine<C> {
                 }
             });
             outcome = match sent {
-                Ok(true) => Ok(()),
+                Ok(true) => {
+                    self.mark_trashed_locally(id_str);
+                    Ok(())
+                }
                 Ok(false) => Err(NotTrashed::Protected),
                 Err(kind) => Err(NotTrashed::Call(kind)),
             };
@@ -174,6 +182,15 @@ impl<C: CredentialStores> Engine<C> {
             self.request_resnapshot();
         }
         outcome
+    }
+
+    /// After the server accepted a trash: park the item (and a folder's subtree) `Trashing` in this account's
+    /// local state, so the Files view (which reads it) drops it now instead of waiting for a re-snapshot, and the
+    /// snapshot's `Trashing` guard keeps it from coming back. Best effort: no local state, no row: nothing.
+    fn mark_trashed_locally(&self, id: &str) {
+        if let Ok(state) = self.local_state_for_changes() {
+            let _ = state.with(|db| db.mark_subtree_trashing(id));
+        }
     }
 
     /// Whether the session in memory is, now, the very one `generation` and `key` were copied from: asked with no
