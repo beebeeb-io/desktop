@@ -46,6 +46,8 @@ mod theme;
 mod ui;
 #[path = "../src/windows_floor.rs"]
 mod windows_floor;
+#[path = "../src/office_log.rs"]
+mod office_log;
 pub use shell::registry::view;
 pub use shell::state::{State, init, load};
 pub use shell::{FAMILIES, FONTS, TITLEBAR_H};
