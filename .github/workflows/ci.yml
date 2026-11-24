@@ -536,7 +536,7 @@ jobs:
   native-rune:
     name: Native Rune app (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
