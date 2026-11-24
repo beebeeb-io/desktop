@@ -546,10 +546,10 @@ pub(crate) fn decoders() -> String {
             return format!("err lookup {}", last_error());
         };
         (
-            std::mem::transmute::<_, CoInitializeEx>(init),
-            std::mem::transmute::<_, CoCreateInstance>(create),
-            std::mem::transmute::<_, MfStartup>(startup),
-            std::mem::transmute::<_, MfShutdown>(shutdown),
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, CoInitializeEx>(init),
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, CoCreateInstance>(create),
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, MfStartup>(startup),
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, MfShutdown>(shutdown),
         )
     };
     // SAFETY: no reserved pointer; this thread joins the multithreaded apartment (and stays in it until exit).

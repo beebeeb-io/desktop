@@ -419,6 +419,21 @@ fn flow7_rename_on_locally_edited_local_row_moves_path_without_conflict() {
     assert!(conflicts.is_empty());
 }
 
+/// Read-and-clear the re-snapshot request, as the tick does on each OS (macOS clears it only after the snapshot).
+fn resnapshot_taken(db: &crate::state_db::StateDb) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        match db.peek_resnapshot_request().unwrap() {
+            Some(seen) => db.clear_resnapshot_request(seen).unwrap(),
+            None => false,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        db.take_needs_resnapshot().unwrap()
+    }
+}
+
 #[test]
 fn flow7_rename_with_undecryptable_name_keeps_path_and_schedules_resnapshot() {
     let dir = tempfile::tempdir().unwrap();
@@ -427,7 +442,7 @@ fn flow7_rename_with_undecryptable_name_keeps_path_and_schedules_resnapshot() {
     let file = "bad00000-0000-4000-8000-000000000004";
     flow7_seed_local_with_hash(&bridge, file, "notes.txt");
     // Drain any flag left by seeding so the assertion below is caused by this op.
-    bridge.db().take_needs_resnapshot().unwrap();
+    resnapshot_taken(bridge.db());
 
     let conflicts = flow7_apply_batch(
         &bridge,
@@ -445,7 +460,7 @@ fn flow7_rename_with_undecryptable_name_keeps_path_and_schedules_resnapshot() {
     assert_eq!(row.content_hash.as_deref(), Some("local-hash-abc"));
     assert_eq!(row.remote_updated_at, 10);
     assert!(
-        bridge.db().take_needs_resnapshot().unwrap(),
+        resnapshot_taken(bridge.db()),
         "an unresolvable name schedules a re-snapshot so the real name is recovered"
     );
     assert!(conflicts.is_empty());
@@ -465,7 +480,7 @@ fn flow7_rename_with_undecryptable_name_keeps_path_and_schedules_resnapshot() {
             serde_json::json!({ "id": file, "new_name_encrypted": "not-a-valid-encrypted-blob" }),
         )],
     );
-    assert!(!bridge.db().take_needs_resnapshot().unwrap(), "a name that stays unreadable is no loop");
+    assert!(!resnapshot_taken(bridge.db()), "a name that stays unreadable is no loop");
 
     // A name that decrypts (the keys changed, another client fixed it) is applied and clears the mark.
     flow7_apply_batch(

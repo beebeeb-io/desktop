@@ -430,8 +430,9 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
 
     // The process ends: nothing of the engine is left running.
     drop(host);
+    // A joined thread can show in /proc for a moment after the join returns; it must be gone soon, not stay.
     #[cfg(target_os = "linux")]
-    assert_eq!(engine_threads(), 0, "no engine thread outlives the handle");
+    wait_for("no engine thread outlives the handle", || engine_threads() == 0);
 
     // A restart, no password asked: the app starts SCREEN-LOCKED. The stored key (this account's) is in memory, so
     // sync starts and runs; the window is shown nothing of the account.

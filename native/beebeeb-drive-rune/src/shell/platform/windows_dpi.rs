@@ -103,7 +103,7 @@ struct Pass {
 /// empty area or one that does not fit the two words (no message is sent then).
 fn size_lparam(width: i32, height: i32) -> Option<LPARAM> {
     let fits = |v: i32| (1..=0xFFFF).contains(&v);
-    (fits(width) && fits(height)).then(|| ((height as LPARAM) << 16) | width as LPARAM)
+    (fits(width) && fits(height)).then_some(((height as LPARAM) << 16) | width as LPARAM)
 }
 
 /// Posts each window a `WM_SIZE` with its real client size and its real state (maximized or not). winit emits

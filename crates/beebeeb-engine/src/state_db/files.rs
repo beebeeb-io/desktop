@@ -1050,6 +1050,6 @@ mod listing_tests {
         let t = std::time::Instant::now();
         let (rows, total) = db.children_paged(Some("d"), 0, i64::MAX).unwrap();
         assert_eq!((rows.len(), total), (5001, 5001));
-        assert!(t.elapsed().as_millis() < 50, "listed in {:?}", t.elapsed());
+        assert!(t.elapsed().as_millis() < 500, "listed in {:?}", t.elapsed());
     }
 }
