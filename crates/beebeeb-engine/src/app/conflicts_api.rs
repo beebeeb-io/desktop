@@ -301,6 +301,8 @@ impl<C: CredentialStores> Engine<C> {
             files: Vec::new(),
             unread: 0,
         };
+        // Is the session still the one asked about? One question, asked where a list is handed over.
+        let still = || self.acct.while_session_is(&self.writes, session, |_| ()).is_some();
         let state = match self.local_state() {
             Ok(state) => state,
             // Nothing has synced on this computer yet (the first run, no state database or an empty one): no file
@@ -308,9 +310,10 @@ impl<C: CredentialStores> Engine<C> {
             // Behind a locked screen a person reads nothing: nothing is shown as waiting, and nothing was read.
             // Both only for the session asked about.
             Err(LocalStateRefused::NothingSynced | LocalStateRefused::Locked) => {
-                return match self.acct.while_session_is(&self.writes, session, |_| ()) {
-                    Some(()) => Ok(nothing()),
-                    None => Err(ConflictsRefused::NotSignedIn),
+                return if still() {
+                    Ok(nothing())
+                } else {
+                    Err(ConflictsRefused::NotSignedIn)
                 };
             }
             Err(refused) => return Err(local::<ConflictsRefused>(refused)),
@@ -358,7 +361,7 @@ impl<C: CredentialStores> Engine<C> {
             }
         }
         // A list made for a session that ended is not handed over.
-        if self.acct.while_session_is(&self.writes, session, |_| ()).is_none() {
+        if !still() {
             return Err(ConflictsRefused::NotSignedIn);
         }
         Ok(Conflicts { session, files, unread })
