@@ -74,6 +74,7 @@ pub mod name_alias;
 pub mod no_fetch_scope;
 pub mod operation_failure;
 pub mod os_state_reconcile;
+pub mod os_words;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod own_data_proof;
 pub mod owner_keys;
