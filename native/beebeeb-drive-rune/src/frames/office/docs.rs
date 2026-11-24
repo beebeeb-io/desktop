@@ -177,7 +177,7 @@ impl DocBody {
 /// The words the board shows in these frames.
 pub const OPEN_ELSEWHERE: &str = "Open in another app\u{2026}";
 /// Said when the file is not kept on this PC (decision 2482, Q8: the viewer makes no temporary decrypted copy).
-pub const KEEP_FIRST: &str = "Keep this file on this PC first.";
+pub const KEEP_FIRST: &str = concat!("Keep this file on ", beebeeb_engine::device_word!(), " first.");
 pub const OLDER_FORMAT: &str = "An older Word file (.doc). It opens read-only here.";
 pub const ENCRYPTED: &str = "Encrypted";
 pub const ABOUT: &str = "About";
@@ -997,7 +997,7 @@ mod tests {
         press_with(&mut rt, Key::Command('+'), ctrl());
         assert_eq!(doc(&mut rt).view.zoom, 110);
         press_with(&mut rt, Key::Command('0'), ctrl());
-        assert_eq!(doc(&mut rt).view.zoom, 100, "Ctrl+0 is the actual size");
+        assert_eq!(doc(&mut rt).view.zoom, 100, concat!(beebeeb_engine::primary_key!(), "0 is the actual size"));
         press_with(&mut rt, Key::Command('+'), ctrl());
         for _ in 0..20 {
             press_with(&mut rt, Key::Command('-'), ctrl());

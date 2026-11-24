@@ -12,7 +12,7 @@ use super::EditUi;
 pub const SAVING: &str = "Saving\u{2026}";
 
 /// The toast, and the status line, of a save kept on this PC while Beebeeb cannot be reached.
-pub const QUEUED_TOAST: &str = "Saved on this PC, uploads when online";
+pub const QUEUED_TOAST: &str = concat!("Saved on ", beebeeb_engine::device_word!(), ", uploads when online");
 
 /// The status line says the same.
 pub const QUEUED_STATUS: &str = QUEUED_TOAST;
@@ -121,7 +121,7 @@ mod tests {
         edit.revision = 3;
         queued(&mut edit, &sent());
         assert!(!edit.unsaved());
-        assert_eq!(kept_words(&edit, 7), "Saved on this PC, uploads when online");
+        assert_eq!(kept_words(&edit, 7), concat!("Saved on ", beebeeb_engine::device_word!(), ", uploads when online"));
         // Typing on after it is unsaved again, and a later landing is a version again.
         edit.revision = 4;
         assert_eq!(kept_words(&edit, 7), "unsaved changes");

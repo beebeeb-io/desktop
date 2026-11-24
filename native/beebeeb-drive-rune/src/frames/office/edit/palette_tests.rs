@@ -35,7 +35,7 @@ fn each_kind_lists_its_own_operations_and_typing_filters() {
     let slides = names(&found(Some(EditKind::Pptx), "NEW sl", Vec::new()));
     assert_eq!(slides, ["New slide"]);
     let bold = found(Some(EditKind::Docx), "bold", Vec::new());
-    assert_eq!(bold[0].commands[0].shortcut.as_deref(), Some("Ctrl+B"));
+    assert_eq!(bold[0].commands[0].shortcut.as_deref(), Some(concat!(beebeeb_engine::primary_key!(), "B")));
     // Without an editor only the source's answer,: the source filters its own names.
     assert!(found(None, "bold", Vec::new()).is_empty());
     assert_eq!(names(&found(Some(EditKind::Docx), "plan", files(&["Plan.pdf", "Other.pdf"]))), ["Plan.pdf", "Other.pdf"]);
@@ -172,7 +172,7 @@ fn slide_commands_are_listed_only_with_a_current_slide() {
     // Never in a document or a sheet.
     assert!(names(&found_at(Some(EditKind::Docx), Some(Stage { current: 1, count: 3 }), "slide", Vec::new())).is_empty());
     let dup = found_at(pptx, Some(Stage { current: 2, count: 3 }), "duplicate", Vec::new());
-    assert_eq!(dup[0].commands[0].shortcut.as_deref(), Some("Ctrl+D"));
+    assert_eq!(dup[0].commands[0].shortcut.as_deref(), Some(concat!(beebeeb_engine::primary_key!(), "D")));
 }
 
 #[test]

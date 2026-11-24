@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use source::{BoardShared, Invitation, LinkShare, Loaded, Notice, PeopleShare, Request, RequestState, SharedSource};
 
 const COLUMNS: Columns = Columns {
-    names: ["Name", "Shared on", "Size", "From", "PC"],
+    names: ["Name", "Shared on", "Size", "From", if cfg!(target_os = "macos") { "Mac" } else { "PC" }],
     extra_w: 160.0,
     pc_w: 34.0,
 };
@@ -188,7 +188,7 @@ fn notice_words(notice: Notice) -> &'static str {
         Notice::ChangeRefused => "Couldn\u{2019}t make that change. Nothing was changed.",
         Notice::AlreadyAccepted => "Already accepted.",
         Notice::RequestStillOpen => "Close the request first.",
-        Notice::NotOnThisPc => "This isn\u{2019}t on this PC. Make it available offline to show it in File Explorer.",
+        Notice::NotOnThisPc => concat!("This isn\u{2019}t on ", beebeeb_engine::device_word!(), ". Make it available offline to show it in ", beebeeb_engine::file_manager!(), "."),
         Notice::NoFolder => "This request has no folder of its own. Its files arrive in your Beebeeb.",
         Notice::RefreshFailed => "Couldn\u{2019}t refresh Shared. What\u{2019}s shown may be out of date.",
     }
@@ -495,7 +495,7 @@ impl SharedUi {
                 self.source.keep_offline(&id);
                 None
             }
-            "Show in File Explorer" => Some(Intent::About("DW-1180", id)),
+            SHOW_IN_FM => Some(Intent::About("DW-1180", id)),
             "Details" => Some(Intent::About("DW-0411", id)),
             // Each asks first; the engine call follows the answer (`actions_items`).
             "Leave\u{2026}" => {
@@ -531,11 +531,13 @@ impl SharedUi {
     }
 }
 
+const SHOW_IN_FM: &str = concat!("Show in ", beebeeb_engine::file_manager!());
+
 const MENU_WITH_ME: &[Entry] = &[
     Entry::new("Open").keys("Enter"),
     Entry::new("Preview").keys("Space"),
     Entry::new("Make available offline").rule(),
-    Entry::new("Show in File Explorer"),
+    Entry::new(SHOW_IN_FM),
     Entry::new("Details").keys("Alt+Enter"),
     Entry::new("Leave\u{2026}").danger().rule(),
 ];

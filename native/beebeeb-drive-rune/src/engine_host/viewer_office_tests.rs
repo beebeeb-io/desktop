@@ -552,7 +552,7 @@ impl ViewerEngine for TestEngine {
         s.copies.push((file_id.to_string(), bytes.to_vec()));
         Ok(NewCopy {
             id: "copy1".into(),
-            name: "Invented (This PC, 09:41).docx".into(),
+            name: concat!("Invented (", beebeeb_engine::device_word_cap!(), ", 09:41).docx").into(),
         })
     }
 

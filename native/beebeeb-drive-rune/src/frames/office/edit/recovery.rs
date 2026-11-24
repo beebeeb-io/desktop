@@ -64,9 +64,9 @@ pub fn offer_words(name: &str, at: &str) -> String {
 pub fn unlocked_words(count: usize, name: Option<&str>) -> Option<String> {
     match (count, name) {
         (0, _) => None,
-        (1, Some(name)) => Some(format!("Unsaved changes to {name} were kept on this PC.")),
-        (1, None) => Some("Unsaved changes to a file were kept on this PC.".to_string()),
-        (n, _) => Some(format!("Unsaved changes to {n} files were kept on this PC.")),
+        (1, Some(name)) => Some(format!("Unsaved changes to {name} were kept on {device}.", device = beebeeb_engine::device_word!())),
+        (1, None) => Some(concat!("Unsaved changes to a file were kept on ", beebeeb_engine::device_word!(), ".").to_string()),
+        (n, _) => Some(format!("Unsaved changes to {n} files were kept on {device}.", device = beebeeb_engine::device_word!())),
     }
 }
 
@@ -141,7 +141,7 @@ pub fn row_of(ui: &viewers::Ui, t: &Theme) -> Option<El> {
 }
 
 /// What the Restore button says when the kept editing could not be opened.
-pub const NOT_RESTORED: &str = "Couldn't restore those changes. They are still kept on this PC.";
+pub const NOT_RESTORED: &str = concat!("Couldn't restore those changes. They are still kept on ", beebeeb_engine::device_word!(), ".");
 
 fn restore_press(s: &mut State) {
     restore_now(s);

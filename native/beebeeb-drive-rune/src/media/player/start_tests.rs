@@ -36,7 +36,7 @@ fn the_window_is_woken_for_the_first_frame_no_sound_and_a_refusal() {
             .unwrap()
             .iter()
             .any(|(_, no_sound, _)| *no_sound == Some(NoSound::Device)),
-        "the window was woken for 'Sound isn't available on this PC'"
+        concat!("the window was woken for 'Sound isn't available on ", beebeeb_engine::device_word!(), "'")
     );
     r.handle.stop(StopReason::Closed);
 

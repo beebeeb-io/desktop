@@ -54,7 +54,7 @@ pub(crate) mod tests;
 pub const READ_EVERY_WHILE_MAKING: Duration = Duration::from_secs(10);
 
 /// The Format caption's added sentence while HEIC is chosen (decision 2527, Q1).
-pub const HEIC_NOTE: &str = "This PC makes previews in JPEG only; with HEIC it makes none.";
+pub const HEIC_NOTE: &str = concat!(beebeeb_engine::device_word_cap!(), " makes previews in JPEG only; with HEIC it makes none.");
 /// Fixed sentences: never a server's words.
 pub const READ_OFFLINE: &str = "Couldn't reach Beebeeb. Check your connection and try again.";
 pub const READ_FAILED: &str = "Beebeeb didn't answer as expected. Try again.";
