@@ -138,8 +138,8 @@ pub fn not_shown(why: OpenError) -> String {
     let reason = match why.stopped() {
         Some(source::Stopped::Gone) => "the file is gone",
         Some(source::Stopped::SessionEnded) => "the session ended",
-        Some(source::Stopped::NothingSynced) => "nothing has synced on this PC yet",
-        Some(source::Stopped::NotThisAccounts) => "this PC's data couldn't be confirmed as this account's",
+        Some(source::Stopped::NothingSynced) => concat!("nothing has synced on ", beebeeb_engine::device_word!(), " yet"),
+        Some(source::Stopped::NotThisAccounts) => concat!(beebeeb_engine::device_word!(), "'s data couldn't be confirmed as this account's"),
         // Signed out or locked: the shell's own gate says it.
         None => "Beebeeb is locked or signed out",
         Some(_) => "couldn't read it right now",
@@ -149,7 +149,7 @@ pub fn not_shown(why: OpenError) -> String {
 
 /// What "Open in another app…" says when the account's folder on this PC is not in sync now.
 pub const NEEDS_SYNC_ELSEWHERE: &str =
-    "Couldn't open it in another app. It opens from your Beebeeb folder, so sync has to be on for this PC.";
+    concat!("Couldn't open it in another app. It opens from your Beebeeb folder, so sync has to be on for ", beebeeb_engine::device_word!(), ".");
 
 /// What "Open in another app…" says when the file could not be opened there for another reason.
 pub const NOT_OPENED_ELSEWHERE: &str = "Couldn't open this file in another app.";

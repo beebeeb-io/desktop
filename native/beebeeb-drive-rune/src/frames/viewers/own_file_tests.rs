@@ -21,7 +21,7 @@ use crate::media::player::{
     AudioFactory, AudioSink, Link, LinkFactory, MediaBytes, MediaItem, MediaOpener, PlayerHandle, Press, Refusal,
 };
 use crate::media::video::VideoSurface;
-use crate::{State, init, view};
+use crate::{init, view, State};
 
 type Calls = Rc<RefCell<Vec<String>>>;
 

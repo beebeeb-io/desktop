@@ -8,12 +8,12 @@ use std::rc::Rc;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 use super::source::{
-    Body, FixtureViewerSource, Ink, Keep, OpenError, OpenFile, Run, SaveOutcome, ViewerSource, board, count_words,
-    percent, plain_lines, progress_words, size_words,
+    board, count_words, percent, plain_lines, progress_words, size_words, Body, FixtureViewerSource, Ink, Keep,
+    OpenError, OpenFile, Run, SaveOutcome, ViewerSource,
 };
-use super::{Dialog, Intent, markdown, md_source, open, open_from, scene_file, set_scene};
+use super::{markdown, md_source, open, open_from, scene_file, set_scene, Dialog, Intent};
 use crate::shell::app::{Event, Screen};
-use crate::{State, init, view};
+use crate::{init, view, State};
 
 /// Every built frame, and its first words.
 const BUILT: [(&str, &str, &str); 11] = [
@@ -27,7 +27,15 @@ const BUILT: [(&str, &str, &str); 11] = [
     ("DW-1524", "toast-text", "Saved \u{00B7} encrypted \u{00B7} version 4"),
     ("DW-1525", "dlg-title", "You have unsaved changes"),
     ("DW-1526", "dlg-title", "Two versions"),
-    ("DW-1516", "loading-words", "Decrypting Tram 28.mov on this PC \u{00B7} 46 of 120 MB (38 percent)"),
+    (
+        "DW-1516",
+        "loading-words",
+        concat!(
+            "Decrypting Tram 28.mov on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} 46 of 120 MB (38 percent)"
+        ),
+    ),
     ("DW-1517", "state-title", "Too large to preview here"),
     ("DW-1518", "state-title", "Couldn't decrypt this file"),
     ("DW-1512", "run-0-0", "# Export this month's invoices as one CSV"),
@@ -184,7 +192,10 @@ fn tool_to(rt: &mut Runtime<State>, key: &str) {
         }
         press(rt, Key::Tab);
     }
-    assert!(focused(rt).as_deref().is_some_and(in_file_tools), "Tab never entered the toolbar");
+    assert!(
+        focused(rt).as_deref().is_some_and(in_file_tools),
+        "Tab never entered the toolbar"
+    );
     press(rt, Key::Home);
     for _ in 0..12 {
         if focused(rt).as_deref() == Some(key) {
@@ -192,7 +203,10 @@ fn tool_to(rt: &mut Runtime<State>, key: &str) {
         }
         press(rt, Key::Right);
     }
-    panic!("the arrows never reached {key} in the toolbar; focus is on {:?}", focused(rt));
+    panic!(
+        "the arrows never reached {key} in the toolbar; focus is on {:?}",
+        focused(rt)
+    );
 }
 
 /// [`tool_to`], then Space.
@@ -253,7 +267,11 @@ fn decrypting_shows_the_amount_and_cancel_stops_it_from_the_keyboard() {
     let (mut rt, calls) = recording(board::DECRYPTING);
     assert_eq!(
         info(&rt, "loading-words").text.as_deref(),
-        Some("Decrypting Tram 28.mov on this PC \u{00B7} 46 of 120 MB (38 percent)")
+        Some(concat!(
+            "Decrypting Tram 28.mov on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} 46 of 120 MB (38 percent)"
+        ))
     );
     assert_eq!(info(&rt, "loading-bar").role, "progressbar");
     assert_eq!(
@@ -300,13 +318,18 @@ fn too_large_says_the_numbers_and_both_ways_out_are_intents() {
     let mut rt = runtime("DW-1517");
     assert_eq!(
         info(&rt, "state-text").text.as_deref(),
-        Some(
-            "Studio walkthrough 4K.mov is 18.2 GB. Opening it decrypts it on this PC, which needs that much free space; there's 12.4 GB."
-        )
+        Some(concat!(
+            "Studio walkthrough 4K.mov is 18.2 GB. Opening it decrypts it on ",
+            beebeeb_engine::device_word!(),
+            ", which needs that much free space; there's 12.4 GB."
+        ))
     );
     assert_eq!(
         info(&rt, "status-details").text.as_deref(),
-        Some("18.2 GB needed \u{00B7} 12.4 GB free on this PC")
+        Some(concat!(
+            "18.2 GB needed \u{00B7} 12.4 GB free on ",
+            beebeeb_engine::device_word!()
+        ))
     );
     operate(&mut rt, "state-btn-0");
     operate(&mut rt, "state-btn-1");
@@ -319,7 +342,10 @@ fn too_large_says_the_numbers_and_both_ways_out_are_intents() {
 fn a_failure_is_an_alert_and_try_again_decrypts_again() {
     let (mut rt, calls) = recording(board::FAILED);
     assert_eq!(info(&rt, "state").role, "group");
-    assert_eq!(info(&rt, "state-title").text.as_deref(), Some("Couldn't decrypt this file"));
+    assert_eq!(
+        info(&rt, "state-title").text.as_deref(),
+        Some("Couldn't decrypt this file")
+    );
     operate(&mut rt, "state-btn-1");
     assert_eq!(intents(&mut rt), [Intent::ReportProblem]);
     operate(&mut rt, "state-btn-0");
@@ -896,7 +922,10 @@ fn a_save_that_meets_another_devices_version_overwrites_nothing() {
         assert_eq!(info(&rt, "dlg").role, "dialog");
         assert_eq!(
             info(&rt, "dlg-card-0-sub").text.as_deref(),
-            Some("this PC \u{00B7} not saved \u{00B7} +1 line")
+            Some(concat!(
+                beebeeb_engine::device_word!(),
+                " \u{00B7} not saved \u{00B7} +1 line"
+            ))
         );
         assert_eq!(info(&rt, "dlg-btn-2").label.as_deref(), Some("Keep Anna's iPhone's"));
         assert_eq!(
@@ -1029,7 +1058,11 @@ fn f6_cycles_the_toolbar_the_file_and_the_details_panel() {
         },
     );
     assert!(viewer(&rt).show_details);
-    for pane in [super::chrome::PANE_TOOLBAR, super::chrome::PANE_BODY, super::chrome::PANE_DETAILS] {
+    for pane in [
+        super::chrome::PANE_TOOLBAR,
+        super::chrome::PANE_BODY,
+        super::chrome::PANE_DETAILS,
+    ] {
         assert!(has(&rt, pane), "{pane} is an F6 stop");
     }
     tab_to(&mut rt, "back");
@@ -1039,9 +1072,17 @@ fn f6_cycles_the_toolbar_the_file_and_the_details_panel() {
         seen.push(focused(&rt));
     }
     assert!(seen.iter().all(Option::is_some), "each F6 lands on a control: {seen:?}");
-    assert_eq!(seen.iter().collect::<std::collections::HashSet<_>>().len(), 3, "three panes: {seen:?}");
+    assert_eq!(
+        seen.iter().collect::<std::collections::HashSet<_>>().len(),
+        3,
+        "three panes: {seen:?}"
+    );
     press(&mut rt, Key::Function(6));
-    assert_eq!(focused(&rt), Some("back".to_string()), "and around to the toolbar's first stop");
+    assert_eq!(
+        focused(&rt),
+        Some("back".to_string()),
+        "and around to the toolbar's first stop"
+    );
 }
 
 #[test]
@@ -1133,7 +1174,11 @@ fn progress_from_the_engine_moves_the_bar_and_a_finished_file_replaces_the_state
     let mut rt = runtime_of(state, false);
     assert_eq!(
         info(&rt, "loading-words").text.as_deref(),
-        Some("Decrypting Tram 28.mov on this PC \u{00B7} 90 of 120 MB (75 percent)")
+        Some(concat!(
+            "Decrypting Tram 28.mov on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} 90 of 120 MB (75 percent)"
+        ))
     );
     rt.invalidate();
     rt.frame(0.0);
@@ -1225,7 +1270,11 @@ fn assert_file_bar(rt: &Runtime<State>, what: &str, wanted: &[&str]) {
 #[test]
 fn the_preview_bar_has_no_files_view_buttons() {
     let rt = runtime("DW-1512");
-    assert_file_bar(&rt, "preview", &["back", "panel-toggle-btn", "show-in-folder", "more-btn"]);
+    assert_file_bar(
+        &rt,
+        "preview",
+        &["back", "panel-toggle-btn", "show-in-folder", "more-btn"],
+    );
 }
 
 #[test]
@@ -1233,7 +1282,11 @@ fn the_text_edit_bar_has_no_files_view_buttons() {
     let mut rt = runtime("DW-1512");
     operate_tool(&mut rt, "tb-btn-0");
     assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some());
-    assert_file_bar(&rt, "text edit", &["back", "tb-btn-0", "show-in-folder", "panel-toggle-btn"]);
+    assert_file_bar(
+        &rt,
+        "text edit",
+        &["back", "tb-btn-0", "show-in-folder", "panel-toggle-btn"],
+    );
 }
 
 #[test]
@@ -1246,7 +1299,7 @@ fn the_office_edit_bar_has_no_files_view_buttons() {
 /// quit follows only an answer. With nothing unsaved it asks nothing.
 #[test]
 fn a_quit_with_unsaved_changes_asks_save_discard_or_cancel() {
-    use super::unsaved_guard::{Then, ask, holds};
+    use super::unsaved_guard::{ask, holds, Then};
     let (mut rt, calls) = note(false, false);
     assert!(!ask(&mut rt.state, Then::Quit), "nothing unsaved: no question");
     edit_and_type(&mut rt);
@@ -1254,8 +1307,14 @@ fn a_quit_with_unsaved_changes_asks_save_discard_or_cancel() {
     assert!(ask(&mut rt.state, Then::Quit), "unsaved: the question is up");
     rt.invalidate();
     rt.frame(0.0);
-    assert_eq!(info(&rt, "dlg-text-0").text.as_deref(), Some("You have unsaved changes in Meeting notes 4 Nov.md."));
-    assert_eq!(info(&rt, "btn-2").label.as_deref(), Some("Discard and quit, destructive"));
+    assert_eq!(
+        info(&rt, "dlg-text-0").text.as_deref(),
+        Some("You have unsaved changes in Meeting notes 4 Nov.md.")
+    );
+    assert_eq!(
+        info(&rt, "btn-2").label.as_deref(),
+        Some("Discard and quit, destructive")
+    );
     // Cancel keeps the edit and nothing was saved.
     operate(&mut rt, "btn-3");
     assert!(rt.state.viewer.leave.is_none() && viewer(&rt).dirty());
@@ -1272,7 +1331,7 @@ fn a_quit_with_unsaved_changes_asks_save_discard_or_cancel() {
 /// A text save the engine still has in flight keeps the quit question waiting; it does not read as "not saved".
 #[test]
 fn a_text_save_still_in_flight_keeps_the_quit_question_waiting() {
-    use super::unsaved_guard::{Then, ask, save_state};
+    use super::unsaved_guard::{ask, save_state, Then};
     let (mut rt, calls) = note(false, false);
     edit_and_type(&mut rt);
     assert!(ask(&mut rt.state, Then::Quit));
@@ -1283,14 +1342,18 @@ fn a_text_save_still_in_flight_keeps_the_quit_question_waiting() {
 /// ux-53: with the editor focused behind it, Enter on the shown question presses Save.
 #[test]
 fn enter_on_the_shown_unsaved_question_presses_save() {
-    use super::unsaved_guard::{Then, ask, holds};
+    use super::unsaved_guard::{ask, holds, Then};
     let (mut rt, calls) = note(false, false);
     edit_and_type(&mut rt);
     assert!(ask(&mut rt.state, Then::Quit));
     rt.invalidate();
     rt.frame(0.0);
     press(&mut rt, Key::Enter);
-    assert!(calls.borrow().iter().any(|c| c.starts_with("save")), "Enter saved: {:?}", calls.borrow());
+    assert!(
+        calls.borrow().iter().any(|c| c.starts_with("save")),
+        "Enter saved: {:?}",
+        calls.borrow()
+    );
     assert!(!holds(&rt.state));
 }
 
@@ -1319,7 +1382,11 @@ fn focus_after_the_unsaved_question_goes_to_the_editor_or_else_the_toolbar() {
     operate(&mut rt, "dlg-btn-2");
     rt.settle_all();
     rt.frame(0.0);
-    assert_eq!(focused(&rt).as_deref(), Some(super::EDITOR_KEY), "Keep editing: back in the editor");
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some(super::EDITOR_KEY),
+        "Keep editing: back in the editor"
+    );
     operate(&mut rt, "back");
     operate(&mut rt, "dlg-btn-1");
     rt.settle_all();

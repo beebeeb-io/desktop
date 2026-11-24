@@ -22,13 +22,21 @@ pub(super) const NEWER_EVERY: Duration = Duration::from_millis(1500);
 /// has not been sent yet: nothing was stored, and the edit stays open (delta 3 of desktop#432); Save a copy keeps it
 /// as a new file next to this one (task 2530, item 1). Once that change lands, the banner offers it and a save from
 /// here asks the two-versions question.
-pub(super) const EARLIER_NOT_SENT: &str = "Not saved: an earlier change to this file on this PC has not been sent yet. \
-     Your edit stays open: Save a copy keeps it as a new file.";
+pub(super) const EARLIER_NOT_SENT: &str = concat!(
+    "Not saved: an earlier change to this file on ",
+    beebeeb_engine::device_word!(),
+    " has not been sent yet. \
+     Your edit stays open: Save a copy keeps it as a new file."
+);
 
 /// As [`EARLIER_NOT_SENT`], when that earlier change is held back (parked, or a held edit): it is not sent until the
 /// person settles it, so the words promise no send (task 2530, item 1).
-pub(super) const EARLIER_HELD: &str = "Not saved: an earlier change to this file on this PC is held back and is not \
-     sent until it is settled in Sync history. Your edit stays open: Save a copy keeps it as a new file.";
+pub(super) const EARLIER_HELD: &str = concat!(
+    "Not saved: an earlier change to this file on ",
+    beebeeb_engine::device_word!(),
+    " is held back and is not \
+     sent until it is settled in Sync history. Your edit stays open: Save a copy keeps it as a new file."
+);
 
 /// What the window says of a save that was on its way when the screen locked and that the engine could not confirm
 /// (the lock landed while it ran: it may have been stored just before). Never "not saved": that is not known. Saving
@@ -125,7 +133,7 @@ pub(crate) fn this_pc() -> String {
     ["COMPUTERNAME", "HOSTNAME"]
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))
-        .unwrap_or_else(|| "This PC".to_string())
+        .unwrap_or_else(|| concat!(beebeeb_engine::device_word_cap!()).to_string())
 }
 
 impl Opening {
@@ -683,9 +691,12 @@ fn earlier(settled: Settled, file_id: &str) -> Option<Settled> {
             format!("Your earlier edit was saved \u{00B7} encrypted \u{00B7} version {version}")
         }
         Settled::Saved { .. } => "Your earlier edit was saved as a copy next to this file".to_string(),
-        Settled::Queued { .. } => {
-            "Your earlier edit was saved on this PC \u{00B7} sends when Beebeeb can be reached".to_string()
-        }
+        Settled::Queued { .. } => concat!(
+            "Your earlier edit was saved on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} sends when Beebeeb can be reached"
+        )
+        .to_string(),
         Settled::Conflict(_) => "Your earlier edit was not saved: the file changed since you opened it".to_string(),
         Settled::Failed | Settled::Refused(_) => "Your earlier edit was not saved".to_string(),
         Settled::Opened { .. } | Settled::SavedRevision(_) | Settled::Newer(_) | Settled::Said(_) => String::new(),

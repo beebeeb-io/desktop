@@ -3,15 +3,15 @@
 //! file, and the pill in the toolbar says so. With the details panel open (DW-1502) the stage
 //! holds the photo alone.
 
-use rune::{Align, Color, El, Icon, SurfaceFit, TextStyle, col, el, row};
+use rune::{col, el, row, Align, Color, El, Icon, SurfaceFit, TextStyle};
 
 use super::chrome::{Dot, Status};
 use super::source::{OpenFile, PhotoDoc, Picture};
-use super::{Intent, Ui, details, media, media_icons};
-use crate::State;
+use super::{details, media, media_icons, Intent, Ui};
 use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::{kit, pill};
+use crate::State;
 
 /// `.t-cap`: 11px/500 on 14px.
 const CAP: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
@@ -124,7 +124,7 @@ pub fn body(ui: &Ui, doc: &PhotoDoc, t: &Theme) -> El {
         });
     }
     let offline = if ui.file.details.offline {
-        "On this PC"
+        concat!("On ", beebeeb_engine::device_word!())
     } else {
         "Offline"
     };

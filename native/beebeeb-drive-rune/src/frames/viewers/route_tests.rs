@@ -9,12 +9,12 @@ use std::rc::Rc;
 use rune::{Env, Runtime};
 
 use super::source::{
-    Body, Details, NoPreview, OpenError, OpenFile, Origin, Stopped, TextDoc, ViewerSource, plain_lines,
+    plain_lines, Body, Details, NoPreview, OpenError, OpenFile, Origin, Stopped, TextDoc, ViewerSource,
 };
 use super::{chrome, open_item, states, text, wire};
 use crate::shell::app::{Event, Screen};
 use crate::shell::host;
-use crate::{State, init, view};
+use crate::{init, view, State};
 
 const FILE: &str = "f-invented-route";
 const WORDS: &str = "an-invented-line-of-the-routed-file";
@@ -273,17 +273,26 @@ fn the_status_line_says_when_the_content_is_the_copy_on_this_pc_and_when_it_is_n
     };
     // Downloaded: the words every open file had.
     let words = status(None);
-    assert!(words.contains("Decrypted on this PC"), "{words}");
+    assert!(
+        words.contains(concat!("Decrypted on ", beebeeb_engine::device_word!())),
+        "{words}"
+    );
     assert!(!words.contains(chrome::FROM_THIS_PC), "{words}");
     // The copy kept here.
     let words = status(Some(Origin::ThisPc { unsent: false }));
     assert!(words.contains(chrome::FROM_THIS_PC), "{words}");
     assert!(!words.contains("aren't in Beebeeb yet"), "{words}");
-    assert!(!words.contains("Decrypted on this PC"), "{words}");
+    assert!(
+        !words.contains(concat!("Decrypted on ", beebeeb_engine::device_word!())),
+        "{words}"
+    );
     // A copy with a change that is not sent: said, never shown as what Beebeeb has.
     let words = status(Some(Origin::ThisPc { unsent: true }));
     assert!(words.contains(chrome::FROM_THIS_PC_UNSENT), "{words}");
-    assert!(!words.contains("Decrypted on this PC"), "{words}");
+    assert!(
+        !words.contains(concat!("Decrypted on ", beebeeb_engine::device_word!())),
+        "{words}"
+    );
     // A copy read while sync is off: nothing says it is still what Beebeeb has, and the line says that.
     let words = status(Some(Origin::ThisPcSyncOff));
     assert!(words.contains(chrome::FROM_THIS_PC_SYNC_OFF), "{words}");
@@ -292,14 +301,18 @@ fn the_status_line_says_when_the_content_is_the_copy_on_this_pc_and_when_it_is_n
     let words = status(Some(Origin::BeebeebNotThisPcs));
     assert!(words.contains(chrome::FROM_BEEBEEB_NOT_THIS_PCS), "{words}");
     assert!(
-        !words.contains("Decrypted on this PC \u{00B7} the key never left it"),
+        !words.contains(concat!(
+            "Decrypted on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} the key never left it"
+        )),
         "{words}"
     );
 }
 
 #[test]
 fn the_origin_adds_a_warning_to_the_status_line_and_never_takes_the_frames_own_away() {
-    use chrome::{Dot, Status, origin_status};
+    use chrome::{origin_status, Dot, Status};
     let status = |dot| Status {
         dot,
         text: "the frame's words".into(),
@@ -486,7 +499,10 @@ fn a_copy_with_unsent_changes_that_cannot_be_read_says_so_and_can_be_tried_again
     });
     route_to_file(&mut rt);
     let words = drawn(&rt);
-    assert!(words.contains("Couldn't read the copy on this PC"), "{words}");
+    assert!(
+        words.contains(concat!("Couldn't read the copy on ", beebeeb_engine::device_word!())),
+        "{words}"
+    );
     assert!(words.contains("aren't in Beebeeb yet"), "{words}");
     assert!(words.contains("isn't shown in its place"), "{words}");
     assert!(!words.contains(WORDS), "{words}");
@@ -506,10 +522,10 @@ fn a_text_a_source_cannot_save_does_not_name_the_edit_key() {
         route_to_file(&mut rt);
         drawn(&rt)
     };
-    assert!(hint(false).contains("Ctrl+E to edit"));
+    assert!(hint(false).contains(&beebeeb_engine::os_words::for_this_os("Ctrl+E to edit")));
     let read_only = hint(true);
     assert!(read_only.contains(text::READ_ONLY_HINT), "{read_only}");
-    assert!(!read_only.contains("Ctrl+E to edit"), "{read_only}");
+    assert!(!read_only.contains(&beebeeb_engine::os_words::for_this_os("Ctrl+E to edit")), "{read_only}");
 }
 
 #[test]
@@ -517,13 +533,25 @@ fn a_pc_that_knows_no_file_yet_never_says_the_file_is_gone_and_can_be_tried_agai
     for (refusal, title, line) in [
         (
             OpenError::NothingSynced,
-            "Nothing has synced on this PC yet",
-            "Not opened: nothing has synced on this PC yet",
+            concat!("Nothing has synced on ", beebeeb_engine::device_word!(), " yet"),
+            concat!(
+                "Not opened: nothing has synced on ",
+                beebeeb_engine::device_word!(),
+                " yet"
+            ),
         ),
         (
             OpenError::NotThisAccounts,
-            "Couldn't confirm this PC's data is this account's",
-            "Not opened: this PC's data couldn't be confirmed as this account's",
+            concat!(
+                "Couldn't confirm ",
+                beebeeb_engine::device_word!(),
+                "'s data is this account's"
+            ),
+            concat!(
+                "Not opened: ",
+                beebeeb_engine::device_word!(),
+                "'s data couldn't be confirmed as this account's"
+            ),
         ),
     ] {
         let (mut rt, script) = window(Script {
@@ -599,13 +627,20 @@ fn a_pdf_that_cannot_be_read_has_its_own_words_and_says_decrypted_only_when_it_w
         }
         let words = said(NoPreview::PdfUnreadable, Some(origin));
         assert!(
-            words.contains("It was read from the copy on this PC, but this app can't read it"),
+            words.contains(concat!(
+                "It was read from the copy on ",
+                beebeeb_engine::device_word!(),
+                ", but this app can't read it"
+            )),
             "{words}"
         );
     }
     // Beebeeb's version of a file that is not in sync here WAS decrypted.
     let words = said(NoPreview::Unreadable, Some(Origin::BeebeebNotThisPcs));
-    assert!(words.contains("It was decrypted on this PC"), "{words}");
+    assert!(
+        words.contains(concat!("It was decrypted on ", beebeeb_engine::device_word!())),
+        "{words}"
+    );
     assert!(words.contains(states::DECRYPTED_NOT_KEPT), "{words}");
 }
 
