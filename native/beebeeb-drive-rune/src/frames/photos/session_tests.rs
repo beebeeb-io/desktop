@@ -298,8 +298,8 @@ fn the_section_opening_asks_for_the_library_once_and_no_library_is_said_in_words
     for (loaded, title) in [
         (Loaded::Loading, "Loading your photos\u{2026}"),
         (Loaded::Failed, "Couldn\u{2019}t load your photos"),
-        (Loaded::NothingSynced, "Nothing has synced to this PC yet"),
-        (Loaded::NotThisAccounts, "This PC holds another account\u{2019}s files"),
+        (Loaded::NothingSynced, concat!("Nothing has synced to ", beebeeb_engine::device_word!(), " yet")),
+        (Loaded::NotThisAccounts, concat!(beebeeb_engine::device_word_cap!(), " holds another account\u{2019}s files")),
         (Loaded::SessionEnded, "Your session ended"),
         (Loaded::SignedOut, "Signed out"),
     ] {
@@ -476,7 +476,7 @@ fn keeping_a_photo_is_said_only_once_this_pc_answered() {
             left: Some(Left::Failed),
         },
     );
-    assert_eq!(text(&rt, "ph-toast-text"), "Couldn\u{2019}t keep it on this PC");
+    assert_eq!(text(&rt, "ph-toast-text"), concat!("Couldn\u{2019}t keep it on ", beebeeb_engine::device_word!()));
     click(&mut rt, "ph-toast-action");
     assert_eq!(asked(&script)[1], ("keep", vec![harbour]));
     answer(
@@ -721,7 +721,7 @@ fn keep_several_failures_are_one_message_with_the_count() {
             again: vec![a, b]
         })
     );
-    assert_eq!(text(&rt, "ph-toast-text"), "Couldn\u{2019}t keep 2 on this PC");
+    assert_eq!(text(&rt, "ph-toast-text"), concat!("Couldn\u{2019}t keep 2 on ", beebeeb_engine::device_word!()));
 }
 
 // ---- Add a folder… and Move… (CP2 8.1), Remove (8.2) ----

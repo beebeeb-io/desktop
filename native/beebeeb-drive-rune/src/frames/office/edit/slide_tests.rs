@@ -341,7 +341,7 @@ fn office_slides_edit_present_keys_are_not_taken() {
     key(&mut rt, Key::Enter, ctrl());
     assert!(
         log.borrow().edits.is_empty(),
-        "Ctrl+Enter is Present's, not a paragraph"
+        concat!(beebeeb_engine::primary_key!(), "Enter is Present's, not a paragraph")
     );
     let d = viewers::deck_mut(&mut rt.state).expect("a deck");
     assert!(d.presenting);
@@ -683,7 +683,7 @@ fn office_slides_window_keys_ctrl_k_from_a_thumbnail_shows_the_palette_and_dupli
     key(&mut rt, Key::Command('k'), ctrl());
     assert!(
         find(&rt, "pal").is_some(),
-        "Ctrl+K draws the command search over the deck"
+        concat!(beebeeb_engine::primary_key!(), "K draws the command search over the deck")
     );
     assert_eq!(
         focused(&rt).as_deref(),
@@ -712,7 +712,7 @@ fn office_slides_window_keys_ctrl_k_from_a_thumbnail_shows_the_palette_and_dupli
     assert_eq!(
         log.borrow().edits.last(),
         Some(&EditOp::Undo),
-        "Ctrl+Z after the palette undoes"
+        concat!(beebeeb_engine::primary_key!(), "Z after the palette undoes")
     );
 }
 
@@ -751,14 +751,14 @@ fn office_slides_window_keys_ctrl_d_and_ctrl_z_from_a_thumbnail() {
     assert_eq!(
         log.borrow().edits.as_slice(),
         &[EditOp::DuplicateSlide(0)],
-        "Ctrl+D on a filmstrip row"
+        concat!(beebeeb_engine::primary_key!(), "D on a filmstrip row")
     );
     assert_eq!(deck(&mut rt), (2, 4));
     key(&mut rt, Key::Command('z'), ctrl());
     assert_eq!(
         log.borrow().edits.last(),
         Some(&EditOp::Undo),
-        "Ctrl+Z on a filmstrip row"
+        concat!(beebeeb_engine::primary_key!(), "Z on a filmstrip row")
     );
     key(&mut rt, Key::Command('y'), ctrl());
     assert_eq!(log.borrow().edits.last(), Some(&EditOp::Redo));

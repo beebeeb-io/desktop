@@ -6,8 +6,8 @@
 //! [`ChannelHost`]. Must not: name a UI toolkit, a window, or block in [`EngineHost::event`] (the engine calls it
 //! from its own runtime's tasks).
 
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -314,18 +314,29 @@ pub struct ChannelHost {
     wake: Box<dyn Fn() + Send + Sync>,
     conflict_opens_window: bool,
     transfers: Arc<TransferBoard>,
+    file_provider: Option<Arc<dyn crate::file_provider_port::FileProviderPort>>,
 }
 
 impl ChannelHost {
     /// `wake` runs on the engine's thread after each message is queued: post a wake-up to the UI loop there,
     /// do nothing else.
     pub fn new(wake: impl Fn() + Send + Sync + 'static) -> (Arc<Self>, mpsc::Receiver<HostMessage>) {
+        Self::with_file_provider(wake, None)
+    }
+
+    /// [`Self::new`] with the platform's File Provider port (macOS), which [`EngineHost::file_provider`] hands to
+    /// the runner. `None` is the same as `new`.
+    pub fn with_file_provider(
+        wake: impl Fn() + Send + Sync + 'static,
+        file_provider: Option<Arc<dyn crate::file_provider_port::FileProviderPort>>,
+    ) -> (Arc<Self>, mpsc::Receiver<HostMessage>) {
         let (queue, messages) = mpsc::channel();
         let host = Self {
             queue,
             wake: Box::new(wake),
             conflict_opens_window: false,
             transfers: TransferBoard::new(),
+            file_provider,
         };
         (Arc::new(host), messages)
     }
@@ -364,6 +375,10 @@ impl EngineHost for ChannelHost {
 
     fn transfer_board(&self) -> Option<Arc<TransferBoard>> {
         Some(self.transfers.clone())
+    }
+
+    fn file_provider(&self) -> Option<Arc<dyn crate::file_provider_port::FileProviderPort>> {
+        self.file_provider.clone()
     }
 
     fn wake(&self) {
@@ -495,7 +510,7 @@ mod tests {
     /// plain state, an error and a state with activity and a reason.
     #[test]
     fn the_typed_status_event_is_the_old_status_json_with_the_startup_guard() {
-        use crate::engine_status::{Activity, Reason, State, plain_status};
+        use crate::engine_status::{plain_status, Activity, Reason, State};
         let guard = StartupGuardProgress {
             running: true,
             done: 2,
@@ -544,7 +559,11 @@ mod tests {
         .keys()
         .cloned()
         .collect();
-        assert_eq!(keys.len(), 11, "ten status keys (RC2-6b added `changes`) and startup_guard: {keys:?}");
+        assert_eq!(
+            keys.len(),
+            11,
+            "ten status keys (RC2-6b added `changes`) and startup_guard: {keys:?}"
+        );
     }
 
     /// Review of PR 290, P3-4: a name, a path or a refusal's words never reach a `{:?}`.

@@ -26,7 +26,10 @@ fn what_the_local_state_says_is_what_the_switch_and_the_version_show() {
     });
     let (source, file, _) = opened(&fake, NOTE);
     assert!(source.knows_offline());
-    assert!(file.details.offline, "kept on this PC, as read");
+    assert!(
+        file.details.offline,
+        concat!("kept on ", beebeeb_engine::device_word!(), ", as read")
+    );
     assert_eq!(file.version, 7, "the version the local state holds");
     assert!(source.can_save());
 
@@ -162,7 +165,7 @@ fn the_three_keeps() {
         panic!("the copy");
     };
     assert_eq!(id, "f-copy");
-    assert!(name.contains("This PC"));
+    assert!(name.contains(concat!(beebeeb_engine::device_word_cap!())));
     // Keep theirs: the file as Beebeeb has it, my edit dropped.
     assert_eq!(source.resolve(NOTE, "mine", Keep::Theirs), SaveOutcome::Working);
     let Settled::Opened { body, version } = settled(&mut source, NOTE) else {
@@ -583,7 +586,11 @@ fn a_change_answered_for_an_earlier_opening_never_replaces_the_view() {
     };
     assert_eq!(
         words,
-        "Your earlier edit was saved on this PC \u{00B7} sends when Beebeeb can be reached"
+        concat!(
+            "Your earlier edit was saved on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} sends when Beebeeb can be reached"
+        )
     );
     // The view's opening still holds the newer version: a read of 4 is nothing new.
     source.changes.every = Duration::ZERO;

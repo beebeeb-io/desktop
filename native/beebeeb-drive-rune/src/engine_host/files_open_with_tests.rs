@@ -15,7 +15,7 @@ use beebeeb_engine::runner::EngineRunner;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
 use beebeeb_engine::sync_view::Start;
-use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, start_fake};
+use beebeeb_engine::test_api::fake_account::{start_fake, FakeAccount, TEST_PHRASE};
 use zeroize::Zeroizing;
 
 use super::*;
@@ -249,9 +249,17 @@ fn open_with_an_app_hands_over_any_file() {
         label: "Invented".into(),
     };
     let notes = row(NOTES, "Invented notes.txt", false);
-    assert_eq!(set.source.open_in_app(&notes, &app), Err(ActionError::NotOnThisSystem), "online only");
+    assert_eq!(
+        set.source.open_in_app(&notes, &app),
+        Err(ActionError::NotOnThisSystem),
+        "online only"
+    );
     put_kept(&set, NOTES, "Invented notes.txt", FileStatus::Local, true);
-    assert_eq!(set.source.open_in_app(&notes, &app), Err(ActionError::NotOnThisSystem), "kept and here");
+    assert_eq!(
+        set.source.open_in_app(&notes, &app),
+        Err(ActionError::NotOnThisSystem),
+        "kept and here"
+    );
     assert_eq!(
         set.source.open_in_app(&row(FOLDER, "Invented folder", true), &app),
         Err(ActionError::Failed)
@@ -322,5 +330,8 @@ fn files_open_never_waits_on_the_launch_lock() {
     assert_eq!(kinds, ["open", "reveal", "open"], "in the order asked");
     assert!(started[0].1.ends_with("Invented notes.txt") && started[0].1.starts_with(&root));
     assert!(started[1].1.ends_with("Invented notes.txt"));
-    assert_eq!(started[2].1, root, "Open in File Explorer: the sync folder");
+    assert_eq!(
+        started[2].1, root,
+        concat!("Open in ", beebeeb_engine::file_manager!(), ": the sync folder")
+    );
 }

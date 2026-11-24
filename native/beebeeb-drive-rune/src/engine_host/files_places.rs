@@ -14,13 +14,13 @@
 //! Must not: log a name, a path or an id; answer "outside the tree" because nothing is known yet (nothing known is
 //! `None`, and the engine decides); name a device's kind or status it does not know (this PC's is the only one).
 
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 
 use beebeeb_engine::app::backup_places_api::{BackupPlace, BackupPlaces};
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 
 use super::log;
-use super::stamp::{Stamp, stamp};
+use super::stamp::{stamp, Stamp};
 use crate::frames::files::protected::{BackupEntry, BackupKind, Protection};
 use crate::source::DriveItem;
 
@@ -175,7 +175,7 @@ impl<C: CredentialStores> Places<C> {
         match held.rows.iter().find(|(id, _)| *id == item.id) {
             Some((_, BackupPlace::Device { this_pc: true, .. })) => Some(BackupEntry {
                 kind: BackupKind::Laptop,
-                status: Some("This PC".into()),
+                status: Some(concat!(beebeeb_engine::device_word_cap!()).into()),
                 managed: false,
                 note: None,
             }),

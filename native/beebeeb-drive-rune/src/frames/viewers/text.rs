@@ -1,18 +1,18 @@
 //! Text and code (DW-1512, DW-1527): the file in JetBrains Mono with line numbers, each run in
 //! the ink the source gave it; and the toolbar controls and the banner of a text file.
 
-use rune::{Align, Color, El, Icon, Span, col, el, row, text_input};
+use rune::{col, el, row, text_input, Align, Color, El, Icon, Span};
 
 use super::chrome::{Dot, Status};
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
-use super::source::{Cut, Ink, Keep, OpenFile, Run, TextDoc, count_words};
-use super::{Intent, icons, style, ui};
-use crate::State;
+use super::source::{count_words, Cut, Ink, Keep, OpenFile, Run, TextDoc};
+use super::{icons, style, ui, Intent};
 use crate::theme::scale;
 use crate::theme::tokens::{self, Theme};
-use crate::ui::toolbar::{ToolState, tool_button};
+use crate::ui::button::{button, keys, ButtonState, Size, Variant};
+use crate::ui::toolbar::{tool_button, ToolState};
 use crate::ui::view_state::{self, ViewState};
 use crate::ui::{au, kit};
+use crate::State;
 
 /// The gutter: the line number's box, 16 pt of padding on both sides.
 const GUTTER_W: f32 = 56.0;
@@ -243,9 +243,16 @@ pub fn tools(doc: &TextDoc, wrap: bool, t: &Theme) -> Vec<El> {
         well.child(wrap_tab.on_press(set_wrap(true)))
             .child(no_wrap_tab.on_press(set_wrap(false))),
         tool_button("tool-0", "Copy", &icons::COPY, 14.0, ToolState::Idle, t)
-            .shortcut_hint("Ctrl+C")
+            .shortcut_hint(crate::frames::files::key_label("C"))
             .on_press_tx(super::copy_text),
-        tool_action("tb-btn-0", "Edit", Some(&icons::EDIT), Some("Ctrl+E"), t).on_press(|s: &mut State| {
+        tool_action(
+            "tb-btn-0",
+            "Edit",
+            Some(&icons::EDIT),
+            Some(crate::frames::files::key_label("E")),
+            t,
+        )
+        .on_press(|s: &mut State| {
             if let Some(ui) = ui(s) {
                 ui.edit();
             }
@@ -266,7 +273,14 @@ pub fn md_tools(source: bool, t: &Theme) -> Vec<El> {
     vec![
         well.child(rendered.on_press(set(false)))
             .child(as_source.on_press(set(true))),
-        tool_action("tb-btn-0", "Edit", Some(&icons::EDIT), Some("Ctrl+E"), t).on_press(|s: &mut State| {
+        tool_action(
+            "tb-btn-0",
+            "Edit",
+            Some(&icons::EDIT),
+            Some(crate::frames::files::key_label("E")),
+            t,
+        )
+        .on_press(|s: &mut State| {
             if let Some(ui) = ui(s) {
                 ui.edit();
             }
@@ -287,7 +301,7 @@ pub fn editor(editor: &super::Editor, file_name: &str, spans: Vec<Span>, t: &The
             text_input(&editor.edit, style::CODE)
                 .key(super::EDITOR_KEY)
                 .label(editor_name(file_name))
-                .shortcut_hint("Ctrl+S")
+                .shortcut_hint(crate::frames::files::key_label("S"))
                 .color(t.text)
                 .spans(spans)
                 .wrap()
@@ -325,20 +339,27 @@ pub fn editor_name(file_name: &str) -> String {
 /// The toolbar's controls of the editor: Save, a plain button with the lock (New stays the
 /// window's one Amber control), and Preview for a file that has a live preview.
 pub fn editor_tools(has_preview: bool, preview_open: bool, t: &Theme) -> Vec<El> {
-    let mut tools = vec![
-        tool_action("tb-btn-0", "Save", Some(&icons::LOCK), Some("Ctrl+S"), t).on_press(|s: &mut State| {
-            if let Some(ui) = ui(s) {
-                ui.save();
-            }
-        }),
-    ];
+    let mut tools = vec![tool_action(
+        "tb-btn-0",
+        "Save",
+        Some(&icons::LOCK),
+        Some(crate::frames::files::key_label("S")),
+        t,
+    )
+    .on_press(|s: &mut State| {
+        if let Some(ui) = ui(s) {
+            ui.save();
+        }
+    })];
     if has_preview {
         tools.push(
-            tool_action("tb-preview", "Preview", None, None, t).checked(preview_open).on_press(|s: &mut State| {
-                if let Some(ui) = ui(s) {
-                    ui.editor_view.preview_open = !ui.editor_view.preview_open;
-                }
-            }),
+            tool_action("tb-preview", "Preview", None, None, t)
+                .checked(preview_open)
+                .on_press(|s: &mut State| {
+                    if let Some(ui) = ui(s) {
+                        ui.editor_view.preview_open = !ui.editor_view.preview_open;
+                    }
+                }),
         );
     }
     tools
@@ -356,13 +377,20 @@ pub fn newer_banner(file: &OpenFile, t: &Theme) -> Option<El> {
     };
     // The time is a figure: mono.
     let time = words.len() - newer.at.len() - 1;
-    let show = button(keys("banner-btn"), "Show it", None, Variant::Secondary, Size::Sm, ButtonState::Enabled, t).on_press(
-        |s: &mut State| {
-            if let Some(ui) = ui(s) {
-                ui.show_newer();
-            }
-        },
-    );
+    let show = button(
+        keys("banner-btn"),
+        "Show it",
+        None,
+        Variant::Secondary,
+        Size::Sm,
+        ButtonState::Enabled,
+        t,
+    )
+    .on_press(|s: &mut State| {
+        if let Some(ui) = ui(s) {
+            ui.show_newer();
+        }
+    });
     Some(banner_spans(
         &icons::REFRESH,
         &words,
@@ -394,12 +422,20 @@ pub fn banner_el(icon: &'static Icon, words: &str, action: Option<El>, t: &Theme
 /// (task 2530, item 1). No board draws it: DW-1519's banner, its words wrapped (they are longer than a line).
 pub fn refused_banner(words: Option<&str>, t: &Theme) -> Option<El> {
     let words = words?;
-    let copy = button(keys("banner-btn"), "Save a copy", None, Variant::Secondary, Size::Sm, ButtonState::Enabled, t)
-        .on_press(|s: &mut State| {
-            if let Some(ui) = ui(s) {
-                ui.resolve(Keep::Both);
-            }
-        });
+    let copy = button(
+        keys("banner-btn"),
+        "Save a copy",
+        None,
+        Variant::Secondary,
+        Size::Sm,
+        ButtonState::Enabled,
+        t,
+    )
+    .on_press(|s: &mut State| {
+        if let Some(ui) = ui(s) {
+            ui.resolve(Keep::Both);
+        }
+    });
     Some(view_state::view_state(
         ViewState::Failed {
             key: "refused",
@@ -451,14 +487,22 @@ pub const READ_ONLY_HINT: &str = "Space for Preview \u{00B7} read-only here";
 pub fn status(doc: &TextDoc) -> Status {
     Status {
         dot: Dot::Green,
-        text: "Decrypted on this PC \u{00B7} the key never left it".into(),
+        text: concat!(
+            "Decrypted on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} the key never left it"
+        )
+        .into(),
         details: match doc.truncated {
             Some(cut) => format!(
                 "Showing the first {} of {} lines",
                 count_words(cut.shown),
                 count_words(cut.total)
             ),
-            None => "Space for Preview \u{00B7} Ctrl+E to edit".into(),
+            None => format!(
+                "Space for Preview \u{00B7} {} to edit",
+                crate::frames::files::key_label("E")
+            ),
         },
     }
 }

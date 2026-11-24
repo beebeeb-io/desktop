@@ -222,14 +222,24 @@ impl More {
             Conflict {
                 file: "contract".to_string(),
                 name: "Contract draft.pdf".to_string(),
-                here: side("This PC", Device::Computer, "Today, 09:12", "1.2 MB"),
+                here: side(
+                    concat!(beebeeb_engine::device_word_cap!()),
+                    Device::Computer,
+                    "Today, 09:12",
+                    "1.2 MB",
+                ),
                 there: side("Anna's iPad", Device::Tablet, "Today, 08:50", "1.3 MB"),
             },
             Conflict {
                 // A file of another folder (Documents), so the board's Files shows one such row.
                 file: "doc-shot-list".to_string(),
                 name: "Shot list.docx".to_string(),
-                here: side("This PC", Device::Computer, "Today, 09:12", "84 KB"),
+                here: side(
+                    concat!(beebeeb_engine::device_word_cap!()),
+                    Device::Computer,
+                    "Today, 09:12",
+                    "84 KB",
+                ),
                 there: side("Anna's iPhone", Device::Phone, "Today, 09:05", "86 KB"),
             },
         ]
@@ -271,8 +281,20 @@ impl More {
         if item.id == "contract" && !copy {
             return vec![
                 v("contract-v3", "Yesterday, 16:42", "1.2 MB", true, "Anna's iPhone"),
-                v("contract-v2", "Yesterday, 11:05", "1.1 MB", false, "This PC"),
-                v("contract-v1", "28 Oct, 14:20", "980 KB", false, "This PC"),
+                v(
+                    "contract-v2",
+                    "Yesterday, 11:05",
+                    "1.1 MB",
+                    false,
+                    concat!(beebeeb_engine::device_word_cap!()),
+                ),
+                v(
+                    "contract-v1",
+                    "28 Oct, 14:20",
+                    "980 KB",
+                    false,
+                    concat!(beebeeb_engine::device_word_cap!()),
+                ),
             ];
         }
         vec![Version {
@@ -306,7 +328,7 @@ impl More {
                 when: "Just now".to_string(),
                 size: from.size,
                 current: true,
-                changed_on: Some("This PC".to_string()),
+                changed_on: Some(concat!(beebeeb_engine::device_word_cap!()).to_string()),
             },
         );
         self.versions.insert(item.id.clone(), all);

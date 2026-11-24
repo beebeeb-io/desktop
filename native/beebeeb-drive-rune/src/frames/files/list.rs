@@ -10,15 +10,15 @@
 use std::borrow::Cow;
 
 use super::SortBy;
-use crate::State;
 use crate::source::DriveItem;
 use crate::theme::icons;
 use crate::theme::scale;
-use crate::theme::tokens::{Theme, type_};
-use crate::ui::file_list::{Fit, PcState, ROW_H, file_tile, format_date, pc_glyph, shared_cell};
+use crate::theme::tokens::{type_, Theme};
+use crate::ui::file_list::{file_tile, format_date, pc_glyph, shared_cell, Fit, PcState, ROW_H};
 use crate::ui::file_row::{self, RowLook};
 use crate::ui::kit;
-use rune::{Align, Cx, El, PointerPress, Tx, col, el};
+use crate::State;
+use rune::{col, el, Align, Cx, El, PointerPress, Tx};
 
 const COL_DATE_W: f32 = 132.0;
 const COL_SIZE_W: f32 = 84.0;
@@ -191,7 +191,7 @@ pub fn row_name(item: &DriveItem, date: &str, size: &str) -> String {
         parts.push(
             match state {
                 PcState::OnlineOnly => "online only",
-                PcState::Downloaded => "on this PC",
+                PcState::Downloaded => concat!("on ", beebeeb_engine::device_word!()),
                 PcState::AvailableOffline => "available offline",
             }
             .to_string(),

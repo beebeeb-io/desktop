@@ -38,7 +38,7 @@ use crate::ui::{caption, kit, status_line};
 /// The field's placeholder: one string for the field and for the gate's note.
 const PLACEHOLDER: &str = "Search names";
 /// Under the recent searches (DW-0801).
-const COVERS: &str = "Searches file and folder names on this PC, even offline. It doesn't look inside files.";
+const COVERS: &str = concat!("Searches file and folder names on ", beebeeb_engine::device_word!(), ", even offline. It doesn't look inside files.");
 /// Beside the pills while there are results (DW-0802).
 const SCOPE: &str = "Names only \u{00B7} Trash isn't searched";
 /// DW-0803's sentence.
@@ -165,7 +165,7 @@ fn status(s: &State, t: &Theme) -> El {
 }
 
 /// What the list-on-this-PC search says it can't do (DW-1105), where the status line stands.
-pub const PLAIN_NOTE: &str = "Searches file and folder names on this PC, even offline. It doesn't look inside files.";
+pub const PLAIN_NOTE: &str = concat!("Searches file and folder names on ", beebeeb_engine::device_word!(), ", even offline. It doesn't look inside files.");
 
 fn plain_note_line(t: &Theme) -> El {
     crate::ui::status_bar::frame(
@@ -229,7 +229,7 @@ fn search_field(s: &State, t: &Theme) -> El {
         text_input(&s.search, type_::SEARCH)
             .key(SEARCH_KEY)
             .label(PLACEHOLDER)
-            .shortcut_hint("Ctrl+F")
+            .shortcut_hint(concat!(beebeeb_engine::primary_key!(), "F"))
             .single_line()
             .color(t.text)
             .caret(t.accent_deep, t.text.alpha(0.15))
@@ -287,7 +287,7 @@ fn unavailable(reason: Option<(&'static str, &'static str)>, t: &Theme) -> El {
 fn searching(t: &Theme) -> El {
     col().key("search-searching").w_full().child(view_state(
         ViewState::Loading {
-            words: "Searching\u{2026} Looking through the names on this PC.",
+            words: concat!("Searching\u{2026} Looking through the names on ", beebeeb_engine::device_word!(), "."),
         },
         t,
     ))
@@ -470,7 +470,7 @@ fn header(t: &Theme) -> El {
         Column::new("date", "Date changed", Width::Fixed(DATE_W)),
         Column::new("size", "Size", Width::Fixed(SIZE_W)).align(Align::End),
         Column::new("shared", "Where", Width::Fixed(WHERE_W)),
-        Column::new("pc", "PC", Width::Fixed(PC_W)).align(Align::Center).spoken("On this PC"),
+        Column::new("pc", if cfg!(target_os = "macos") { "Mac" } else { "PC" }, Width::Fixed(PC_W)).align(Align::Center).spoken(concat!("On ", beebeeb_engine::device_word!())),
     ];
     file_row::header(&COLUMNS, None, t)
 }

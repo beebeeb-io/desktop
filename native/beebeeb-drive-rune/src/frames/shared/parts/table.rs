@@ -112,7 +112,7 @@ pub fn header(c: &Columns, t: &Theme) -> El {
     let head = |key: &'static str, words: &'static str| kit::label(key, words, type_::COLUMN_HEADER, t.text_tertiary);
     let mut pc = row().key("col-pc-cell").role("columnheader").w(c.pc_w).center();
     if !c.names[4].is_empty() {
-        pc = pc.label("On this PC").child(head("col-pc", c.names[4]));
+        pc = pc.label(concat!("On ", beebeeb_engine::device_word!())).child(head("col-pc", c.names[4]));
     }
     row()
         .key("column-headers")

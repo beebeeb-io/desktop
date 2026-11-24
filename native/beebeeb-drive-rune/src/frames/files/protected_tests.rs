@@ -4,14 +4,14 @@
 
 use super::protected::Protection;
 use super::protected_fixture::{LAPTOP_ID, MAIL_ID};
-use super::source::{Action, ActionError, BACKUPS_ID, BoardDrive, FilesFixture};
+use super::source::{Action, ActionError, BoardDrive, FilesFixture, BACKUPS_ID};
 use super::tests::*;
 use super::{Intent, Toast};
-use crate::State;
 use crate::init;
 use crate::shell::app::{Screen, Section, SettingsPane};
 use crate::shell::host;
 use crate::ui::sidebar::SidebarSection;
+use crate::State;
 use rune::{Env, Key, Mods, Runtime};
 
 const OF_WHAT_IS_INSIDE: &str =
@@ -103,7 +103,7 @@ fn the_sidebars_backups_shows_every_backup_and_new_is_dimmed() {
         [
             "12,418 photos",
             "4,120 photos",
-            "This PC",
+            concat!(beebeeb_engine::device_word_cap!()),
             "Not signed in",
             "Managed by Beebeeb"
         ]
@@ -115,9 +115,16 @@ fn the_sidebars_backups_shows_every_backup_and_new_is_dimmed() {
     assert_eq!(locks, [false, false, false, false, true]);
     assert_eq!(
         info(&rt, "row-2").label.as_deref(),
-        Some("Anna-Laptop, last backup Today, 09:30, 9.8 GB, This PC, online only")
+        Some(concat!(
+            "Anna-Laptop, last backup Today, 09:30, 9.8 GB, ",
+            beebeeb_engine::device_word_cap!(),
+            ", online only"
+        ))
     );
-    assert_eq!(text(&rt, "status-details"), "0 on this PC \u{00B7} 5 online only");
+    assert_eq!(
+        text(&rt, "status-details"),
+        concat!("0 on ", beebeeb_engine::device_word!(), " \u{00B7} 5 online only")
+    );
     let new = info(&rt, "new-btn");
     assert!(!new.focusable && (new.opacity - 0.4).abs() < 0.01, "New is dimmed");
     assert!(asked(&calls).is_empty());
@@ -269,7 +276,12 @@ fn the_file_menu_there_offers_only_what_reads() {
     right_click(&mut rt, "row-1-date");
     assert_eq!(
         menu_labels(&rt),
-        ["Open", "Preview", "Show in File Explorer", "Details"]
+        [
+            "Open",
+            "Preview",
+            concat!("Show in ", beebeeb_engine::file_manager!()),
+            "Details"
+        ]
     );
 }
 
@@ -702,8 +714,8 @@ fn the_sort_menu_changes_nothing_in_a_protected_folder() {
 
 #[test]
 fn a_folder_that_cannot_be_read_at_the_start_is_asked_for_once() {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
     struct Unreadable(Arc<AtomicU32>);
     impl crate::source::DriveSource for Unreadable {
         fn list(&self, _: Option<&str>) -> Result<crate::source::Listing, crate::source::SourceError> {

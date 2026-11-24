@@ -45,7 +45,7 @@ fn entries(ui: &Ui, which: Menu) -> Vec<Entry> {
                     Entry::Item {
                         id: label,
                         label,
-                        shortcut: Some("Ctrl\u{2212}"),
+                        shortcut: Some(concat!(beebeeb_engine::primary_key!(), "\u{2212}")),
                         checked,
                         danger: false,
                         off: false,
@@ -54,7 +54,7 @@ fn entries(ui: &Ui, which: Menu) -> Vec<Entry> {
                     Entry::Item {
                         id: label,
                         label,
-                        shortcut: Some("Ctrl+Plus"),
+                        shortcut: Some(concat!(beebeeb_engine::primary_key!(), "Plus")),
                         checked,
                         danger: false,
                         off: false,
@@ -66,7 +66,7 @@ fn entries(ui: &Ui, which: Menu) -> Vec<Entry> {
             out
         }
         Menu::More => vec![
-            Entry::item("save", "Save to PC\u{2026}"),
+            Entry::item("save", if cfg!(target_os = "macos") { "Save to Mac\u{2026}" } else { "Save to PC\u{2026}" }),
             Entry::item("move", "Move\u{2026}"),
             Entry::keyed("rename", "Rename", "F2"),
             Entry::item("duplicate", "Duplicate"),
@@ -110,7 +110,7 @@ pub fn menu(ui: &Ui, open: OpenMenu, t: &Theme) -> El {
 pub fn toast_layer(toast: &Toast, bottom: f32, _over_photos: bool, t: &Theme) -> El {
     let left_words;
     let (lead, words): (Lead, &str) = match toast {
-        Toast::Kept => (Lead::Lock, "Keeping the original on this PC"),
+        Toast::Kept => (Lead::Lock, concat!("Keeping the original on ", beebeeb_engine::device_word!())),
         Toast::Trashed(_) => (Lead::Check, "Moved to Trash"),
         Toast::NotYet => (Lead::None, "Not available in this version yet"),
         Toast::Words(words) => (Lead::None, words),
@@ -121,7 +121,7 @@ pub fn toast_layer(toast: &Toast, bottom: f32, _over_photos: bool, t: &Theme) ->
         }
     };
     let action = if matches!(toast, Toast::Trashed(_)) {
-        Some(toast_action("Undo", Some("Ctrl+Z"), |s: &mut State| {
+        Some(toast_action("Undo", Some(concat!(beebeeb_engine::primary_key!(), "Z")), |s: &mut State| {
             s.photos.undo();
         }, t))
     } else if toast.can_retry() {
