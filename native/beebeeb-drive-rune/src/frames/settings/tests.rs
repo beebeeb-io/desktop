@@ -162,7 +162,7 @@ fn esc_goes_back_from_every_settings_section() {
         settle(&mut rt);
         assert_eq!(on_settings(&rt), Some(pane), "{pane:?} opened");
         // Esc with nothing focused, and with each of the first Tab stops focused.
-        for tabs in 0..4 {
+        for tabs in 0..14 {
             let mut rt = runtime("");
             rt.update(|s, _| {
                 host::dispatch(s, Event::OpenSettings(pane));
