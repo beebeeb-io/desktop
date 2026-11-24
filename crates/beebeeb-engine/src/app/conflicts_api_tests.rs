@@ -264,7 +264,14 @@ fn choice_list_behind_a_locked_screen_is_empty_not_a_failure() {
         .unlock_with_phrase(Zeroizing::new(rig.phrase.clone()))
         .expect("the phrase unlocks");
     let before_lock = rig.engine.session_turn();
-    rig.engine.lock_screen().expect("the screen locks");
+    // The restore of a session from before can leave the screen locked already: then there is nothing to lock.
+    let _ = rig.engine.lock_screen();
+    assert_eq!(
+        rig.engine.lock_state(),
+        crate::app::lock_api::LockState::ScreenLocked,
+        "the screen is locked"
+    );
+    assert!(rig.engine.has_session(), "a session is in memory behind the lock");
     let asked = requests(&rig);
     let now = rig.engine.session_turn();
     let listed = rig.engine.conflicts_for(now).expect("an empty list, not a refusal");
