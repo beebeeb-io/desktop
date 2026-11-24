@@ -46,7 +46,7 @@ fn no_hello_offers_the_password_and_the_password_turns_app_lock_off() {
     assert_eq!(switch(&source), Some(true));
     assert_eq!(
         source.notice(),
-        Some("App lock is still on: Windows Hello is not set up on this PC. Use your password instead.")
+        Some(beebeeb_engine::os_words::for_this_os("App lock is still on: Windows Hello is not set up on this PC. Use your password instead.").as_str())
     );
     let offer = offered(&source).expect("Use your password is offered");
     assert!(
@@ -73,7 +73,7 @@ fn a_cancelled_hello_offers_the_password_for_a_longer_delay() {
     settle(&mut source);
     assert_eq!(
         source.notice(),
-        Some("The lock delay was not changed: Windows Hello did not confirm it's you.")
+        Some(beebeeb_engine::os_words::for_this_os("The lock delay was not changed: Windows Hello did not confirm it's you.").as_str())
     );
     let offer = offered(&source).expect("Use your password is offered");
     assert!(!offer.turning_off, "for the delay: {offer:?}");
@@ -91,7 +91,7 @@ fn a_cancelled_hello_offers_the_password_for_a_longer_delay() {
     }
     assert_eq!(
         source.notice(),
-        Some("The lock delay was not changed: Windows Hello is not set up on this PC. Use your password instead.")
+        Some(beebeeb_engine::os_words::for_this_os("The lock delay was not changed: Windows Hello is not set up on this PC. Use your password instead.").as_str())
     );
 }
 

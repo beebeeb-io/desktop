@@ -28,6 +28,7 @@ accounts
 ack
 acknowledged
 acquire
+active
 activity
 add
 added
@@ -101,6 +102,7 @@ bases
 batch
 be
 beat
+became
 because
 beebeeb
 beebeeb-sync
@@ -208,6 +210,7 @@ connected
 connection
 content
 content_unknown
+contents_checked
 context
 continued
 continuing
@@ -285,6 +288,7 @@ dispatch
 dispatched
 dnxhd
 does
+domain
 done
 down
 download
@@ -530,6 +534,7 @@ local_id
 local_prunable
 locally-removed
 locally-renamed
+location
 lock
 locked
 longer
@@ -734,6 +739,7 @@ post-queue
 pre-upload
 presentation_read_failed
 presented
+preserved
 preserving
 previews
 previous
@@ -786,6 +792,7 @@ re-download
 re-materialise
 re-snapshot
 reach
+reached
 reaches
 reactivation
 read
@@ -804,6 +811,7 @@ receiver
 reconcile
 reconcile_os_state
 reconcile_placeholder_state
+reconciler
 record
 recorded
 records
@@ -836,6 +844,7 @@ removing
 ren
 rename
 renamed
+reopened
 repair
 replaced
 replacement
@@ -864,6 +873,7 @@ restarting
 restore
 restore_bookkeeping_failed
 restored
+result
 resume
 resumed
 ret
@@ -926,6 +936,7 @@ setting
 settings
 settled
 settling
+setup
 several
 shard
 shards
@@ -1087,6 +1098,7 @@ unavailable
 unchanged
 under
 undone
+unexpected
 unfinished
 uninstall
 unjournalled
@@ -1155,6 +1167,7 @@ web
 went
 were
 what
+when
 where
 which
 while
