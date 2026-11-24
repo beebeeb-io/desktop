@@ -255,7 +255,7 @@ fn every_frame_of_the_editor_draws_its_words_in_both_themes() {
         for dark in [false, true] {
             let rt = scene(frame, dark);
             for (key, text) in *expected {
-                assert_eq!(words(&rt, key), *text, "{frame} {key} (dark: {dark})");
+                assert_eq!(words(&rt, key), beebeeb_engine::os_words::for_this_os(text), "{frame} {key} (dark: {dark})");
             }
             for chrome in ["caption-bar", "toolbar", "rib", "status-bar"] {
                 assert!(has(&rt, chrome), "{frame} has {chrome}");

@@ -2,16 +2,16 @@
 //! Its three controls act on the selection: the Available offline switch, Share… (DW-0407) and
 //! Version history (DW-0413).
 
-use super::Intent;
 use super::source::Details;
-use crate::State;
+use super::Intent;
 use crate::source::DriveItem;
 use crate::theme::icons;
 use crate::theme::scale;
-use crate::theme::tokens::{Theme, radius, type_};
+use crate::theme::tokens::{radius, type_, Theme};
 use crate::ui::detail_pane::{action_button, encrypted_badge, meta_row, page_preview, pane, preview};
 use crate::ui::{file_list, kit};
-use rune::{El, Span, Tx, col, el, row};
+use crate::State;
+use rune::{col, el, row, El, Span, Tx};
 
 /// `ui::detail_pane::switch_card`, with a switch that switches: a card with a title, a second line
 /// and the switch. Keys: `<key>-card`, `<key>-label`, `<key>-detail`, `<key>-switch`, `<key>-knob`.
@@ -101,7 +101,11 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, pin: Option<bool>, t: &
             .key("free-up-box")
             .role("button")
             .label("Free up space")
-            .description("Removes the copy on this PC. It stays in Beebeeb and downloads again when you open it.")
+            .description(concat!(
+                "Removes the copy on ",
+                beebeeb_engine::device_word!(),
+                ". It stays in Beebeeb and downloads again when you open it."
+            ))
             .w_full()
             .h(22.0)
             .gap(scale::space::S7)

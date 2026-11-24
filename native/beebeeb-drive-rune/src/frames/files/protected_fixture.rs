@@ -119,7 +119,11 @@ pub fn entry(item: &DriveItem) -> Option<BackupEntry> {
     let (kind, status, managed) = match item.id.as_str() {
         "b-iphone" => (BackupKind::Phone, Some("12,418 photos"), false),
         "b-ipad" => (BackupKind::Tablet, Some("4,120 photos"), false),
-        LAPTOP_ID => (BackupKind::Laptop, Some("This PC"), false),
+        LAPTOP_ID => (
+            BackupKind::Laptop,
+            Some(concat!(beebeeb_engine::device_word_cap!())),
+            false,
+        ),
         "b-old-iphone" => (BackupKind::Phone, Some("Not signed in"), false),
         MAIL_ID => (BackupKind::Mail, Some("Managed by Beebeeb"), true),
         "b-laptop-contacts" => (BackupKind::Contacts, None, false),

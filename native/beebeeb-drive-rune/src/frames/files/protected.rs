@@ -17,22 +17,22 @@
 
 use super::source::{Action, ActionError};
 use super::{Intent, Toast};
-use crate::State;
 use crate::shell::app::{Event, Route, Screen, Section, SettingsPane};
 use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
 use crate::source::DriveItem;
 use crate::theme::icons;
 use crate::theme::icons_settings;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::backups_kit::{self, Md, TileTone};
 use crate::ui::banner::{self, Banner, Run, Tone};
-use crate::ui::file_list::{PcState, format_date, pc_glyph};
-use crate::ui::settings_dialog::{self, Weight};
 use crate::ui::button::{self, ButtonState, Size, Variant};
+use crate::ui::file_list::{format_date, pc_glyph, PcState};
 use crate::ui::file_row::{self, Column, RowLook, Width};
+use crate::ui::settings_dialog::{self, Weight};
 use crate::ui::view_state::{self, ViewState};
 use crate::ui::{dialog, kit};
-use rune::{Align, Cx, El, Icon, Key, KeyEvent, TextStyle, Tx, el, row};
+use crate::State;
+use rune::{el, row, Align, Cx, El, Icon, Key, KeyEvent, TextStyle, Tx};
 
 /// The words of the message, as the source hands them over.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,8 +80,11 @@ pub struct BackupEntry {
 }
 
 /// What the window says once the local file list was rebuilt (144b moved a damaged `state.db` aside).
-pub const REBUILT_WORDS: &str =
-    "Beebeeb rebuilt its list of your files on this PC. Nothing was lost; your files are on the server.";
+pub const REBUILT_WORDS: &str = concat!(
+    "Beebeeb rebuilt its list of your files on ",
+    beebeeb_engine::device_word!(),
+    ". Nothing was lost; your files are on the server."
+);
 
 fn dismiss_rebuilt(s: &mut State, _: &mut Tx) {
     s.actions.protected.rebuilt = None;
@@ -458,7 +461,7 @@ pub fn status_words(s: &State) -> Option<String> {
         .filter(|i| i.pc_status.as_deref() == Some("online_only"))
         .count();
     Some(format!(
-        "{} on this PC \u{00B7} {} online only",
+        concat!("{} on ", beebeeb_engine::device_word!(), " \u{00B7} {} online only"),
         s.listing.items.len() - online,
         online
     ))
@@ -481,9 +484,13 @@ pub fn column_headers(s: &State, t: &Theme) -> Option<El> {
         Column::new("date", date, Width::Fixed(COL_DATE_W)),
         Column::new("size", "Size", Width::Fixed(COL_SIZE_W)).align(Align::End),
         Column::new("shared", shared, Width::Fixed(shared_w)),
-        Column::new("pc", "PC", Width::Fixed(COL_PC_W))
+        Column::new(
+            "pc",
+            if cfg!(target_os = "macos") { "Mac" } else { "PC" },
+            Width::Fixed(COL_PC_W),
+        )
             .align(Align::Center)
-            .spoken("On this PC"),
+            .spoken(concat!("On ", beebeeb_engine::device_word!())),
     ];
     Some(file_row::header(&columns, Some((0, true)), t))
 }
@@ -501,16 +508,17 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
     let date = format_date(&item.modified_at);
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
 
-
-    let tile = file_row::tile_frame(&k).fill(t.tile).child(match entry.as_ref().map(|e| e.kind) {
-        None | Some(BackupKind::Folder) => crate::ui::file_icon::file_icon(
-            format!("{k}-icon"),
-            crate::theme::file_icons::icon_for_item(item),
-            14.0,
-            t,
-        ),
-        Some(kind) => kit::glyph(format!("{k}-icon"), kind.icon(), 14.0, t.text_secondary),
-    });
+    let tile = file_row::tile_frame(&k)
+        .fill(t.tile)
+        .child(match entry.as_ref().map(|e| e.kind) {
+            None | Some(BackupKind::Folder) => crate::ui::file_icon::file_icon(
+                format!("{k}-icon"),
+                crate::theme::file_icons::icon_for_item(item),
+                14.0,
+                t,
+            ),
+            Some(kind) => kit::glyph(format!("{k}-icon"), kind.icon(), 14.0, t.text_secondary),
+        });
     let mut marks = Vec::new();
     let managed = entry.as_ref().is_some_and(|e| e.managed);
     if managed {
@@ -546,7 +554,7 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
     said.extend(pc_state.map(|state| {
         match state {
             PcState::OnlineOnly => "online only",
-            PcState::Downloaded => "on this PC",
+            PcState::Downloaded => concat!("on ", beebeeb_engine::device_word!()),
             PcState::AvailableOffline => "available offline",
         }
         .to_string()
@@ -580,8 +588,20 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
         last,
         pc,
     ];
-    let look = RowLook { selected, ..RowLook::default() };
-    Some(file_row::row_with(&k, &said.join(", "), tile, &item.name, marks, cells, look, t))
+    let look = RowLook {
+        selected,
+        ..RowLook::default()
+    };
+    Some(file_row::row_with(
+        &k,
+        &said.join(", "),
+        tile,
+        &item.name,
+        marks,
+        cells,
+        look,
+        t,
+    ))
 }
 
 fn open_settings(s: &mut State, _: &mut Tx) {
@@ -620,7 +640,11 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
     let card = dialog::dialog(
         dialog::Dialog {
             alert: true,
-            head: dialog::Head::Alert { tile, title: &words.title, sub: &words.body },
+            head: dialog::Head::Alert {
+                tile,
+                title: &words.title,
+                sub: &words.body,
+            },
             foot: dialog::Foot::Row(vec![ok.w(161.0), open_settings.w(163.0)]),
             enter: Some(0),
             ..dialog::Dialog::new("dlg", &words.title, 380.0)
