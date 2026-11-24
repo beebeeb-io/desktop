@@ -101,7 +101,7 @@ pub fn side_item(
         16.0,
         if on { t.text } else { t.text_tertiary },
     );
-    side_row(label, glyph, count, on, shortcut, t)
+    side_row(label, label, glyph, count, on, shortcut, t)
 }
 
 /// A sidebar place: the folder art in its tint (a selected row keeps the tint), or the line
@@ -117,11 +117,23 @@ pub fn section_item(
         return side_item(label, section.icon(), count, on, section.shortcut(), t);
     };
     let glyph = file_icon(format!("{label}-icon"), fi, 16.0, t);
-    side_row(label, glyph, count, on, section.shortcut(), t)
+    side_row(label, label, glyph, count, on, section.shortcut(), t)
+}
+
+/// A pinned folder (`Pinned`): its art, its name. Keys: `pin-<id>-row`, `pin-<id>-icon`, `pin-<id>`.
+pub fn pinned_item(id: &str, name: &str, t: &Theme) -> El {
+    let key = format!("pin-{id}");
+    let fi = FileIcon {
+        id: IconId::Folder,
+        tint: Tint::Folder,
+    };
+    let glyph = file_icon(format!("{key}-icon"), fi, 16.0, t);
+    side_row(&key, name, glyph, None, false, "", t)
 }
 
 fn side_row(
-    label: &'static str,
+    key: &str,
+    label: &str,
     glyph: El,
     count: Option<Count>,
     on: bool,
