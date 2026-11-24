@@ -379,10 +379,10 @@ impl UpdatesPart {
             // Keeps the build's mark in the binary: the release workflow reads it there (as `windows_release_trust`
             // does).
             std::hint::black_box(BUILD_MARK);
-            if let Ok(path) = DesktopConfig::path_for(identity) {
-                if !seed_first_run(&path, built_channel()) {
-                    log("settings: the release channel of a fresh install was not written down");
-                }
+            if let Ok(path) = DesktopConfig::path_for(identity)
+                && !seed_first_run(&path, built_channel())
+            {
+                log("settings: the release channel of a fresh install was not written down");
             }
             let (channel, from) = channels(config, built_channel());
             let folder = rune::dirs::AppDirs::new(crate::shell::identity::AppIdentity::CURRENT.state_dir_id())

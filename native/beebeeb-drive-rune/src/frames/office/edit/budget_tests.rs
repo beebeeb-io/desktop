@@ -170,7 +170,7 @@ fn office_word_budget_a_caret_move_and_a_dirty_strip_fit_a_frame() {
         rt.frame(1.0 / 60.0);
     });
     eprintln!("word budget: caret move + dirty strip frame {frame:?}");
-    assert!(frame < GATE, "a Word frame with a caret move took {frame:?}");
+    assert!(frame < bound(), "a Word frame with a caret move took {frame:?}");
 }
 
 fn full() -> SheetView {
