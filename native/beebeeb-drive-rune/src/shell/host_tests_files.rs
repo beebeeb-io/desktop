@@ -718,6 +718,25 @@ fn a_sidebar_click_ends_search_and_its_typed_word() {
     assert!(!rt.state.frames.find.open, "Search is over");
 }
 
+/// Pressing the section the window is already on (Files while on Files) is a section press too: it closes Search.
+#[test]
+fn section_press_on_the_current_section_closes_search() {
+    let (_engine, _platform, mut rt) = fixture();
+    rt.update(|s, tx| {
+        crate::frames::search::open(s, tx);
+        s.search = rune::TextEdit::new("contract");
+    });
+    settle(&mut rt);
+    assert!(rt.state.frames.find.open);
+    rt.update(|s, _| {
+        crate::shell::host::dispatch(s, Event::Navigate(Route::section(Section::Files)));
+    });
+    settle(&mut rt);
+    assert!(!rt.state.frames.find.open, "Search is over");
+    assert_eq!(rt.state.search.text, "");
+    assert_eq!(registry::group_for(&rt.state.shell.app), FrameGroup::Section(Section::Files));
+}
+
 /// A message that went takes what its Try again held with it.
 #[test]
 fn what_try_again_holds_goes_when_its_message_goes() {
