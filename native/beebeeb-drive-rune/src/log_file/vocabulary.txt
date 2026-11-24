@@ -1,6 +1,6 @@
-!
 # The words of every string literal and field name at the engine's and this crate's tracing calls, one per line,
 # sorted, lowercase. A test (vocabulary_sync.rs) fails, naming the words, when a log call's word is missing here.
+!
 $home
 +
 0x
@@ -72,6 +72,7 @@ asked_ms
 asking
 at
 at_ms
+at_root
 atomic
 attempt
 attempting
@@ -267,6 +268,7 @@ descendant
 descending
 desktop
 dest
+detail
 device
 device_folder_id
 device_id
@@ -344,6 +346,7 @@ exclude
 exclusion
 existing
 exists
+exit
 exited
 expires_in
 explorer
