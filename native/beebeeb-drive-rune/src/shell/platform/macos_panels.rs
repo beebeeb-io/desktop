@@ -7,7 +7,7 @@
 //! under the sandbox is inside the container (HOME is the container).
 
 use std::collections::BTreeMap;
-use std::ffi::{c_char, c_int, c_long, c_ulong, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_ulong, c_void};
 use std::path::{Path, PathBuf};
 
 use super::SaveAnswer;
@@ -132,23 +132,20 @@ fn on_main<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     if unsafe { pthread_main_np() } == 1 {
         return f();
     }
-    struct Job<F, T> {
-        f: Option<F>,
-        out: Option<T>,
+    extern "C" fn run(ctx: *mut c_void) {
+        let job = unsafe { &mut *(ctx as *mut Option<Box<dyn FnOnce() + '_>>) };
+        if let Some(f) = job.take() {
+            f();
+        }
     }
-    extern "C" fn run<F: FnOnce() -> T, T>(ctx: *mut c_void) {
-        let job = unsafe { &mut *(ctx as *mut Job<F, T>) };
-        job.out = Some((job.f.take().expect("job runs once"))());
+    let mut out: Option<T> = None;
+    {
+        let slot = &mut out;
+        let mut job: Option<Box<dyn FnOnce() + '_>> = Some(Box::new(move || *slot = Some(f())));
+        // dispatch_sync_f returns only after `run` ended, so the borrows above outlive the call.
+        unsafe { dispatch_sync_f(&raw const _dispatch_main_q, &mut job as *mut _ as *mut c_void, run) };
     }
-    let mut job = Job { f: Some(f), out: None };
-    unsafe {
-        dispatch_sync_f(
-            &raw const _dispatch_main_q,
-            &mut job as *mut _ as *mut c_void,
-            run::<_, T>,
-        )
-    };
-    job.out.expect("main queue ran the job")
+    out.expect("main queue ran the job")
 }
 
 const MODAL_OK: c_long = 1;
