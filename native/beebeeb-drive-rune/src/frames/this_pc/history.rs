@@ -62,7 +62,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(chrome::status_line(
             s,
             ui,
-            "History of the last 30 days, on this PC only".into(),
+            concat!("History of the last 30 days, on ", beebeeb_engine::device_word!(), " only").into(),
             &t,
         ));
     let window = super::window(s, cx, Section::SyncHistory, main);
@@ -370,7 +370,7 @@ fn empty(t: &Theme) -> El {
             key: "empty",
             icon: &base::SYNC_HISTORY,
             title: "No changes yet",
-            body: "Changes from this PC and your other devices show here for 30 days.",
+            body: concat!("Changes from ", beebeeb_engine::device_word!(), " and your other devices show here for 30 days."),
             action: None,
         },
         t,

@@ -50,7 +50,7 @@ pub const NOT_READ: &str = crate::frames::backups::source::DEVICES_NOT_READ;
 /// What it says when the Backups listing was cut short.
 pub const NOT_ALL: &str = "Not every device could be listed.";
 /// What it says when nothing has synced on this PC yet (the keys of the other devices' files are not here).
-pub const NOT_SYNCED: &str = "Your other devices show here once this PC has synced.";
+pub const NOT_SYNCED: &str = concat!("Your other devices show here once ", beebeeb_engine::device_word!(), " has synced.");
 /// A device folder whose name does not open on this PC.
 pub const UNNAMED: &str = "Unnamed device";
 
@@ -61,7 +61,7 @@ pub const SIGNED_OUT: &str = "You're no longer signed in. Nothing was deleted.";
 pub const NOT_FOUND: &str = "This backup could not be found. Nothing was deleted.";
 pub const NOT_ALLOWED: &str = "This backup can't be deleted from here. Nothing was deleted.";
 pub const UNCONFIRMED: &str = "Beebeeb didn't confirm the delete. The list is read again to show what was done.";
-pub const NOT_CHECKED: &str = "Couldn't check this backup on this PC. Nothing was deleted.";
+pub const NOT_CHECKED: &str = concat!("Couldn't check this backup on ", beebeeb_engine::device_word!(), ". Nothing was deleted.");
 
 /// The engine handle as the device calls use it. The real one is [`Engine`]; tests pass a fake.
 pub trait DevicesEngine: Send + Sync + 'static {

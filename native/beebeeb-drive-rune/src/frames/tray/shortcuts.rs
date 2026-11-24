@@ -45,7 +45,7 @@ pub struct Shortcuts {
 }
 
 pub const TITLE: &str = "Commands and keyboard shortcuts";
-pub const SUB: &str = "Ctrl+/ or the account menu. Each command lives in the window, a right-click menu or Settings; this list shows where.";
+pub const SUB: &str = concat!(beebeeb_engine::primary_key!(), "/ or the account menu. Each command lives in the window, a right-click menu or Settings; this list shows where.");
 /// `.wn-dlg`: "width: 1120px", never nearer than 24 px to the window's edges.
 pub const WIDTH: f32 = 1120.0;
 const MARGIN: f32 = 24.0;
@@ -216,9 +216,23 @@ fn column(c: usize, list: &List, t: &Theme) -> El {
             .pb(6.0),
         );
     for (r, (name, home)) in list.commands.iter().enumerate() {
-        column = column.child(command(c, r, name, home, t));
+        let (name, home) = (os_text(name), os_text(home));
+        column = column.child(command(c, r, &name, &home, t));
     }
     column
+}
+
+/// The board's Windows words in this OS's: "Ctrl+Shift+N" becomes "\u{21E7}\u{2318}N" on a Mac, "File Explorer" "Finder".
+/// Windows (and anything but macOS) gets the board's text unchanged.
+fn os_text(board: &str) -> String {
+    if !cfg!(target_os = "macos") {
+        return board.to_string();
+    }
+    let board = board.replace("File Explorer", beebeeb_engine::os_words::file_manager());
+    match board.strip_prefix("Ctrl+") {
+        Some(rest) if !rest.contains(' ') => beebeeb_engine::os_words::shortcut(rest),
+        _ => board,
+    }
 }
 
 /// `.wn-cmd`: the command at the start, its key or its home at the end, on one baseline

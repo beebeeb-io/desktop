@@ -88,7 +88,7 @@ fn open_in_file_explorer_is_the_last_icon_button_of_every_window_and_opens_the_b
         let button = info(&rt, "open-explorer");
         assert_eq!(
             (button.role, button.label.as_deref(), button.focusable),
-            ("button", Some("Open in File Explorer"), true),
+            ("button", Some(beebeeb_engine::os_words::for_this_os("Open in File Explorer").as_str()), true),
             "{name}"
         );
         // After the details button, before the hairline and New: where the board draws it.

@@ -93,10 +93,10 @@ fn synced_by_note(by: &str) -> String {
 
 pub const TITLE: &str = "Found while sync was paused";
 pub const UPLOAD: &str = "Upload to my Beebeeb";
-pub const KEEP: &str = "Keep on this PC only";
-pub const SHOW: &str = "Show in File Explorer";
+pub const KEEP: &str = concat!("Keep on ", beebeeb_engine::device_word!(), " only");
+pub const SHOW: &str = concat!("Show in ", beebeeb_engine::file_manager!());
 pub const KEEP_WORDS: &str =
-    "Keep on this PC only moves them into “Beebeeb - not uploaded”, next to your Beebeeb folder. Nothing is deleted.";
+    concat!("Keep on ", beebeeb_engine::device_word!(), " only moves them into “Beebeeb - not uploaded”, next to your Beebeeb folder. Nothing is deleted.");
 
 impl Card {
     /// Only what the engine's review held, or what the last keep did: never a sample.

@@ -290,11 +290,11 @@ fn the_gate_opening_says_what_unsaved_editing_this_pc_kept() {
     let rt = runtime_keeping(2);
     assert_eq!(rt.state.actions.toast, Some(Toast::KeptEdits(2)));
     let drawn = texts(&rt);
-    assert!(drawn.contains("Unsaved changes to 2 files were kept on this PC."), "{drawn}");
+    assert!(drawn.contains(beebeeb_engine::os_words::for_this_os("Unsaved changes to 2 files were kept on this PC.").as_str()), "{drawn}");
 
     let rt = runtime_keeping(1);
     assert_eq!(rt.state.actions.toast, Some(Toast::KeptEdits(1)));
-    assert!(texts(&rt).contains("Unsaved changes to a file were kept on this PC."));
+    assert!(texts(&rt).contains(beebeeb_engine::os_words::for_this_os("Unsaved changes to a file were kept on this PC.").as_str()));
 }
 
 #[test]

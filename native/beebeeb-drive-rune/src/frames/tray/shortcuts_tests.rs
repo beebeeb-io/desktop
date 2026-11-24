@@ -112,8 +112,8 @@ fn ctrl_slash_opens_the_first_page_with_every_command_and_its_home() {
     assert_eq!(drawn(&rt), capitals(APP));
     for (c, list) in APP.iter().enumerate() {
         for (r, (name, home)) in list.commands.iter().enumerate() {
-            assert_eq!(info(&rt, &format!("sc-{c}-{r}-name")).text.as_deref(), Some(*name));
-            assert_eq!(info(&rt, &format!("sc-{c}-{r}-home")).text.as_deref(), Some(*home));
+            assert_eq!(info(&rt, &format!("sc-{c}-{r}-name")).text.as_deref(), Some(os(name).as_str()));
+            assert_eq!(info(&rt, &format!("sc-{c}-{r}-home")).text.as_deref(), Some(os_home(home).as_str()));
             assert!(has(&rt, &format!("sc-{c}-{r}-line")));
         }
     }
@@ -280,8 +280,8 @@ fn the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document() {
         let last = list.commands.len() - 1;
         for r in [0, last] {
             let (name, home) = list.commands[r];
-            assert_eq!(info(&rt, &format!("sc-{c}-{r}-name")).text.as_deref(), Some(name));
-            assert_eq!(info(&rt, &format!("sc-{c}-{r}-home")).text.as_deref(), Some(home));
+            assert_eq!(info(&rt, &format!("sc-{c}-{r}-name")).text.as_deref(), Some(os(name).as_str()));
+            assert_eq!(info(&rt, &format!("sc-{c}-{r}-home")).text.as_deref(), Some(os_home(home).as_str()));
         }
         assert!(
             !has(&rt, &format!("sc-{c}-{}", last + 1)),
@@ -306,4 +306,11 @@ fn the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document() {
     // Ctrl+/ from the document opens the same lists again.
     open(&mut rt);
     assert_eq!(drawn(&rt), capitals(EDITOR));
+}
+
+fn os(board: &str) -> String {
+    beebeeb_engine::os_words::for_this_os(board)
+}
+fn os_home(home: &str) -> String {
+    os(home)
 }

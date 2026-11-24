@@ -102,17 +102,17 @@ const EVENTS: usize = 200;
 
 /// What the window says when a change the person asked for did not happen. Fixed sentences: never a name or an
 /// engine's words.
-pub const NOT_SYNCING: &str = "Sync isn't running, so nothing was removed from this PC.";
-pub const NOT_REMOVED: &str = "Couldn't remove every item from this PC. Try again.";
+pub const NOT_SYNCING: &str = concat!("Sync isn't running, so nothing was removed from ", beebeeb_engine::device_word!(), ".");
+pub const NOT_REMOVED: &str = concat!("Couldn't remove every item from ", beebeeb_engine::device_word!(), ". Try again.");
 pub const NOT_RETRIED: &str = "Couldn't try every item again.";
 /// Task 2530: what a way out of a parked change did, or why it did nothing. Fixed sentences.
 pub const SETTLE_MOVED: &str = "This change moved since you saw it. Nothing was changed.";
-pub const SETTLE_NOT_KEPT: &str = "Couldn't keep this PC's version, so nothing was changed.";
-pub const SETTLE_BYTES_HERE: &str = "This PC has the bytes of this change, so it wasn't removed.";
+pub const SETTLE_NOT_KEPT: &str = concat!("Couldn't keep ", beebeeb_engine::device_word!(), "'s version, so nothing was changed.");
+pub const SETTLE_BYTES_HERE: &str = concat!(beebeeb_engine::device_word_cap!(), " has the bytes of this change, so it wasn't removed.");
 pub const SETTLE_FAILED: &str = "Couldn't do that. The change is still listed.";
-pub const SETTLED_KEPT_OTHER: &str = "This PC's version is in Changes not sent, in Beebeeb's app data.";
-pub const SETTLED_KEPT_BOTH: &str = "This PC's version is queued as a new file next to the original.";
-pub const SETTLED_SENT_AGAIN: &str = "This PC's version is queued to be sent.";
+pub const SETTLED_KEPT_OTHER: &str = concat!(beebeeb_engine::device_word_cap!(), "'s version is in Changes not sent, in Beebeeb's app data.");
+pub const SETTLED_KEPT_BOTH: &str = concat!(beebeeb_engine::device_word_cap!(), "'s version is queued as a new file next to the original.");
+pub const SETTLED_SENT_AGAIN: &str = concat!(beebeeb_engine::device_word_cap!(), "'s version is queued to be sent.");
 pub const SETTLED_REMOVED: &str = "Removed from the list. The file on Beebeeb is as it was.";
 
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is a state database in a folder of

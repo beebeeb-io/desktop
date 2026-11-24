@@ -153,7 +153,7 @@ fn about_draws_no_row_to_release_notes_that_do_not_open() {
     assert_eq!(text(&rt, "item-1-2-title"), "Release notes", "drawn where they open");
 
     let mut rt = about_on(BoardSettings::new().with_older_channel().with_notes_closed());
-    assert_eq!(text(&rt, "item-1-2-sub"), "This PC runs 0.9.1, from the Beta channel.");
+    assert_eq!(text(&rt, "item-1-2-sub"), beebeeb_engine::os_words::for_this_os("This PC runs 0.9.1, from the Beta channel.").as_str());
     assert_ne!(element(&rt, "item-1-2").expect("the older channel's row").role, "link");
     assert!(element(&rt, "item-1-3").is_none(), "no Release notes row");
     click(&mut rt, "item-1-2");

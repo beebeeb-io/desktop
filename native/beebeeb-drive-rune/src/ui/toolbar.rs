@@ -237,7 +237,7 @@ fn search_field_box(input: El, t: &Theme) -> El {
         .center_y()
         .child(kit::glyph("search-icon", &icons::SEARCH, 13.0, t.text_tertiary))
         .child(input)
-        .child(kbd("kbd-hint", "Ctrl+F", t))
+        .child(kbd("kbd-hint", concat!(beebeeb_engine::primary_key!(), "F"), t))
 }
 
 /// The title block (`.mk-title`, key `folder-info`): the title, and under it the info line
@@ -397,13 +397,13 @@ fn bar_for(bar: Bar, file: bool, t: &Theme) -> El {
     let on_reveal = on_explorer.clone();
     let mut explorer_btn = tool_button(
         "open-explorer",
-        "Open in File Explorer",
+        concat!("Open in ", beebeeb_engine::file_manager!()),
         &crate::theme::icons_settings::FOLDER,
         16.0,
         ToolState::Idle,
         t,
     )
-    .help("Open in File Explorer")
+    .help(concat!("Open in ", beebeeb_engine::file_manager!()))
     .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| on_explorer(s, tx));
     if bar.gate_closed {
         explorer_btn = explorer_btn.disabled(true).focusable(false);
@@ -547,7 +547,7 @@ pub fn toolbar_in(s: &State, t: &Theme, trailing_inset: f32, closed: Option<&Clo
             text_input(&s.search, type_::SEARCH)
                 .key("search-input")
                 .label("Search names")
-                .shortcut_hint("Ctrl+F")
+                .shortcut_hint(concat!(beebeeb_engine::primary_key!(), "F"))
                 .single_line()
                 .color(t.text)
                 .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)

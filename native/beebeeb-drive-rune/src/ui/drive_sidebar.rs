@@ -194,7 +194,7 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
         &icons::SYNC_HISTORY,
         None,
         lit == Lit::SyncHistory,
-        "Ctrl+6",
+        concat!(beebeeb_engine::primary_key!(), "6"),
         t,
     );
     if let Some(n) = c.sync_problems {
@@ -206,7 +206,7 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
         &icons::AVAILABLE_OFFLINE,
         None,
         offline_on,
-        "Ctrl+7",
+        concat!(beebeeb_engine::primary_key!(), "7"),
         t,
     );
     if let Some(n) = c.available_offline {
@@ -243,7 +243,7 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
         .gap(1.0)
         .child(el().key("this-pc-title").px(10.0).pb(3.0).child(kit::label(
             "this-pc-label",
-            "THIS PC",
+            if cfg!(target_os = "macos") { "THIS MAC" } else { "THIS PC" },
             type_::SECTION_LABEL,
             t.text_tertiary,
         )))
@@ -439,8 +439,8 @@ fn foot(s: &State, standing: Standing, t: &Theme) -> El {
         el().key("settings-btn")
             .role("button")
             .label("Settings")
-            .shortcut_hint("Ctrl+,")
-            .help("Settings  Ctrl+,")
+            .shortcut_hint(concat!(beebeeb_engine::primary_key!(), ","))
+            .help(concat!("Settings  ", beebeeb_engine::primary_key!(), ","))
             .size(26.0, 26.0)
             .radius(radius::CONTROL)
             .center()

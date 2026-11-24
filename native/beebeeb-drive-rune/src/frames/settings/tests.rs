@@ -183,7 +183,7 @@ fn the_sidebar_is_navigation_of_links_with_the_current_one_selected() {
         "Notifications",
         "Storage",
         "Backups",
-        "Sync and File Explorer",
+        concat!("Sync and ", beebeeb_engine::file_manager!()),
         "Thumbnails and previews",
         "Bandwidth",
     ];
@@ -938,7 +938,7 @@ fn another_channel_checks_again_and_an_older_channel_says_so() {
     assert_eq!(
         info(&rt, "item-1-2-sub").text.as_deref(),
         Some(
-            "This PC runs 0.9.1, from the Beta channel. Read the release notes before you go back to an older version."
+            beebeeb_engine::os_words::for_this_os("This PC runs 0.9.1, from the Beta channel. Read the release notes before you go back to an older version.").as_str()
         )
     );
     assert_eq!(info(&rt, "item-1-2").role, "link");

@@ -27,7 +27,7 @@ pub const NOT_SAVED: &str = "Couldn't change the notification setting. Nothing c
 /// A timeout, a transport error mid-flight, or an unreadable 2xx: the change may have landed. Over when the
 /// check is: its answer is said in its place ([`SAVED`], [`NOT_SAVED`]), or the pane says it could not check.
 pub const UNKNOWN: &str = "Couldn't confirm the change. Checking what the server has.";
-pub const PC_NOT_SAVED: &str = "Couldn't save the notification setting on this PC.";
+pub const PC_NOT_SAVED: &str = concat!("Couldn't save the notification setting on ", beebeeb_engine::device_word!(), ".");
 /// A read failed. The panes say that themselves (the rows, Recent's card, [`NOT_READ`] over the pane), so this
 /// is drawn only where nothing else changes: "Try again" pressed under [`UNCONFIRMED`], and failing again.
 pub const NOT_LOADED: &str = "Couldn't load your notifications. Try again in a moment.";

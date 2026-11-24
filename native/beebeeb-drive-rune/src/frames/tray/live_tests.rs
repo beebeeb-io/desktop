@@ -115,7 +115,7 @@ fn before_the_engines_first_report_the_flyout_says_checking_never_up_to_date() {
 #[test]
 fn the_gate_decides_before_anything_the_engine_reports_and_hides_every_name() {
     let empty_since = |name: &str| Changes::Empty {
-        text: format!("Changes show here once {name} syncs this PC."),
+        text: os(&format!("Changes show here once {name} syncs this PC.")),
     };
     let cases = [
         (
@@ -418,7 +418,7 @@ fn rows_say_what_happened_in_the_boards_words() {
                 "id-/Plans/2027/photo.heic",
                 "photo.heic",
                 Tile::Image,
-                done(format!("Uploaded from this PC {dot} 2027")),
+                done(os(&format!("Uploaded from this PC {dot} 2027"))),
                 "2 min",
                 false
             ),
@@ -426,7 +426,7 @@ fn rows_say_what_happened_in_the_boards_words() {
                 "id-/song.m4a",
                 "song.m4a",
                 Tile::Audio,
-                done(format!("Downloaded to this PC {dot} Files")),
+                done(os(&format!("Downloaded to this PC {dot} Files"))),
                 "3 h",
                 false
             ),
@@ -434,7 +434,7 @@ fn rows_say_what_happened_in_the_boards_words() {
                 "",
                 "old.md",
                 Tile::Trashed,
-                done("Moved to Trash on this PC".into()),
+                done(os("Moved to Trash on this PC")),
                 "Yesterday",
                 true
             ),
@@ -464,7 +464,7 @@ fn the_list_holds_50_rows_at_most_and_ends_only_when_it_is_full() {
     assert_eq!(
         snap(&ready()).changes,
         Changes::Empty {
-            text: "Changes show here once Hive syncs this PC.".into()
+            text: os("Changes show here once Hive syncs this PC.")
         },
         "no history yet"
     );
@@ -555,4 +555,8 @@ fn sync_anyway_is_offered_while_the_engine_holds_on_a_metered_connection() {
         ..ready()
     });
     assert!(matches!(lifted.status, Status::Syncing { .. }), "{:?}", lifted.status);
+}
+
+fn os(board: &str) -> String {
+    beebeeb_engine::os_words::for_this_os(board)
 }

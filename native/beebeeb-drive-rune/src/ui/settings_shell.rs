@@ -222,7 +222,7 @@ pub const SETTINGS_ITEMS: &[(&str, &Icon, &str)] = &[
 pub const DRIVE_ITEMS: &[(&str, &Icon, &str)] = &[
     ("Storage", &ic::DATABASE, "DW-0712"),
     ("Backups", &ic::CLOCK, "DW-0737"),
-    ("Sync and File Explorer", &ic::SYNC, "DW-0746"),
+    (concat!("Sync and ", beebeeb_engine::file_manager!()), &ic::SYNC, "DW-0746"),
     ("Thumbnails and previews", &ic::IMAGE, "DW-0744"),
     ("Bandwidth", &ic::GAUGE, "DW-0785"),
 ];

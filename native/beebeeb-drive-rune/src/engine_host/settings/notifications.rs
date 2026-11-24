@@ -197,7 +197,7 @@ const GROUPS: [Group; 3] = [
         ],
     ),
     (
-        "Sync on this PC",
+        concat!("Sync on ", beebeeb_engine::device_word!()),
         &[
             (
                 "Sync stopped",
@@ -211,18 +211,18 @@ const GROUPS: [Group; 3] = [
             ),
             (
                 "Sync finished",
-                "When everything on this PC has synced. Off by default",
+                concat!("When everything on ", beebeeb_engine::device_word!(), " has synced. Off by default"),
                 Stored::Pc(PcSwitch::SyncFinished),
             ),
             (
-                "Space on this PC",
+                concat!("Space on ", beebeeb_engine::device_word!()),
                 "When downloaded files near their limit",
                 Stored::Pc(PcSwitch::LocalSpace),
             ),
         ],
     ),
     (
-        "Backups on this PC",
+        concat!("Backups on ", beebeeb_engine::device_word!()),
         &[
             (
                 "Backup finished",

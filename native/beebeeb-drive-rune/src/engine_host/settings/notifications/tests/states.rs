@@ -113,7 +113,7 @@ fn a_press_aimed_before_the_read_lands_hits_the_same_switch_after() {
 
     let stopped = rt.state.settings.source.notifications().groups[1].1[0]
         .on
-        .expect("this PC's are read");
+        .expect(beebeeb_engine::os_words::for_this_os("this PC's are read").as_str());
     let account: Vec<Option<bool>> = rt.state.settings.source.notifications().groups[0]
         .1
         .iter()

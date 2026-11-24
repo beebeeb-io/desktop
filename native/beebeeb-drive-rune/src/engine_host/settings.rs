@@ -66,7 +66,7 @@ const DEFAULT_ID: &str = "europe";
 pub const CHOSEN: &str = "Storage location updated";
 pub const NOT_CHOSEN: &str = "Couldn't change the storage location. Nothing changed.";
 pub const UNKNOWN_CHANGE: &str = "Couldn't confirm the change. Checking what the server has.";
-pub const THEME_NOT_SAVED: &str = "Couldn't save the theme on this PC.";
+pub const THEME_NOT_SAVED: &str = concat!("Couldn't save the theme on ", beebeeb_engine::device_word!(), ".");
 
 /// What the "still saving" toast says: a change waits for the one before it.
 pub const STILL_SAVING: &str = "Still saving the last change. Try again in a moment.";

@@ -181,7 +181,7 @@ fn hotkey_enters_and_leaves_comment_mode() {
             assert_eq!(
                 rt.state.feedback.mode,
                 Mode::Off,
-                "Ctrl+{c} (shift {shift}) is not ours"
+                beebeeb_engine::os_words::for_this_os("Ctrl+{c} (shift {shift}) is not ours").as_str()
             );
         }
     }
@@ -610,7 +610,7 @@ fn the_panel_shows_a_status_and_reply_the_lead_wrote_but_looks_no_faster_than_2s
         "{shown}"
     );
     assert!(
-        shown.contains("files on this PC")
+        shown.contains(beebeeb_engine::os_words::for_this_os("files on this PC").as_str())
             && shown.contains("AI provider")
             && !shown.to_lowercase().contains("nothing is sent"),
         "the privacy line is in the panel"

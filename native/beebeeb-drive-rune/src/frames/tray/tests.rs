@@ -228,8 +228,8 @@ fn every_frame_draws_its_words_its_button_and_the_three_buttons() {
                 assert!(has(&rt, skeleton), "{frame}: {skeleton}");
             }
         } else {
-            assert_eq!(text(&rt, "st-title"), title, "{frame}");
-            assert_eq!(text(&rt, "st-line"), line, "{frame}");
+            assert_eq!(text(&rt, "st-title"), board_os(frame, title), "{frame}");
+            assert_eq!(text(&rt, "st-line"), board_os(frame, line), "{frame}");
         }
         match button {
             // Without one, the only button of the kit left is the list's own.
@@ -238,14 +238,14 @@ fn every_frame_draws_its_words_its_button_and_the_three_buttons() {
                 "{frame}"
             ),
             Some((label, amber)) => {
-                assert_eq!(text(&rt, "btn-0-label"), label, "{frame}");
+                assert_eq!(text(&rt, "btn-0-label"), os(label), "{frame}");
                 assert_eq!(info(&rt, "btn-0").fill == t.accent, amber, "{frame}: amber");
                 assert_eq!(info(&rt, "btn-0").role, "button");
                 assert!(info(&rt, "btn-0").focusable, "{frame}: a Tab stop");
             }
         }
         for (i, label) in ["Open Beebeeb", "Open in File Explorer", "Settings"].iter().enumerate() {
-            assert_eq!(text(&rt, &format!("foot-{i}-label")), *label, "{frame}");
+            assert_eq!(text(&rt, &format!("foot-{i}-label")), os(label), "{frame}");
         }
         checked += 1;
     }
@@ -557,7 +557,7 @@ fn names_and_roles() {
         ("foot-2", "Settings"),
     ] {
         let button = info(&rt, key);
-        assert_eq!((button.role, button.label.as_deref()), ("button", Some(name)));
+        assert_eq!((button.role, button.label.as_deref()), ("button", Some(os(name).as_str())));
     }
     assert_eq!(
         Status::Syncing {
@@ -832,4 +832,17 @@ fn the_flyout_windows_list_takes_the_arrow_keys() {
     assert_eq!(rt.state.tray.selected(), Some(2));
     press(&mut rt, Key::Up);
     assert_eq!(rt.state.tray.selected(), Some(1));
+}
+
+fn os(board: &str) -> String {
+    beebeeb_engine::os_words::for_this_os(board)
+}
+
+/// The Cloud Files frames (adding to, couldn't add to File Explorer) are Windows-only and keep the board's words.
+fn board_os(frame: &str, board: &str) -> String {
+    if matches!(frame, "DW-1215" | "DW-1216" | "DW-1221") {
+        board.to_string()
+    } else {
+        os(board)
+    }
 }

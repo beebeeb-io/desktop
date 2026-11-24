@@ -444,7 +444,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     if let Some(on_pc) = &p.on_pc {
         children.push(lists::roving_list(
             4,
-            Some("On this PC"),
+            Some(concat!("On ", beebeeb_engine::device_word!())),
             vec![
                 lists::item(
                     4,

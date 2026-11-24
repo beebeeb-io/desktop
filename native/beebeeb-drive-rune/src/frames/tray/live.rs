@@ -270,7 +270,7 @@ fn offered(action: Action, gate: Gate) -> bool {
 /// DW-1213's empty list: nothing has synced on this PC yet.
 fn nothing_yet(name: &str) -> Changes {
     Changes::Empty {
-        text: format!("Changes show here once {name} syncs this PC."),
+        text: format!("Changes show here once {name} syncs {os}.", os = beebeeb_engine::device_word!()),
     }
 }
 
@@ -328,21 +328,21 @@ fn change(row: &Row, now: DateTime<LocalTime>) -> Change {
         RowKind::Uploaded => (
             What::Done {
                 origin: Origin::ThisPc,
-                text: format!("Uploaded from this PC {dot} {}", folder_of(&row.path)),
+                text: format!("Uploaded from {os} {dot} {}", folder_of(&row.path), os = beebeeb_engine::device_word!()),
             },
             tile_for(&name),
         ),
         RowKind::Downloaded => (
             What::Done {
                 origin: Origin::ThisPc,
-                text: format!("Downloaded to this PC {dot} {}", folder_of(&row.path)),
+                text: format!("Downloaded to {os} {dot} {}", folder_of(&row.path), os = beebeeb_engine::device_word!()),
             },
             tile_for(&name),
         ),
         RowKind::MovedToTrash => (
             What::Done {
                 origin: Origin::ThisPc,
-                text: "Moved to Trash on this PC".into(),
+                text: concat!("Moved to Trash on ", beebeeb_engine::device_word!()).into(),
             },
             Tile::Trashed,
         ),

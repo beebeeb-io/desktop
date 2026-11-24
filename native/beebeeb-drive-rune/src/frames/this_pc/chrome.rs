@@ -29,7 +29,7 @@ pub fn search_field(ui: &Ui, placeholder: &'static str, t: &Theme) -> El {
     let input = text_input(&ui.search, type_::SEARCH)
         .key(crate::ui::keys::SEARCH_KEY)
         .label(placeholder)
-        .shortcut_hint("Ctrl+F")
+        .shortcut_hint(concat!(beebeeb_engine::primary_key!(), "F"))
         .single_line()
         .color(t.text)
         .caret(t.accent_deep, t.text.alpha(0.15))

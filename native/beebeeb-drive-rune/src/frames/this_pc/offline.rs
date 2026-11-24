@@ -32,7 +32,7 @@ const COLUMNS: [Column; 5] = [
     Column::new("status", "Status", Width::Fixed(COL_STATUS_W)),
     Column::new("size", "Size", Width::Fixed(COL_SIZE_W)).align(Align::End),
     Column::new("contains", "Contains", Width::Fixed(COL_CONTAINS_W)),
-    Column::new("pc", "PC", Width::Fixed(COL_PC_W)).align(Align::Center).spoken("On this PC"),
+    Column::new("pc", if cfg!(target_os = "macos") { "Mac" } else { "PC" }, Width::Fixed(COL_PC_W)).align(Align::Center).spoken(concat!("On ", beebeeb_engine::device_word!())),
 ];
 
 /// "3 items · 1.4 GB", or "No items".
@@ -63,7 +63,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     // "Remove all is hidden" when nothing is kept (DW-0120).
     if !kept.is_empty() {
         right.push(
-            button::button(button::keys("btn-remove-all-from-this-pc"), "Remove all from this PC", None, button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, &t)
+            button::button(button::keys("btn-remove-all-from-this-pc"), concat!("Remove all from ", beebeeb_engine::device_word!()), None, button::Variant::Secondary, button::Size::Sm, button::ButtonState::Enabled, &t)
                 .on_press(|s: &mut State| s.this_pc.ask(super::Intent::AskRemoveAll)),
         );
     }
@@ -103,7 +103,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                     key: "empty",
                     icon: &base::AVAILABLE_OFFLINE,
                     title: "Nothing available offline",
-                    body: "Right-click a file or folder and choose Make available offline to keep it on this PC.",
+                    body: concat!("Right-click a file or folder and choose Make available offline to keep it on ", beebeeb_engine::device_word!(), "."),
                     action: None,
                 },
                 &t,
@@ -126,9 +126,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 s,
                 ui,
                 format!(
-                    "{} available offline \u{00B7} {} on this PC",
+                    "{} available offline \u{00B7} {} on {os}",
                     kept.len(),
-                    format_size(bytes)
+                    format_size(bytes),
+                    os = beebeeb_engine::device_word!()
                 ),
                 &t,
             )
@@ -174,14 +175,14 @@ pub fn not_ready(standing: Standing, t: &Theme) -> Option<El> {
                 col()
                     .key("empty-area")
                     .w_full()
-                    .child(view_state::view_state(ViewState::Loading { words: "Reading this PC" }, t)),
+                    .child(view_state::view_state(ViewState::Loading { words: concat!("Reading ", beebeeb_engine::device_word!()) }, t)),
             );
         }
         Standing::Unreadable => view_state::view_state(
             ViewState::Failed {
                 key: "unreadable",
-                title: "Couldn't read this PC",
-                why: "What this PC keeps couldn't be read just now.",
+                title: concat!("Couldn't read ", beebeeb_engine::device_word!()),
+                why: concat!("What ", beebeeb_engine::device_word!(), " keeps couldn't be read just now."),
                 retry: Some(
                     view_state::try_again("unreadable", t).on_press(|s: &mut State| s.this_pc.read_again()),
                 ),
@@ -192,7 +193,7 @@ pub fn not_ready(standing: Standing, t: &Theme) -> Option<El> {
             ViewState::Failed {
                 key: "another-account",
                 title: "Not available for this account",
-                why: "The synced files on this PC aren't confirmed as this account's, so nothing is shown here.",
+                why: concat!("The synced files on ", beebeeb_engine::device_word!(), " aren't confirmed as this account's, so nothing is shown here."),
                 retry: None,
             },
             t,
@@ -210,9 +211,9 @@ fn ask_remove_all(count: usize, t: &Theme) -> El {
         if count == 1 { "item" } else { "items" }
     );
     let card = dialog(
-        "Remove all from this PC",
+        concat!("Remove all from ", beebeeb_engine::device_word!()),
         400.0,
-        "Remove all from this PC?",
+        concat!("Remove all from ", beebeeb_engine::device_word!(), "?"),
         Some(&sub),
         Vec::new(),
         vec![
@@ -275,7 +276,7 @@ fn note(t: &Theme) -> El {
         .child(
             kit::label(
                 "banner-text",
-                "These stay on this PC and open without a connection. They don't count toward your downloaded files limit.",
+                concat!("These stay on ", beebeeb_engine::device_word!(), " and open without a connection. They don't count toward your downloaded files limit."),
                 type_::SEARCH,
                 t.text_secondary,
             )

@@ -119,7 +119,7 @@ pub fn status_bar(t: &Theme) -> El {
     bar(
         Some(Dot::Green),
         Some(UP_TO_DATE),
-        "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only",
+        concat!("4 on ", beebeeb_engine::device_word!(), " \u{00B7} 3 available offline \u{00B7} 4 online only"),
         t,
     )
 }
