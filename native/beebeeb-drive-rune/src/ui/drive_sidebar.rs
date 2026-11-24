@@ -11,7 +11,7 @@ use crate::theme::tokens::{Theme, radius, type_};
 use rune::{El, col, el, row};
 
 use super::kit;
-use super::sidebar::{Count, SidebarSection, Standing, brand, format_storage, section_item, side_item};
+use super::sidebar::{Count, SidebarSection, Standing, brand, format_storage, pinned_item, section_item, side_item};
 
 const SIDEBAR_W: f32 = 220.0;
 
@@ -163,6 +163,32 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
         });
     }
 
+    // Pinned: the account's pinned folders (the web's Quick access), under the places. Not drawn while there are none,
+    // nor while the window hides the account's details (names are the person's).
+    let pinned: Vec<_> = if details && !no_plan { s.actions.source.pinned() } else { Vec::new() };
+    let pinned_list = (!pinned.is_empty()).then(|| {
+        let mut list = col()
+            .key("pinned")
+            .gap(1.0)
+            .child(el().key("pinned-title").px(10.0).pb(3.0).child(kit::label(
+                "pinned-label",
+                "PINNED",
+                type_::SECTION_LABEL,
+                t.text_tertiary,
+            )));
+        for folder in &pinned {
+            let id = folder.id.clone();
+            let item = tree_item(pinned_item(&id, &folder.name, t), &folder.name, None, false)
+                .description("Pinned folder");
+            list = list.child(if open {
+                item.on_press(move |s: &mut State| crate::frames::files::pins::open(s, &id))
+            } else {
+                closed(item, open)
+            });
+        }
+        list
+    });
+
     let mut history = side_item(
         "Sync history",
         &icons::SYNC_HISTORY,
@@ -233,6 +259,7 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
         .grow(1.0)
         .min_h(0.0)
         .child(sections)
+        .children(pinned_list)
         .child(this_pc);
 
     let side = crate::ui::focus::pane(col(), "sidebar")

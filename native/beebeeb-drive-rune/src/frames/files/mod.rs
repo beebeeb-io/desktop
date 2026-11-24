@@ -25,6 +25,7 @@ pub mod long_list;
 pub mod menus;
 pub mod names;
 pub mod open_with_menu;
+pub mod pins;
 mod outcomes;
 pub mod preview;
 pub mod protected;
@@ -56,6 +57,8 @@ mod long_list_tests;
 mod open_in_app_tests;
 #[cfg(test)]
 mod open_with_menu_tests;
+#[cfg(test)]
+mod pins_tests;
 #[cfg(test)]
 mod protected_tests;
 #[cfg(test)]
@@ -201,6 +204,7 @@ impl Toast {
                  file in the web app first."
             }
             ActionError::NotSent => " It has changes that are not uploaded yet.",
+            ActionError::PinLimit => " Unpin a folder first.",
             ActionError::HoldsKept => " Something in it is kept on this PC.",
             ActionError::NotToRecycleBin => " This file can't go to the Recycle Bin, so it was left as it is.",
             // The viewers' words for a full disk ("Not enough space to decrypt", "free on this PC").
@@ -1015,6 +1019,7 @@ impl State {
             "free-up-space" => {
                 self.free_up_space(tx);
             }
+            "pin" => self.toggle_pin(tx),
             "duplicate" => {
                 self.duplicate_selected(tx);
             }

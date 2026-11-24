@@ -81,6 +81,7 @@ pub mod owned_state;
 pub mod backup_places_api;
 pub mod passkeys_api;
 pub mod photo_previews_api;
+pub mod pins_api;
 pub mod photos_api;
 pub mod settings_api;
 pub mod setup_api;

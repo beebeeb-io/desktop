@@ -327,7 +327,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                     .collect();
                 select_bar::panel(&items, &t)
             } else {
-                details::details_pane(facts, &t)
+                details::details_pane(facts, s.pin_state(), &t)
             };
             body = body.child(crate::ui::focus::pane(
                 col().h_full().child(details_pane),

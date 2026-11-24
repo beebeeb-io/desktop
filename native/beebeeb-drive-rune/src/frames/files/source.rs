@@ -94,6 +94,8 @@ pub enum ActionError {
     /// Another item here has the same name but for capital letters, and this PC (which does not tell them apart)
     /// holds one entry for the two: the press would reach the other item's file, so nothing was done.
     NameSharedButCase,
+    /// Pin to sidebar left it: the sidebar already holds as many pins as web allows. Nothing was changed.
+    PinLimit,
 }
 
 /// What a person asked for, in the words the failure message uses (DW-0109: "Couldn't rename.").
@@ -139,6 +141,10 @@ pub enum Action {
     RetryUpload,
     /// Cancel upload (DW-0427).
     CancelUpload,
+    /// Pin to sidebar: the folder joins the account's pinned folders.
+    Pin,
+    /// Unpin from sidebar.
+    Unpin,
 }
 
 impl Action {
@@ -169,6 +175,8 @@ impl Action {
             Action::PauseUploads => "pause the uploads",
             Action::RetryUpload => "try that upload again",
             Action::CancelUpload => "cancel the upload",
+            Action::Pin => "pin to the sidebar",
+            Action::Unpin => "unpin from the sidebar",
         }
     }
 }
@@ -217,6 +225,8 @@ pub enum Call {
     OpenInApp(String, String),
     /// The file with this id that changed in two places: what is kept (DW-0429).
     KeepVersion(String, super::actions_data::Keep),
+    /// The folder with this id is pinned (`true`) or unpinned.
+    Pin(String, bool),
     /// The upload with this id is tried again now (DW-0427).
     RetryUpload(String),
     /// The account left: what was uploading is cancelled and forgotten.
@@ -371,6 +381,22 @@ pub trait FilesSource: Send + 'static {
     fn share_of(&self, _item: &DriveItem) -> Option<String> {
         None
     }
+    /// The account's pinned folders as the sidebar shows them, in the order pinned: only those this PC's local state
+    /// knows. Never waits (what is held; read in the background). Empty: none, or not known yet.
+    fn pinned(&self) -> Vec<DriveItem> {
+        Vec::new()
+    }
+    /// The ids of every pinned folder (known here or not): what the limit counts and what a toggle looks at.
+    fn pinned_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Pin (`true`) or unpin the folder. Accepted at once and written to the account in the background; a write that
+    /// fails is read back, so the sidebar returns to what the account holds.
+    fn set_pinned(&mut self, _folder: &DriveItem, _pin: bool) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// Read the account's pins again (the window got focus: a pin made on the web shows up).
+    fn refresh_pins(&mut self) {}
     /// The item with this id, as this account's local state holds it. `None`: not known, or not this account's.
     fn item_of(&self, _id: &str) -> Option<DriveItem> {
         None
@@ -631,6 +657,8 @@ pub struct FilesFixture {
     /// A source that would accept a change of a protected item: so a test can show that the
     /// WINDOW refuses it before it asks (`protected_tests.rs`).
     pub lenient: bool,
+    /// The pinned folders, in the order pinned.
+    pub pins: Vec<DriveItem>,
 }
 
 /// What the fixture's actions changed in the board's folders.
@@ -782,6 +810,24 @@ impl FilesSource for FilesFixture {
 
     fn folder_notice(&self, folder: Option<&str>) -> Option<super::protected::FolderNotice> {
         super::protected_fixture::notice(folder)
+    }
+
+    fn pinned(&self) -> Vec<DriveItem> {
+        self.pins.clone()
+    }
+
+    fn pinned_ids(&self) -> Vec<String> {
+        self.pins.iter().map(|item| item.id.clone()).collect()
+    }
+
+    fn set_pinned(&mut self, folder: &DriveItem, pin: bool) -> Result<(), ActionError> {
+        self.refuse(if pin { Action::Pin } else { Action::Unpin }, std::slice::from_ref(folder))?;
+        self.record(Call::Pin(folder.id.clone(), pin));
+        self.pins.retain(|item| item.id != folder.id);
+        if pin {
+            self.pins.push(folder.clone());
+        }
+        Ok(())
     }
 
     fn sort_of(&self, folder: Option<&str>) -> Option<super::Sort> {

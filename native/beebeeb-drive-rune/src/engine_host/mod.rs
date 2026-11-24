@@ -64,6 +64,7 @@ mod files_conflicts;
 mod files_downloads;
 mod files_facts;
 mod files_item_of;
+mod files_pins;
 #[cfg(test)]
 mod files_item_of_tests;
 mod files_launch;
@@ -845,6 +846,8 @@ pub struct EngineFilesSource<C: CredentialStores> {
     upload_left: Option<Vec<PathBuf>>,
     /// The sidebar's figures and each folder's sort.
     facts: files_facts::Facts<C>,
+    /// The sidebar's Pinned folders.
+    pins: files_pins::Pins<C>,
     /// A file's versions and the restore of one.
     versions: files_versions::VersionCalls<C>,
     /// The files in two versions and the answer to one.
@@ -880,6 +883,7 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             downloads: files_downloads::DownloadCalls::new(engine.clone()),
             links: files_link::LinkCalls::new(engine.clone()),
             facts: files_facts::Facts::new(engine.clone()),
+            pins: files_pins::Pins::new(engine.clone()),
             versions: files_versions::VersionCalls::new(engine.clone()),
             conflicts: files_conflicts::ConflictCalls::new(engine.clone()),
             places: files_places::Places::new(engine.clone()),
@@ -1207,6 +1211,22 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.engine.share_target_of(self.engine.session_turn(), &item.id)
     }
 
+    fn pinned(&self) -> Vec<DriveItem> {
+        self.pins.pinned()
+    }
+
+    fn pinned_ids(&self) -> Vec<String> {
+        self.pins.pinned_ids()
+    }
+
+    fn set_pinned(&mut self, folder: &DriveItem, pin: bool) -> Result<(), ActionError> {
+        self.pins.set(folder, pin)
+    }
+
+    fn refresh_pins(&mut self) {
+        self.pins.refresh();
+    }
+
     fn item_of(&self, id: &str) -> Option<DriveItem> {
         // Not `local`: no sync root is needed to read one row, and a listing reads without one too.
         let state = self.engine.local_state_for_changes().ok()?;
@@ -1437,6 +1457,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.places.pump();
         // The sidebar's figures are read again after a change (`files_facts`); an arrival redraws by its wake.
         self.facts.pump(!changes.is_empty());
+        self.pins.pump();
         changes
     }
 }

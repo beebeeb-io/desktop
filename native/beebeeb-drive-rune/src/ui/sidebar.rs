@@ -129,11 +129,11 @@ fn side_row(
     t: &Theme,
 ) -> El {
     let mut item = row()
-        .key(format!("{label}-row"))
+        .key(format!("{key}-row"))
         .role("button")
         .label(label)
         .shortcut_hint(shortcut)
-        .help(format!("{label}  {shortcut}"))
+        .help(if shortcut.is_empty() { label.to_string() } else { format!("{label}  {shortcut}") })
         .h(28.0)
         .px(9.0)
         .gap(9.0)
@@ -146,7 +146,7 @@ fn side_row(
         .child(glyph)
         .child(
             kit::label(
-                label,
+                key,
                 label,
                 type_::LIST_ITEM,
                 if on { t.text } else { t.text_secondary },
@@ -157,7 +157,7 @@ fn side_row(
     match count {
         Some(Count::Pill(n)) => {
             item = item.child(
-                el().key(format!("{label}-pill"))
+                el().key(format!("{key}-pill"))
                     .min_w(18.0)
                     .h(18.0)
                     .px(5.0)
@@ -165,7 +165,7 @@ fn side_row(
                     .fill(t.badge)
                     .center()
                     .child(kit::label(
-                        format!("{label}-badge"),
+                        format!("{key}-badge"),
                         n.to_string(),
                         type_::BADGE,
                         t.text,
@@ -174,7 +174,7 @@ fn side_row(
         }
         Some(Count::Plain(n)) => {
             item = item.child(kit::label(
-                format!("{label}-badge"),
+                format!("{key}-badge"),
                 n.to_string(),
                 type_::KBD,
                 t.text_tertiary,
