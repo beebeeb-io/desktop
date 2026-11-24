@@ -729,7 +729,7 @@ fn section_press_on_the_current_section_closes_search() {
     settle(&mut rt);
     assert!(rt.state.frames.find.open);
     rt.update(|s, _| {
-        super::host::dispatch(s, Event::Navigate(Route::section(Section::Files)));
+        crate::shell::host::dispatch(s, Event::Navigate(Route::section(Section::Files)));
     });
     settle(&mut rt);
     assert!(!rt.state.frames.find.open, "Search is over");
