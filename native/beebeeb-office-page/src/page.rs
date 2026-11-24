@@ -16,16 +16,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use beebeeb_office_protocol::check;
-use office_host::{CloseWhy, DocKind, Event, OfficeHost, OfficeState};
+use office_host::{CloseWhy, DocKind, EditKind, Event, OfficeHost, OfficeState};
 use zeroize::Zeroizing;
 
-const USAGE: &str = "usage: office_page <file.docx> [--zoom <percent>] [--dpi <n>] [--helper <exe>]";
+const USAGE: &str = "usage: office_page <file.docx> [--zoom <percent>] [--dpi <n>] [--helper <exe>] [--edit]";
 
 struct Args {
     file: PathBuf,
     zoom: f32,
     dpi: f32,
     helper: Option<PathBuf>,
+    /// Open as the app opens a writable .docx / .xlsx / .pptx: an editing session (`OfficeHost::open_edit`).
+    edit: bool,
 }
 
 fn parse() -> Option<Args> {
@@ -33,12 +35,14 @@ fn parse() -> Option<Args> {
     let mut zoom = 100.0;
     let mut dpi = 96.0;
     let mut helper = None;
+    let mut edit = false;
     let mut rest = std::env::args().skip(1);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--zoom" => zoom = rest.next()?.parse().ok()?,
             "--dpi" => dpi = rest.next()?.parse().ok()?,
             "--helper" => helper = Some(PathBuf::from(rest.next()?)),
+            "--edit" => edit = true,
             _ if file.is_none() && !arg.starts_with("--") => file = Some(PathBuf::from(&arg)),
             _ => return None,
         }
@@ -48,6 +52,7 @@ fn parse() -> Option<Args> {
         zoom,
         dpi,
         helper,
+        edit,
     })
 }
 
@@ -108,7 +113,12 @@ fn main() -> ExitCode {
     let scale = check::render_scale(args.zoom / 100.0, args.dpi);
 
     let started = Instant::now();
-    let mut host = OfficeHost::open(&helper, kind_of(&args.file), bytes, Arc::new(|| {}));
+    let mut host = match (args.edit, kind_of(&args.file)) {
+        (true, DocKind::Docx) => OfficeHost::open_edit(&helper, EditKind::Docx, bytes, Arc::new(|| {})),
+        (true, DocKind::Xlsx) => OfficeHost::open_edit(&helper, EditKind::Xlsx, bytes, Arc::new(|| {})),
+        (true, DocKind::Pptx) => OfficeHost::open_edit(&helper, EditKind::Pptx, bytes, Arc::new(|| {})),
+        (_, kind) => OfficeHost::open(&helper, kind, bytes, Arc::new(|| {})),
+    };
     let until = started + Duration::from_secs(60);
     let mut asked = false;
     let mut page = None;
