@@ -179,3 +179,66 @@ fn a_folder_made_on_this_pc_gets_no_cloud_files_identity() {
     let error = info.expect_err("a folder made on this PC is no Cloud Files placeholder");
     assert_eq!(error.code().0 as u32, ERROR_NOT_A_CLOUD_FILE, "{error}");
 }
+
+/// RE-e (11-24, 16:02:02-04Z: 12 POST /files/folder on the maintainer's account right after the first load): a folder
+/// the engine minted from a server row (a Cloud Files placeholder) that the scan finds with no row at its path is
+/// never created on the server again, by the walk or by a path the change journal names. A folder made on this PC
+/// still is.
+#[test]
+fn re_e_a_placeholder_folder_is_never_created_on_the_server() {
+    use crate::watcher::scan::placeholder_dirs_for_tests::mark;
+    let temp = tempfile::tempdir().unwrap();
+    let sync_root = temp.path().join("sync-root");
+    fs::create_dir_all(sync_root.join("Photos").join("2024")).unwrap();
+    fs::create_dir_all(sync_root.join("Mine")).unwrap();
+    let (db, bridge) = test_bridge(&temp.path().join("state.db"));
+    // The first pull is in: the scaffold is no longer held back for it.
+    db.set_sync_cursor(1).unwrap();
+    mark(&sync_root.join("Photos"));
+    mark(&sync_root.join("Photos").join("2024"));
+
+    let folder_creates = |db: &StateDb| -> Vec<Option<String>> {
+        let mut paths: Vec<Option<String>> = db
+            .list_due_operations(i64::MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|op| op.kind == OperationKind::CreateFolder)
+            .map(|op| op.target_path)
+            .collect();
+        paths.sort();
+        paths
+    };
+
+    // The walk.
+    let mut memo = ScanMemo::default();
+    scan_tick(&bridge, &sync_root, &mut memo, &mut crate::watcher::NoFeed);
+    assert_eq!(
+        folder_creates(&db),
+        vec![Some("Mine".to_string())],
+        "only the folder made on this PC"
+    );
+    assert!(
+        db.get_file_by_path("Photos").unwrap().is_none(),
+        "no row is made for a placeholder"
+    );
+
+    // A path the change journal names.
+    struct Once(Option<crate::watcher::Changes>);
+    impl crate::watcher::ChangeFeed for Once {
+        fn take(&mut self) -> crate::watcher::Changes {
+            self.0.take().unwrap_or(crate::watcher::Changes::Nothing)
+        }
+    }
+    let named: std::collections::BTreeSet<std::path::PathBuf> = [sync_root.join("Photos")].into();
+    scan_tick(
+        &bridge,
+        &sync_root,
+        &mut memo,
+        &mut Once(Some(crate::watcher::Changes::Paths(named))),
+    );
+    assert_eq!(
+        folder_creates(&db),
+        vec![Some("Mine".to_string())],
+        "a named placeholder is not created either"
+    );
+}

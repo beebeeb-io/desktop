@@ -219,7 +219,7 @@ pub(crate) fn run_scan(
         // vault mirrors the on-disk `Backup/<device>/<folder>/<sub>` hierarchy
         // (task 0811 — without this, nested files uploaded FLAT to the root).
         // Idempotent: `ensure_local_folder` returns the existing id on later scans.
-        |dir_path: &std::path::Path| {
+        |dir_path: &std::path::Path, _stamp: &DiskStamp| {
             visited.set(visited.get() + 1);
             // Don't scaffold (enqueue CreateFolder for) a disabled backup folder's
             // subtree — same disable-race gate as files.
