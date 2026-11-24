@@ -30,6 +30,7 @@ mod files_launch_tests;
 const PASSWORD: &str = "an invented password for open with";
 const NOTES: &str = "a0000000-0000-4000-8000-000000000601";
 const TOOL: &str = "a0000000-0000-4000-8000-000000000602";
+const DOWNLOAD: &str = "a0000000-0000-4000-8000-000000000604";
 const FOLDER: &str = "a0000000-0000-4000-8000-000000000603";
 
 type Source = EngineFilesSource<MemoryCredentials>;
@@ -87,6 +88,7 @@ fn set(tag: &str, signed_in: bool, owner_is_account: bool) -> Set {
     put(&db, NOTES, "Invented notes.txt", ItemKind::File);
     put(&db, TOOL, "invented tool.exe", ItemKind::File);
     put(&db, FOLDER, "Invented folder", ItemKind::Folder);
+    put(&db, DOWNLOAD, "Invented download.txt", ItemKind::File);
     let owner = if owner_is_account {
         Identity::new(Some(&account.user_id), Some(&account.email))
     } else {
@@ -96,7 +98,10 @@ fn set(tag: &str, signed_in: bool, owner_is_account: bool) -> Set {
     drop(db);
     engine.use_local_state_for_test(path);
     // The sync folder is in this process's own temp home; a path below a folder that is not there is refused.
-    std::fs::create_dir_all(engine.sync_root().expect("a sync folder")).unwrap();
+    let root = engine.sync_root().expect("a sync folder");
+    std::fs::create_dir_all(&root).unwrap();
+    // Notes is on this PC (as a placeholder or a copy): opening it fetches nothing. Download is not.
+    std::fs::write(root.join("Invented notes.txt"), b"here").unwrap();
     let source = EngineFilesSource::new(engine.clone());
     Set {
         engine,
@@ -305,8 +310,6 @@ fn files_open_never_waits_on_the_launch_lock() {
         })
     });
     held.recv().unwrap();
-    // The file is on this PC (a placeholder or a copy): nothing is fetched, the app is handed its own path.
-    std::fs::write(root.join("Invented notes.txt"), b"here").unwrap();
     let notes = row(NOTES, "Invented notes.txt", false);
     let asked_at = Instant::now();
     assert_eq!(set.source.open(std::slice::from_ref(&notes)), Ok(()));
@@ -361,15 +364,15 @@ fn open_file_downloads_a_cloud_only_file_before_it_opens() {
     let _running = hold_running(&set.engine);
     let root = set.engine.sync_root().expect("a sync folder");
     set.account
-        .add_file_with_content(NOTES, None, "Invented notes.txt", b"invented bytes of the notes");
+        .add_file_with_content(DOWNLOAD, None, "Invented download.txt", b"invented bytes of the notes");
     set.source.starts = files_launch::Starts {
         open: reading_open,
         reveal: reveal_stand_in,
         has_default_app: |_| true,
         app: None,
     };
-    assert!(!root.join("Invented notes.txt").exists());
-    let notes = row(NOTES, "Invented notes.txt", false);
+    assert!(!root.join("Invented download.txt").exists());
+    let notes = row(DOWNLOAD, "Invented download.txt", false);
     assert_eq!(set.source.open(std::slice::from_ref(&notes)), Ok(()));
     let waited = Instant::now();
     let seen = loop {
@@ -377,7 +380,7 @@ fn open_file_downloads_a_cloud_only_file_before_it_opens() {
             .lock()
             .unwrap()
             .iter()
-            .find(|(p, _)| p.ends_with(format!("{NOTES}/Invented notes.txt")))
+            .find(|(p, _)| p.ends_with(format!("{DOWNLOAD}/Invented download.txt")))
             .cloned();
         if let Some(seen) = seen {
             break seen;
