@@ -48,13 +48,22 @@ fn test_1882_r2_the_saved_folder_survives_a_settings_save_and_a_restart() {
         Some("/Users/someone/Library/CloudStorage/Beebeeb-Beebeeb (10-10-2026 10:50)"),
         "a settings save never clears it"
     );
-    let toml = toml::to_string(&cfg).expect("serialize");
-    let back: beebeeb_engine::config::DesktopConfig = toml::from_str(&toml).expect("parse");
+    // A restart: the file on disk, read back by the engine.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("desktop.toml");
+    beebeeb_engine::config::DesktopConfig::update_at(&path, |on_disk| {
+        *on_disk = cfg.clone();
+        (true, ())
+    })
+    .expect("saved");
+    let back = beebeeb_engine::config::DesktopConfig::load_from(&path).expect("reads back");
     assert_eq!(
         back.kept_unsynced_folder, cfg.kept_unsynced_folder,
         "it survives a restart"
     );
-    let fresh = toml::to_string(&beebeeb_engine::config::DesktopConfig::default()).expect("serialize");
+    let fresh_path = dir.path().join("fresh.toml");
+    beebeeb_engine::config::DesktopConfig::update_at(&fresh_path, |_| (true, ())).expect("saved");
+    let fresh = std::fs::read_to_string(&fresh_path).expect("file");
     assert!(
         !fresh.contains("kept_unsynced_folder"),
         "absent until something was kept"

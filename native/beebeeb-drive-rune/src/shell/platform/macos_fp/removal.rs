@@ -432,8 +432,8 @@ pub(crate) fn remember_kept_folder_at(path: &std::path::Path, location: &str) ->
 }
 
 /// What the row's "Dismiss" did: `cleared` says whether the saved folder was the one shown and is now gone; `current`
-/// is the folder saved after the command. The field names are the JSON the row reads.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// is the folder saved after the command.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DismissOutcome {
     pub cleared: bool,
     pub current: Option<String>,

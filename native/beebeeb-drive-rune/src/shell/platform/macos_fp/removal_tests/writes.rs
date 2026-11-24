@@ -164,25 +164,3 @@ fn test_1882_r5_a_dismiss_with_a_stale_path_leaves_the_newer_folder_and_reports_
         }
     );
 }
-
-/// The frontend reads exactly these two keys (`DismissKeptFolderResult` in
-/// `src/macSettingsModel.ts`).
-#[test]
-fn test_1882_r5_the_dismiss_outcome_is_the_json_the_frontend_reads() {
-    assert_eq!(
-        serde_json::to_value(DismissOutcome {
-            cleared: false,
-            current: Some("/Users/someone/Kept".to_string())
-        })
-        .expect("serializes"),
-        serde_json::json!({ "cleared": false, "current": "/Users/someone/Kept" })
-    );
-    assert_eq!(
-        serde_json::to_value(DismissOutcome {
-            cleared: true,
-            current: None
-        })
-        .expect("serializes"),
-        serde_json::json!({ "cleared": true, "current": null })
-    );
-}
