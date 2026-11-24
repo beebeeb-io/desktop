@@ -29,7 +29,6 @@ struct Rig {
     fake: FakeApi,
     session: SessionGeneration,
     root: PathBuf,
-    phrase: String,
     _dir: tempfile::TempDir,
 }
 
@@ -74,7 +73,7 @@ fn sign_out(engine: &TestEngine) {
 }
 
 fn rig() -> Rig {
-    let (account, phrase) = FakeAccount::register("conflicts-api@example.eu", "an invented password", TEST_PHRASE);
+    let (account, _phrase) = FakeAccount::register("conflicts-api@example.eu", "an invented password", TEST_PHRASE);
     let account = Arc::new(account);
     for (id, name) in [
         (WAITING, "Invented draft.txt"),
@@ -118,7 +117,6 @@ fn rig() -> Rig {
         fake,
         session,
         root,
-        phrase,
         _dir: dir,
     }
 }
@@ -251,37 +249,55 @@ fn choice_list_of_an_empty_state_with_no_owner_is_empty_not_a_failure() {
     assert!(listed.files.is_empty() && listed.unread == 0);
 }
 
-/// A start behind the screen lock: a person reads nothing, so nothing is listed, and it is no failure.
+/// A start behind the screen lock: a person reads nothing, so nothing is listed, and it is no failure. Signed in
+/// through the lock's own flow (a fresh handle: restore, password, phrase), so the screen can lock.
 #[test]
 fn choice_list_behind_a_locked_screen_is_empty_not_a_failure() {
-    let rig = rig();
-    // Through the lock's own flow: a sign-in and an unlock, so the screen can lock.
-    rig.engine.restore();
-    rig.engine
-        .sign_in_password(&rig.account.email, Zeroizing::new("an invented password".into()))
+    let (account, phrase) = FakeAccount::register("conflicts-locked@example.eu", "an invented password", TEST_PHRASE);
+    let account = Arc::new(account);
+    account.add_item(WAITING, None, "Invented draft.txt", false, 10);
+    account.add_version(WAITING, "w-new", "2026-11-03T10:00:00Z", 2_048);
+    let handler = account_handler(account.clone());
+    let fake = FakeApi::start(Arc::new(move |req: &Request| handler(req)));
+    let (host, _messages) = ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "conflicts-locked-slot".into(),
+        state_dir: crate::state_paths::init_for_test(),
+        api_base: fake.base.clone(),
+    };
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the handle opens");
+    engine.restore();
+    engine
+        .sign_in_password(&account.email, Zeroizing::new("an invented password".into()))
         .expect("the fake accepts the password");
-    rig.engine
-        .unlock_with_phrase(Zeroizing::new(rig.phrase.clone()))
+    engine
+        .unlock_with_phrase(Zeroizing::new(phrase))
         .expect("the phrase unlocks");
-    let before_lock = rig.engine.session_turn();
-    // The restore of a session from before can leave the screen locked already: then there is nothing to lock.
-    let _ = rig.engine.lock_screen();
-    assert_eq!(
-        rig.engine.lock_state(),
-        crate::app::lock_api::LockState::ScreenLocked,
-        "the screen is locked"
-    );
-    assert!(rig.engine.has_session(), "a session is in memory behind the lock");
-    let asked = requests(&rig);
-    let now = rig.engine.session_turn();
-    let listed = rig.engine.conflicts_for(now).expect("an empty list, not a refusal");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sync");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("Invented draft.txt"), b"my edit on this pc").unwrap();
+    let state_path = dir.path().join("state.db");
+    let db = StateDb::open(&state_path).unwrap();
+    put(&db, WAITING, "Invented draft.txt", FileStatus::Conflict);
+    db.set_owner(&Identity::new(Some(&account.user_id), Some(&account.email)))
+        .unwrap();
+    drop(db);
+    engine.use_local_state_for_test(state_path);
+    engine.use_sync_root_for_test(root);
+    let open = engine.session_turn();
+    assert_eq!(engine.conflicts_for(open).expect("listed while open").files.len(), 1);
+    engine.lock_screen().expect("an open lock can lock the screen");
+    let asked = fake.requests().len();
+    let now = engine.session_turn();
+    let listed = engine.conflicts_for(now).expect("an empty list, not a refusal");
     assert!(
         listed.files.is_empty() && listed.unread == 0,
         "nothing is shown behind the lock"
     );
-    assert_eq!(requests(&rig), asked, "no request");
+    assert_eq!(fake.requests().len(), asked, "nothing was sent");
     assert_eq!(
-        rig.engine.conflicts_for(before_lock).unwrap_err(),
+        engine.conflicts_for(open).unwrap_err(),
         ConflictsRefused::NotSignedIn,
         "the session from before the lock gets nothing"
     );
