@@ -21,6 +21,8 @@ pub mod packet_text;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macos_panels;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -181,6 +183,11 @@ pub trait Platform: Send + Sync {
     /// BLOCKS until the person closed it: a worker's call, never the window's thread. `Ok(None)`: closed
     /// without a folder. The folder is the person's own: shown to them, never logged.
     fn pick_folder(&self, _title: &str, _start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
+        #[cfg(target_os = "macos")]
+        {
+            return macos_panels::pick_folder(_title, _start, "pick_folder").map_err(PlatformError::Os);
+        }
+        #[cfg(not(target_os = "macos"))]
         Err(PlatformError::NotBuilt("the folder picker"))
     }
     /// Opens the OS's own file picker for one picture this PC decodes, in `start` (photo previews' "Choose
@@ -193,6 +200,11 @@ pub trait Platform: Send + Sync {
     /// modeless like `pick_folder`, and its answer is handed over only for the session of the press
     /// ([`SaveAnswer::for_session`]). The path is shown to the person, never logged.
     fn pick_save_path(&self, _suggested_name: &str, _start: std::path::PathBuf) -> SaveAnswer {
+        #[cfg(target_os = "macos")]
+        {
+            return macos_panels::pick_save_path(_suggested_name, _start, "save_folder");
+        }
+        #[cfg(not(target_os = "macos"))]
         SaveAnswer::Failed
     }
     /// Opens the OS's Share sheet (Windows: `IDataTransferManagerInterop::ShowShareUIForWindow`) for the file at
