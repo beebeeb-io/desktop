@@ -814,7 +814,7 @@ fn regression_1640_a_kept_file_says_why_and_is_resolved_where_it_is() {
     let open = feed(&db);
     assert_eq!(open.len(), 1);
     assert_eq!((open[0].0.as_str(), open[0].2.as_str()), ("waiting to close", "none"));
-    assert!(open[0].1.contains("open on this PC"), "{}", open[0].1);
+    assert!(open[0].1.contains(&crate::os_words::for_this_os("open on this PC")), "{}", open[0].1);
     std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
     retry_kept_originals(&db, &sync_root, &|_, _| LocalEntry::InSync);
     assert!(!docs.join("notes.txt").exists(), "removed once closed");

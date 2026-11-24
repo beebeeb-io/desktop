@@ -756,7 +756,9 @@ fn trash_without_a_found_backup_changes_nothing() {
     assert!(!RemoveRefused::NoCopyFound.stopped_backing_up());
     assert_eq!(
         RemoveRefused::NoCopyFound.words(),
-        "This PC hasn't found this folder's backup yet, so it can't be moved to Trash. Nothing was changed."
+        crate::os_words::for_this_os(
+            "This PC hasn't found this folder's backup yet, so it can't be moved to Trash. Nothing was changed."
+        )
     );
     // "Stop and keep the backup" needs no backup found: the folder leaves the set, nothing is sent.
     let left = std::cell::Cell::new(false);
