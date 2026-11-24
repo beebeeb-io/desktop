@@ -384,7 +384,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// Step 4: the breach check, then core keeps the password for the account it will create, then core makes
-    /// the recovery phrase (Argon2id, about a second: this is the slow step, so the screen shows its wait here
+    /// the master key (Argon2id, about a second: this is the slow step, so the screen shows its wait here
     /// and never while the words are drawn). Nobody goes on without the check's answer unless the server says the
     /// check may fail open (core applies that, not this module).
     pub fn signup_set_password(

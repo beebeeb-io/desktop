@@ -7,7 +7,7 @@ const check = (id, what, got, want) => { const ok = got === want; if (!ok) fail+
 await p.goto('http://localhost:5221/?window=main-app&platform=windows&frame=DW-A84a'); await p.waitForTimeout(1500)
 check('DW-A84a', "'6 of 7 done' headings/text", await p.getByText('6 of 7 done', { exact: true }).count(), 1)
 check('DW-A84a', "to-do 'Add' buttons", await p.getByRole('button', { name: 'Add', exact: true }).count(), 1)
-const done = ['Email verified', 'Two-factor authentication', 'Strong password', 'Recovery phrase saved', 'Password not in a breach', 'Devices and sessions']
+const done = ['Email verified', 'Two-factor authentication', 'Strong password', 'Master key saved', 'Password not in a breach', 'Devices and sessions']
 let n = 0; for (const t of done) n += await p.locator('main, body').getByRole('button', { name: new RegExp('^' + t) }).count() > 0 ? 1 : 0
 check('DW-A84a', 'done rows present', n, 6)
 await p.screenshot({ path: `${out}/DW-A84a.png` })

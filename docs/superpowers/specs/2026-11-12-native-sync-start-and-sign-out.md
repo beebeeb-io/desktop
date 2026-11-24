@@ -28,7 +28,7 @@ were not rendered here; the build lane renders them in the PR and fixes syntax i
 | Gate, 6 states | `E/signin/gate.rs:19-35`, `decide_gate` `:269-284` | built; `NoPlan` cannot occur (`E/app.rs:240` passes `false` for the plan) |
 | Restore at start | `Engine::restore`, `E/app.rs:202-228` | built; no network; a stored key the loader accepts unlocks at once |
 | Password, second factor | `E/app.rs:268-339`, `finish_sign_in` `:344-379` | built |
-| Recovery phrase | `Engine::unlock_with_phrase`, `E/app.rs:417-465`; proof `E/signin/recovery.rs:136-150` | built |
+| Master key | `Engine::unlock_with_phrase`, `E/app.rs:417-465`; proof `E/signin/recovery.rs:136-150` | built |
 | Start sync | `Engine::start_sync`, `E/app.rs:476-527`; `EngineRunner::spawn` at `:509` | built; takes any folder; nothing creates the folder |
 | Cloud Files registration | `windows_cf::connect_root`, `E/windows_cf/mod.rs:1040`, registers at `:1065` and `:1076`, called from `E/runner.rs:187` | runs inside the engine task, on every spawn |
 | Folder owner check | `E/sync_root_owner.rs:46-66` and `check` `:85`, called at `E/app.rs:481`, `E/runner.rs:178`, `E/windows_cf/mod.rs:344` | built |
@@ -298,7 +298,7 @@ not in an error value that reaches the UI.
 
 | # | Invariant | Evidence today / what the PR adds |
 | --- | --- | --- |
-| I1 | The recovery phrase never leaves the process and is never in argv, a file, a log or an element label | secure `TextEdit` → `Zeroizing<String>` (`N/engine_host.rs:436-438`) → `unlock_with_phrase`; the server gets a check derived from the key (`E/signin/recovery.rs:36-49`). S1 adds the log-capture test |
+| I1 | The master key never leaves the process and is never in argv, a file, a log or an element label | secure `TextEdit` → `Zeroizing<String>` (`N/engine_host.rs:436-438`) → `unlock_with_phrase`; the server gets a check derived from the key (`E/signin/recovery.rs:36-49`). S1 adds the log-capture test |
 | I2 | Every copy of the phrase and of the derived key is wiped after use | `Zeroizing` at `E/app.rs:417`, `:433`; the key `E/signin/recovery.rs:149`; `Session` is `ZeroizeOnDrop` (`E/session.rs:24`). S1: every copy on the phrase path is a wiping type (task 2445 notes N2) |
 | I3 | A wrong phrase changes nothing on this PC and sends exactly one request (the check) | the store is written only after the proof (`E/app.rs:430-448`) |
 | I4 | A phrase is accepted only on the server's positive answer; unreachable, 401, 5xx, any other 400 are refusals | `E/signin/recovery.rs:28-84` |
@@ -397,7 +397,7 @@ Truth lines: per test binary `test result: ok. N passed; 0 failed`, with the cou
 (`scripts/assert-cargo-test-counts.py`). A mutant is a one-line change to product code that the named test must turn
 red; the PR body pastes red and green for each. One full test run, just before the PR opens.
 
-### S1: recovery phrase → Ready → register → sync runs, and says so
+### S1: master key → Ready → register → sync runs, and says so
 
 **File area:** `E/app.rs`, `E/sync_view.rs` (new), `E/windows_cf/mod.rs` (`connect_root` only), `E/runner.rs` (the
 lines around `:187`), `E/signin/recovery.rs` (I2 only), `crates/beebeeb-engine/examples/fake_api.rs` (new),

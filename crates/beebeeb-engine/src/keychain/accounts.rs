@@ -60,7 +60,7 @@ pub enum KeychainAccount {
     /// `WrappedMasterKey` (task 2447). A sibling credential entry, not
     /// derived crypto. An entry with no `VaultKeyOwner` is "unknown owner"
     /// (legacy, pre-tag). Written whenever the vault key is stored after a
-    /// VERIFIED unlock (recovery phrase, device approval, browser handoff).
+    /// VERIFIED unlock (master key, device approval, browser handoff).
     VaultKeyOwner,
     /// Server user id of the account the stored `SessionToken` belongs to (task 2447): written only from the
     /// server's own answer for that token, and removed before any other token is stored. Not a secret.

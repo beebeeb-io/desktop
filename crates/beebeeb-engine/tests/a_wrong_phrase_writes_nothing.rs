@@ -1,4 +1,4 @@
-//! S1, invariant I3 (contract §6): a wrong recovery phrase changes nothing on this PC and sends exactly one request,
+//! S1, invariant I3 (contract §6): a wrong master key changes nothing on this PC and sends exactly one request,
 //! the server's check. Mutant: let the key through without the proof (`verify_vault_key_from_phrase` ignores a
 //! mismatch), so a key is stored for the wrong phrase.
 

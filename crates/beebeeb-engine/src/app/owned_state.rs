@@ -39,7 +39,7 @@ use beebeeb_api::flows::call_may_run;
 pub enum LocalStateRefused {
     /// Nobody is signed in.
     SignedOut,
-    /// Signed in, the account's keys are not in memory (locked, or the recovery phrase is still to come).
+    /// Signed in, the account's keys are not in memory (locked, or the master key is still to come).
     Locked,
     /// The server refused this session's token again and again: it has ended.
     SessionEnded,

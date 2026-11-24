@@ -11,7 +11,7 @@ mod tests {
     //! On launch, `lib::restore_session_on_startup` resumes a fully UNLOCKED
     //! session iff the credential store holds both the session token and a
     //! valid 32-byte master key; otherwise it leaves onboarding to prompt for
-    //! the recovery phrase. The exact gate is `AuthVault::unlock()`, exercised
+    //! the master key. The exact gate is `AuthVault::unlock()`, exercised
     //! here against an in-memory store so it runs on any platform (the real
     //! OS credential vaults are platform-gated and can't run in CI).
 
@@ -120,7 +120,7 @@ mod tests {
 
     /// Token + 32-byte key present → unlock succeeds and the key is readable.
     /// This is the startup auto-unlock path: relaunch resumes signed-in +
-    /// unlocked with no recovery-phrase prompt.
+    /// unlocked with no master-key prompt.
     #[test]
     fn unlock_succeeds_when_master_key_present() {
         let mut vault = AuthVault::new(MemoryStore::default());
@@ -554,7 +554,7 @@ mod tests {
     fn migration_token_only_legacy_migrates_and_legacy_fallback_reads() {
         let vault: SharedVault = Arc::new(Mutex::new(HashMap::new()));
         // Token-only legacy (an install that signed in but never provisioned a
-        // local key — onboarding would prompt for the recovery phrase).
+        // local key — onboarding would prompt for the master key).
         seed_legacy(&vault, "tok", None, None);
 
         let new = KeyedMemoryStore::with_account(vault.clone(), TEST_ID);
