@@ -632,7 +632,7 @@ impl AccountSource for BoardAccount {
         if let Some(answer) = self.sign_out_held(true) {
             return answer;
         }
-        self.signed_out = Some("all apps on this PC");
+        self.signed_out = Some(concat!("all apps on ", beebeeb_engine::device_word!()));
         for product in &mut self.products {
             product.1 = ProductState::NotSignedIn;
         }

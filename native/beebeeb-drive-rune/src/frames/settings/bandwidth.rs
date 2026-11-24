@@ -162,7 +162,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         children.push(shell::heading(
             "Bandwidth",
             Some(
-                "What Beebeeb sends and receives on this PC, how fast it may go, and how fast this PC reaches Beebeeb.",
+                concat!("What Beebeeb sends and receives on ", beebeeb_engine::device_word!(), ", how fast it may go, and how fast ", beebeeb_engine::device_word!(), " reaches Beebeeb."),
             ),
             t,
         ));
@@ -358,7 +358,7 @@ fn last_20_hours(h: &History, tip: Option<usize>, t: &Theme) -> El {
             .child(kit::label("card-1-sub", "Nothing recorded yet.", SUB, t.text_tertiary))
             .child(kit::label(
                 "card-1-empty",
-                "Beebeeb records traffic from when it starts syncing on this PC.",
+                concat!("Beebeeb records traffic from when it starts syncing on ", beebeeb_engine::device_word!(), "."),
                 type_::CAPTION,
                 t.text_tertiary,
             ))
@@ -707,7 +707,7 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, metered_control: bool
         list,
         Some("Limits"),
         rows,
-        Some("For this PC only. Each device keeps its own limits."),
+        Some(concat!("For ", beebeeb_engine::device_word!(), " only. Each device keeps its own limits.")),
         t,
     )
 }
@@ -797,7 +797,7 @@ fn speed_test(list: usize, test: &SpeedTest, t: &Theme) -> El {
         }
         line
     };
-    let mut foot = "Measures how fast this PC reaches Beebeeb's own servers in Europe: the same test as the bb command line and the iPhone.";
+    let mut foot = concat!("Measures how fast ", beebeeb_engine::device_word!(), " reaches Beebeeb's own servers in Europe: the same test as the bb command line and the iPhone.");
     match test {
         SpeedTest::Idle => {}
         SpeedTest::Running(now) => rows.push(steps(now)),

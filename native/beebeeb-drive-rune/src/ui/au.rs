@@ -139,7 +139,7 @@ impl Keys {
 
 /// The three plain facts of the brand panel. Copy says Europe, never a provider or a city.
 pub const FACTS: [&str; 3] = [
-    "Encrypted on this PC before anything syncs. Beebeeb can't read it.",
+    concat!("Encrypted on ", beebeeb_engine::device_word!(), " before anything syncs. Beebeeb can't read it."),
     "One Beebeeb account for Drive, Pass, VPN, Chat and Mail.",
     "Stored in Europe.",
 ];

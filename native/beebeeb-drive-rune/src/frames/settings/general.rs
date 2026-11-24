@@ -174,7 +174,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 /// saved; the person sends the email themselves. `crash`: the record "Send a report" attached after a crash
 /// (`shell::crash_notice`), shown here word for word before it goes into the bundle.
 fn report_problem(crash: Option<&crate::log_file::crash::CrashRecord>, t: &Theme) -> El {
-    const WORDS: &str = "Beebeeb saves a support bundle on this PC and opens an email to support@beebeeb.io in your email app. Read the file, then attach it and send the email yourself.";
+    const WORDS: &str = concat!("Beebeeb saves a support bundle on ", beebeeb_engine::device_word!(), " and opens an email to support@beebeeb.io in your email app. Read the file, then attach it and send the email yourself.");
     const ADDRESS: &str = "support@beebeeb.io";
     let at = WORDS.find(ADDRESS).unwrap_or(0);
     let plain = |l: usize, i: usize, icon: &'static rune::Icon, title: &str, ruled: bool| {

@@ -159,7 +159,7 @@ fn why_not_edit(s: &State, item: &DriveItem) -> &'static str {
     }
     match s.viewer.ui.as_ref().map(|ui| ui.origin()) {
         Some(Origin::Beebeeb | Origin::BeebeebNotThisPcs | Origin::BeebeebUnconfirmedHere) => {
-            "Not on this PC: keep it available offline to edit it here"
+            concat!("Not on ", beebeeb_engine::device_word!(), ": keep it available offline to edit it here")
         }
         _ => "This file is read-only here",
     }

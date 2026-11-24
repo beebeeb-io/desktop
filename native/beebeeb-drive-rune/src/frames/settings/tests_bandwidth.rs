@@ -311,7 +311,7 @@ fn a_new_pc_says_when_recording_starts_instead_of_an_empty_chart() {
     assert_eq!(text(&rt, "card-1-sub"), "Nothing recorded yet.");
     assert_eq!(
         text(&rt, "card-1-empty"),
-        "Beebeeb records traffic from when it starts syncing on this PC."
+        beebeeb_engine::os_words::for_this_os("Beebeeb records traffic from when it starts syncing on this PC.").as_str()
     );
     for gone in ["chart-plot", "legend", "chart-x"] {
         assert!(find(&rt, gone).is_none(), "{gone} is not drawn without a history");
@@ -333,7 +333,7 @@ fn the_metered_wait_is_reached_from_sync_and_the_switch_resumes_sync_at_once() {
     assert_eq!(text(&rt, "card-0-now"), "Waiting for another network");
     assert_eq!(
         text(&rt, "fig-0-says"),
-        "Waiting: this PC is on a metered connection \u{b7} 7 changes wait"
+        beebeeb_engine::os_words::for_this_os("Waiting: this PC is on a metered connection \u{b7} 7 changes wait").as_str()
     );
     assert_eq!(text(&rt, "fig-1-says"), "Files you open still download");
     assert_eq!(
@@ -477,7 +477,7 @@ fn leaving_settings_does_not_stop_the_test_and_the_result_stays() {
     );
     assert_eq!(
         text(&rt, "list-2-foot"),
-        "Measured just now, from this PC to Beebeeb's servers in Europe. The test moved 60 MB."
+        beebeeb_engine::os_words::for_this_os("Measured just now, from this PC to Beebeeb's servers in Europe. The test moved 60 MB.").as_str()
     );
     for i in 0..3 {
         assert!(
@@ -569,7 +569,7 @@ fn a_device_row_says_its_state_and_leads_to_devices_and_sessions() {
     assert_eq!(row.role, "link");
     assert_eq!(
         row.label.as_deref(),
-        Some("Anna-Laptop, This PC, Syncing. 38 of 50 files \u{b7} 120 of 168 MB \u{b7} 3.2 MB/s \u{b7} 4 s ago")
+        Some(beebeeb_engine::os_words::for_this_os("Anna-Laptop, This PC, Syncing. 38 of 50 files \u{b7} 120 of 168 MB \u{b7} 3.2 MB/s \u{b7} 4 s ago").as_str())
     );
     assert_eq!(text(&rt, "pill-0-label"), "Syncing");
     assert_eq!(text(&rt, "pill-2-label"), "Paused");

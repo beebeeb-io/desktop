@@ -408,8 +408,8 @@ fn places(source: &Source) -> Vec<(String, usize)> {
 fn all_places() -> Vec<(String, usize)> {
     vec![
         ("Your account".to_string(), 3),
-        ("Sync on this PC".to_string(), 4),
-        ("Backups on this PC".to_string(), 2),
+        (beebeeb_engine::os_words::for_this_os("Sync on this PC").as_str().to_string(), 4),
+        (beebeeb_engine::os_words::for_this_os("Backups on this PC").as_str().to_string(), 2),
     ]
 }
 
@@ -491,7 +491,7 @@ fn an_empty_list_is_nothing_to_show_and_no_count() {
     assert_eq!(source.notifications().new_recent, 0);
     assert_eq!(
         group_titles(&source),
-        ["Your account", "Sync on this PC", "Backups on this PC"],
+        ["Your account", beebeeb_engine::os_words::for_this_os("Sync on this PC").as_str(), beebeeb_engine::os_words::for_this_os("Backups on this PC").as_str()],
         "the switches read: every group is drawn"
     );
 }
@@ -506,7 +506,7 @@ fn a_failed_read_draws_nothing_of_the_account_and_says_so() {
         assert!(source.recent_alerts().is_empty());
         assert_eq!(
             group_titles(&source),
-            ["Sync on this PC", "Backups on this PC"],
+            [beebeeb_engine::os_words::for_this_os("Sync on this PC").as_str(), beebeeb_engine::os_words::for_this_os("Backups on this PC").as_str()],
             "the account's switches were not read: never a guess"
         );
         assert_eq!(
@@ -542,7 +542,7 @@ fn a_session_that_ended_shows_nothing_and_signed_out_asks_nothing() {
     );
     assert!(source.recent_alerts().is_empty());
     assert_eq!(source.notifications().new_recent, 0);
-    assert_eq!(group_titles(&source), ["Sync on this PC", "Backups on this PC"]);
+    assert_eq!(group_titles(&source), [beebeeb_engine::os_words::for_this_os("Sync on this PC").as_str(), beebeeb_engine::os_words::for_this_os("Backups on this PC").as_str()]);
 
     let signed_out = engine_at(&fake.fake.base);
     let before = asked(&fake.fake, LIST) + asked(&fake.fake, SWITCHES);
@@ -721,7 +721,7 @@ fn a_lock_drops_everything_at_once_and_another_account_never_sees_it() {
     // Before any poll: the accessors already hand out nothing of the locked session.
     assert!(source.recent_alerts().is_empty());
     assert_eq!(source.notifications().new_recent, 0);
-    assert_eq!(group_titles(&source), ["Sync on this PC", "Backups on this PC"]);
+    assert_eq!(group_titles(&source), [beebeeb_engine::os_words::for_this_os("Sync on this PC").as_str(), beebeeb_engine::os_words::for_this_os("Backups on this PC").as_str()]);
     assert!(source.pump().changed, "the poll drops what it held");
 
     engine.sign_out_keeping_local_data().expect("signed out");
@@ -770,7 +770,7 @@ fn an_answer_made_for_a_session_that_ended_is_dropped() {
         "an answer that outlived its session is never drawn"
     );
     assert_eq!(source.notifications().new_recent, 0);
-    assert_eq!(group_titles(&source), ["Sync on this PC", "Backups on this PC"]);
+    assert_eq!(group_titles(&source), [beebeeb_engine::os_words::for_this_os("Sync on this PC").as_str(), beebeeb_engine::os_words::for_this_os("Backups on this PC").as_str()]);
 }
 
 /// Every text and label in the window's element tree.

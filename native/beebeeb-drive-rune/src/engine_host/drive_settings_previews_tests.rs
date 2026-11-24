@@ -68,7 +68,7 @@ fn engine_pane_draws_no_fallback_grid_or_on_pc_rows() {
         "Fallback previews",
         "Fallback preview, with HEIC",
         "720p WebP",
-        "On this PC",
+        beebeeb_engine::os_words::for_this_os("On this PC").as_str(),
         "ON THIS PC",
     ] {
         assert!(!texts.iter().any(|t| t.contains(words)), "draws {words}");

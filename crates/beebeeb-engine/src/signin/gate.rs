@@ -240,11 +240,19 @@ pub fn approve_error(code: &str) -> &'static str {
         return "That password isn\u{2019}t right. Nothing was shared.";
     }
     if code == "hello_unavailable" {
-        return "Windows Hello isn\u{2019}t set up on this PC. Set it up in Windows Settings to \
-                approve sign-ins.";
+        return if cfg!(target_os = "macos") {
+            "Touch ID isn\u{2019}t set up on this Mac. Set it up in System Settings to approve sign-ins."
+        } else {
+            "Windows Hello isn\u{2019}t set up on this PC. Set it up in Windows Settings to \
+                approve sign-ins."
+        };
     }
     if code == "hello_failed" {
-        return "Windows Hello didn\u{2019}t recognise you. Nothing was shared.";
+        return if cfg!(target_os = "macos") {
+            "Touch ID didn\u{2019}t recognise you. Nothing was shared."
+        } else {
+            "Windows Hello didn\u{2019}t recognise you. Nothing was shared."
+        };
     }
     if code == "offline" || code.contains("network error") {
         return "You\u{2019}re offline. Nothing was shared.";

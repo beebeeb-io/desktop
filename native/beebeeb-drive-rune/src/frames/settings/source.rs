@@ -207,7 +207,7 @@ impl OlderChannel {
     /// The row's words where no release notes open (the app never shows an older version's notes: DW-0789b's
     /// button would offer it): what this PC runs, without a pointer to notes that are not there.
     pub fn runs_from(&self) -> String {
-        format!("This PC runs {}, from the {} channel.", self.runs, self.from.label())
+        format!(concat!(beebeeb_engine::device_word_cap!(), " runs {}, from the {} channel."), self.runs, self.from.label())
     }
 }
 
@@ -608,20 +608,20 @@ fn board_notifications() -> Notifications {
                 ],
             ),
             (
-                "Sync on this PC".into(),
+                concat!("Sync on ", beebeeb_engine::device_word!()).into(),
                 vec![
                     alert("Sync stopped", "When files couldn't upload", true),
                     alert("Files need a decision", "When a file changed in two places", true),
                     alert(
                         "Sync finished",
-                        "When everything on this PC has synced. Off by default",
+                        concat!("When everything on ", beebeeb_engine::device_word!(), " has synced. Off by default"),
                         false,
                     ),
-                    alert("Space on this PC", "When downloaded files near their limit", true),
+                    alert(concat!("Space on ", beebeeb_engine::device_word!()), "When downloaded files near their limit", true),
                 ],
             ),
             (
-                "Backups on this PC".into(),
+                concat!("Backups on ", beebeeb_engine::device_word!()).into(),
                 vec![
                     alert("Backup finished", "When a backup completes", false),
                     alert("Backup needs attention", "Such as a folder that can't be read", true),

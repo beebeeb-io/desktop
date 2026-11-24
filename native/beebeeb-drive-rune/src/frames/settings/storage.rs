@@ -207,10 +207,10 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             ),
         lists::list(
             1,
-            Some("On this PC"),
+            Some(concat!("On ", beebeeb_engine::device_word!())),
             pc,
             Some(
-                "Clearing only removes copies on this PC. Your files stay safe in Beebeeb, and your file list is always kept.",
+                concat!("Clearing only removes copies on ", beebeeb_engine::device_word!(), ". Your files stay safe in Beebeeb, and your file list is always kept."),
             ),
             t,
         ),
@@ -289,7 +289,7 @@ pub fn free_up(ui: &SettingsUi, first: usize, t: &Theme) -> El {
             .on_press(|s: &mut State| {
                 s.settings.drive.clear(Kept::Downloaded);
                 s.settings.dialog = None;
-                s.settings.toast = Some("Downloaded copies removed from this PC");
+                s.settings.toast = Some(concat!("Downloaded copies removed from ", beebeeb_engine::device_word!()));
             }),
         dialogs::button(first + 1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
     ];
@@ -298,7 +298,7 @@ pub fn free_up(ui: &SettingsUi, first: usize, t: &Theme) -> El {
         380.0,
         notices::tile(0, Tone::Neutral, &ic::DOWNLOAD_TRAY, t),
         &format!("Free up {used}?"),
-        "Downloaded copies are removed from this PC. Your files stay in Beebeeb and download again when you open them. Available offline files stay.",
+        concat!("Downloaded copies are removed from ", beebeeb_engine::device_word!(), ". Your files stay in Beebeeb and download again when you open them. Available offline files stay."),
         foot,
         t,
     )

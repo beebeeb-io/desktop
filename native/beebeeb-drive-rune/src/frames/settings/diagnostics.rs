@@ -184,7 +184,7 @@ fn banner(bundle: &Bundle, t: &Theme) -> Option<El> {
         );
     if matches!(bundle, Bundle::Saved { .. }) {
         line = line.child(
-            controls::button(0, "Show in File Explorer", None, Emphasis::Plain, t)
+            controls::button(0, concat!("Show in ", beebeeb_engine::file_manager!()), None, Emphasis::Plain, t)
                 .on_press(|s: &mut State| s.settings.ask(Intent::Open("support-bundle"))),
         );
     }
@@ -197,7 +197,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         shell::crumb("General", t, |s: &mut State| super::go(s, "DW-0701")),
         shell::heading(
             "Diagnostics",
-            Some("What Beebeeb is doing on this PC, and a file you can read before you send it to support."),
+            Some(concat!("What Beebeeb is doing on ", beebeeb_engine::device_word!(), ", and a file you can read before you send it to support.")),
             t,
         ),
     ];
@@ -234,7 +234,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             0,
             Some("App activity"),
             rows,
-            Some("Beebeeb's own use of this PC, sampled every 2 seconds while this page is open. Upload and download are the latest bandwidth sample, not a live rate."),
+            Some(concat!("Beebeeb's own use of ", beebeeb_engine::device_word!(), ", sampled every 2 seconds while this page is open. Upload and download are the latest bandwidth sample, not a live rate.")),
             t,
         ));
     }
@@ -278,7 +278,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         None => lists::item(
             3,
             0,
-            &Item::new(Some(&ic::WARN_CIRCLE), "No log file on this PC")
+            &Item::new(Some(&ic::WARN_CIRCLE), concat!("No log file on ", beebeeb_engine::device_word!()))
                 .sub("Beebeeb could not make its log folder when it started, so nothing is being written."),
             t,
         ),
@@ -291,7 +291,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         vec![lists::item_with(
             1,
             0,
-            &Item::new(Some(&ic::BOX), "Export a support bundle").sub("A file on this PC, then a draft to support"),
+            &Item::new(Some(&ic::BOX), "Export a support bundle").sub(concat!("A file on ", beebeeb_engine::device_word!(), ", then a draft to support")),
             vec![
                 controls::button(export, "Export…", None, Emphasis::Plain, t).on_press(|s: &mut State| {
                     s.settings.ask(Intent::SaveBundleAndWriteEmail);

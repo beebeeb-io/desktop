@@ -132,10 +132,7 @@ pub enum Bound {
 pub const IDENTITY_UNKNOWN: &str = "Beebeeb couldn’t confirm which account this computer’s local files belong to, so sync didn’t start. Connect to the internet and open Beebeeb again.";
 /// Task 2267: shown only when this PC's local data could not be proven the signed-in account's own
 /// (`own_data_proof`). It never tells a person they have another account: the reported PCs had one.
-#[cfg(not(target_os = "macos"))]
-pub const OTHER_ACCOUNT_DATA: &str = "Beebeeb couldn’t confirm that the files on this PC belong to the account you’re signed in to, so sync didn’t start. Nothing was uploaded or deleted. Contact support@beebeeb.io.";
-#[cfg(target_os = "macos")]
-pub const OTHER_ACCOUNT_DATA: &str = "Beebeeb couldn’t confirm that the files on this Mac belong to the account you’re signed in to, so sync didn’t start. Nothing was uploaded or deleted. Contact support@beebeeb.io.";
+pub const OTHER_ACCOUNT_DATA: &str = concat!("Beebeeb couldn’t confirm that the files on ", device_word!(), " belong to the account you’re signed in to, so sync didn’t start. Nothing was uploaded or deleted. Contact support@beebeeb.io.");
 
 /// The sentence for an engine start (and a sign-out) refused because an engine stop was never confirmed: its task may
 /// still run with the keys, and nothing confirms its end later, so only a restart of Beebeeb ends the refusal (the
