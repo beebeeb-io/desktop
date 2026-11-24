@@ -81,7 +81,7 @@ impl<C: CredentialStores> Engine<C> {
         if !self.acct.session_unchanged_since(session) {
             return Err(AccountCallError::NotSignedIn);
         }
-        let items = raw.iter().filter_map(|meta| trash_item_from_meta(meta, &key)).collect();
+        let items = trash_roots(raw.iter().filter_map(|meta| trash_item_from_meta(meta, &key)).collect());
         // The hand-over: only while the session in memory is the one the token and the key were copied from, asked
         // with no session change half done. A listing made for a session that is ending is dropped here.
         if !self.session_is_still(session, &key) {
@@ -258,6 +258,25 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
+/// What a person trashed, as Trash lists it: each row once, and never a row whose parent folder is itself in Trash
+/// (it went with that folder, comes back with its restore and goes with its delete for good). The server's flat
+/// Trash holds every cascade-trashed row: listed as it came, a folder that holds a folder of the same name showed
+/// twice (RD-d2). A row whose parent is not in the listing (a live folder, the root, or a server that sends no
+/// parent) is kept. Order is kept.
+pub fn trash_roots(items: Vec<DesktopTrashItem>) -> Vec<DesktopTrashItem> {
+    let folders: std::collections::HashSet<String> = items
+        .iter()
+        .filter(|item| item.is_folder)
+        .map(|item| item.id.clone())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| !item.parent_id.as_ref().is_some_and(|parent| folders.contains(parent)))
+        .filter(|item| seen.insert(item.id.clone()))
+        .collect()
+}
+
 /// The server's row with its name decrypted (`owner_keys::display_name`), without the local state.
 pub fn trash_item_from_meta(meta: &serde_json::Value, master_key: &[u8; 32]) -> Option<DesktopTrashItem> {
     let id = meta.get("id").and_then(|v| v.as_str())?.to_string();
@@ -376,6 +395,51 @@ mod tests {
         let meta = json!({ "id": ID, "uploaded_by": "someone" });
         let item = trash_item_from_meta(&meta, &key()).expect("a row with an id");
         assert_eq!(item.name, owner_keys::blocked_name(ID));
+    }
+
+    fn listed(id: &str, name: &str, is_folder: bool, parent: Option<&str>) -> DesktopTrashItem {
+        DesktopTrashItem {
+            id: id.into(),
+            name: name.into(),
+            is_folder,
+            size_bytes: 0,
+            updated_at: String::new(),
+            parent_id: parent.map(str::to_string),
+        }
+    }
+
+    /// RD-d2: a folder trashed with a same-named folder inside it ("Film (2025)/Film (2025)/film.mkv") listed the
+    /// name twice: the server's flat Trash holds every cascade-trashed row, and the view drew each one.
+    #[test]
+    fn what_a_trashed_folder_holds_is_listed_once_under_it_never_as_rows_of_its_own() {
+        let items = vec![
+            listed("f-outer", "An invented film (2025)", true, None),
+            listed("f-inner", "An invented film (2025)", true, Some("f-outer")),
+            listed("film", "An invented film (2025).mkv", false, Some("f-inner")),
+            listed("loose", "An invented loose file.pdf", false, Some("a-live-folder")),
+            listed("top", "An invented top file.txt", false, None),
+        ];
+        let ids: Vec<String> = trash_roots(items).into_iter().map(|item| item.id).collect();
+        assert_eq!(ids, ["f-outer", "loose", "top"]);
+    }
+
+    #[test]
+    fn the_same_row_twice_is_listed_once() {
+        let items = vec![
+            listed("a", "An invented note.txt", false, None),
+            listed("a", "An invented note.txt", false, None),
+        ];
+        assert_eq!(trash_roots(items).len(), 1);
+    }
+
+    /// A listing without parents (an older server) keeps every row: nothing is hidden on a guess.
+    #[test]
+    fn rows_without_a_parent_are_all_kept() {
+        let items = vec![
+            listed("a", "An invented folder", true, None),
+            listed("b", "An invented folder", true, None),
+        ];
+        assert_eq!(trash_roots(items).len(), 2);
     }
 
     #[test]
