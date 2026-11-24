@@ -21,7 +21,8 @@
 //! answer arrives on the prompt's own thread.
 //!
 //! This file names no other module of the crate, so `examples/hello_probe.rs` (the native rung) includes it as it
-//! is. Off Windows everything answers "not here": `Unsupported` and `Unavailable`.
+//! is. On macOS the same seam is Touch ID (`macos_touchid.rs`, `LAContext`); elsewhere everything answers "not here":
+//! `Unsupported` and `Unavailable`.
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -151,7 +152,13 @@ impl HelloWindow {
             });
             hwnd.ok().flatten().and_then(Self::from_hwnd)
         }
-        #[cfg(not(windows))]
+        // Touch ID's sheet belongs to the system, not to a window: any live window will do, and the number is unused.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = window;
+            Self::from_hwnd(1)
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = window;
             None
@@ -399,15 +406,15 @@ pub fn start(
 mod imp {
     use std::sync::Arc;
 
+    use windows::core::HSTRING;
     use windows::Foundation::{AsyncOperationCompletedHandler, AsyncStatus, IAsyncOperation};
     use windows::Security::Credentials::UI::{
         UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
     };
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
-    use windows::core::HSTRING;
 
-    use super::{Control, HelloAvailability, HelloWindow, Seen, Woken, availability_from_raw, raw};
+    use super::{availability_from_raw, raw, Control, HelloAvailability, HelloWindow, Seen, Woken};
 
     // The mapping above is written (and tested on every platform) against these numbers.
     const _: () = {
@@ -499,13 +506,13 @@ mod imp {
         use std::time::{Duration, Instant};
 
         use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, TRUE};
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            EnumWindows, GW_OWNER, GetClassNameW, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
-            WM_CLOSE,
-        };
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
-            TerminateProcess,
+            OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_TERMINATE,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetClassNameW, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, GW_OWNER,
+            WM_CLOSE,
         };
 
         const CLASS: &str = "Credential Dialog Xaml Host";
@@ -608,7 +615,11 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+#[path = "macos_touchid.rs"]
+mod imp;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use std::sync::Arc;
 
@@ -969,7 +980,7 @@ mod tests {
 
     // Off Windows there is nothing to show: the answers below are the stub's. On Windows these would raise a
     // real prompt, which is the native rung's job (`examples/hello_probe.rs`).
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     mod off_windows {
         use std::sync::mpsc;
         use std::time::Duration;
