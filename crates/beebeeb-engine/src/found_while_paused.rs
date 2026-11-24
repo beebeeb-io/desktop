@@ -21,7 +21,7 @@
 //!      PC" ([`synced_by`], P3-4).
 //!
 //! Names and paths are never logged; the result carries counts and the one folder the person is shown.
-#![cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+#![cfg_attr(not(any(target_os = "windows", target_os = "macos", test)), allow(dead_code))]
 
 use crate::state_db::{HeldChange, ProofOp, ProofRow, StateDb};
 use serde::{Deserialize, Serialize};

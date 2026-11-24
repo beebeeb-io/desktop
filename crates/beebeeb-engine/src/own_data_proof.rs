@@ -1,5 +1,5 @@
 //! Task 2267 (P1): a Windows PC whose local data had no recorded owner, or an owner recorded only by an email the
-//! account no longer uses, refused every sync start with `OTHER_ACCOUNT_ON_WINDOWS`, although the data was the
+//! account no longer uses, refused every sync start with `OTHER_ACCOUNT_DATA`, although the data was the
 //! signed-in account's own. Signing out did not help: the Windows sign-out keeps unsent changes, and those cannot send
 //! while sync is refused.
 //!
@@ -32,7 +32,7 @@ pub use crate::engine_bridge::name_opens;
 mod tests {
     use super::*;
     use crate::account_binding::{
-        Bound, IDENTITY_UNKNOWN, LocalData, OTHER_ACCOUNT_ON_WINDOWS, adopt_unbound, bind_before_engine_start,
+        Bound, IDENTITY_UNKNOWN, LocalData, OTHER_ACCOUNT_DATA, adopt_unbound, bind_before_engine_start,
     };
     use crate::state_db::{FileEntry, FileStatus, ItemKind, Namespace, OperationKind, PendingOperation};
     use std::cell::{Cell, RefCell};

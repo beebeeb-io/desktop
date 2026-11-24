@@ -390,11 +390,11 @@ fn the_session_identity_takes_the_profile_only_when_it_is_this_sessions() {
 /// Mutant: `Refusal::of` compares with `error.starts_with(refusal.sentence())`: the "(detail)" row is red.
 #[test]
 fn only_the_two_exact_binding_sentences_are_binding_refusals() {
-    use beebeeb_engine::account_binding::{IDENTITY_UNKNOWN, OTHER_ACCOUNT_ON_WINDOWS, Refusal};
+    use beebeeb_engine::account_binding::{IDENTITY_UNKNOWN, OTHER_ACCOUNT_DATA, Refusal};
 
     assert_eq!(Refusal::of(IDENTITY_UNKNOWN), Some(Refusal::IdentityUnknown));
     assert_eq!(
-        Refusal::of(OTHER_ACCOUNT_ON_WINDOWS),
+        Refusal::of(OTHER_ACCOUNT_DATA),
         Some(Refusal::OtherAccountOnWindows)
     );
     assert_eq!(Refusal::of("read the local data owner: disk I/O error"), None);
