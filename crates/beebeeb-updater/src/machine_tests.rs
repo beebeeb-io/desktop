@@ -1173,3 +1173,108 @@ fn the_replay_mark_keeps_the_larger_time() {
     assert!(matches!(state, State::Available { .. }));
     assert_eq!(mark, 1_800_000_000);
 }
+
+/// A Mac: its trust picks the `darwin-aarch64` entry (and a Windows-only manifest has no build for it); it only
+/// opens the download page; an install request is refused first with the code, and nothing is downloaded.
+mod mac {
+    use super::*;
+    use crate::testkit::{Did, darwin_artifact_url, darwin_updater};
+
+    fn mac_world(published: Publish) -> (World, TestUpdater, String) {
+        let world = World::new();
+        let mut http = FakeHttp::default();
+        published.serve(&mut http, &world.key);
+        let url = published.url.clone();
+        let updater = darwin_updater(&world.key, "0.9.0", world.dir.path(), http, MemStore::default());
+        (world, updater, url)
+    }
+
+    #[test]
+    fn a_manifest_with_darwin_aarch64_is_picked_on_a_mac() {
+        let publish = Publish::for_darwin(Channel::Stable, "0.9.1", artifact_bytes(SIZE));
+        let (_world, mut updater, _) = mac_world(publish);
+        let State::Available { offer } = settle(&mut updater, CHECK) else {
+            panic!("a Mac sees the update")
+        };
+        assert_eq!(offer.version, version("0.9.1"));
+        assert_eq!(offer.url, darwin_artifact_url("0.9.1"));
+        assert_eq!(offer.file_name, "Beebeeb_0.9.1_aarch64.app.tar.gz");
+    }
+
+    #[test]
+    fn a_windows_only_manifest_has_no_build_for_a_mac() {
+        let (_world, mut updater, _) = mac_world(Publish::new(Channel::Stable, "0.9.1", artifact_bytes(SIZE)));
+        assert!(matches!(
+            settle(&mut updater, CHECK),
+            State::Failed {
+                failure: Failure::Refused(Refusal::NoBuildForThisPc),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn download_update_opens_the_page_and_changes_nothing_else() {
+        let publish = Publish::for_darwin(Channel::Stable, "0.9.1", artifact_bytes(SIZE));
+        let (world, mut updater, url) = mac_world(publish);
+        let offered = settle(&mut updater, CHECK);
+        assert!(matches!(offered, State::Available { .. }));
+        assert_eq!(
+            updater.step(Event::OpenDownloadPage).clone(),
+            offered,
+            "the offer stays"
+        );
+        assert_eq!(updater.apply.did, [Did::OpenedDownloadPage(version("0.9.1"))]);
+        assert!(world.staged().is_empty(), "nothing was downloaded");
+        assert!(
+            updater.http.requests_for(&url).is_empty(),
+            "the artefact was never requested"
+        );
+    }
+
+    #[test]
+    fn a_page_that_does_not_open_says_so_and_keeps_the_offer() {
+        let publish = Publish::for_darwin(Channel::Stable, "0.9.1", artifact_bytes(SIZE));
+        let (_world, mut updater, _) = mac_world(publish);
+        settle(&mut updater, CHECK);
+        updater.apply.page_will_not_open = true;
+        assert!(matches!(
+            updater.step(Event::OpenDownloadPage),
+            State::Failed {
+                failure: Failure::DownloadPageDidNotOpen,
+                resume: Some(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn an_install_request_on_a_mac_is_refused_first_with_the_code() {
+        let publish = Publish::for_darwin(Channel::Stable, "0.9.1", artifact_bytes(SIZE));
+        let (world, mut updater, url) = mac_world(publish);
+        settle(&mut updater, CHECK);
+        for event in [
+            Event::Download,
+            Event::Apply,
+            Event::DownloadDowngrade(version("0.9.1")),
+        ] {
+            let state = updater.step(event).clone();
+            let State::Failed {
+                failure,
+                resume: Some(offer),
+            } = state
+            else {
+                panic!("refused, with the offer kept: {state:?}")
+            };
+            assert_eq!(failure, Failure::InstallUnsupported);
+            assert_eq!(failure.code(), Some("update_install_unsupported"));
+            assert_eq!(offer.version, version("0.9.1"));
+        }
+        assert_eq!(
+            crate::machine::install_unsupported_message(),
+            "update_install_unsupported: Beebeeb on a Mac downloads updates and cannot install them in place."
+        );
+        assert!(world.staged().is_empty());
+        assert!(updater.http.requests_for(&url).is_empty());
+        assert!(updater.apply.did.is_empty(), "no engine stop, no installer");
+    }
+}

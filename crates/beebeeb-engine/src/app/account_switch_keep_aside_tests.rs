@@ -205,7 +205,9 @@ fn the_discard_keeps_a_copy_of_each_left_file_and_switches() {
     let done = pc.engine.discard_and_switch_with(&ask, pc.root(), &port).unwrap();
 
     assert_eq!(done.kept, 2);
-    assert!(done.kept_in.starts_with(pc.engine.config.state_dir.join(crate::sign_out::kept_names::KEPT_FOLDER_NAME)));
+    // Compared by real path: a Mac's temp folder is `/var/...`, a link to `/private/var/...`, and the engine names the latter.
+    let real = |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    assert!(real(&done.kept_in).starts_with(real(&pc.engine.config.state_dir).join(crate::sign_out::kept_names::KEPT_FOLDER_NAME)));
     let mut kept: Vec<String> = listing(&done.kept_in)
         .into_iter()
         .filter(|path| done.kept_in.join(path).is_file())

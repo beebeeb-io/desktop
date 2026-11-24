@@ -3,7 +3,7 @@
 //! makes a closed loopback port the default API, and the credential stores are in memory. Nothing here touches
 //! the OS credential store, the person's folders, a registration or the network. Every name is invented.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use beebeeb_engine::app::{Engine, EngineConfig};
@@ -218,7 +218,12 @@ fn the_test_build_refuses_the_real_apps_state_folder_and_sync_folder() {
     // Where it syncs: its own folder, not the real app's; and a folder Windows has registered to the real
     // app's provider is refused by the engine's owner check, as is one whose registration cannot be read.
     let root = started.live.sync_root().unwrap();
-    assert_eq!(root.file_name().unwrap(), TEST.sync_folder_name());
+    if cfg!(target_os = "macos") {
+        // A Mac's sync surface is the state root `<identity's own folder>/file-provider-state`.
+        assert!(root.ends_with(Path::new(TEST.config_dir_name()).join("file-provider-state")), "{root:?}");
+    } else {
+        assert_eq!(root.file_name().unwrap(), TEST.sync_folder_name());
+    }
     assert_ne!(root, beebeeb_engine::config::default_sync_root_suggestion(&REAL));
     let reals_registration = Registration::Provider(REAL.cloud_files_provider_name().to_string());
     assert!(sync_root_owner::refusal(identity, &reals_registration, &root).is_some());

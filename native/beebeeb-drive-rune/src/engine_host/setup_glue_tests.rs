@@ -181,10 +181,13 @@ fn the_folder_calls_reach_the_engine() {
     in_own_settings(|| {
         assert_eq!(SetupEngine::settings_folder(&*engine), Ok(None));
         let suggested = SetupEngine::suggested_folder(&*engine);
-        assert!(
-            suggested.ends_with(TEST.sync_folder_name()),
-            "the identity's own folder name"
-        );
+        // On a Mac there is no visible sync folder: the suggestion is the state root `<identity's own folder>/file-provider-state`.
+        let own = if cfg!(target_os = "macos") {
+            Path::new(TEST.config_dir_name()).join("file-provider-state")
+        } else {
+            std::path::PathBuf::from(TEST.sync_folder_name())
+        };
+        assert!(suggested.ends_with(&own), "the identity's own folder name: {suggested:?}");
         // The rule is the engine's: the settings' own folder is Beebeeb's data.
         let settings = DesktopConfig::path_for(&TEST).expect("the settings file's place");
         let refused = SetupEngine::check_folder(&*engine, settings.parent().expect("its folder"));
