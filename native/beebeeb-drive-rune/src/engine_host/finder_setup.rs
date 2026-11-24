@@ -373,13 +373,15 @@ mod macos {
         }
     }
 
+    /// `ProductVersion` from the system's version file: no process is started.
     fn macos_version() -> String {
-        std::process::Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
+        std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
             .ok()
-            .and_then(|out| String::from_utf8(out.stdout).ok())
-            .map(|v| beebeeb_engine::finder_setup::driver::token(v.trim()))
+            .and_then(|plist| {
+                let rest = plist.split("<key>ProductVersion</key>").nth(1)?;
+                let value = rest.split("<string>").nth(1)?.split("</string>").next()?;
+                Some(beebeeb_engine::finder_setup::driver::token(value.trim()))
+            })
             .unwrap_or_else(|| "unknown".into())
     }
 }

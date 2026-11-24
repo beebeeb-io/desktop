@@ -262,6 +262,7 @@ dehydrated
 delete
 delete_count
 deleted
+delivered
 depth
 descendant
 descending
@@ -373,6 +374,7 @@ final
 finalization
 find
 finder
+finish
 finished
 fired
 first
@@ -1089,6 +1091,7 @@ trashing
 tree
 tried
 tries
+trigger
 true_size_bytes
 trying
 ttl
