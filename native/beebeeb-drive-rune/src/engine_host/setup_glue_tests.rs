@@ -1,19 +1,19 @@
 //! The engine's own first-run calls, once, on a real handle against the fake API: the gate the shell reads from
 //! the live engine, the settings each call writes, and the session rule of the writes. Every name is invented.
 
-use beebeeb_engine::app::EngineConfig;
 use beebeeb_engine::app::setup_api::decide_first_run;
-use beebeeb_engine::config::{CONFIG_DIR_OVERRIDE, DesktopConfig};
+use beebeeb_engine::app::EngineConfig;
+use beebeeb_engine::config::{DesktopConfig, CONFIG_DIR_OVERRIDE};
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
+use beebeeb_engine::test_api::fake_account::{account_handler, FakeAccount, TEST_PHRASE};
 use beebeeb_engine::test_api::FakeApi;
-use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::engine_host::LiveEngine;
 use crate::engine_host::open::Opened;
+use crate::engine_host::LiveEngine;
 
 const PASSWORD: &str = "an invented password for setup";
 
@@ -187,7 +187,10 @@ fn the_folder_calls_reach_the_engine() {
         } else {
             std::path::PathBuf::from(TEST.sync_folder_name())
         };
-        assert!(suggested.ends_with(&own), "the identity's own folder name: {suggested:?}");
+        assert!(
+            suggested.ends_with(&own),
+            "the identity's own folder name: {suggested:?}"
+        );
         // The rule is the engine's: the settings' own folder is Beebeeb's data.
         let settings = DesktopConfig::path_for(&TEST).expect("the settings file's place");
         let refused = SetupEngine::check_folder(&*engine, settings.parent().expect("its folder"));

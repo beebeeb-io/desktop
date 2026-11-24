@@ -5,8 +5,8 @@
 //! One filter runs them all: `setup_add_passkey`.
 
 use super::*;
-use crate::frames::signin::setup::PasskeyStep;
 use crate::frames::signin::setup::source::PasskeyRefused;
+use crate::frames::signin::setup::PasskeyStep;
 
 /// What the person types into step 1's field.
 const TYPED: &str = "an invented one";

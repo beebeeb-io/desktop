@@ -12,13 +12,13 @@ use super::source::{
     CodeKind, GateState as SourceGate, HelloOutcome, NextAfterSignIn, ScreenPasswordOutcome, SharedSession,
     SignInEvent, SignInSource, TwoFactorProblem,
 };
-use super::{PASSWORD_KEY, Ui, lock};
-use crate::State;
+use super::{lock, Ui, PASSWORD_KEY};
 use crate::shell::actions::FixtureEngine;
 use crate::shell::app::{GateState, Screen};
 use crate::shell::host::{self, Shell};
 use crate::shell::platform::fake::FakePlatform;
 use crate::shell::{registry, state};
+use crate::State;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 #[derive(Clone, Default)]
@@ -190,7 +190,10 @@ fn unlock_asks_windows_hello_once_and_each_answer_is_a_sentence_or_nothing() {
 
     // Not recognised: said under the button, and the password is offered.
     answer(&mut rt, &script, SignInEvent::Hello(HelloOutcome::NotRecognized));
-    assert!(shows(&rt, "Windows Hello didn't recognise you."));
+    assert!(shows(
+        &rt,
+        beebeeb_engine::os_words::for_this_os("Windows Hello didn't recognise you.").as_str()
+    ));
     assert!(find(&rt, "gate-btn-1").is_some());
     // The next prompt takes the sentence away while it is up.
     click(&mut rt, lock::UNLOCK_KEY);
@@ -199,7 +202,10 @@ fn unlock_asks_windows_hello_once_and_each_answer_is_a_sentence_or_nothing() {
 
     // No prompt on this PC: said, and the password is offered.
     answer(&mut rt, &script, SignInEvent::Hello(HelloOutcome::Unavailable));
-    assert!(shows(&rt, "Windows Hello isn't available on this PC."));
+    assert!(shows(
+        &rt,
+        beebeeb_engine::os_words::for_this_os("Windows Hello isn't available on this PC.").as_str()
+    ));
     assert!(find(&rt, "gate-btn-1").is_some());
 
     // A yes moves nothing in the window: the engine's gate does.
@@ -620,11 +626,11 @@ fn screen_password_each_outcome_draws_its_sentence() {
         ),
         (
             O::LocalCheckOff,
-            "That password isn't right. This PC no longer checks your password offline: connect to the internet or use Windows Hello.",
+            &*Box::leak(beebeeb_engine::os_words::for_this_os("That password isn't right. This PC no longer checks your password offline: connect to the internet or use Windows Hello.").into_boxed_str()),
         ),
         (
             O::OfflineNoRecord,
-            "Beebeeb can't be reached, and this PC can't check your password offline yet. Connect to the internet or use Windows Hello.",
+            &*Box::leak(beebeeb_engine::os_words::for_this_os("Beebeeb can't be reached, and this PC can't check your password offline yet. Connect to the internet or use Windows Hello.").into_boxed_str()),
         ),
         (O::Failed, "Beebeeb couldn't check that password. Nothing was unlocked."),
         (

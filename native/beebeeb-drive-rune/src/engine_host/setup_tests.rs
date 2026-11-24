@@ -3,18 +3,18 @@
 //! and drops the first run), and the engine's own first-run calls once against a real handle on the fake API.
 //! Every name is invented.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use rune::{Env, Runtime, Tx};
 
 use super::*;
-use crate::State;
 use crate::shell::actions::{EngineActions, FixtureEngine};
 use crate::shell::app::GateState as ShellGate;
 use crate::shell::host::{self, Shell};
 use crate::shell::platform::fake::FakePlatform;
+use crate::State;
 use beebeeb_engine::app::passkeys_api::PasskeyProblem;
 use beebeeb_engine::app::photo_previews_api::{PreviewsFacts, PreviewsRefused, SampleFacts};
 use beebeeb_engine::photo_previews::PreviewSetting;
@@ -913,11 +913,19 @@ fn the_first_run_in_the_window_shows_its_real_steps_and_ends_in_the_main_window(
         EngineExplorer::Unknown,
     );
     wait_for(&mut rt, "sync did not start", |rt| {
-        says(rt, "Sync didn't start on this PC")
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("Sync didn't start on this PC").as_str(),
+        )
     });
     assert!(!says(&rt, "Windows didn't finish"), "it was not Windows that refused");
     engine.set(Start::Running, EngineExplorer::Added);
-    wait_for(&mut rt, "added", |rt| says(rt, "is in File Explorer"));
+    wait_for(&mut rt, "added", |rt| {
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("is in File Explorer").as_str(),
+        )
+    });
     press(&mut rt, "Continue");
     // Notifications, then open at login (the engine's answer is held: nothing is drawn as set before it).
     let held = engine.held.lock().unwrap();
@@ -938,7 +946,10 @@ fn the_first_run_in_the_window_shows_its_real_steps_and_ends_in_the_main_window(
             "a step nothing answered for claims no value: {row}"
         );
     }
-    assert!(says(&rt, "File Explorer, On"));
+    assert!(says(
+        &rt,
+        beebeeb_engine::os_words::for_this_os("File Explorer, On").as_str()
+    ));
     assert!(
         !rt.elements().iter().any(|e| !e.exiting && e.role == "link"),
         "the rows are values: nothing opens a setting from here"

@@ -75,13 +75,13 @@ fn an_approval_this_pc_did_not_take_is_said_for_what_it_is() {
     for (status, title, words, other_account) in [
         (
             DeviceStatus::OtherAccount,
-            "Approved, but this PC holds another account",
-            "Nothing was signed in on this PC, and no keys were kept.",
+            beebeeb_engine::os_words::for_this_os("Approved, but this PC holds another account").as_str(),
+            beebeeb_engine::os_words::for_this_os("Nothing was signed in on this PC, and no keys were kept.").as_str(),
             true,
         ),
         (
             DeviceStatus::NotSignedIn,
-            "Approved, but this PC did not sign in",
+            beebeeb_engine::os_words::for_this_os("Approved, but this PC did not sign in").as_str(),
             "Nothing was signed in. Ask again.",
             false,
         ),

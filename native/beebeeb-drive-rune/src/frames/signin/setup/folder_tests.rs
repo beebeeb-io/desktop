@@ -3,7 +3,7 @@
 //! person's presses make.
 
 use super::super::source::{FolderAsk, FolderSaid};
-use super::super::{RENDER_SCENES, render_scene};
+use super::super::{render_scene, RENDER_SCENES};
 use super::*;
 
 const SUGGESTED: &str = r"C:\Users\Sam\Beebeeb";
@@ -82,7 +82,10 @@ fn a_step_nothing_answers_for_keeps_its_place_says_so_and_claims_nothing() {
     for row in ["Passkey", "App lock", "Backup", "Previews", "Notifications"] {
         assert!(says(&rt, &format!("{row}, Not available yet")), "{row}");
     }
-    assert!(says(&rt, "File Explorer, On") && says(&rt, "Open at login, On"));
+    assert!(
+        says(&rt, beebeeb_engine::os_words::for_this_os("File Explorer, On").as_str())
+            && says(&rt, "Open at login, On")
+    );
     assert!(!says(&rt, "4K HEIC"), "no value for a setting nothing set");
 
     // "Not now" and the passkey button's own call on such a step ask nothing either.
@@ -119,7 +122,13 @@ fn the_file_explorer_step_asks_for_the_folder_first() {
     assert!(ui(&mut rt).asks_folder());
     assert_eq!(heading(&rt), "Choose where Beebeeb's folder goes");
     assert!(says(&rt, SUGGESTED), "the suggested folder");
-    assert!(says(&rt, "isn't in File Explorer yet"), "the status at the left");
+    assert!(
+        says(
+            &rt,
+            beebeeb_engine::os_words::for_this_os("isn't in File Explorer yet").as_str()
+        ),
+        "the status at the left"
+    );
     assert!(!says(&rt, "Adding"), "nothing is being added");
     assert!(has_button(&rt, "Use this folder") && has_button(&rt, "Choose another folder\u{2026}"));
     assert!(!has_button(&rt, "Continue") && !has_button(&rt, "Not now"));
@@ -138,7 +147,10 @@ fn the_file_explorer_step_asks_for_the_folder_first() {
     // The folder is settled: the step shows File Explorer's own state, and its button goes on.
     assert_eq!(ui_step(&mut rt), Step::Explorer);
     assert!(!ui(&mut rt).asks_folder());
-    assert_eq!(heading(&rt), "Adding Beebeeb to File Explorer");
+    assert_eq!(
+        heading(&rt),
+        beebeeb_engine::os_words::for_this_os("Adding Beebeeb to File Explorer")
+    );
     ui(&mut rt).choose_folder();
     assert_eq!(log.borrow().len(), 2, "no picker once the folder is settled");
     click(&mut rt, "btn-0");
@@ -208,7 +220,10 @@ fn while_a_choice_is_on_its_way_no_second_one_is_asked() {
 #[test]
 fn another_folder_can_be_chosen_after_a_refused_start_only_when_none_was_kept() {
     for (explorer, words) in [
-        (Explorer::NotSyncing, "Sync didn't start on this PC"),
+        (
+            Explorer::NotSyncing,
+            &*Box::leak(beebeeb_engine::os_words::for_this_os("Sync didn't start on this PC").into_boxed_str()),
+        ),
         (
             Explorer::Failed {
                 code: "0x80070005".into(),
@@ -226,14 +241,26 @@ fn another_folder_can_be_chosen_after_a_refused_start_only_when_none_was_kept() 
         assert!(says(&rt, words));
         // Only a File Explorer entry that failed leaves a window that works: sync that did not start does not.
         assert_eq!(
-            says(&rt, "the Beebeeb window works without File Explorer"),
+            says(
+                &rt,
+                beebeeb_engine::os_words::for_this_os("the Beebeeb window works without File Explorer").as_str()
+            ),
             explorer != Explorer::NotSyncing
         );
         assert_eq!(
-            says(&rt, "Nothing syncs with this PC"),
+            says(
+                &rt,
+                beebeeb_engine::os_words::for_this_os("Nothing syncs with this PC").as_str()
+            ),
             explorer == Explorer::NotSyncing
         );
-        assert!(has_button(&rt, "Try again") && has_button(&rt, "Continue without File Explorer"));
+        assert!(
+            has_button(&rt, "Try again")
+                && has_button(
+                    &rt,
+                    beebeeb_engine::os_words::for_this_os("Continue without File Explorer").as_str()
+                )
+        );
         click(&mut rt, "btn-0");
         assert_eq!(log.borrow().clone(), ["choose_folder"], "{explorer:?}");
 
@@ -257,7 +284,12 @@ fn the_render_scenes_draw_their_states() {
         ("first-run-not-yet", "Add a passkey"),
         ("first-run-folder", "Choose where Beebeeb's folder goes"),
         ("first-run-folder-refused", "Choose where Beebeeb's folder goes"),
-        ("first-run-sync-off", "Couldn't add Beebeeb to File Explorer"),
+        (
+            "first-run-sync-off",
+            &*Box::leak(
+                beebeeb_engine::os_words::for_this_os("Couldn't add Beebeeb to File Explorer").into_boxed_str(),
+            ),
+        ),
         ("first-run-summary", "You're set up"),
     ];
     assert_eq!(RENDER_SCENES.len(), expected.len());

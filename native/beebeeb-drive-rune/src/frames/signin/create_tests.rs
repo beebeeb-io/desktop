@@ -4,16 +4,16 @@
 
 use rune::{Key, Runtime};
 
-use super::create::{CODE_KEY, DEVICE_KEY, FRAME_IDS, Step, WORD_KEYS, scene};
+use super::create::{scene, Step, CODE_KEY, DEVICE_KEY, FRAME_IDS, WORD_KEYS};
 use super::create_source::{
-    CodeProblem, CreateProblem, PasswordProblem, SendProblem, SignUpEvent, SignUpScript, sample,
+    sample, CodeProblem, CreateProblem, PasswordProblem, SendProblem, SignUpEvent, SignUpScript,
 };
-use super::source::{FixtureSignInSource, NextAfterSignIn, Script, SignInEvent, board};
+use super::source::{board, FixtureSignInSource, NextAfterSignIn, Script, SignInEvent};
 use super::steps::CONFIRM_KEY;
 use super::tests::{click, focused, has, info, press, readable, runtime, runtime_of, space, tab_to, ui};
-use super::{EMAIL_KEY, Intent, PASSWORD_KEY, Screen, TITLE_KEY, Ui};
-use crate::State;
+use super::{Intent, Screen, Ui, EMAIL_KEY, PASSWORD_KEY, TITLE_KEY};
 use crate::ui::kit;
+use crate::State;
 
 const HEADINGS: [&str; 14] = [
     "Create your Beebeeb account",
@@ -27,7 +27,7 @@ const HEADINGS: [&str; 14] = [
     "Your recovery phrase",
     "Confirm your phrase",
     "Confirm your phrase",
-    "Name this PC",
+    concat!("Name ", beebeeb_engine::device_word!()),
     "Creating your account",
     "Your account is ready",
 ];
@@ -462,11 +462,9 @@ fn the_password_needs_its_length_its_twin_and_the_breach_check() {
     rt.invalidate();
     rt.frame(0.0);
     assert_eq!(at(&mut rt), Step::Password);
-    assert!(
-        said(&rt, "field-0-msg")
-            .unwrap_or_default()
-            .starts_with("We could not check this password")
-    );
+    assert!(said(&rt, "field-0-msg")
+        .unwrap_or_default()
+        .starts_with("We could not check this password"));
 }
 
 /// The password is typed into the group's one secure field, and is gone from this window the
@@ -659,11 +657,9 @@ fn creating_has_no_way_back_and_each_failure_has_its_one_way_on() {
     };
     answer(&mut rt, CreateProblem::NothingStored);
     assert_eq!(said(&rt, "btn-0").as_deref(), Some("Try again"));
-    assert!(
-        said(&rt, "banner-0-text")
-            .unwrap_or_default()
-            .contains("Nothing was stored.")
-    );
+    assert!(said(&rt, "banner-0-text")
+        .unwrap_or_default()
+        .contains("Nothing was stored."));
     click(&mut rt, "btn-0");
     assert_eq!(calls.borrow().iter().filter(|c| **c == "sign_up_create").count(), 2);
     assert!(!has(&rt, "btn-0"), "running again");
@@ -684,11 +680,9 @@ fn creating_has_no_way_back_and_each_failure_has_its_one_way_on() {
     press(&mut rt, Key::Enter);
     answer(&mut rt, CreateProblem::CodeExpired);
     assert_eq!(at(&mut rt), Step::Verify);
-    assert!(
-        said(&rt, "field-0-msg")
-            .unwrap_or_default()
-            .ends_with("Your password and recovery phrase are kept.")
-    );
+    assert!(said(&rt, "field-0-msg")
+        .unwrap_or_default()
+        .ends_with("Your password and recovery phrase are kept."));
     assert!(ui(&mut rt).can_resend(), "a new code can be asked for at once");
 }
 
@@ -784,7 +778,10 @@ fn each_shown_word_says_its_place_of_twelve_and_never_the_word() {
         assert_eq!(nodes.len(), 1, "word-{i}");
         assert_eq!(nodes[0]["name"], format!("Word {}", i + 1));
         assert_eq!(nodes[0]["position"], i + 1, "{} of 12", i + 1);
-        assert_eq!(super::steps_tests::a11y_set_size_of(&rt, &format!("word-{i}")), Some(12));
+        assert_eq!(
+            super::steps_tests::a11y_set_size_of(&rt, &format!("word-{i}")),
+            Some(12)
+        );
     }
     let tree = rt.accessibility_json().to_string();
     for word in board::WORDS {

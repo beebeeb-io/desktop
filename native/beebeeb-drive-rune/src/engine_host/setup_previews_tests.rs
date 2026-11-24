@@ -218,7 +218,12 @@ fn setup_space_row_hidden_when_no_limit() {
     )));
     board.step = Step::Previews;
     let board = texts(&drawn(board));
-    assert!(board.iter().any(|t| t.contains("Space on this PC")), "{board:?}");
+    assert!(
+        board
+            .iter()
+            .any(|t| t.contains(beebeeb_engine::os_words::for_this_os("Space on this PC").as_str())),
+        "{board:?}"
+    );
 }
 
 #[test]

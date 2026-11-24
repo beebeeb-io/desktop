@@ -314,7 +314,11 @@ fn lock_window(prompts: &Prompts) -> (Runtime<State>, Arc<Fake>) {
     let fixture = Arc::new(FixtureEngine::ready());
     fixture.set_account(FIRST);
     let mut state = crate::shell::state::init_with(Shell::fixture_on(fixture.clone(), platform.clone()));
-    let (binds, source_hooks, hello) = (Arc::new(Binds(engine.clone())), hooks(&asked, platform, first_run), prompts.clone());
+    let (binds, source_hooks, hello) = (
+        Arc::new(Binds(engine.clone())),
+        hooks(&asked, platform, first_run),
+        prompts.clone(),
+    );
     state.setup_source = Some(Box::new(move || {
         Box::new(EngineSetupSource::new(binds.clone(), source_hooks.clone()).with_hello(Box::new(hello.clone())))
     }));
@@ -345,7 +349,11 @@ fn leave_the_lock_step_with(skip: bool, result: HelloResult) {
     assert!(says(&rt, "Lock Beebeeb"), "the Lock step is offered");
     rt.update(|s, _| {
         let ui = s.setup.as_mut().expect("the first run");
-        if skip { ui.skip() } else { ui.not_now() }
+        if skip {
+            ui.skip()
+        } else {
+            ui.not_now()
+        }
     });
     assert_eq!(prompts.asked.load(Ordering::SeqCst), 1, "Windows Hello is asked first");
     rt.update(|s, _| {
@@ -360,7 +368,10 @@ fn leave_the_lock_step_with(skip: bool, result: HelloResult) {
     wait_for(&mut rt, "not changed", |rt| says(rt, "App lock, Not changed"));
     assert!(!says(&rt, "App lock, Off") && !says(&rt, "App lock, On"));
     // Option A: a cancelled Hello is not an error. No "Couldn't change", the words say it was not changed.
-    assert!(!says(&rt, "Couldn't change"), "a cancelled Hello is not an error ({result:?})");
+    assert!(
+        !says(&rt, "Couldn't change"),
+        "a cancelled Hello is not an error ({result:?})"
+    );
     assert!(says(&rt, "App lock wasn't changed"), "the note says so ({result:?})");
     assert!(
         engine.app_lock.lock().unwrap().is_empty(),
@@ -423,7 +434,11 @@ fn not_now_stays_on_the_lock_step_until_windows_hello_answers() {
         for _ in 0..5 {
             rt.frame(0.1);
         }
-        assert_eq!(step_of(&mut rt), Step::Lock, "still on Lock while Hello is up ({result:?})");
+        assert_eq!(
+            step_of(&mut rt),
+            Step::Lock,
+            "still on Lock while Hello is up ({result:?})"
+        );
         prompts.answer(result);
         wait_for(&mut rt, "the next step", |rt| {
             rt.state.setup.as_ref().is_some_and(|ui| ui.step == Step::Backup)
