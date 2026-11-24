@@ -94,6 +94,21 @@ beebeeb-updater = { path = "../../crates/beebeeb-updater", features = ["net"] }
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 cpal = "=0.18.2"
 
+[target.'cfg(target_os = "macos")'.build-dependencies]
+# Compiles the small C/Objective-C shims of the Mac shell. A build tool only.
+cc = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The Mac shell (`shell/platform/macos_*.rs`): the menu-bar item, the login item, Touch ID. The versions already in the lock
+# through winit and cpal, except objc2-local-authentication.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-local-authentication = "0.3"
+block2 = "0.6"
+# The updater's https client (`net`) on macOS too (see `beebeeb-updater` above).
+beebeeb-updater = { path = "../../crates/beebeeb-updater", features = ["net"] }
+
 [dev-dependencies]
 # `engine_host` tests open the engine on credential stores in memory, with the settings file in the engine's test
 # sandbox and a closed loopback port as the default API: no test of this crate reaches the OS credential store,

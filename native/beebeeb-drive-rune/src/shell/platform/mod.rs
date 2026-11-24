@@ -303,7 +303,7 @@ mod save_share_tests {
 }
 
 /// On the platforms that are stubs, every call says so instead of pretending.
-#[cfg(all(test, not(windows)))]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::super::tray::{TrayInputs, tray_model};
     use super::*;
