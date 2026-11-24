@@ -8,19 +8,19 @@
 //! A source that hands no player draws what a kind without a viewer draws, and nothing is downloaded.
 
 use rune::tok::Family;
-use rune::{Color, El, SurfaceFit, TextStyle, col, el, row};
+use rune::{col, el, row, Color, El, SurfaceFit, TextStyle};
 
 use super::chrome::{Dot, Status};
 use super::kinds::clock;
 use super::source::{Body, NoPreview};
-use super::{Intent, Ui, media_icons, refusal_text, states, style};
-use crate::State;
-use crate::theme::scale;
+use super::{media_icons, refusal_text, states, style, Intent, Ui};
 use crate::media::player::{NoSound, PlayState, PlayerHandle, Refusal};
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
+use crate::ui::button::{button, keys, ButtonState, Size, Variant};
 use crate::ui::kit;
-use crate::ui::view_state::{ViewState, view_state};
+use crate::ui::view_state::{view_state, ViewState};
+use crate::State;
 
 #[cfg(test)]
 #[path = "player_view_tests.rs"]
@@ -107,13 +107,20 @@ pub fn refused_for(why: &Refusal, t: &Theme) -> El {
 fn refused_with(words: &str, action: &'static str, store: Option<&'static str>, t: &Theme) -> El {
     // A refusal is final for this file here: it offers the other app, never "Try again".
     let mut buttons = row().key("refused-actions").gap(scale::space::S8).child(
-        button(keys("refused-open"), action, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(
-            |s: &mut State| {
-                if let Some(ui) = super::ui(s) {
-                    ui.intent(Intent::OpenInAnotherApp);
-                }
-            },
-        ),
+        button(
+            keys("refused-open"),
+            action,
+            None,
+            Variant::Secondary,
+            Size::Md,
+            ButtonState::Enabled,
+            t,
+        )
+        .on_press(|s: &mut State| {
+            if let Some(ui) = super::ui(s) {
+                ui.intent(Intent::OpenInAnotherApp);
+            }
+        }),
     );
     if let Some(url) = store {
         buttons = buttons.child(
@@ -479,7 +486,12 @@ pub fn status(ui: &Ui) -> Status {
         return Status {
             dot: Dot::Green,
             text: super::details::DECRYPTED_HERE.into(),
-            details: "Streaming \u{00B7} decrypted on this PC as it plays".into(),
+            details: concat!(
+                "Streaming \u{00B7} decrypted on ",
+                beebeeb_engine::device_word!(),
+                " as it plays"
+            )
+            .into(),
         };
     }
     states::status(&Body::NotPreviewable(NoPreview::NoViewer), ui.origin()).unwrap_or(Status {

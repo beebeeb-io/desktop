@@ -5,14 +5,14 @@
 //! search field) is `ui::toolbar`'s, drawn again here because that file builds it in one private
 //! function (a request to the design-system lane in the PR body: make the halves public).
 
-use rune::{Cx, El, col, el, row};
+use rune::{col, el, row, Cx, El};
 
 use super::source::OpenFile;
-use super::{Ui, icons};
-use crate::State;
+use super::{icons, Ui};
 use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::{caption, focus, sidebar, status_bar, toolbar};
+use crate::State;
 
 /// The F6 stops of an open file's window: the toolbar, the file itself, the details panel.
 pub const PANE_TOOLBAR: &str = "pane-toolbar";
@@ -26,10 +26,9 @@ pub(super) fn full_screen_key(s: &State, ev: &rune::KeyEvent) -> bool {
     let plain = !m.alt && !m.shift && !m.cmd && !m.ctrl;
     plain
         && matches!(&ev.key, rune::Key::Text(k) if k.eq_ignore_ascii_case("f"))
-        && s.viewer
-            .ui
-            .as_ref()
-            .is_some_and(|ui| ui.editor.is_none() && ui.dialog.is_none() && matches!(ui.file.body, super::source::Body::Video(_)))
+        && s.viewer.ui.as_ref().is_some_and(|ui| {
+            ui.editor.is_none() && ui.dialog.is_none() && matches!(ui.file.body, super::source::Body::Video(_))
+        })
 }
 
 fn window_keys(s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
@@ -99,7 +98,12 @@ pub fn toolbar(_s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> E
     // The file's own controls and "more" sit 6 apart (`.flex.items-center.gap-1.5`).
     // One Tab stop (`ui::toolbar::roving`): Tab enters it once, Left/Right/Home/End move inside it.
     let file_tools = toolbar::roving(
-        row().key("file-tools").center_y().gap(scale::space::S6).children(tools).child(more),
+        row()
+            .key("file-tools")
+            .center_y()
+            .gap(scale::space::S6)
+            .children(tools)
+            .child(more),
         "File tools",
     );
     toolbar::file_bar(
@@ -155,19 +159,36 @@ pub fn status_bar(status: &Status, t: &Theme) -> El {
 }
 
 /// What the status line says at the left while content read from the copy on this PC is on screen.
-pub const FROM_THIS_PC: &str = "Opened from the copy on this PC";
+pub const FROM_THIS_PC: &str = concat!("Opened from the copy on ", beebeeb_engine::device_word!());
 /// The same, for a copy with a change that is not in Beebeeb yet: what is on screen is NOT what Beebeeb has.
-pub const FROM_THIS_PC_UNSENT: &str = "Opened from the copy on this PC \u{00B7} its changes aren't in Beebeeb yet";
+pub const FROM_THIS_PC_UNSENT: &str = concat!(
+    "Opened from the copy on ",
+    beebeeb_engine::device_word!(),
+    " \u{00B7} its changes aren't in Beebeeb yet"
+);
 /// The same, for a copy read while sync is off: nothing says it is still the version Beebeeb has.
-pub const FROM_THIS_PC_SYNC_OFF: &str =
-    "Opened from the copy on this PC \u{00B7} sync is off, Beebeeb may have a newer version";
+pub const FROM_THIS_PC_SYNC_OFF: &str = concat!(
+    "Opened from the copy on ",
+    beebeeb_engine::device_word!(),
+    " \u{00B7} sync is off, Beebeeb may have a newer version"
+);
 /// What the line says for the version Beebeeb has of a file whose copy on this PC could not be confirmed as that
 /// version (older, or of a version not known: `LocalCopy::Behind`).
-pub const FROM_BEEBEEB_UNCONFIRMED_HERE: &str =
-    "The version in Beebeeb, decrypted on this PC \u{00B7} couldn't confirm the copy on this PC is this version";
+pub const FROM_BEEBEEB_UNCONFIRMED_HERE: &str = concat!(
+    "The version in Beebeeb, decrypted on ",
+    beebeeb_engine::device_word!(),
+    " \u{00B7} couldn't confirm the copy on ",
+    beebeeb_engine::device_word!(),
+    " is this version"
+);
 /// What the line says for the version Beebeeb has of a file whose copy on this PC is not in sync with it.
-pub const FROM_BEEBEEB_NOT_THIS_PCS: &str =
-    "The version in Beebeeb, decrypted on this PC \u{00B7} the copy on this PC is not in sync with it";
+pub const FROM_BEEBEEB_NOT_THIS_PCS: &str = concat!(
+    "The version in Beebeeb, decrypted on ",
+    beebeeb_engine::device_word!(),
+    " \u{00B7} the copy on ",
+    beebeeb_engine::device_word!(),
+    " is not in sync with it"
+);
 
 /// `status`, saying where the content on screen came from when that is not plainly Beebeeb: content read from
 /// the copy kept on this PC was not downloaded and decrypted just now, a copy with unsent changes is not the
@@ -237,7 +258,10 @@ pub fn window(
         .h_full()
         .fill(t.bg)
         // The toolbar, the body and the details panel are F6 stops (`ui::focus::pane`).
-        .child(focus::pane(col().w_full().child(toolbar(s, ui, &head, tools, t)), PANE_TOOLBAR));
+        .child(focus::pane(
+            col().w_full().child(toolbar(s, ui, &head, tools, t)),
+            PANE_TOOLBAR,
+        ));
     if let Some(banner) = banner {
         main = main.child(banner);
     }

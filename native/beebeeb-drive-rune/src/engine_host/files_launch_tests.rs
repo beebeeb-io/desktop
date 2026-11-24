@@ -4,8 +4,8 @@
 //! and asks `still` inside it, as the system's own do. Every name is invented; nothing is started for real.
 
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -239,8 +239,16 @@ fn a_session_end_empties_the_launch_queue() {
         started[0].1.ends_with("Invented notes.txt"),
         "the Open begun before the end"
     );
-    assert_eq!(started[1], ("open", root), "the press after it: Open in File Explorer");
-    assert_eq!(QUEUE_BEGUN.load(SeqCst), 2, "Show in File Explorer was never begun");
+    assert_eq!(
+        started[1],
+        ("open", root),
+        concat!("the press after it: Open in ", beebeeb_engine::file_manager!())
+    );
+    assert_eq!(
+        QUEUE_BEGUN.load(SeqCst),
+        2,
+        concat!("Show in ", beebeeb_engine::file_manager!(), " was never begun")
+    );
 }
 
 /// P3-2: Open With hands a file to another app only when the engine says it is kept AND its bytes are here, asked at

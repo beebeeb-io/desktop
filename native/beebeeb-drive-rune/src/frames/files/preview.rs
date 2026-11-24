@@ -11,16 +11,16 @@
 use super::actions_data::{Page, Previewed};
 use super::dialogs::Dialog;
 use super::source::{Action, ActionError};
-use crate::State;
-use crate::source::{DriveItem, format_size};
+use crate::source::{format_size, DriveItem};
 use crate::theme::file_icons::icon_for;
 use crate::theme::scale;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
 use crate::theme::{icons, icons_files};
 use crate::ui::settings_dialog::DIALOG_TITLE;
 use crate::ui::settings_shell::SUB;
 use crate::ui::{button, kit};
-use rune::{Color, El, Key, KeyEvent, Span, TextStyle, Tx, col, el, row};
+use crate::State;
+use rune::{col, el, row, Color, El, Key, KeyEvent, Span, TextStyle, Tx};
 
 /// What the card offers. Files' panel: Share, Open in its app, Open in another app…, Make available offline. The
 /// read-only panel of an item that is not in Files' list (`frames::item`: a file in Trash, one shared with the
@@ -292,7 +292,11 @@ fn blank(item: &DriveItem, state: &Previewed, mode: &Mode, t: &Theme) -> El {
         // No preview for this kind of file (DW-0408b).
         _ => (
             "No preview for this kind of file",
-            " Open it in another app, or keep it on this PC to open it offline.",
+            concat!(
+                " Open it in another app, or keep it on ",
+                beebeeb_engine::device_word!(),
+                " to open it offline."
+            ),
         ),
     };
     // A read-only panel says its own words after why (none while it waits).

@@ -4,7 +4,7 @@
 use super::source::{Action, ActionError, Call, FilesFixture};
 use super::{Intent, MenuKind, Toast};
 use crate::source::{DriveSource, LargeFixtureSource};
-use crate::{State, init, load, view};
+use crate::{init, load, view, State};
 use rune::{Env, Key, KeyEvent, Mods, PhysicalInput, Runtime};
 use std::sync::{Arc, Mutex};
 
@@ -302,7 +302,11 @@ fn ctrl_click_shift_click_and_the_keyboard_select_several_rows() {
     assert_eq!(
         rt.state.selected_rows(),
         [2, 3, 4, 5, 6, 7, 8],
-        "Shift+click selects the range from the row clicked last, as File Explorer does"
+        concat!(
+            "Shift+click selects the range from the row clicked last, as ",
+            beebeeb_engine::file_manager!(),
+            " does"
+        )
     );
     for row in [2, 5, 8] {
         assert!(
@@ -343,7 +347,7 @@ fn a_right_click_the_menu_key_and_shift_f10_open_the_file_menu() {
             "Make available offline",
             // Harbour.heic is downloaded: there is a copy on this PC to free (PR 305).
             "Free up space",
-            "Show in File Explorer",
+            concat!("Show in ", beebeeb_engine::file_manager!()),
             "Details",
             "Rename",
             "Move\u{2026}",
@@ -412,7 +416,12 @@ fn a_protected_folder_and_several_items_get_the_menus_the_board_gives_them() {
     right_click(&mut rt, "row-0-date");
     assert_eq!(
         menu_labels(&rt),
-        ["Open", "Preview", "Show in File Explorer", "Details"]
+        [
+            "Open",
+            "Preview",
+            concat!("Show in ", beebeeb_engine::file_manager!()),
+            "Details"
+        ]
     );
     press(&mut rt, Key::Escape, NONE);
 
@@ -437,7 +446,9 @@ fn a_protected_folder_and_several_items_get_the_menus_the_board_gives_them() {
     // An item kept offline offers to remove it instead.
     click(&mut rt, "row-1-date");
     right_click(&mut rt, "row-1-date");
-    assert!(menu_labels(&rt).iter().any(|l| l == "Remove from this PC"));
+    assert!(menu_labels(&rt)
+        .iter()
+        .any(|l| l == concat!("Remove from ", beebeeb_engine::device_word!())));
 }
 
 #[test]
@@ -449,7 +460,10 @@ fn menu_entries_pick_with_a_click_and_go_where_the_board_sends_them() {
         ("Details", Intent::Frame("DW-0411")),
         ("Version history\u{2026}", Intent::Frame("DW-0413")),
         // These two are calls on the source, not frames: the last frame asked for stays.
-        ("Show in File Explorer", Intent::Frame("DW-0413")),
+        (
+            concat!("Show in ", beebeeb_engine::file_manager!()),
+            Intent::Frame("DW-0413"),
+        ),
         ("Copy link", Intent::Frame("DW-0413")),
     ] {
         right_click(&mut rt, "row-6-date");
@@ -574,7 +588,9 @@ fn make_available_offline_keeps_the_file_and_the_menu_then_offers_to_remove_it()
     );
     assert_eq!(rt.state.live_toast(), Some(Toast::Keeping));
     right_click(&mut rt, "row-6-date");
-    assert!(menu_labels(&rt).iter().any(|l| l == "Remove from this PC"));
+    assert!(menu_labels(&rt)
+        .iter()
+        .any(|l| l == concat!("Remove from ", beebeeb_engine::device_word!())));
 }
 
 // ---- Sort (DW-0404) and New (DW-0414) ----
@@ -653,7 +669,10 @@ fn new_opens_its_menu_and_every_entry_and_shortcut_goes_to_its_frame() {
             "Upload a folder\u{2026}"
         ]
     );
-    for (n, expected) in ["DW-0417", "DW-1521", "DW-1558", "DW-0415", "DW-0480"].into_iter().enumerate() {
+    for (n, expected) in ["DW-0417", "DW-1521", "DW-1558", "DW-0415", "DW-0480"]
+        .into_iter()
+        .enumerate()
+    {
         if rt.state.actions.menu.is_none() {
             click(&mut rt, "new-btn");
         }
