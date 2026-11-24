@@ -446,7 +446,8 @@ pub fn refusal_message(refusal: &Refusal, identity: AppIdentity) -> String {
         ),
         Refusal::ChannelUnavailable => format!(
             "{name} could not check whether it is already running, so it did not start a second time. \
-             Sign out of Windows and back in, then open {name} again."
+             {sign_out} and back in, then open {name} again.",
+            sign_out = if cfg!(target_os = "macos") { "Log out of your Mac" } else { "Sign out of Windows" }
         ),
         Refusal::ServerAlreadyChosen => format!(
             "{name} is already running, on the server it started with: --api-base cannot change that. \

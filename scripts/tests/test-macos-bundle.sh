@@ -32,6 +32,7 @@ check "placeholder profile is empty" test ! -s "$APP/Contents/embedded.provision
 check "codesign --verify --deep --strict" codesign --verify --deep --strict "$APP"
 check "preflight.sh --local" scripts/macos/preflight.sh --local "$APP"
 check "preflight.sh (full) rejects the placeholder" bash -c '! scripts/macos/preflight.sh "$0"' "$APP"
+check "preflight.sh accepts the team app-group wildcard" grep -qF '"R8352WDJJR.*"' scripts/macos/preflight.sh
 check "unversioned env: bad version refused" bash -c '! BEEBEEB_RELEASE_VERSION=x scripts/macos/bundle-app.sh --identity real --binary "$0" --out "$1/o2"' "$T/beebeeb-drive" "$T"
 check "no real profile or key tracked" bash -c '! git ls-files | grep -Eq "\.(provisionprofile|mobileprovision|p12|p8|cer)$"'
 check "no profile base64 in scripts" bash -c '! git grep -nE "(PROVISION_PROFILE_BASE64|SIGNING_IDENTITY)=[\"'"'"']?[A-Za-z0-9+/]{20,}" -- scripts packaging'

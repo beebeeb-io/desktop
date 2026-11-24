@@ -112,3 +112,53 @@ fn a_socket_open_to_others_is_not_written_to() {
     assert!(seen.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_socket_path_stays_under_sun_len() {
+    let sandbox = Path::new("/Users/someone.with.a.longer.name/Library/Containers/io.beebeeb.app/Data");
+    let long_home = PathBuf::from(format!("/Users/{}", "h".repeat(53)));
+    assert_eq!(long_home.as_os_str().len(), 60);
+    for home in [sandbox, long_home.as_path()] {
+        for id in [AppIdentity::Real, AppIdentity::Test] {
+            let path = socket_path(&control_dir_in(home, id));
+            assert!(
+                path.as_os_str().len() < SUN_LEN,
+                "{} bytes: {path:?}",
+                path.as_os_str().len()
+            );
+        }
+    }
+    assert_ne!(
+        control_dir_in(sandbox, AppIdentity::Real),
+        control_dir_in(sandbox, AppIdentity::Test)
+    );
+}
+
+#[test]
+fn a_second_instance_over_a_short_home_path_finds_the_first() {
+    let home = temp("hs");
+    std::fs::create_dir_all(&home).unwrap();
+    let dir = control_dir_in(&home, ID);
+    let (handler, seen) = recording(Reply::Ok);
+    let server = serve_in(&dir, ID, handler).unwrap();
+    assert!(matches!(
+        serve_in(&dir, ID, recording(Reply::Ok).0),
+        Err(ServeError::AlreadyRunning)
+    ));
+    assert_eq!(
+        send_in(&dir, &Request::Show, Duration::from_secs(2)),
+        Delivery::Acknowledged
+    );
+    assert_eq!(seen.lock().unwrap().as_slice(), [Request::Show]);
+    drop(server);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_too_long_path_is_refused_not_bound() {
+    let dir = PathBuf::from(format!("/tmp/{}", "d".repeat(100)));
+    assert!(matches!(
+        serve_in(&dir, ID, recording(Reply::Ok).0),
+        Err(ServeError::Os(_))
+    ));
+}

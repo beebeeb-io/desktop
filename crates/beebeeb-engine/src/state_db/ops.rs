@@ -107,7 +107,7 @@ impl StateDb {
         tx.execute("DELETE FROM upload_resume WHERE op_id=?1", params![pending.op_id])?;
         tx.commit()
     }
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn upload_finalizations(&self) -> Result<Vec<UploadFinalization>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -126,7 +126,7 @@ impl StateDb {
         })?
         .collect()
     }
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn mark_upload_finalization_stamped(&self, op_id: &str) -> Result<()> {
         self.0.lock().unwrap().execute(
             "UPDATE upload_finalizations SET stamped=1 WHERE op_id=?1",
@@ -136,7 +136,7 @@ impl StateDb {
     }
     /// Task 2270 (spec R2): hold the row for review with a reason label, at `at` (Unix seconds). It is not retried
     /// on every tick after this; the tray counts it as `not_marked_synced`.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn mark_upload_finalization_review(&self, op_id: &str, reason: &str, at: i64) -> Result<()> {
         self.0.lock().unwrap().execute(
             "UPDATE upload_finalizations SET review=?2, review_at=?3 WHERE op_id=?1",
@@ -154,7 +154,7 @@ impl StateDb {
         )?;
         Ok(())
     }
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn forget_upload_finalization(&self, op_id: &str) -> Result<()> {
         self.0.lock().unwrap().execute(
             "DELETE FROM upload_finalizations WHERE op_id=?1 AND stamped=1",

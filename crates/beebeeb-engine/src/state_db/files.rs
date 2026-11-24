@@ -517,7 +517,7 @@ impl StateDb {
     /// Task 1640 (review F1): the placeholder's bytes may have changed in part without a fetch (a
     /// resize, a download cut off by a stop): its agreed content joins the candidate, which is then
     /// mixed: never agreed, a change sent on its version. Its version is kept (never reset).
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn poison_local_content(&self, file_id: &str) -> Result<()> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
@@ -582,7 +582,7 @@ impl StateDb {
     /// absent). A negative size is clamped to 0: a caller should never
     /// pass a negative length, but clamping keeps a pathological value
     /// from corrupting the column.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn set_size_bytes(&self, file_id: &str, size_bytes: i64) -> Result<usize> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let updated = conn.execute(

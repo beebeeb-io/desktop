@@ -165,11 +165,25 @@ impl<C: CredentialStores + 'static> Actions<C> {
             &self.sign_out_end.0,
             asked_as.clone(),
             move |engine| {
-                if discard_unsaved {
+                // DW-S02 under Q1 (sign-out-and-lock.md §1 without the keep and purge): the Finder location goes
+                // FIRST (keeps unsynced files), then the confirmed engine stop, the local data kept, the Keychain
+                // clear and, last, the server revoke: all inside the engine's sign-out. A removal that cannot be
+                // confirmed does not stop the sign-out. Where no reconciler runs this is a no-op.
+                let removed = crate::engine_host::finder_setup::sign_out();
+                if let Err(message) = &removed {
+                    log(format!("account: the Finder removal before the sign-out was not confirmed ({message})"));
+                }
+                let result = if discard_unsaved {
                     engine.sign_out_discarding_unsaved_for(session)
                 } else {
                     engine.sign_out_for(session)
+                };
+                if result.is_err() && removed.is_ok() {
+                    // Refused (unsaved edits, a session that moved on): the keys are still here, so the location
+                    // comes back (ruling T3-2).
+                    crate::engine_host::finder_setup::turn_on();
                 }
+                result
             },
         );
         if !started {

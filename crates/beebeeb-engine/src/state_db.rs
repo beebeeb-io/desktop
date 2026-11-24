@@ -41,7 +41,7 @@ thread_local! {
 }
 
 /// one `files` row as the ownership proof judges it.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofRow {
     pub file_id: String,
@@ -57,7 +57,7 @@ pub struct ProofRow {
 }
 
 /// one queued operation, by what it acts on.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofOp {
     pub op_id: String,
@@ -68,7 +68,7 @@ pub struct ProofOp {
 }
 
 /// one change held as `found_while_paused`, as the card counts it.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldChange {
     pub op_id: String,
