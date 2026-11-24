@@ -5,7 +5,7 @@ use super::*;
 
 // ── The copy on this PC ─────────────────────────────────────────────────────────────────────────────
 
-const LOCAL_WORDS: &str = "the words of the copy on this PC";
+const LOCAL_WORDS: &str = concat!("the words of the copy on ", beebeeb_engine::device_word!());
 
 #[test]
 fn a_file_kept_on_this_pc_is_read_from_its_copy_and_nothing_is_downloaded() {
@@ -113,7 +113,11 @@ fn kept_on_this_pc_is_said_only_for_a_file_that_is_here_while_sync_runs_for_this
     fake.keep(NOTE, OnThisPc::NotSentYet, Some(LOCAL_WORDS.as_bytes()));
     assert!(
         source.kept_on_this_pc(NOTE),
-        "a copy with an unsent change is on this PC too"
+        concat!(
+            "a copy with an unsent change is on ",
+            beebeeb_engine::device_word!(),
+            " too"
+        )
     );
     assert!(!source.kept_on_this_pc("no-such-file"));
     // Sync is off: the system cannot be asked to open it from the folder, so the viewer shows it.
@@ -623,7 +627,11 @@ fn a_pdf_whose_helper_stops_at_a_page_shows_failed_once_and_try_again_opens_it_a
         assert!(began.elapsed() < Duration::from_secs(20), "the stop was never said");
         std::thread::sleep(Duration::from_millis(2));
     };
-    assert_eq!(said, Body::Stopped(Stopped::HelperStopped), "the helper's stop has its own words (RC2-3)");
+    assert_eq!(
+        said,
+        Body::Stopped(Stopped::HelperStopped),
+        "the helper's stop has its own words (RC2-3)"
+    );
     assert_eq!(source.poll("f-pdf"), None, "said once");
     assert!(source.picture("f-pdf", Picture::Page(1)).is_none());
     assert!(!source.finds(), "nothing of the stopped opening is searched");
@@ -640,7 +648,11 @@ fn a_pdf_whose_helper_stops_at_a_page_shows_failed_once_and_try_again_opens_it_a
         std::thread::sleep(Duration::from_millis(2));
     };
     assert!(matches!(again, Body::Pdf(ref doc) if doc.pages == 2), "{again:?}");
-    assert_eq!(fake.s().fetches.len(), 2, "the first open's download, and the retry's: read anew");
+    assert_eq!(
+        fake.s().fetches.len(),
+        2,
+        "the first open's download, and the retry's: read anew"
+    );
 }
 
 #[test]
@@ -726,7 +738,7 @@ fn mfx_find_on_a_pdf_whose_session_ended_says_so_never_not_built() {
 
 #[test]
 fn a_pdf_page_whose_font_is_not_in_the_file_is_said_for_that_page_and_for_no_other() {
-    use viewer_pdf::tests::{Writes, fonts_pdf};
+    use viewer_pdf::tests::{fonts_pdf, Writes};
     let fake = Fake::new();
     fake.put(
         "f-pdf",

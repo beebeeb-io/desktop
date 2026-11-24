@@ -118,7 +118,7 @@ fn nothing_is_drawn_before_the_engine_answered_then_both_sides_in_the_dialogs_wo
     let shown = calls.conflicts();
     assert_eq!(shown.len(), 1);
     assert_eq!(shown[0].file, "file-1");
-    assert_eq!(shown[0].here.device, "This PC");
+    assert_eq!(shown[0].here.device, concat!(beebeeb_engine::device_word_cap!()));
     assert_eq!(shown[0].there.device, "Another device");
     assert_eq!(
         (shown[0].here.kind, shown[0].there.kind),

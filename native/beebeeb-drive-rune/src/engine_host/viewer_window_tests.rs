@@ -15,15 +15,14 @@ use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::signin::gate::GateState as EngineGate;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
-use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
+use beebeeb_engine::test_api::fake_account::{account_handler, FakeAccount, TEST_PHRASE};
 use beebeeb_engine::test_api::{FakeApi, Handler, Reply, Request};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use zeroize::Zeroizing;
 
-use crate::State;
-use crate::engine_host::LiveEngine;
 use crate::engine_host::open::Opened;
-use crate::frames::global::source::{GlobalFixture, board};
+use crate::engine_host::LiveEngine;
+use crate::frames::global::source::{board, GlobalFixture};
 use crate::frames::signin::setup::guide::Step;
 use crate::frames::viewers;
 use crate::frames::viewers::source::Body;
@@ -35,6 +34,7 @@ use crate::shell::instance::ProfileHolder;
 use crate::shell::platform::fake::FakePlatform;
 use crate::shell::tray::TrayInputs;
 use crate::shell::{host, registry, state};
+use crate::State;
 
 const PASSWORD: &str = "an invented password for the viewer";
 /// A second valid 12-word phrase (a BIP-39 test vector), for the second account.
@@ -67,7 +67,7 @@ const LETTER_NAME: &str = "letter-of-the-first-account-viewer.pdf";
 
 /// A PDF whose first page writes in a font that is not in the file; its second page has no text.
 fn letter_pdf() -> Vec<u8> {
-    use super::viewer_pdf::tests::{Writes, fonts_pdf};
+    use super::viewer_pdf::tests::{fonts_pdf, Writes};
     fonts_pdf(&[Writes::Japanese, Writes::Nothing])
 }
 /// Words found nowhere else in the app.
@@ -465,7 +465,13 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     assert_eq!(w.route_item().as_deref(), Some(NOTE), "the route is on the file");
     assert!(w.rt.state.viewer.ui.is_some(), "the file is open in the window");
     let drawn = w.drawn();
-    assert!(drawn.contains(&format!("Decrypting {NOTE_NAME} on this PC")), "{drawn}");
+    assert!(
+        drawn.contains(&format!(concat!(
+            "Decrypting {NOTE_NAME} on ",
+            beebeeb_engine::device_word!()
+        ))),
+        "{drawn}"
+    );
     assert!(
         !drawn.contains(NOTE_WORDS),
         "nothing of the content before it is decrypted"
@@ -476,7 +482,10 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     w.until_drawn(NOTE_WORDS);
     let drawn = w.drawn();
     assert!(drawn.contains("the last line"), "the whole text is there");
-    assert!(!drawn.contains(&format!("Decrypting {NOTE_NAME} on this PC")));
+    assert!(!drawn.contains(&format!(concat!(
+        "Decrypting {NOTE_NAME} on ",
+        beebeeb_engine::device_word!()
+    ))));
     assert!(w.chunk_requests() >= 2, "the content came chunk by chunk from Beebeeb");
 
     // The details panel (Alt+Shift+P): where the file is, and the Available offline switch, whose state the local
@@ -510,7 +519,11 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     );
     assert!(w.rt.state.viewer.ui.as_ref().unwrap().editor.is_none());
     assert!(
-        w.drawn().contains("Not on this PC: keep it available offline to edit it here"),
+        w.drawn().contains(concat!(
+            "Not on ",
+            beebeeb_engine::device_word!(),
+            ": keep it available offline to edit it here"
+        )),
         "{}",
         w.drawn()
     );
@@ -575,7 +588,10 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
     // On its way, then locked: the answer never reaches a window.
     w.hold.hold();
     w.open_row(NOTE_NAME);
-    assert!(w.drawn().contains(&format!("Decrypting {NOTE_NAME} on this PC")));
+    assert!(w.drawn().contains(&format!(concat!(
+        "Decrypting {NOTE_NAME} on ",
+        beebeeb_engine::device_word!()
+    ))));
     w.engine.lock();
     w.settle();
     w.assert_nothing_of_the_file("locked, the download was on its way");
@@ -596,7 +612,11 @@ fn a_kind_with_no_preview_never_opens_the_viewer_from_a_list_and_its_route_says_
     // system's app, else the file manager): the route stays on the list. No sync runs here, so the file is not on
     // this PC and nothing is started; the window says so (and nothing was downloaded).
     w.open_row(PLAN_NAME);
-    assert_eq!(w.route_item(), None, "a list's Open does not go to a file the viewer cannot show");
+    assert_eq!(
+        w.route_item(),
+        None,
+        "a list's Open does not go to a file the viewer cannot show"
+    );
     assert!(w.rt.state.viewer.ui.is_none());
     assert_eq!(w.chunk_requests(), 0);
 
@@ -610,7 +630,10 @@ fn a_kind_with_no_preview_never_opens_the_viewer_from_a_list_and_its_route_says_
     assert!(drawn.contains("No preview for this kind of file yet"), "{drawn}");
     // "Save a copy…" has nowhere to go on this source: it is not drawn (never a button that only says "not built").
     assert!(drawn.contains("Open in another app\u{2026}") && !drawn.contains("Save a copy"));
-    assert!(!drawn.contains(&format!("Decrypting {NOTE_NAME} on this PC")));
+    assert!(!drawn.contains(&format!(concat!(
+        "Decrypting {NOTE_NAME} on ",
+        beebeeb_engine::device_word!()
+    ))));
     w.settle();
     assert_eq!(w.chunk_requests(), 0, "nothing was downloaded");
 
@@ -682,7 +705,10 @@ fn a_file_kept_on_this_pc_opens_from_its_copy_without_a_download_and_says_so() {
         "the older version Beebeeb has is not what is shown"
     );
     assert!(drawn.contains(viewers::FROM_THIS_PC_UNSENT), "{drawn}");
-    assert!(!drawn.contains("Decrypted on this PC"), "{drawn}");
+    assert!(
+        !drawn.contains(concat!("Decrypted on ", beebeeb_engine::device_word!())),
+        "{drawn}"
+    );
     assert_eq!(w.chunk_requests(), 0, "nothing was downloaded");
 
     // In sync, and the copy is what Beebeeb has: said as the copy on this PC, without the warning.
@@ -767,7 +793,10 @@ fn a_pdf_opened_from_the_files_window_shows_its_page_rendered_here() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let drawn = w.drawn();
-    assert!(drawn.contains("Decrypted on this PC"), "{drawn}");
+    assert!(
+        drawn.contains(concat!("Decrypted on ", beebeeb_engine::device_word!())),
+        "{drawn}"
+    );
     assert!(!drawn.contains(viewers::PAGE_FAILED), "{drawn}");
     // Page Down: the second page, rendered when it is shown.
     w.press(Key::PageDown, Mods::default());
@@ -800,7 +829,10 @@ fn a_pdf_page_that_may_lack_text_says_so_under_the_page_and_a_page_that_does_not
         !drawn.contains("Space for Preview"),
         "the note takes the hint's place: {drawn}"
     );
-    assert!(drawn.contains("Decrypted on this PC"), "{drawn}");
+    assert!(
+        drawn.contains(concat!("Decrypted on ", beebeeb_engine::device_word!())),
+        "{drawn}"
+    );
     // The second page lacks nothing: the hint is back, the note is gone.
     w.press(Key::PageDown, Mods::default());
     w.until_drawn("Page 2 of 2");
@@ -957,7 +989,7 @@ mod edit_lock;
 /// (`.zip` here; a video too, in a window with no player) is not: `open_file` sends it on to steps 2 and 3, and with no sync running here nothing is started.
 #[test]
 fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_preview_does_not() {
-    use crate::frames::open_file::{Opened, Target, item_named, open_file};
+    use crate::frames::open_file::{item_named, open_file, Opened, Target};
     let mut w = window("sixkinds");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
@@ -989,7 +1021,11 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
         let mut opened = Opened::Failed(crate::frames::files::source::ActionError::Failed);
         w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(id, name))));
         w.settle_until(|w| w.route_item().as_deref() == Some(id));
-        assert_eq!((opened, w.route_item().as_deref()), (Opened::InApp, Some(id)), "Search: {name}");
+        assert_eq!(
+            (opened, w.route_item().as_deref()),
+            (Opened::InApp, Some(id)),
+            "Search: {name}"
+        );
         in_app += 1;
         leave(&mut w);
     }
@@ -1010,7 +1046,10 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
     assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
     let mut opened = Opened::InApp;
     w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(PLAN, PLAN_NAME))));
-    assert_eq!(opened, Opened::Failed(crate::frames::files::source::ActionError::Unavailable));
+    assert_eq!(
+        opened,
+        Opened::Failed(crate::frames::files::source::ActionError::Unavailable)
+    );
     // A video, in this window (no player here), is the same: step 2, never the viewer's frame.
     w.open_row(CLIP_NAME);
     assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
@@ -1021,7 +1060,13 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_knows_an_app_for_text_and_none_for_an_unregistered_kind() {
-    assert!(crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\notes.txt")));
-    assert!(!crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\file.bbunregisteredkind")));
-    assert!(!crate::engine_host::has_default_app(std::path::Path::new("C:\\x\\no-extension")));
+    assert!(crate::engine_host::has_default_app(std::path::Path::new(
+        "C:\\x\\notes.txt"
+    )));
+    assert!(!crate::engine_host::has_default_app(std::path::Path::new(
+        "C:\\x\\file.bbunregisteredkind"
+    )));
+    assert!(!crate::engine_host::has_default_app(std::path::Path::new(
+        "C:\\x\\no-extension"
+    )));
 }

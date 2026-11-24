@@ -5,16 +5,16 @@
 //! not a failed decryption ([`Stopped`]), and a file that is in Beebeeb and is not shown here
 //! ([`NoPreview`]). They are drawn with the same parts as the board's three.
 
-use rune::{El, Icon, col, row};
+use rune::{col, row, El, Icon};
 
 use super::chrome::{Dot, Status};
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
-use super::source::{Body, NoPreview, OpenFile, Origin, Stopped, percent, progress_words, size_words};
-use super::{Intent, icons, style, ui};
-use crate::State;
+use super::source::{percent, progress_words, size_words, Body, NoPreview, OpenFile, Origin, Stopped};
+use super::{icons, style, ui, Intent};
 use crate::theme::scale;
 use crate::theme::tokens::Theme;
-use crate::ui::view_state::{self, ViewState, view_state};
+use crate::ui::button::{button, keys, ButtonState, Size, Variant};
+use crate::ui::view_state::{self, view_state, ViewState};
+use crate::State;
 
 /// The key focus moves to when a state replaces what was on screen: the state's first button (`ui::view_state`
 /// titles are not focus stops).
@@ -94,7 +94,11 @@ pub fn empty_file(name: &str, t: &Theme) -> El {
 /// The status line's right side for bytes that were decrypted, looked at, and dropped.
 pub const DECRYPTED_NOT_KEPT: &str = "Decrypted in memory only; nothing was kept";
 /// The same for bytes read from the copy on this PC: nothing was decrypted.
-pub const READ_HERE_NOT_KEPT: &str = "Read from the copy on this PC; nothing was kept";
+pub const READ_HERE_NOT_KEPT: &str = concat!(
+    "Read from the copy on ",
+    beebeeb_engine::device_word!(),
+    "; nothing was kept"
+);
 
 /// The same for a PDF that arrived whole and could not be read as a PDF.
 pub const PDF_NOT_KEPT: &str = "Held in memory only; nothing was kept";
@@ -120,7 +124,7 @@ pub fn status(body: &Body, origin: Origin) -> Option<Status> {
             dot: Dot::Warn,
             text: "Not enough space to decrypt".into(),
             details: format!(
-                "{} needed \u{00B7} {} free on this PC",
+                concat!("{} needed \u{00B7} {} free on ", beebeeb_engine::device_word!()),
                 size_words(*size),
                 size_words(*free)
             ),
@@ -138,9 +142,21 @@ pub fn status(body: &Body, origin: Origin) -> Option<Status> {
                 Stopped::SessionChanged => "Closed: its content left memory",
                 Stopped::Gone => "Not opened: the file is gone",
                 Stopped::NotNow => "Not opened: couldn't read it right now",
-                Stopped::CopyNotReadable => "Not opened: the copy on this PC couldn't be read",
-                Stopped::NothingSynced => "Not opened: nothing has synced on this PC yet",
-                Stopped::NotThisAccounts => "Not opened: this PC's data couldn't be confirmed as this account's",
+                Stopped::CopyNotReadable => concat!(
+                    "Not opened: the copy on ",
+                    beebeeb_engine::device_word!(),
+                    " couldn't be read"
+                ),
+                Stopped::NothingSynced => concat!(
+                    "Not opened: nothing has synced on ",
+                    beebeeb_engine::device_word!(),
+                    " yet"
+                ),
+                Stopped::NotThisAccounts => concat!(
+                    "Not opened: ",
+                    beebeeb_engine::device_word!(),
+                    "'s data couldn't be confirmed as this account's"
+                ),
                 Stopped::NoAccess => "Not opened: you no longer have access to this file",
                 Stopped::Changed => "Not opened: it changed while it was opening",
                 Stopped::HelperStopped => "Not shown: the viewer's helper stopped",
@@ -179,7 +195,11 @@ pub fn status(body: &Body, origin: Origin) -> Option<Status> {
 /// DW-1516: the loading strip with the amount, and Cancel.
 fn decrypting(file: &OpenFile, done: u64, total: u64, t: &Theme) -> El {
     let words = format!(
-        "Decrypting {} on this PC \u{00B7} {} ({} percent)",
+        concat!(
+            "Decrypting {} on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} {} ({} percent)"
+        ),
         file.name,
         progress_words(done, total),
         percent(done, total)
@@ -191,7 +211,18 @@ fn decrypting(file: &OpenFile, done: u64, total: u64, t: &Theme) -> El {
         .gap(scale::space::S8)
         .child(view_state(ViewState::Loading { words: &words }, t))
         // Closing cancels: nothing is kept half-decrypted.
-        .child(button(keys("state-btn-0"), "Cancel", None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t).on_press(super::close));
+        .child(
+            button(
+                keys("state-btn-0"),
+                "Cancel",
+                None,
+                Variant::Ghost,
+                Size::Sm,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(super::close),
+        );
     stage(content, t)
 }
 
@@ -203,16 +234,38 @@ fn too_large(file: &OpenFile, size: u64, free: u64, t: &Theme) -> El {
         &icons::FILE_VIDEO,
         "Too large to preview here",
         &format!(
-            "{} is {size}. Opening it decrypts it on this PC, which needs that much free space; there's {free}.",
+            concat!(
+                "{} is {size}. Opening it decrypts it on ",
+                beebeeb_engine::device_word!(),
+                ", which needs that much free space; there's {free}."
+            ),
             file.name
         ),
         vec![
-            button(keys("state-btn-0"), "Free up space\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
+            button(
+                keys("state-btn-0"),
+                "Free up space\u{2026}",
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::FreeUpSpace);
                 }
             }),
-            button(keys("state-btn-1"), "Download to\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
+            button(
+                keys("state-btn-1"),
+                "Download to\u{2026}",
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::DownloadTo);
                 }
@@ -239,8 +292,26 @@ fn failed(t: &Theme) -> El {
         "Couldn't decrypt this file",
         "Nothing changed: the copy in Beebeeb is untouched. This can happen when a download is cut off.",
         vec![
-            button(keys("state-btn-0"), view_state::TRY_AGAIN, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(retry),
-            button(keys("state-btn-1"), "Report a problem", None, Variant::Ghost, Size::Md, ButtonState::Enabled, t).on_press(|s: &mut State| {
+            button(
+                keys("state-btn-0"),
+                view_state::TRY_AGAIN,
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(retry),
+            button(
+                keys("state-btn-1"),
+                "Report a problem",
+                None,
+                Variant::Ghost,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::ReportProblem);
                 }
@@ -270,23 +341,41 @@ fn stopped(why: Stopped, t: &Theme) -> El {
             "It may have been moved to Trash or deleted on another device.",
         ),
         Stopped::CopyNotReadable => (
-            "Couldn't read the copy on this PC",
-            "This PC has changes to this file that aren't in Beebeeb yet, and its copy couldn't be read just now: \
-             another app may have it open. The older version in Beebeeb isn't shown in its place.",
+            concat!("Couldn't read the copy on ", beebeeb_engine::device_word!()),
+            concat!(
+                beebeeb_engine::device_word_cap!(),
+                " has changes to this file that aren't in Beebeeb yet, and its copy couldn't be read just now: \
+             another app may have it open. The older version in Beebeeb isn't shown in its place."
+            ),
         ),
         Stopped::NotNow => (
             "Couldn't open this file right now",
-            "What this PC knows about the file couldn't be read at this moment. Nothing changed.",
+            concat!(
+                "What ",
+                beebeeb_engine::device_word!(),
+                " knows about the file couldn't be read at this moment. Nothing changed."
+            ),
         ),
         Stopped::NothingSynced => (
-            "Nothing has synced on this PC yet",
-            "This PC doesn't know your files yet, so it can't open this one. The file in Beebeeb is unchanged. \
-             Try again once the first sync has run.",
+            concat!("Nothing has synced on ", beebeeb_engine::device_word!(), " yet"),
+            concat!(
+                beebeeb_engine::device_word_cap!(),
+                " doesn't know your files yet, so it can't open this one. The file in Beebeeb is unchanged. \
+             Try again once the first sync has run."
+            ),
         ),
         Stopped::NotThisAccounts => (
-            "Couldn't confirm this PC's data is this account's",
-            "What this PC holds of Beebeeb couldn't be confirmed as this account's, so nothing of it was read. \
-             This says nothing about the file: the copy in Beebeeb is unchanged.",
+            concat!(
+                "Couldn't confirm ",
+                beebeeb_engine::device_word!(),
+                "'s data is this account's"
+            ),
+            concat!(
+                "What ",
+                beebeeb_engine::device_word!(),
+                " holds of Beebeeb couldn't be confirmed as this account's, so nothing of it was read. \
+             This says nothing about the file: the copy in Beebeeb is unchanged."
+            ),
         ),
         Stopped::NoAccess => (
             "You no longer have access to this file",
@@ -308,9 +397,27 @@ fn stopped(why: Stopped, t: &Theme) -> El {
         } else {
             "Try again"
         };
-        button(keys("state-btn-0"), label, None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(retry)
+        button(
+            keys("state-btn-0"),
+            label,
+            None,
+            Variant::Secondary,
+            Size::Md,
+            ButtonState::Enabled,
+            t,
+        )
+        .on_press(retry)
     } else {
-        button(keys("state-btn-0"), "Close", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(super::close)
+        button(
+            keys("state-btn-0"),
+            "Close",
+            None,
+            Variant::Secondary,
+            Size::Md,
+            ButtonState::Enabled,
+            t,
+        )
+        .on_press(super::close)
     };
     failed_view(title, words, vec![act], t)
 }
@@ -320,9 +427,9 @@ fn stopped(why: Stopped, t: &Theme) -> El {
 fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin, t: &Theme) -> El {
     // What happened to the bytes before this app looked at them: decrypted, or read from the copy on this PC.
     let it_was = if was_decrypted(origin) {
-        "It was decrypted on this PC"
+        concat!("It was decrypted on ", beebeeb_engine::device_word!())
     } else {
-        "It was read from the copy on this PC"
+        concat!("It was read from the copy on ", beebeeb_engine::device_word!())
     };
     let (title, words) = match why {
         NoPreview::NoViewer => (
@@ -335,8 +442,12 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
         NoPreview::Heic => (
             "HEIC photos can\u{2019}t be shown here yet",
             format!(
-                "{} is safe in Beebeeb. HEIC photos can\u{2019}t be shown at full size on this PC yet, so nothing was \
-                 downloaded. Open it in your default app.",
+                concat!(
+                    "{} is safe in Beebeeb. HEIC photos can\u{2019}t be shown at full size on ",
+                    beebeeb_engine::device_word!(),
+                    " yet, so nothing was \
+                 downloaded. Open it in your default app."
+                ),
                 file.name
             ),
         ),
@@ -399,23 +510,36 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
             ),
         ),
     };
-    let mut buttons = vec![
-        button(keys("state-btn-0"), &heic_button(why), None, Variant::Secondary, Size::Md, ButtonState::Enabled, t)
-            .on_press(|s: &mut State| {
-                if let Some(ui) = ui(s) {
-                    ui.intent(Intent::OpenInAnotherApp);
-                }
-            }),
-    ];
+    let mut buttons = vec![button(
+        keys("state-btn-0"),
+        &heic_button(why),
+        None,
+        Variant::Secondary,
+        Size::Md,
+        ButtonState::Enabled,
+        t,
+    )
+    .on_press(|s: &mut State| {
+        if let Some(ui) = ui(s) {
+            ui.intent(Intent::OpenInAnotherApp);
+        }
+    })];
     if copies {
         buttons.push(
-            button(keys("state-btn-1"), "Save a copy\u{2026}", None, Variant::Secondary, Size::Md, ButtonState::Enabled, t).on_press(
-                |s: &mut State| {
-                    if let Some(ui) = ui(s) {
-                        ui.intent(Intent::SaveCopy);
-                    }
-                },
-            ),
+            button(
+                keys("state-btn-1"),
+                "Save a copy\u{2026}",
+                None,
+                Variant::Secondary,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(|s: &mut State| {
+                if let Some(ui) = ui(s) {
+                    ui.intent(Intent::SaveCopy);
+                }
+            }),
         );
     }
     empty_view(&icons::INFO, title, &words, buttons, t)

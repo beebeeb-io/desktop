@@ -21,7 +21,7 @@
 //! Must not: log a name, a path or an id; draw a side the engine did not read; repeat an answer.
 
 use std::collections::HashMap;
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
@@ -337,7 +337,7 @@ fn shown(waiting: &WaitingConflict) -> Conflict {
         file: waiting.file_id.clone(),
         name: waiting.name.clone(),
         here: Side {
-            device: "This PC".to_string(),
+            device: concat!(beebeeb_engine::device_word_cap!()).to_string(),
             kind: Device::Computer,
             when: crate::ui::file_list::format_date(&waiting.here_modified),
             size: crate::source::format_size(waiting.here_size.min(i64::MAX as u64) as i64),

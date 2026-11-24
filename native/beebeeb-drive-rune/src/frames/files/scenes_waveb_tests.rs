@@ -6,8 +6,8 @@ use super::keeping::Download;
 use super::scenes_waveb::SCENES;
 use super::source::FilesFixture;
 use super::tests::*;
-use crate::State;
 use crate::init;
+use crate::State;
 use rune::Runtime;
 
 fn drawn(frame: &str) -> Runtime<State> {
@@ -75,7 +75,11 @@ fn dw_0412_shows_how_far_the_copy_is_in_the_row_the_panel_and_the_status_line() 
     assert_eq!(text(&rt, "status-text").as_deref(), Some("Syncing"));
     assert!(
         find(&rt, "free-up-btn").is_none(),
-        "a copy on its way is not on this PC to free up"
+        concat!(
+            "a copy on its way is not on ",
+            beebeeb_engine::device_word!(),
+            " to free up"
+        )
     );
     assert!(find(&rt, "toast-text").is_some(), "the message is up");
 }

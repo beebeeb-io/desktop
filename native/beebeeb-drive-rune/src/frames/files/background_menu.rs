@@ -2,9 +2,9 @@
 //! view, Sort by with its choices beside it, Folders first and the details panel. Kept apart from
 //! `menus.rs` so the file menu stays as it is.
 
-use super::{Intent, MenuKind, OpenMenu, Sort, SortBy, menus};
-use crate::State;
+use super::{menus, Intent, MenuKind, OpenMenu, Sort, SortBy};
 use crate::ui::menu::Entry;
+use crate::State;
 use rune::Tx;
 
 /// `.wn-menu` of the list's background: as wide as its longest line and shortcut ask.
@@ -24,8 +24,13 @@ pub fn entries(s: &State) -> Vec<Entry> {
     // (DW-0414), as the toolbar's Sort menu does.
     let fixed = s.in_protected_folder();
     vec![
-        Entry::keyed("new-folder", "New folder", "Ctrl+Shift+N").dimmed(fixed),
-        Entry::keyed("upload-files", "Upload files\u{2026}", "Ctrl+O").dimmed(fixed),
+        Entry::keyed("new-folder", "New folder", crate::frames::files::key_label("Shift+N")).dimmed(fixed),
+        Entry::keyed(
+            "upload-files",
+            "Upload files\u{2026}",
+            crate::frames::files::key_label("O"),
+        )
+        .dimmed(fixed),
         Entry::Sep,
         Entry::check("view-list", "as List", !grid),
         Entry::check("view-grid", "as Grid", grid),

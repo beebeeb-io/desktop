@@ -4,7 +4,7 @@
 //! answer belongs to the session and the account it was asked under. The local state is a database of each test's
 //! own (`Engine::use_local_state_for_test`), recorded as the first account's. Every name and id is invented.
 
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use beebeeb_engine::account_binding::Identity;
@@ -14,7 +14,7 @@ use beebeeb_engine::runner::EngineRunner;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{BackupLayout, FileEntry, FileStatus, ItemKind, StateDb};
 use beebeeb_engine::sync_view::Start;
-use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
+use beebeeb_engine::test_api::fake_account::{account_handler, FakeAccount, TEST_PHRASE};
 use beebeeb_engine::test_api::{FakeApi, Handler, Request};
 use zeroize::Zeroizing;
 
@@ -332,13 +332,11 @@ fn an_answer_for_a_folder_no_longer_asked_is_dropped() {
         None,
         "outside the tree: nothing, and held"
     );
-    assert!(
-        source
-            .places
-            .held
-            .as_ref()
-            .is_some_and(|held| held.folder.as_deref() == Some(PLAIN))
-    );
+    assert!(source
+        .places
+        .held
+        .as_ref()
+        .is_some_and(|held| held.folder.as_deref() == Some(PLAIN)));
 }
 
 #[test]
@@ -352,8 +350,11 @@ fn this_pcs_backup_row_says_this_pc_in_the_adapter_and_others_say_nothing() {
     read_now(&mut source, Some(ROOT));
     let this = source
         .backup_entry(&row(THIS_PC, Some(ROOT), true))
-        .expect("this PC's backup");
-    assert_eq!(this.status.as_deref(), Some("This PC"));
+        .expect(concat!(beebeeb_engine::device_word!(), "'s backup"));
+    assert_eq!(
+        this.status.as_deref(),
+        Some(concat!(beebeeb_engine::device_word_cap!()))
+    );
     assert_eq!(this.kind, BackupKind::Laptop);
     assert!(!this.managed);
     assert_eq!(source.backup_entry(&row(OTHER_PC, Some(ROOT), true)), None);
@@ -413,13 +414,17 @@ fn this_pcs_backup_row_says_this_pc_and_others_say_nothing() {
     settle(&mut rt);
     rt.update(|s, _| s.open_folder(Some(ROOT.to_string())));
     until_drawn(&mut rt, "Invented Phone");
-    until_drawn(&mut rt, "This PC");
+    until_drawn(&mut rt, concat!(beebeeb_engine::device_word_cap!()));
     let now = drawn(&rt);
     assert!(now.contains("Invented Laptop"), "the window draws:\n{now}");
     assert_eq!(
-        texts_of(&rt, "This PC"),
+        texts_of(&rt, concat!(beebeeb_engine::device_word_cap!())),
         1,
-        "exactly one row says it is this PC's:\n{now}"
+        concat!(
+            "exactly one row says it is ",
+            beebeeb_engine::device_word!(),
+            "'s:\n{now}"
+        )
     );
 }
 
@@ -466,7 +471,7 @@ fn the_sidebars_backups_opens_the_device_rows_and_nothing_in_the_tree_changes() 
     }
     assert!(opened, "the adapter never handed out the Backups folder");
     until_drawn(&mut rt, "Invented Phone");
-    until_drawn(&mut rt, "This PC");
+    until_drawn(&mut rt, concat!(beebeeb_engine::device_word_cap!()));
     let now = drawn(&rt);
     assert!(now.contains("Invented Laptop"), "the device rows are drawn:\n{now}");
     // The section STAYS Backups on the next frames (the real engine's crumbs start at the Files root).
