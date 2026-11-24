@@ -126,7 +126,7 @@ fn only_plain_http_to_this_computer_skips_the_proxy() {
     }
 }
 
-/// Every client the engine builds for the API base comes from `api_base_client_builder`: the three of `ApiClient`,
+/// Every client the engine builds for the API base comes from `api_base_client_builder`: the four of `ApiClient` (the bulk GET's included),
 /// the auth transport's, and `Engine::open` hands the auth transport its own base.
 #[test]
 fn every_api_base_client_takes_the_proxy_rule() {
@@ -139,7 +139,7 @@ fn every_api_base_client_takes_the_proxy_rule() {
         0,
         "client.rs builds no client of its own"
     );
-    assert_eq!(client_rs.matches("api_base_client_builder(&").count(), 3, "client.rs");
+    assert_eq!(client_rs.matches("api_base_client_builder(&").count(), 4, "client.rs");
     assert_eq!(
         auth.matches("Client::builder()").count(),
         0,
