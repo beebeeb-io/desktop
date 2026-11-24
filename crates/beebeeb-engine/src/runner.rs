@@ -587,7 +587,8 @@ async fn run(
     let mut last_nudge_run: Option<std::time::Instant> = None;
     // Spec D11, D11b (task 1888): whether this engine run's first reconcile pass, with its key check and resume, has
     // committed. Until it has, the send phase's wake sends nothing.
-    #[cfg(not(target_os = "macos"))]
+    // F4 (macOS too): the pass then resumes the operations paused for `auth` after a tick that reached the server. A Mac
+    // does not wait on it before sending (the File Provider sends its own saves), so only the pass reads this.
     let mut reconciled_this_run = false;
     // S6: the kept files' step, for this engine run (one batch at a time, each failing file's backoff).
     #[cfg(not(target_os = "macos"))]
@@ -855,7 +856,6 @@ async fn run(
                         // pull came back: `Ok` alone is also a swallowed `/sync/ops` failure (offline, a
                         // 5xx, a 401), which proves no token and leaves the rows the pass plans against stale.
                         let reconcile_started = std::time::Instant::now();
-                        #[cfg(not(target_os = "macos"))]
                         if tick.reached_server
                             && let Err(error) = bridge
                                 .reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run)

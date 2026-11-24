@@ -375,8 +375,8 @@ fn an_available_update_is_said_once_with_one_primary_action() {
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
     assert_eq!(
         super::FRAMES.len(),
-        49,
-        "the frames the settings lanes built (28, Bandwidth's 10, Diagnostics' 2, Keep on this PC's 4, Photo previews' 3) and Notifications' 2 own states"
+        55,
+        "the frames the settings lanes built (28, Bandwidth's 10, Diagnostics' 2, Keep on this PC's 4, Photo previews' 3), Notifications' 2 own states and Beebeeb in Finder's 6 (dm-18)"
     );
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);

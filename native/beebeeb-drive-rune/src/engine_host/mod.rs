@@ -45,7 +45,7 @@ use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary
 pub mod account;
 mod app_lock;
 mod away;
-mod finder_setup;
+pub mod finder_setup;
 mod drive_errors;
 use drive_errors::{map_drive_err, map_new_file_err};
 pub mod backups;
@@ -722,6 +722,8 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     fn lock_vault_now(&self) {
         let engine = self.engine.clone();
         on_worker("lock-vault", move || {
+            // The reconciler holds first, so no check starts an engine after the lock (no-op off a Mac).
+            finder_setup::lock();
             let _ = engine.lock();
             engine.wake_host();
         });

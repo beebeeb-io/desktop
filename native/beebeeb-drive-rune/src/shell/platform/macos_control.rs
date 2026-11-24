@@ -1,7 +1,8 @@
 //! macOS: the control channel's transport, a Unix socket (`shell/control.rs` is the protocol).
 //!
-//! - **The place** is `control.sock` in this identity's Application Support folder
-//!   (`AppIdentity::state_dir_id`), the folder mode 0700 and the socket 0600: this user only.
+//! - **The place** is `c.sock` in a short folder (`~/.bbr` / `~/.bbt`) under `$HOME`, the folder mode
+//!   0700 and the socket 0600: this user only. Not Application Support: in the sandbox that sits inside
+//!   `~/Library/Containers/io.beebeeb.app/Data/...` and the path would pass SUN_LEN (104 bytes).
 //! - **Serving it is being the instance.** A socket file that is there is tried first: if
 //!   something answers a connect, that is the running instance (`AlreadyRunning`); if nothing
 //!   does, its owner is gone and the file is replaced.
@@ -24,17 +25,25 @@ use crate::shell::control::{self, Reply, Request, MAX_REPLY, MAX_REQUEST};
 use crate::shell::identity::AppIdentity;
 use crate::shell::instance::Delivery;
 
-const SOCKET_NAME: &str = "control.sock";
+const SOCKET_NAME: &str = "c.sock";
+/// What `sockaddr_un.sun_path` holds on macOS, with its terminating NUL.
+const SUN_LEN: usize = 104;
 const REQUEST_WAIT: Duration = Duration::from_secs(2);
 
-/// This identity's folder: `~/Library/Application Support/<bundle identifier>`.
+/// This identity's control folder: `$HOME/.bbr` (real) or `$HOME/.bbt` (test). `$HOME` is the container's
+/// `Data` folder in the sandbox, which the app may write.
 pub(super) fn state_dir(identity: AppIdentity) -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .ok_or("HOME is not set")?;
-    Ok(PathBuf::from(home)
-        .join("Library/Application Support")
-        .join(identity.state_dir_id()))
+    Ok(control_dir_in(Path::new(&home), identity))
+}
+
+fn control_dir_in(home: &Path, identity: AppIdentity) -> PathBuf {
+    home.join(match identity {
+        AppIdentity::Real => ".bbr",
+        AppIdentity::Test => ".bbt",
+    })
 }
 
 fn socket_path(dir: &Path) -> PathBuf {
@@ -122,6 +131,12 @@ pub(super) fn serve_in(
     handler: ControlHandler,
 ) -> Result<Box<dyn ControlServer>, ServeError> {
     let os = |what: &str, e: std::io::Error| ServeError::Os(format!("{what}: {e}"));
+    if socket_path(dir).as_os_str().len() >= SUN_LEN {
+        return Err(ServeError::Os(format!(
+            "the control socket path is too long ({} bytes)",
+            socket_path(dir).as_os_str().len()
+        )));
+    }
     ensure_dir(dir).map_err(|e| os("preparing the control folder failed", e))?;
     let path = socket_path(dir);
     let listener = match UnixListener::bind(&path) {
