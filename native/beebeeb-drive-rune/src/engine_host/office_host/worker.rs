@@ -310,10 +310,12 @@ impl<S: Starter> Worker<S> {
 
     fn start_helper(&mut self) {
         if !self.starter.installed() {
+            crate::office_log::helper_not_started("not installed beside the app", "");
             return self.end_with(OfficeState::NoPreview(NoPreview::NotInstalled));
         }
         // Only the helper of our own name is started: that is the name crash reports leave out.
         let Some(name) = self.starter.file_name().filter(|name| name == HELPER_EXE) else {
+            crate::office_log::helper_not_started("not the helper's own file name", "");
             return self.end_with(OfficeState::NoPreview(NoPreview::NotInstalled));
         };
         // Before EVERY start: Windows Error Reporting keeps no dump of it.
@@ -406,6 +408,8 @@ impl<S: Starter> Worker<S> {
     }
 
     fn start_failed(&mut self, error: sandbox::SandboxError) {
+        // The sandbox's errors are fixed texts and system codes, never a path.
+        crate::office_log::helper_not_started("the sandbox refused", &error.to_string());
         if error == sandbox::SandboxError::Unsupported {
             self.end_with(OfficeState::NoPreview(NoPreview::NoSandbox));
         } else if error == sandbox::SandboxError::NeedsNewerWindows {
@@ -426,8 +430,18 @@ impl<S: Starter> Worker<S> {
         }
     }
 
-    /// "Renderer stopped". The document's section stays for Try again; without one it goes now.
+    /// "Renderer stopped". The document's section stays for Try again; without one it goes now. Logged with the check
+    /// that stopped it (the caller's place) and the helper's exit code.
+    #[track_caller]
     fn stopped(&mut self, why: Stop) {
+        let at = std::panic::Location::caller();
+        let exit = self.run.as_ref().and_then(|run| run.helper.exit_code());
+        let mode = match self.mode {
+            Mode::View => "view",
+            Mode::Edit(_) => "edit",
+            Mode::New(..) => "new",
+        };
+        crate::office_log::helper_stopped(&format!("{why:?}"), mode, exit, at.file(), at.line());
         // A snapshot a lock waits for can no longer come from this helper.
         self.flush_complete();
         // An editing session whose helper exited goes on with a new one (or read-only).
