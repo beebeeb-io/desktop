@@ -143,6 +143,9 @@ pub fn flyout_options() -> WindowOptions {
         resizable: false,
         min_size: Some(flyout::SIZE),
         max_size: Some(flyout::SIZE),
+        // macOS (docs/macos §3 rule 7): hidden, never destroyed; not resizable, no decorations, always on top, created
+        // hidden. "Skips the task switcher" and "on all spaces" are not fields of rune's WindowOptions at c92e462
+        // (see the report); the Accessory activation policy keeps the app out of the switcher meanwhile.
         ..WindowOptions::default()
     }
 }
@@ -242,7 +245,7 @@ mod tests {
     fn two_windows_with_the_boards_sizes() {
         assert_eq!(WindowKind::Main.default_size(), (1280.0, 800.0));
         assert_eq!(WindowKind::Main.min_size(), (960.0, 640.0));
-        assert_eq!(WindowKind::Flyout.default_size(), (340.0, 520.0));
+        assert_eq!(WindowKind::Flyout.default_size(), flyout::SIZE);
         assert_eq!(WindowKind::Flyout.min_size(), WindowKind::Flyout.default_size());
         assert_ne!(WindowKind::Main.key(), WindowKind::Flyout.key());
     }
@@ -251,7 +254,7 @@ mod tests {
     fn the_flyout_is_fixed_frameless_topmost_and_starts_hidden() {
         let o = flyout_options();
         assert!(o.borderless && o.always_on_top && !o.visible && !o.resizable);
-        assert_eq!((o.min_size, o.max_size), (Some((340.0, 520.0)), Some((340.0, 520.0))));
+        assert_eq!((o.min_size, o.max_size), (Some(flyout::SIZE), Some(flyout::SIZE)));
     }
 
     #[test]
