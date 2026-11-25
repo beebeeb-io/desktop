@@ -655,6 +655,8 @@ mod thumbnail_flag;
 mod name_unreadable;
 // Folder digests (task 13): what the sync drift check trusts of the server tree, and the mirror reads it compares.
 pub(crate) mod folder_digests;
+// fd-18: the backup digest cache, kept across restarts.
+pub(crate) mod backup_digest_cache;
 mod test_hooks;
 // Task 2409: the changes "Not sent" counts, one row each.
 mod unsent;
