@@ -107,9 +107,9 @@ pub fn net_row(state: &PlayState, t: &Theme) -> Option<El> {
                 .range_value(f64::from(part), 0.0, 1.0)
                 .w(240.0)
                 .h(4.0)
-                .radius(2.0)
+                .radius(scale::radius::PILL)
                 .fill(ink.alpha(0.3))
-                .child(el().key("video-net-fill").w_frac(part).h_full().radius(2.0).fill(ink)),
+                .child(el().key("video-net-fill").w_frac(part).h_full().radius(scale::radius::PILL).fill(ink)),
         );
     }
     Some(r)
@@ -443,7 +443,7 @@ fn bar_with(
                     el().key(format!("{prefix}-scrub-buffered"))
                         .w_frac(f32::from(times.buffered_pm) / 1000.0)
                         .h_full()
-                        .radius(2.0)
+                        .radius(scale::radius::PILL)
                         .fill(ink.alpha(0.35)),
                 )
                 .child(

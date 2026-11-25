@@ -43,6 +43,8 @@ struct DriveMock {
     /// RE3-a: the server answers `/sync/snapshot` (every live node, cursor [`SYNC_HEAD`]) and `/sync/ops` (no
     /// ops, at the head). Off: both 404, as before.
     sync_api: Arc<AtomicBool>,
+    /// How many entries a listing page holds ([`PAGE`] unless a test of a large folder raises it).
+    page_size: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// RE3-a: the op cursor the mock's sync API is at.
@@ -129,6 +131,8 @@ impl DriveMock {
         let lose = Arc::clone(&lose_create_answer);
         let sync_api = Arc::new(AtomicBool::new(false));
         let sync_on = Arc::clone(&sync_api);
+        let page_size = Arc::new(std::sync::atomic::AtomicUsize::new(PAGE));
+        let page_now = Arc::clone(&page_size);
         let (tree, log, halt) = (Arc::clone(&nodes), Arc::clone(&requests), Arc::clone(&stop));
         let (ahead, rows, fail_later) = (
             Arc::clone(&date_ahead_s),
@@ -197,8 +201,9 @@ impl DriveMock {
                         .filter(|(_, node)| node.parent.as_deref() == Some(parent.as_str()))
                         .map(|(id, node)| node_json(id, node))
                         .collect();
-                    let page: Vec<_> = children.iter().skip(offset).take(PAGE).cloned().collect();
-                    let next = (offset + PAGE < children.len()).then(|| format!("c{}", offset + PAGE));
+                    let size = page_now.load(Ordering::SeqCst);
+                    let page: Vec<_> = children.iter().skip(offset).take(size).cloned().collect();
+                    let next = (offset + size < children.len()).then(|| format!("c{}", offset + size));
                     let listing = serde_json::json!({ "files": page, "next_cursor": next });
                     match *ahead.lock().unwrap() {
                         Some(seconds) => http_json_dated("200 OK", listing, seconds),
@@ -264,6 +269,7 @@ impl DriveMock {
             create_on_notices,
             lose_create_answer,
             sync_api,
+            page_size,
         }
     }
 
@@ -1894,6 +1900,9 @@ async fn a_rebuilt_record_set_over_unchanged_files_uploads_nothing() {
             switch_on(&["pictures"]);
             let fx = Fixture::new();
             fx.server.sync_api.store(true, Ordering::SeqCst);
+            // Large pages: the test is about what is uploaded, not about paging (a 1,000-entry folder in pages of 2
+            // is 500 requests of a single-threaded mock, slow on a loaded machine).
+            fx.server.page_size.store(500, Ordering::SeqCst);
             let pictures = fx.add(Some(&fx.device.clone()), "Pictures", true, 0);
             fx.bridge
                 .db
