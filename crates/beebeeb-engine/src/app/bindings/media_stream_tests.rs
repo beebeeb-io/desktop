@@ -158,9 +158,11 @@ fn fake(tag: &str) -> Fake {
                 _ => rest(req),
             };
         }
-        if missed
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
+        let left = missed.load(Ordering::SeqCst);
+        if left > 0
+            && missed
+                .compare_exchange(left, left - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
         {
             return Reply::error(404, "not_found");
         }
