@@ -191,12 +191,11 @@ impl DesktopBackupHost {
             },
             None => false,
         };
-        if !checked {
-            if self.folder_state(device).await? == BackupFolderState::Gone
-                || self.folder_state(&kept.category_folder_id).await? == BackupFolderState::Gone
-            {
-                return Ok(None);
-            }
+        if !checked
+            && (self.folder_state(device).await? == BackupFolderState::Gone
+                || self.folder_state(&kept.category_folder_id).await? == BackupFolderState::Gone)
+        {
+            return Ok(None);
         }
         let mut tree = kept.tree;
         tree.device_folder_live = true;

@@ -37,7 +37,7 @@ async fn base_pending_parks_after_ten_successful_snapshots_without_the_file() {
         {
             let mut s = server.state.lock().unwrap();
             s.snapshots
-                .push_back(("503 Service Unavailable".into(), serde_json::json!({ "error": "busy" })));
+                .push_back(("500 Internal Server Error".into(), serde_json::json!({ "error": "busy" })));
             s.snapshots.push_back(("200 OK".into(), listed.clone()));
         }
         assert!(
