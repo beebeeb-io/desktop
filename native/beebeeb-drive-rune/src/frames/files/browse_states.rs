@@ -43,6 +43,19 @@ fn loading(s: &State) -> Option<Loading> {
     status.loading
 }
 
+/// Is the account's first listing running, whether or not the card has given way to the strip? An empty folder
+/// then is not empty yet: its rows are not applied.
+pub fn first_listing(s: &State) -> bool {
+    let status = s.global.source.status();
+    !status.locked && !status.signed_out && status.loading.is_some()
+}
+
+/// Is sync paused with nothing listed? Then an empty Files says so, with Resume (a persisted pause).
+pub fn paused(s: &State) -> bool {
+    let status = s.global.source.status();
+    !status.locked && !status.signed_out && status.paused && status.loading.is_none()
+}
+
 fn listed_words(loading: &Loading) -> String {
     match figure(loading) {
         Some(figure) => format!("{figure} listed"),
