@@ -34,7 +34,11 @@ pub(crate) const LOGIN_ITEMS_URL: &str = "x-apple.systempreferences:com.apple.Lo
 /// Opens a System Settings address through the bridge's `NSWorkspace`.
 pub(crate) fn open_system_url(url: &str) -> Result<(), FpError> {
     let Ok(text) = CString::new(url) else {
-        return Err(FpError::new(BRIDGE_DOMAIN, bridge_code::NO_IDENTIFIER, "the address holds a NUL byte"));
+        return Err(FpError::new(
+            BRIDGE_DOMAIN,
+            bridge_code::NO_IDENTIFIER,
+            "the address holds a NUL byte",
+        ));
     };
     let mut out = BeebeebFpErrorC::zeroed();
     let code = unsafe { beebeeb_open_url(text.as_ptr(), &mut out) };
@@ -289,11 +293,14 @@ pub(crate) fn start_registered(path: &std::path::Path) -> Result<(), OpenFailure
 pub(crate) fn start_registered_with<W: Workspace>(workspace: &W, path: &std::path::Path) -> Result<(), OpenFailure> {
     let target = {
         let targets = TARGETS.lock().unwrap_or_else(|p| p.into_inner());
-        targets.iter().find(|(known, _)| known == path).map(|(_, target)| match target {
-            Target::Location => Target::Location,
-            Target::Item(id) => Target::Item(id.clone()),
-            Target::OpenItem(id) => Target::OpenItem(id.clone()),
-        })
+        targets
+            .iter()
+            .find(|(known, _)| known == path)
+            .map(|(_, target)| match target {
+                Target::Location => Target::Location,
+                Target::Item(id) => Target::Item(id.clone()),
+                Target::OpenItem(id) => Target::OpenItem(id.clone()),
+            })
     };
     match target {
         Some(Target::Item(id)) => reveal_item_with(workspace, &id),

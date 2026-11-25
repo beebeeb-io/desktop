@@ -3,14 +3,14 @@
 //! state of a removal), plus the one-per-process gate every File Provider call goes through. Must not decide what
 //! Finder shows, and never logs: an `FpError` message is the OS's own prose and may name a file.
 
-use std::ffi::{CString, c_void};
+use std::ffi::{c_void, CString};
 use std::os::raw::c_char;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::file_provider_port::WorkingSetSignalOutcome;
 use beebeeb_engine::finder_setup::core::DomainState;
-use beebeeb_engine::finder_setup::error::{FpError, FpErrorCode, app_code};
+use beebeeb_engine::finder_setup::error::{app_code, FpError, FpErrorCode};
 
 /// Mirror of `BeebeebFpError` in the bridge. The C side `_Static_assert`s the same size and offsets, and the tests
 /// compare `sizeof`, `alignof` and every `offsetof` exported from Objective-C against this struct.
@@ -192,7 +192,7 @@ pub(crate) fn kept_state_for_path(path: &str) -> KeptState {
 /// holding a NUL) is the bridge's `NoIdentifier` error, never `Ok(None)`. The caller holds the gate.
 #[allow(dead_code)] // dm-24's reveal
 pub(crate) fn resolve_item(item_id: &str) -> Result<Option<UrlHandle>, FpError> {
-    use beebeeb_engine::finder_setup::error::{BRIDGE_DOMAIN, bridge_code};
+    use beebeeb_engine::finder_setup::error::{bridge_code, BRIDGE_DOMAIN};
     let Ok(identifier) = CString::new(item_id) else {
         return Err(FpError::new(
             BRIDGE_DOMAIN,
@@ -249,7 +249,11 @@ impl Gate {
 fn call(function: unsafe extern "C" fn(*mut BeebeebFpErrorC) -> i32) -> Result<i32, FpError> {
     let mut out = BeebeebFpErrorC::zeroed();
     let code = unsafe { function(&mut out) };
-    if code >= 0 { Ok(code) } else { Err(out.into_fp_error()) }
+    if code >= 0 {
+        Ok(code)
+    } else {
+        Err(out.into_fp_error())
+    }
 }
 
 /// The domain's `userEnabled`, read from the OS's live registry. `NotRegistered` is a fresh install or the state after
@@ -280,7 +284,11 @@ pub(crate) fn add_domain() -> Result<(), FpError> {
 pub(crate) fn wait_for_domain_ready(timeout: Duration) -> Result<(), FpError> {
     let mut out = BeebeebFpErrorC::zeroed();
     let code = unsafe { beebeeb_fp_wait_for_domain_ready(timeout.as_secs_f64(), &mut out) };
-    if code < 0 { Err(out.into_fp_error()) } else { Ok(()) }
+    if code < 0 {
+        Err(out.into_fp_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// One best-effort working-set signal, through the gate. `0` is signaled, or the domain is not registered (nothing to
@@ -299,7 +307,7 @@ pub(crate) fn signal_working_set() -> Result<WorkingSetSignalOutcome, FpError> {
 #[cfg(test)]
 mod bridge_error_tests {
     use super::*;
-    use beebeeb_engine::finder_setup::error::{APP_DOMAIN, BRIDGE_DOMAIN, FpErrorCode, app_code, bridge_code};
+    use beebeeb_engine::finder_setup::error::{app_code, bridge_code, FpErrorCode, APP_DOMAIN, BRIDGE_DOMAIN};
     use std::ffi::CString;
     use std::mem::{align_of, offset_of, size_of};
 

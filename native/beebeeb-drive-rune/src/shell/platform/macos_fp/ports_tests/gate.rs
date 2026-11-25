@@ -6,15 +6,18 @@ use super::super::bridge::GATE_TESTS;
 use super::super::*;
 use beebeeb_engine::finder_setup::core::KeptFolder as EngineKept;
 use beebeeb_engine::finder_setup::error::APP_DOMAIN;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 /// A runtime that does not wait for a bridge call still stuck in the "OS" when the test is done (dropping a runtime
 /// waits for its blocking threads; a real app's runtime outlives every call).
 fn run<T>(future: impl Future<Output = T>) -> T {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let out = runtime.block_on(future);
     runtime.shutdown_background();
     out

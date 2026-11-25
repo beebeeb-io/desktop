@@ -94,8 +94,20 @@ pub fn position(a: &Anchor) -> (i32, i32) {
     let icon = a.icon.map(f);
     // An icon that is not on this display is "unavailable": the top right of the display.
     let icon = icon.filter(|i| macos_anchor::icon_display(*i, &[display]).is_some());
-    macos_anchor::place_popover(icon, &[display])
-        .map_or((a.work.x, a.work.y), |p| (p.x.round() as i32, p.y.round() as i32))
+    // `WindowHandle::set_position` takes physical desktop pixels: points times the display's scale (a point
+    // position handed over as pixels lands at half the way on a Retina Mac, mid-screen).
+    let scale = if a.scale.is_finite() && a.scale > 0.0 {
+        a.scale
+    } else {
+        1.0
+    };
+    macos_anchor::place_popover(icon, &[display]).map_or(
+        (
+            (f64::from(a.work.x) * scale).round() as i32,
+            (f64::from(a.work.y) * scale).round() as i32,
+        ),
+        |p| macos_anchor::to_physical(p.x, p.y, scale),
+    )
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -158,12 +170,13 @@ mod tests {
             icon: Some(r(689, 0, 22, 24)),
         };
         assert_eq!(SIZE, (372.0, 488.0));
-        assert_eq!(position(&a), (700 - 186, 30));
+        // Points (514, 30) at scale 2 are pixels (1028, 60).
+        assert_eq!(position(&a), (1028, 60));
         let near_edge = Anchor {
             icon: Some(r(1420, 0, 22, 24)),
             ..a
         };
-        assert_eq!(position(&near_edge).0, 1440 - 8 - 372);
+        assert_eq!(position(&near_edge).0, (1440 - 8 - 372) * 2);
         assert_eq!(on_tray_click(false, Some(249)), Toggle::Ignore);
         assert_eq!(on_tray_click(false, Some(250)), Toggle::Show);
     }

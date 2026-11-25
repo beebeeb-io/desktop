@@ -8,7 +8,7 @@
 //! Pure and tested (`macos_tray_tests.rs`): the frame → [`Anchor`] conversion (AppKit's origin is bottom-left of the
 //! primary display, the flyout's is top-left), the appearance → theme pick, the menu spec from the model.
 
-use std::ffi::{CString, c_char, c_int, c_ulong, c_void};
+use std::ffi::{c_char, c_int, c_ulong, c_void, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -251,14 +251,38 @@ fn primary_height() -> f64 {
     send_rect(primary, "frame").h
 }
 
+/// The anchor of the menu-bar screen with no icon: the popover then opens at its top right, never centred.
+fn fallback_anchor() -> Option<Anchor> {
+    let screens = send!(Id; class("NSScreen"), "screens");
+    if send!(c_ulong; screens, "count") == 0 {
+        return None;
+    }
+    let primary = send!(Id; screens, "objectAtIndex:", 0 as c_ulong => c_ulong);
+    let scale = send!(f64; primary, "backingScaleFactor");
+    Some(anchor_from_frames(
+        NsRect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        },
+        send_rect(primary, "frame"),
+        send_rect(primary, "visibleFrame"),
+        primary_height(),
+        scale,
+    ))
+    .map(|a| Anchor { icon: None, ..a })
+}
+
+/// The anchor is always there: the item's frame when AppKit gives it, else the menu-bar screen's top right.
 fn current_anchor(button: Id) -> Option<Anchor> {
     let window = send!(Id; button, "window");
     if window.is_null() {
-        return None;
+        return fallback_anchor();
     }
     let screen = send!(Id; window, "screen");
     if screen.is_null() {
-        return None;
+        return fallback_anchor();
     }
     let item = send_rect(window, "frame");
     let scale = send!(f64; screen, "backingScaleFactor");
@@ -269,6 +293,38 @@ fn current_anchor(button: Id) -> Option<Anchor> {
         primary_height(),
         scale,
     ))
+}
+
+/// The popover's native look, once its window exists and is still hidden: transparent window with a system
+/// shadow, content rounded like a macOS popover, above other windows, off Mission Control and the window list.
+pub fn adopt_popover(ns_view: *mut c_void) {
+    if ns_view.is_null() {
+        return;
+    }
+    let view = ns_view as usize;
+    on_main(move || {
+        let view = view as Id;
+        let window = send!(Id; view, "window");
+        if window.is_null() {
+            return;
+        }
+        const POPOVER_CORNER_RADIUS: f64 = 10.0;
+        const STATUS_WINDOW_LEVEL: isize = 25;
+        // canJoinAllSpaces | stationary | ignoresCycle | fullScreenAuxiliary
+        const BEHAVIOR: c_ulong = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
+        send!((); window, "setOpaque:", false => bool);
+        send!((); window, "setBackgroundColor:", send!(Id; class("NSColor"), "clearColor") => Id);
+        send!((); window, "setHasShadow:", true => bool);
+        send!((); window, "setLevel:", STATUS_WINDOW_LEVEL => isize);
+        send!((); window, "setCollectionBehavior:", BEHAVIOR => c_ulong);
+        send!((); view, "setWantsLayer:", true => bool);
+        let layer = send!(Id; view, "layer");
+        if !layer.is_null() {
+            send!((); layer, "setCornerRadius:", POPOVER_CORNER_RADIUS => f64);
+            send!((); layer, "setMasksToBounds:", true => bool);
+        }
+        send!((); window, "invalidateShadow");
+    });
 }
 
 extern "C" fn clicked(_this: Id, _cmd: Sel, sender: Id) {
