@@ -200,3 +200,36 @@ fn a_finder_that_is_not_set_up_answers_with_a_line() {
     let view = FinderSetupView::initial(LaunchLocation::Applications);
     assert!(not_ready_line(&view).is_some());
 }
+
+#[test]
+fn a_plain_file_opens_with_its_default_app_and_a_folder_is_revealed() {
+    let _one = GATE_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+    let fake = Fake::with_location();
+    open_item_with(&fake, "f1").unwrap();
+    assert_eq!(*fake.calls.borrow(), ["resolve_item f1 gate_free=false", "open gate_free=true"]);
+
+    let (file, folder) = (std::path::Path::new("/t/dm38/plain.txt"), std::path::Path::new("/t/dm38/folder"));
+    register_open_item(file, "f1");
+    register_item(folder, "d1");
+    let fake = Fake::with_location();
+    start_registered_with(&fake, file).unwrap();
+    start_registered_with(&fake, folder).unwrap();
+    assert_eq!(
+        *fake.calls.borrow(),
+        [
+            "resolve_item f1 gate_free=false",
+            "open gate_free=true",
+            "resolve_item d1 gate_free=false",
+            "reveal gate_free=true"
+        ]
+    );
+    assert_eq!(
+        start_registered_with(&fake, std::path::Path::new("/t/dm38/nobody")),
+        Err(OpenFailure::NoLocation)
+    );
+}
+
+#[test]
+fn the_login_items_address_is_a_system_settings_pane() {
+    assert!(LOGIN_ITEMS_URL.starts_with("x-apple.systempreferences:"));
+}

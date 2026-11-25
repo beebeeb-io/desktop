@@ -24,6 +24,28 @@ unsafe extern "C" {
     fn beebeeb_open_scoped_url(handle: *mut c_void, out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_reveal_scoped_url(handle: *mut c_void, out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_release_url_handle(handle: *mut c_void);
+    /// A NON-file URL (System Settings' pane) through `NSWorkspace`; 0 = opened. No File Provider call, no gate.
+    fn beebeeb_open_url(url_string: *const std::os::raw::c_char, out_error: *mut BeebeebFpErrorC) -> i32;
+}
+
+/// System Settings › General › Login Items & Extensions.
+pub(crate) const LOGIN_ITEMS_URL: &str = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
+
+/// Opens a System Settings address through the bridge's `NSWorkspace`.
+pub(crate) fn open_system_url(url: &str) -> Result<(), FpError> {
+    let Ok(text) = CString::new(url) else {
+        return Err(FpError::new(BRIDGE_DOMAIN, bridge_code::NO_IDENTIFIER, "the address holds a NUL byte"));
+    };
+    let mut out = BeebeebFpErrorC::zeroed();
+    let code = unsafe { beebeeb_open_url(text.as_ptr(), &mut out) };
+    match code {
+        0 => Ok(()),
+        c if c < 0 => Err(out.into_fp_error()),
+        other => Err(FpError::app(
+            app_code::UNEXPECTED_BRIDGE_RETURN,
+            format!("beebeeb_open_url returned {other}"),
+        )),
+    }
 }
 
 /// The sentences a person is told (verbatim from the tag's `finder_open.rs` and the engine's `finder_show.rs`).
@@ -181,6 +203,15 @@ pub(crate) fn open_location_with<W: Workspace>(workspace: &W) -> Result<(), Open
     workspace.open(url).map_err(OpenFailure::Bridge)
 }
 
+/// A plain file's open with the system's default app: the item's scoped URL through `NSWorkspace`, the gate let go
+/// before the open (dm-28 regression: only the location and Show in Finder were wired).
+pub(crate) fn open_item_with<W: Workspace>(workspace: &W, item_id: &str) -> Result<(), OpenFailure> {
+    let url = resolved(|w| w.resolve_item(item_id), workspace)
+        .map_err(OpenFailure::Bridge)?
+        .ok_or(OpenFailure::NoLocation)?;
+    workspace.open(url).map_err(OpenFailure::Bridge)
+}
+
 /// The namespace rule, before any bridge call: only one of the person's own rows may be asked of the File Provider.
 /// `namespace_of` reads the row (`Ok(None)`: no such row); a failing lookup is refused too.
 pub(crate) fn may_show(
@@ -208,6 +239,10 @@ pub(crate) fn open_location() -> Result<(), OpenFailure> {
     open_location_with(&SystemWorkspace)
 }
 
+pub(crate) fn open_item(item_id: &str) -> Result<(), OpenFailure> {
+    open_item_with(&SystemWorkspace, item_id)
+}
+
 pub(crate) fn reveal_item(item_id: &str) -> Result<(), OpenFailure> {
     reveal_item_with(&SystemWorkspace, item_id)
 }
@@ -216,7 +251,10 @@ pub(crate) fn reveal_item(item_id: &str) -> Result<(), OpenFailure> {
 /// the File Provider, not the path, says where an item is.
 enum Target {
     Location,
+    /// Shown in Finder: a folder, or a file with no app of its kind.
     Item(String),
+    /// A plain file, opened with its default app.
+    OpenItem(String),
 }
 
 static TARGETS: std::sync::Mutex<Vec<(std::path::PathBuf, Target)>> = std::sync::Mutex::new(Vec::new());
@@ -234,26 +272,33 @@ pub(crate) fn register_location(path: &std::path::Path) {
     register(path, Target::Location);
 }
 
+pub(crate) fn register_open_item(path: &std::path::Path, item_id: &str) {
+    register(path, Target::OpenItem(item_id.to_string()));
+}
+
 pub(crate) fn register_item(path: &std::path::Path, item_id: &str) {
     register(path, Target::Item(item_id.to_string()));
 }
 
-/// The launch worker's start on a Mac: opens the location or reveals the item the press registered for `path`. A path
-/// nobody registered is not a Finder location and is not opened.
+/// The launch worker's start on a Mac: opens the location, opens the plain file or reveals the item the press
+/// registered for `path`. A path nobody registered is not a Finder location and is not opened.
 pub(crate) fn start_registered(path: &std::path::Path) -> Result<(), OpenFailure> {
+    start_registered_with(&SystemWorkspace, path)
+}
+
+pub(crate) fn start_registered_with<W: Workspace>(workspace: &W, path: &std::path::Path) -> Result<(), OpenFailure> {
     let target = {
         let targets = TARGETS.lock().unwrap_or_else(|p| p.into_inner());
-        targets
-            .iter()
-            .find(|(known, _)| known == path)
-            .map(|(_, target)| match target {
-                Target::Location => None,
-                Target::Item(id) => Some(id.clone()),
-            })
+        targets.iter().find(|(known, _)| known == path).map(|(_, target)| match target {
+            Target::Location => Target::Location,
+            Target::Item(id) => Target::Item(id.clone()),
+            Target::OpenItem(id) => Target::OpenItem(id.clone()),
+        })
     };
     match target {
-        Some(Some(id)) => reveal_item(&id),
-        Some(None) => open_location(),
+        Some(Target::Item(id)) => reveal_item_with(workspace, &id),
+        Some(Target::OpenItem(id)) => open_item_with(workspace, &id),
+        Some(Target::Location) => open_location_with(workspace),
         None => Err(OpenFailure::NoLocation),
     }
 }

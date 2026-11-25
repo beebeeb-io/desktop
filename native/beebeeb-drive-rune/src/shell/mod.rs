@@ -43,6 +43,7 @@ pub mod instance;
 pub mod macos_menu;
 pub mod intents;
 mod settings_open;
+mod settings_open_finder;
 mod settings_open_pages;
 mod settings_open_places;
 mod settings_show_in_files;
@@ -581,9 +582,17 @@ pub(crate) fn main_app(spec: AppSpec<State>) -> App<State> {
         .on_focus(|s: &mut State, focused, _| {
             crate::frames::signin::on_window_focus(s, focused);
             crate::frames::files::pins::on_focus(s, focused);
-            // dm-31's `finder_setup::on_app_activated()` goes here once `engine_host` exports it (it is private).
+            on_focus_activates(focused, crate::engine_host::finder_setup::on_app_activated);
         })
         .on_ime(on_ime)
+}
+
+/// The window got the keyboard: the app came forward, so Finder setup takes its one read-only check (dm-19). Losing
+/// the keyboard asks nothing.
+pub(crate) fn on_focus_activates(focused: bool, activated: impl FnOnce()) {
+    if focused {
+        activated();
+    }
 }
 
 /// The input method's text while no text field has the keyboard: the office editor's (its page, grid or slide has an
@@ -692,4 +701,17 @@ fn open_engine(
     platform::windows_verbs::register(identity, &opened.engine);
     let live = Arc::new(crate::engine_host::LiveEngine::new(&opened, messages));
     Ok((opened, live))
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::on_focus_activates;
+
+    #[test]
+    fn the_app_coming_forward_asks_finder_setup_for_its_check_and_leaving_does_not() {
+        let mut calls = 0;
+        on_focus_activates(true, || calls += 1);
+        on_focus_activates(false, || calls += 1);
+        assert_eq!(calls, 1);
+    }
 }

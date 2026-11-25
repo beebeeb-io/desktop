@@ -1378,7 +1378,7 @@ pub fn on_open_url(s: &mut State, url: &str, _tx: &mut Tx) {
 }
 
 #[path = "macos_lifecycle.rs"]
-mod macos_lifecycle;
+pub(crate) mod macos_lifecycle;
 
 #[cfg(test)]
 #[path = "host_tests.rs"]

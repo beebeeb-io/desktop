@@ -1141,6 +1141,15 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
                 .map(|item| path_the_system_opens(db, sync_root, &item.id))
                 .collect::<Result<Vec<_>, _>>()
         })?;
+        // A Mac opens a file through the File Provider's URL for its row (never the path); a folder is shown.
+        #[cfg(target_os = "macos")]
+        for (item, path) in items.iter().zip(&paths) {
+            if item.is_folder {
+                crate::shell::platform::macos::macos_fp::open::register_item(path, &item.id);
+            } else {
+                crate::shell::platform::macos::macos_fp::open::register_open_item(path, &item.id);
+            }
+        }
         let open = self.starts.open;
         self.start_later(files_source::Action::Open, paths, open)
     }
@@ -1159,6 +1168,12 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
             let path = file_ops::item_path_for(db, sync_root, &entry).map_err(map_drive_err)?;
             Ok((path, path_the_system_opens(db, sync_root, &item.id).is_ok()))
         })?;
+        #[cfg(target_os = "macos")]
+        if openable && (self.starts.has_default_app)(&path) {
+            crate::shell::platform::macos::macos_fp::open::register_open_item(&path, &item.id);
+        } else {
+            crate::shell::platform::macos::macos_fp::open::register_item(&path, &item.id);
+        }
         self.start_outside(path, openable)
     }
 
