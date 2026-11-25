@@ -285,6 +285,7 @@ mod tests {
     // S6: a hydrate's start look; a save made after it is never replaced (Linux).
     mod start_look_s6;
     mod cursor_2272; // Task 2272: a failed op apply holds the cursor, retries, then parks.
+    mod resnapshot_re3e; // RE3-e: a good snapshot is fetched once at start.
     mod sync;
     mod sync_2;
     mod sync_3;
