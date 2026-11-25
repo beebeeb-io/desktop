@@ -355,6 +355,14 @@ impl DesktopBackupHost {
         Ok((id, None))
     }
 
+    /// [`BackupHost::put_record`] for a batch, in one state-DB transaction (the records' rebuild). How many stored.
+    pub async fn put_records(&self, c: &Category, records: &[(RecordRef, BackupRecord)]) -> Result<usize, HostError> {
+        self.bridge
+            .db()
+            .put_backup_records_cas(&c.key(), records)
+            .map_err(db_error("put_record"))
+    }
+
     async fn folder_state(&self, id: &str) -> Result<BackupFolderState, HostError> {
         self.bridge
             .backup_folder_state(id)
