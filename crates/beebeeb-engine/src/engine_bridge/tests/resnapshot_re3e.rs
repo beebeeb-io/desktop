@@ -26,6 +26,24 @@ fn snapshot() -> serde_json::Value {
     })
 }
 
+/// The canonical row the decrypt pass asks for when a listed name does not open here.
+fn unreadable_row() -> serde_json::Value {
+    snap_node(&OTHER_KEY, UNREADABLE, "secret.txt", None, false, 100)
+}
+
+/// One snapshot (with the canonical fetch of its unreadable row), then one idle ops page.
+fn once_then_ops() -> Vec<serde_json::Value> {
+    vec![snapshot(), unreadable_row(), idle_ops()]
+}
+
+fn expected_paths() -> [String; 3] {
+    [
+        "/api/v1/sync/snapshot".to_string(),
+        format!("/api/v1/files/{UNREADABLE}"),
+        "/api/v1/sync/ops?since=7".to_string(),
+    ]
+}
+
 fn idle_ops() -> serde_json::Value {
     serde_json::json!({ "since": 7, "head_seq": 7, "ops": [] })
 }
@@ -55,7 +73,7 @@ fn serve(
 #[tokio::test]
 async fn resnapshot_clean_start_with_a_good_snapshot_fetches_it_once() {
     let dir = tempfile::tempdir().unwrap();
-    let (base_url, server) = serve(vec![snapshot(), idle_ops()], |_| {});
+    let (base_url, server) = serve(once_then_ops(), |_| {});
     let bridge = test_bridge_with_api(&dir.path().join("state.db"), base_url, KEY);
     bridge.db().set_sync_cursor(5).unwrap();
     bridge.db().request_resnapshot().unwrap();
@@ -76,7 +94,7 @@ async fn resnapshot_clean_start_with_a_good_snapshot_fetches_it_once() {
     sync_tick(&bridge, dir.path()).await.unwrap();
     assert_eq!(
         server.join().unwrap(),
-        ["/api/v1/sync/snapshot", "/api/v1/sync/ops?since=7"],
+        expected_paths(),
         "one snapshot, then the ops path"
     );
 }
@@ -88,7 +106,7 @@ async fn resnapshot_asked_while_the_list_is_on_its_way_is_served_by_it() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("state.db");
     let bridge_db = db_path.clone();
-    let (base_url, server) = serve(vec![snapshot(), idle_ops()], move |i| {
+    let (base_url, server) = serve(once_then_ops(), move |i| {
         if i == 0 {
             StateDb::open(bridge_db.clone()).unwrap().request_resnapshot().unwrap();
         }
@@ -100,10 +118,7 @@ async fn resnapshot_asked_while_the_list_is_on_its_way_is_served_by_it() {
     sync_tick(&bridge, dir.path()).await.unwrap();
     assert_eq!(bridge.db().peek_resnapshot_request().unwrap(), None);
     sync_tick(&bridge, dir.path()).await.unwrap();
-    assert_eq!(
-        server.join().unwrap(),
-        ["/api/v1/sync/snapshot", "/api/v1/sync/ops?since=7"]
-    );
+    assert_eq!(server.join().unwrap(), expected_paths());
 }
 
 /// Only the apply's own requests are served: one made outside it, or from another thread during it, lands.
