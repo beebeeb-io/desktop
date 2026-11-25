@@ -386,7 +386,8 @@ const WHEN_W: f32 = 46.0;
 const THUMB: (f32, f32) = (34.0, 4.0);
 
 fn changes_list<S: 'static>(ui: &Ui, name: &str, host: Host<S>, t: &Theme) -> El {
-    let list = el().key("list").w_full().grow(1.0).min_h(0.0);
+    // A column so the card of a state spans the list's whole width (it was shrunk to its content).
+    let list = col().key("list").w_full().grow(1.0).min_h(0.0);
     let empty = |icon: &'static Icon, title: &str, body: &str| {
         view_state(
             ViewState::Empty {
@@ -548,6 +549,9 @@ fn footer<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El {
         .child(label(&key, concat!("Open in ", beebeeb_engine::file_manager!()), ink));
     if snapshot.explorer_ready {
         explorer = explorer.on_press_tx(host.act(Ui::open_in_file_explorer));
+    } else {
+        // Disabled with its reason, not silently.
+        explorer = explorer.help(concat!("Not available yet: Beebeeb isn't set up in ", beebeeb_engine::file_manager!(), " on this ", beebeeb_engine::device_word!()));
     }
 
     let (settings, key, ink) = button(2, "Settings", true);

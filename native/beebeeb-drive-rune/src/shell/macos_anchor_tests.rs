@@ -212,3 +212,31 @@ fn a_clock_that_steps_backwards_counts_as_the_same_gesture() {
     g.blurred(5000);
     assert_eq!(g.click(false, 4000), Toggle::Ignore);
 }
+
+#[test]
+fn physical_position_is_points_times_scale() {
+    assert_eq!(to_physical(514.0, 30.0, 2.0), (1028, 60));
+    assert_eq!(to_physical(514.0, 30.0, 1.0), (514, 30));
+    assert_eq!(to_physical(514.0, 30.0, 0.0), (514, 30));
+}
+
+#[test]
+fn one_display_popover_hangs_under_the_icon_and_inside_the_visible_frame() {
+    let d = [main_display()];
+    let p = pop(icon_at(700.0), &d);
+    assert_eq!(p.x, 700.0 - POPOVER_WIDTH / 2.0);
+    assert!(p.y >= d[0].visible.y && p.y <= d[0].visible.y + 2.0 * ICON_GAP + 24.0);
+}
+
+#[test]
+fn two_displays_the_popover_stays_on_the_icons_display_and_never_centres() {
+    let d = [
+        disp(0.0, 0.0, 1440.0, 900.0, 24.0, true),
+        disp(1440.0, 0.0, 1920.0, 1080.0, 24.0, false),
+    ];
+    let icon = Some(Frame::new(3340.0, 0.0, 22.0, 24.0));
+    let p = pop(icon, &d);
+    assert!(p.x + p.w <= 1440.0 + 1920.0 - SCREEN_MARGIN && p.x >= 1440.0);
+    assert_ne!(p.x + p.w / 2.0, 1440.0 + 960.0);
+    assert!(p.y < 40.0);
+}

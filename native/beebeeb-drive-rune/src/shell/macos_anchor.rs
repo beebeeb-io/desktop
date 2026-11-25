@@ -105,6 +105,12 @@ pub fn place_popover(icon: Option<Frame>, displays: &[Display]) -> Option<Placem
     Some(clamp_into(v, v.right(), v.y))
 }
 
+/// A point position as the physical desktop pixels `WindowHandle::set_position` takes.
+pub fn to_physical(x: f64, y: f64, scale: f64) -> (i32, i32) {
+    let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    ((x * s).round() as i32, (y * s).round() as i32)
+}
+
 pub const SETTINGS_WIDTH: f64 = 560.0;
 
 /// Settings anchored top right on the icon's display (§4.5), its top level with the popover's. Not used by the Mac

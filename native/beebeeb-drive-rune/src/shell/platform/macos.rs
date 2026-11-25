@@ -10,14 +10,14 @@ use crate::shell::instance::Delivery;
 use crate::shell::tray::TrayModel;
 use crate::shell::tray_icon::TaskbarTheme;
 
-#[path = "macos_control.rs"]
-mod control_socket;
 #[path = "macos_autostart.rs"]
 mod autostart;
-#[path = "macos_tray.rs"]
-mod tray;
+#[path = "macos_control.rs"]
+mod control_socket;
 #[path = "macos_fp/mod.rs"]
 pub(crate) mod macos_fp;
+#[path = "macos_tray.rs"]
+mod tray;
 
 pub struct MacPlatform;
 
@@ -27,6 +27,15 @@ impl Platform for MacPlatform {
     }
     fn create_tray(&self, model: &TrayModel, on_event: TrayHandler) -> Result<Box<dyn TrayIcon>, PlatformError> {
         tray::create_tray(model, on_event)
+    }
+    fn adopt_flyout_window(&self, window: &rune::WindowHandle) {
+        let view = window.with_raw_handle(|handle| match handle.as_raw() {
+            raw_window_handle::RawWindowHandle::AppKit(appkit) => Some(appkit.ns_view.as_ptr() as usize),
+            _ => None,
+        });
+        if let Ok(Some(view)) = view {
+            tray::adopt_popover(view as *mut std::ffi::c_void);
+        }
     }
     fn taskbar_theme(&self) -> TaskbarTheme {
         tray::taskbar_theme()
