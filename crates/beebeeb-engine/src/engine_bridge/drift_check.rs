@@ -1,38 +1,52 @@
 //! The sync drift check (folder digests, task 13): find a server change no op told this PC about.
 //!
 //! Sync follows the server's op log. A server write that records no op (an admin restore, a janitor, an erasure, a
-//! pool delete) leaves the mirror wrong until a full re-snapshot. This check runs from the idle pull (the delta came
-//! back empty at the head), at most once per [`CHECK_EVERY`], in the person's own files only:
+//! pool delete) leaves the mirror wrong until a full re-snapshot. This check is started by the idle pull (the delta
+//! came back empty at the head), at most once per [`CHECK_EVERY`], in the person's own files only. It runs beside
+//! the tick, never inside it: the tick holds the pull lock a save waits for.
 //!
-//! 1. The walker (`folder_digest::changed_folders`) runs from the root against the digests stored in
-//!    `remote_folder_digests`: an unchanged tree costs one request.
-//! 2. Each folder whose digest changed is listed (the engine's listing, `prepare_owned_rows` and the stored or
-//!    decrypted name) and its direct children compared with the mirror's rows under it: ids, kind, size, version
-//!    and object version id (when the listing carries them), and the name against the mirror path's leaf.
-//! 3. A child that is uploading (on the server or here), or that has a local op queued, makes the folder in flux:
-//!    not stored, not counted. A server folder the mirror lacks that is a system folder (`system_role` or
-//!    `managed_by`) is skipped: sync may leave those out.
-//! 4. A folder that agrees, whose changed subfolders all agree too, is stored by the after-read rule (its
-//!    `digest_now`, asked after everything was read, is still the digest the walk read). A folder whose subtree
-//!    holds a disagreeing or in-flux folder is not stored, so the next walk enters it again.
-//! 5. A folder that disagrees is drift only when the next check, with no op applied in between (the sync cursor did
-//!    not move), still disagrees: then a re-snapshot is asked for (`StateDb::request_resnapshot`) and the stored
-//!    digests are cleared, so the check after it reads every folder again.
+//! 1. When the root's digest is stored and still holds, the check ends there: one request.
+//! 2. Otherwise it walks depth first from the root against the digests stored in `remote_folder_digests`: a child
+//!    folder whose digest is stored unchanged is not entered. A folder is checked once every changed folder under it
+//!    is (deepest first), and at most [`FOLDERS_PER_CHECK`] folders are checked per window: the next window goes on
+//!    from what is stored.
+//! 3. A checked folder is listed (the engine's listing, `prepare_owned_rows` and the stored or decrypted name) and
+//!    its direct children compared with the mirror's rows under it: ids, kind, size, version
+//!    (`download_version.version_number`, not against a mirror row at version 0) and object version id (only when the
+//!    mirror has one: the snapshot never sends it), and the name against the mirror path's leaf.
+//! 4. A child that is uploading (on the server or here), in error or conflict, listed while the mirror trashes it, or
+//!    that has a local op queued, makes the folder in flux: not stored, not counted. A mirror row in `Trashing` the
+//!    server does not list is the server's trash, not drift. A server folder the mirror lacks that is a system folder
+//!    (`system_role` or `managed_by`) is skipped: sync may leave those out.
+//! 5. A folder that agrees, whose changed subfolders were all stored, is stored at once by the after-read rule (its
+//!    `digest_now`, asked after everything was read, is still the digest the walk read). A folder whose subtree holds
+//!    a disagreeing or in-flux folder is not stored, so the next walk enters it again.
+//! 6. A folder that disagrees is drift when the next check still finds it disagreeing and no op touched it in
+//!    between: the sync cursor did not move, or the mirror's rows under it are what they were. Then a re-snapshot is
+//!    asked for (`StateDb::request_resnapshot`) and the stored digests are cleared, so the check after it reads every
+//!    folder again.
 //!
 //! A server without digests (`Unsupported`) is not asked again in this process; `NotReady` and failures wait for the
 //! next window. One log line per check, counts only: never an id or a name.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::folder_digest::{FolderDigests, RequestCount, WalkError, changed_folders, digest_now};
+use crate::folder_digest::{FolderDigests, RequestCount, WalkError, digest_now, read_folder};
 use crate::state_db::folder_digests::DriftChild;
 
 /// How often the check runs at most.
-pub(super) const CHECK_EVERY: Duration = Duration::from_secs(10 * 60);
+pub(super) const CHECK_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// How many folders one check lists at most (about three requests each); the next window goes on from there.
+pub(super) const FOLDERS_PER_CHECK: usize = 200;
+
+/// The pause between two checked folders, so a check never sends its requests back to back.
+const PACE: Duration = Duration::from_millis(25);
 
 /// More rows than this in one folder listing is refused (a cursor loop, not a folder).
 const LISTING_CAP: usize = 200_000;
@@ -42,11 +56,11 @@ const LISTING_CAP: usize = 200_000;
 pub(crate) enum DriftAction {
     /// Nothing changed since the stored digests.
     Unchanged,
-    /// Every changed folder agreed (or was in flux); what agreed is stored.
+    /// Every checked folder agreed (or was in flux); what agreed is stored.
     Agreed,
     /// A folder disagrees for the first time: the next check decides.
     Watching,
-    /// A folder disagreed twice with no op applied in between: a re-snapshot is asked for.
+    /// A folder disagreed twice with no op on it in between: a re-snapshot is asked for.
     Resnapshot,
     /// The server has no digests: no check for the rest of this run.
     Unsupported,
@@ -74,10 +88,13 @@ impl DriftAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DriftReport {
     pub requests: u32,
+    /// Folders checked (listed and compared).
     pub changed: usize,
     pub in_flux: usize,
     pub disagreeing: usize,
     pub stored: usize,
+    /// The cap ended the check before the walk did: the next window goes on.
+    pub capped: bool,
     pub action: DriftAction,
 }
 
@@ -89,17 +106,21 @@ impl DriftReport {
             in_flux: 0,
             disagreeing: 0,
             stored: 0,
+            capped: false,
             action,
         }
     }
 }
 
-/// The folders that disagreed at the last check, and the sync cursor then.
-#[derive(Debug, Clone)]
-struct Watching {
+/// A folder that disagreed at a check: the sync cursor then, and what the mirror held under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Seen {
     cursor: Option<i64>,
-    folders: HashSet<String>,
+    mirror: u64,
 }
+
+/// The folders that disagreed at the last check.
+type Watching = HashMap<String, Seen>;
 
 /// The check's memory for one sync root, for the life of this process.
 #[derive(Default)]
@@ -120,39 +141,83 @@ fn with_state<R>(sync_root: &Path, f: impl FnOnce(&mut RootState) -> R) -> R {
     f(all.entry(sync_root.to_path_buf()).or_default())
 }
 
-/// Called from the idle branch of the pull: runs the check when its window is due. Never fails the tick. The first
-/// idle tick of a run only starts the window: the first check runs one window later, so idle ticks right after start
-/// stay one `/sync/ops` request each.
+/// A check in progress for one root: the root is marked running while this lives, also when the check is dropped
+/// half-way (the engine stopping, the runtime shutting down).
+struct Running(PathBuf);
+
+impl Running {
+    fn start(sync_root: &Path) -> Self {
+        with_state(sync_root, |state| {
+            state.running = true;
+            state.last_started = Some(Instant::now());
+        });
+        Running(sync_root.to_path_buf())
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        with_state(&self.0, |state| state.running = false);
+    }
+}
+
+/// Called from the idle branch of the pull: starts the check when its window is due, beside the tick (the tick
+/// returns at once and its pull lock with it). Never fails the tick. The first idle tick of a run only starts the
+/// window: the first check runs one window later, so idle ticks right after start stay one `/sync/ops` request each.
 pub(super) async fn after_idle_pull(bridge: &EngineBridge, sync_root: &Path) {
     let due = with_state(sync_root, |state| {
         let Some(started) = state.last_started else {
             state.last_started = Some(Instant::now());
             return false;
         };
-        let due = !state.unsupported && !state.running && started.elapsed() >= CHECK_EVERY;
-        if due {
-            state.running = true;
-            state.last_started = Some(Instant::now());
-        }
-        due
+        !state.unsupported && !state.running && started.elapsed() >= CHECK_EVERY
     });
-    if due {
-        check_now(bridge, sync_root).await;
+    if !due {
+        return;
+    }
+    let running = Running::start(sync_root);
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => {
+            // The same database, client and stop flag; its own caches.
+            let beside = EngineBridge::new_with_stop_flag(
+                bridge.identity,
+                bridge.db.clone(),
+                bridge.api.clone(),
+                bridge.stopping.clone(),
+            );
+            let root = sync_root.to_path_buf();
+            runtime.spawn(async move {
+                run_check(&beside, &root, FOLDERS_PER_CHECK).await;
+                drop(running);
+            });
+        }
+        Err(_) => {
+            run_check(bridge, sync_root, FOLDERS_PER_CHECK).await;
+            drop(running);
+        }
     }
 }
 
 /// One check now, whatever the window; it starts the next window. A server found without digests is not asked
 /// again.
 pub(crate) async fn check_now(bridge: &EngineBridge, sync_root: &Path) -> DriftReport {
-    let (unsupported, watching) = with_state(sync_root, |state| {
-        state.running = true;
-        state.last_started = Some(Instant::now());
-        (state.unsupported, state.watching.take())
-    });
+    let _running = Running::start(sync_root);
+    run_check(bridge, sync_root, FOLDERS_PER_CHECK).await
+}
+
+/// One check now that lists at most `cap` folders.
+#[cfg(test)]
+pub(crate) async fn check_capped(bridge: &EngineBridge, sync_root: &Path, cap: usize) -> DriftReport {
+    let _running = Running::start(sync_root);
+    run_check(bridge, sync_root, cap).await
+}
+
+async fn run_check(bridge: &EngineBridge, sync_root: &Path, cap: usize) -> DriftReport {
+    let (unsupported, watching) = with_state(sync_root, |state| (state.unsupported, state.watching.take()));
     let (report, watching) = if unsupported {
         (DriftReport::new(DriftAction::Unsupported), None)
     } else {
-        match check(bridge, watching.clone()).await {
+        match check(bridge, watching.clone(), cap).await {
             Ok(done) => done,
             Err(error) => {
                 tracing::warn!(error = %error, "sync drift check: a read failed; the next window tries again");
@@ -161,7 +226,6 @@ pub(crate) async fn check_now(bridge: &EngineBridge, sync_root: &Path) -> DriftR
         }
     };
     with_state(sync_root, |state| {
-        state.running = false;
         state.watching = watching;
         if report.action == DriftAction::Unsupported {
             state.unsupported = true;
@@ -174,6 +238,7 @@ pub(crate) async fn check_now(bridge: &EngineBridge, sync_root: &Path) -> DriftR
             in_flux = report.in_flux,
             disagreeing = report.disagreeing,
             stored = report.stored,
+            capped = report.capped,
             action = report.action.as_str(),
             "sync drift check"
         );
@@ -181,21 +246,28 @@ pub(crate) async fn check_now(bridge: &EngineBridge, sync_root: &Path) -> DriftR
     report
 }
 
-/// One check with a cap on the folders it reads (red-test stub: the cap is not kept yet).
-#[cfg(test)]
-pub(crate) async fn check_capped(bridge: &EngineBridge, sync_root: &Path, _cap: usize) -> DriftReport {
-    check_now(bridge, sync_root).await
-}
-
 /// How one listed folder compares with the mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     Agrees,
     InFlux,
-    Disagrees,
+    /// With what the mirror held under the folder (its rows' fingerprint).
+    Disagrees(u64),
 }
 
-async fn check(bridge: &EngineBridge, watching: Option<Watching>) -> anyhow::Result<(DriftReport, Option<Watching>)> {
+/// A folder of the walk whose changed child folders are not all checked yet.
+struct Frame {
+    folder: FolderDigests,
+    next_child: usize,
+    /// Every changed child folder checked so far was stored.
+    whole: bool,
+}
+
+async fn check(
+    bridge: &EngineBridge,
+    watching: Option<Watching>,
+    cap: usize,
+) -> anyhow::Result<(DriftReport, Option<Watching>)> {
     let count = RequestCount::default();
     let cursor = bridge.db().get_sync_cursor()?;
     let known = bridge.db().remote_folder_digests()?;
@@ -204,81 +276,136 @@ async fn check(bridge: &EngineBridge, watching: Option<Watching>) -> anyhow::Res
         report.requests = count.get();
         report
     };
-    let changed = match changed_folders(bridge.api(), "", &known, &count).await {
-        Ok(changed) => changed,
-        Err(WalkError::Unsupported) => return Ok((ended(DriftAction::Unsupported, &count), None)),
-        Err(WalkError::NotReady { .. }) => return Ok((ended(DriftAction::NotReady, &count), watching)),
-        Err(error) => {
+    // What a walk error means for this check.
+    let stop = |error: WalkError, count: &RequestCount, watching: Option<Watching>| match error {
+        WalkError::Unsupported => (ended(DriftAction::Unsupported, count), None),
+        WalkError::NotReady { .. } => (ended(DriftAction::NotReady, count), watching),
+        error => {
             tracing::warn!(error = %error, "sync drift check: the walk failed; the next window tries again");
-            return Ok((ended(DriftAction::Failed, &count), watching));
+            (ended(DriftAction::Failed, count), watching)
         }
     };
-    if changed.is_empty() {
-        // Nothing moved since the digests stored: what disagreed then is not seen again, so nothing is watched.
-        return Ok((ended(DriftAction::Unchanged, &count), None));
+    if let Some(trusted) = known.get("") {
+        match digest_now(bridge.api(), "", &count).await {
+            // Nothing moved since the digests stored: what disagreed then is not seen again, so nothing is watched.
+            Ok(now) if now == *trusted => return Ok((ended(DriftAction::Unchanged, &count), None)),
+            Ok(_) => {}
+            Err(error) => return Ok(stop(error, &count, watching)),
+        }
     }
+    let root = match read_folder(bridge.api(), "", &count).await {
+        Ok(root) => root,
+        Err(error) => return Ok(stop(error, &count, watching)),
+    };
 
-    let mut verdicts = Vec::with_capacity(changed.len());
-    for folder in &changed {
+    let mut report = DriftReport::new(DriftAction::Agreed);
+    let mut disagreeing: Watching = HashMap::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut stack = vec![Frame {
+        folder: root,
+        next_child: 0,
+        whole: true,
+    }];
+    while let Some(top) = stack.last_mut() {
         if bridge.is_stopping() {
-            return Ok((ended(DriftAction::Failed, &count), watching));
+            report.action = DriftAction::Failed;
+            break;
         }
-        verdicts.push(compare_folder(bridge, &folder.id, &count).await?);
-    }
-
-    // Children before parents (the walk lists parents first): a folder is trusted only when it and every changed
-    // folder under it agree.
-    let index: HashMap<&str, usize> = changed.iter().enumerate().map(|(i, f)| (f.id.as_str(), i)).collect();
-    let mut whole = vec![false; changed.len()];
-    for i in (0..changed.len()).rev() {
-        whole[i] = verdicts[i] == Verdict::Agrees
-            && changed[i]
-                .child_folders
-                .iter()
-                .all(|(child, _)| index.get(child.as_str()).is_none_or(|&j| whole[j]));
-    }
-    // The after-read rule: what was read under a digest is trusted only when that digest still holds now.
-    let mut trusted = Vec::new();
-    let mut forget = Vec::new();
-    for (folder, whole) in changed.iter().zip(&whole) {
-        if *whole && after_read_holds(bridge, folder, &count).await? {
-            trusted.push((folder.id.clone(), folder.digest.clone()));
-        } else {
-            forget.push(folder.id.clone());
+        // Depth first: the next changed child folder of the deepest open folder.
+        let next = top.folder.child_folders[top.next_child..]
+            .iter()
+            .position(|(child, digest)| known.get(child) != Some(digest));
+        if let Some(offset) = next {
+            if report.changed >= cap {
+                report.capped = true;
+                break;
+            }
+            let child = top.folder.child_folders[top.next_child + offset].0.clone();
+            top.next_child += offset + 1;
+            match read_folder(bridge.api(), &child, &count).await {
+                Ok(folder) => stack.push(Frame {
+                    folder,
+                    next_child: 0,
+                    whole: true,
+                }),
+                // Gone since its parent was read: the parent's digest moved, so the parent is not stored.
+                Err(WalkError::FolderGone(_)) => top.whole = false,
+                Err(error) => {
+                    let (mut ended, watching) = stop(error, &count, watching);
+                    ended.changed = report.changed;
+                    ended.in_flux = report.in_flux;
+                    ended.disagreeing = disagreeing.len();
+                    ended.stored = report.stored;
+                    return Ok((ended, watching));
+                }
+            }
+            continue;
+        }
+        // Every changed folder under it is checked: check this one.
+        let frame = stack.pop().expect("the top frame");
+        if report.changed >= cap {
+            report.capped = true;
+            break;
+        }
+        if report.changed > 0 {
+            tokio::time::sleep(PACE).await;
+        }
+        let verdict = compare_folder(bridge, &frame.folder.id, &count).await?;
+        report.changed += 1;
+        visited.insert(frame.folder.id.clone());
+        match verdict {
+            Verdict::Agrees => {}
+            Verdict::InFlux => report.in_flux += 1,
+            Verdict::Disagrees(mirror) => {
+                disagreeing.insert(frame.folder.id.clone(), Seen { cursor, mirror });
+            }
+        }
+        let stored =
+            frame.whole && verdict == Verdict::Agrees && after_read_holds(bridge, &frame.folder, &count).await?;
+        if stored {
+            bridge
+                .db()
+                .update_remote_folder_digests(&[(frame.folder.id.clone(), frame.folder.digest.clone())], &[])?;
+            report.stored += 1;
+        } else if known.contains_key(&frame.folder.id) {
+            bridge
+                .db()
+                .update_remote_folder_digests(&[], &[frame.folder.id.clone()])?;
+        }
+        if let Some(parent) = stack.last_mut() {
+            parent.whole &= stored;
         }
     }
-    bridge.db().update_remote_folder_digests(&trusted, &forget)?;
+    report.disagreeing = disagreeing.len();
+    report.requests = count.get();
 
-    let disagreeing: HashSet<String> = changed
-        .iter()
-        .zip(&verdicts)
-        .filter(|(_, verdict)| **verdict == Verdict::Disagrees)
-        .map(|(folder, _)| folder.id.clone())
-        .collect();
-    let mut report = DriftReport {
-        requests: 0,
-        changed: changed.len(),
-        in_flux: verdicts.iter().filter(|v| **v == Verdict::InFlux).count(),
-        disagreeing: disagreeing.len(),
-        stored: trusted.len(),
-        action: DriftAction::Agreed,
-    };
-    let next = if disagreeing.is_empty() {
-        None
-    } else if watching.is_some_and(|seen| seen.cursor == cursor && !seen.folders.is_disjoint(&disagreeing)) {
+    let previous = watching.unwrap_or_default();
+    // Drift: a folder that disagreed last time and again now, with no op on it in between.
+    let drift = disagreeing.iter().any(|(folder, now)| {
+        previous
+            .get(folder)
+            .is_some_and(|then| then.cursor == now.cursor || then.mirror == now.mirror)
+    });
+    if drift {
         report.action = DriftAction::Resnapshot;
         bridge.db().request_resnapshot()?;
         bridge.db().clear_remote_folder_digests()?;
-        None
-    } else {
+        report.requests = count.get();
+        return Ok((report, None));
+    }
+    let mut next = disagreeing;
+    if report.capped || report.action == DriftAction::Failed {
+        // Not every folder was reached: what was watched and not seen this time is still watched.
+        for (folder, seen) in previous {
+            if !visited.contains(&folder) {
+                next.entry(folder).or_insert(seen);
+            }
+        }
+    }
+    if report.action != DriftAction::Failed && report.disagreeing > 0 {
         report.action = DriftAction::Watching;
-        Some(Watching {
-            cursor,
-            folders: disagreeing,
-        })
-    };
-    report.requests = count.get();
-    Ok((report, next))
+    }
+    Ok((report, (!next.is_empty()).then_some(next)))
 }
 
 async fn after_read_holds(bridge: &EngineBridge, folder: &FolderDigests, count: &RequestCount) -> anyhow::Result<bool> {
@@ -359,6 +486,23 @@ fn is_system_folder(row: &serde_json::Value) -> bool {
     !row["system_role"].is_null() || !row["managed_by"].is_null()
 }
 
+/// What the mirror holds under a folder, as one number: equal when no op changed a row under it.
+fn mirror_fingerprint(mirror: &[DriftChild]) -> u64 {
+    let mut rows: Vec<&DriftChild> = mirror.iter().collect();
+    rows.sort_by(|a, b| a.file_id.cmp(&b.file_id));
+    let mut hasher = DefaultHasher::new();
+    for row in rows {
+        row.file_id.hash(&mut hasher);
+        row.path.hash(&mut hasher);
+        row.status.as_str().hash(&mut hasher);
+        row.is_folder.hash(&mut hasher);
+        row.size_bytes.hash(&mut hasher);
+        row.current_version.hash(&mut hasher);
+        row.current_object_version_id.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// Compare one folder's server children with the mirror's rows under it.
 async fn compare_folder(bridge: &EngineBridge, folder_id: &str, count: &RequestCount) -> anyhow::Result<Verdict> {
     let Some(rows) = list_folder(bridge, folder_id, count).await? else {
@@ -368,61 +512,73 @@ async fn compare_folder(bridge: &EngineBridge, folder_id: &str, count: &RequestC
         return Ok(Verdict::InFlux);
     }
     let mirror = bridge.db().drift_children(folder_id)?;
+    // A `Trashing` row is not in flux by itself: the server's trash stays in the mirror as one. A local trash that
+    // waits for the server has its op queued.
     if mirror.iter().any(|child| {
         matches!(
             child.status,
-            FileStatus::Uploading | FileStatus::Error | FileStatus::Conflict | FileStatus::Trashing
+            FileStatus::Uploading | FileStatus::Error | FileStatus::Conflict
         )
     }) || bridge.db().local_op_queued_in_folder(folder_id)?
     {
         return Ok(Verdict::InFlux);
     }
+    let disagrees = Verdict::Disagrees(mirror_fingerprint(&mirror));
     let rows: Vec<serde_json::Value> = bridge
         .prepare_owned_rows(&rows)
         .await?
         .into_iter()
         .map(|p| p.row)
         .collect();
-    let mut mirror: HashMap<&str, &DriftChild> = mirror.iter().map(|c| (c.file_id.as_str(), c)).collect();
+    let mut by_id: HashMap<&str, &DriftChild> = mirror.iter().map(|c| (c.file_id.as_str(), c)).collect();
     for row in &rows {
         let Some(id) = row["id"].as_str().filter(|id| !id.is_empty()) else {
             continue;
         };
         let is_folder = row["is_folder"].as_bool().unwrap_or(false);
-        let Some(child) = mirror.remove(id) else {
+        let Some(child) = by_id.remove(id) else {
             if is_folder && is_system_folder(row) {
                 continue;
             }
-            return Ok(Verdict::Disagrees);
+            return Ok(disagrees);
         };
+        if child.status == FileStatus::Trashing {
+            // Listed while the mirror trashes it: a local trash on its way (its op may have just landed).
+            return Ok(Verdict::InFlux);
+        }
         if child.is_folder != is_folder {
-            return Ok(Verdict::Disagrees);
+            return Ok(disagrees);
         }
         if !is_folder {
+            // `GET /api/v1/files` carries the version under `download_version`; the snapshot never sends the object
+            // id, so it is compared only when the mirror has one, and a mirror row at version 0 has no version yet.
             let size = row["size_bytes"].as_i64().or_else(|| row["size"].as_i64());
-            let version = row["version_number"]
-                .as_i64()
-                .or_else(|| row["current_version"].as_i64());
-            let object = row["current_object_version_id"].as_str();
+            let version = row["download_version"]["version_number"].as_i64();
+            let object = row["download_version"]["object_version_id"].as_str();
             if size.is_some_and(|size| size != child.size_bytes)
-                || version.is_some_and(|version| version != child.current_version)
-                || object.is_some_and(|object| child.current_object_version_id.as_deref() != Some(object))
+                || version.is_some_and(|version| child.current_version != 0 && version != child.current_version)
+                || object.is_some_and(|object| {
+                    child
+                        .current_object_version_id
+                        .as_deref()
+                        .is_some_and(|mine| mine != object)
+                })
             {
-                return Ok(Verdict::Disagrees);
+                return Ok(disagrees);
             }
         }
         if !child.path.is_empty()
             && !child.name_unreadable
             && server_name(bridge, id, row).is_some_and(|name| !path_ends_in(&child.path, &name))
         {
-            return Ok(Verdict::Disagrees);
+            return Ok(disagrees);
         }
     }
-    // A mirror row the server no longer lists.
-    Ok(if mirror.is_empty() {
+    // A mirror row the server no longer lists; a `Trashing` one is in the server's trash.
+    Ok(if by_id.values().all(|child| child.status == FileStatus::Trashing) {
         Verdict::Agrees
     } else {
-        Verdict::Disagrees
+        disagrees
     })
 }
 
