@@ -841,7 +841,10 @@ mod resnapshot_served_tests {
         // A second request during the apply.
         db.request_resnapshot().unwrap();
         db.clear_resnapshot_request(served).unwrap();
-        assert!(db.peek_resnapshot_request().unwrap().is_some(), "a request made during apply survives");
+        assert!(
+            db.peek_resnapshot_request().unwrap().is_some(),
+            "a request made during apply survives"
+        );
 
         // Without one during apply, the clear leaves nothing: no second bootstrap.
         let db2 = StateDb::open(dir.path().join("state2.db")).unwrap();
