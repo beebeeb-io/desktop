@@ -121,6 +121,9 @@ pub struct BackupScheduler {
     watched: Vec<PathBuf>,
     /// LD-0139: the stopped backups' switches were reconciled since this scheduler started.
     reconciled: bool,
+    /// fd-12: the backups' folder digest caches for this engine run (in memory only; the scheduler lives as long as
+    /// the runner, and a sign-out empties them).
+    digests: super::digest_cache::SharedDigestCache,
 }
 
 impl Default for BackupScheduler {
@@ -144,6 +147,7 @@ impl BackupScheduler {
             watcher: None,
             watched: Vec::new(),
             reconciled: false,
+            digests: Arc::default(),
         }
     }
 
@@ -260,7 +264,7 @@ impl BackupScheduler {
             }
         };
         let running = RunningGuard::start();
-        let report = run_passes(bridge, layout, sync_root, &sources).await;
+        let report = run_passes_with_digests(bridge, layout, sync_root, &sources, Some(&self.digests)).await;
         drop(running);
         super::stop::set_check_failed(report.check_failed);
         Some(report)
@@ -282,6 +286,18 @@ pub async fn run_passes(
     layout: crate::state_db::BackupLayout,
     sync_root: &Path,
     sources: &[BackupSource],
+) -> TickReport {
+    run_passes_with_digests(bridge, layout, sync_root, sources, None).await
+}
+
+/// [`run_passes`] whose regular passes list only the folders whose digest changed (fd-12), the rest from `digests`
+/// (the scheduler's cache for this engine run). `None`: every pass lists as RE3-a does.
+pub async fn run_passes_with_digests(
+    bridge: &Arc<EngineBridge>,
+    layout: crate::state_db::BackupLayout,
+    sync_root: &Path,
+    sources: &[BackupSource],
+    digests: Option<&super::digest_cache::SharedDigestCache>,
 ) -> TickReport {
     use super::stop::PassDecision;
     let mut report = TickReport::default();
@@ -348,7 +364,15 @@ pub async fn run_passes(
         .as_ref()
         .map_or(beebeeb_core::backup::RebuildClock::UNKNOWN, |check| check.clock);
     let device_folder_id = uuid::Uuid::parse_str(&layout.device_folder_id).ok();
-    let host = super::host::DesktopBackupHost::new(Arc::clone(bridge), layout, enabled);
+    let mut host = super::host::DesktopBackupHost::new(Arc::clone(bridge), layout.clone(), enabled);
+    if let Some(digests) = digests {
+        // The caches belong to this sign-in and this device folder: a sign-out (the epoch moved) or a new layout
+        // empties them.
+        if let Ok(mut cache) = digests.lock() {
+            cache.for_run(epoch(), &layout.device_folder_id);
+        }
+        host = host.with_digest_cache(Arc::clone(digests));
+    }
     for (source, mark) in gated {
         let category = source.category.clone();
         let last_pass_at = super::stop::last_pass_at(&mark, check_clock);

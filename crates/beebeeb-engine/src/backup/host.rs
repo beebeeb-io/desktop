@@ -17,8 +17,10 @@ use beebeeb_core::backup::{BackupRecord, FolderPresence, RebuildClock, RecordRef
 use beebeeb_types::backup::{BackupStopReason, Category};
 use uuid::Uuid;
 
+use super::digest_cache::{CategoryCache, Fallback, FolderEntry, SharedDigestCache};
 use super::tree_cache::{self, KeptListing, OpsVerdict};
 use crate::engine_bridge::{BackupChild, BackupFolderState, BackupSnapshot, EngineBridge};
+use crate::folder_digest::{self, RequestCount, WalkError};
 
 /// RE3-a: a listing page by page (a server with no snapshot) runs this many folder requests at full speed, then one
 /// every [`PAGED_LISTING_PACE`].
@@ -107,6 +109,57 @@ fn gone_tree(device_folder_live: bool, category_folder_live: Option<bool>) -> De
     }
 }
 
+/// One folder's children into a listing's tree, keys joined with `/` under `prefix`: each file, and each folder with
+/// the (key, id) to list next. A child whose id is not a uuid, or a folder whose name cannot be opened, is not taken
+/// and makes the listing partial; a file's unopened name lists it by id with an empty key.
+fn add_children(
+    prefix: &str,
+    children: impl IntoIterator<Item = BackupChild>,
+    folders: &mut HashMap<String, Uuid>,
+    files: &mut Vec<RemoteEntry>,
+    complete: &mut bool,
+) -> Vec<(String, String)> {
+    let mut next = Vec::new();
+    for BackupChild {
+        id,
+        name,
+        is_folder,
+        size,
+        uploaded_at_ms,
+        ..
+    } in children
+    {
+        let Some(remote_id) = parse_id(&id) else {
+            *complete = false;
+            continue;
+        };
+        let key = name.as_deref().map(|name| {
+            if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}/{name}")
+            }
+        });
+        if is_folder {
+            match key {
+                Some(key) => {
+                    folders.insert(key.clone(), remote_id);
+                    next.push((key, id));
+                }
+                None => *complete = false,
+            }
+        } else {
+            files.push(RemoteEntry {
+                key: key.unwrap_or_default(),
+                remote_id,
+                size,
+                uploaded_at_ms,
+            });
+        }
+    }
+    next
+}
+
 pub struct DesktopBackupHost {
     bridge: Arc<EngineBridge>,
     layout: BackupLayout,
@@ -115,10 +168,13 @@ pub struct DesktopBackupHost {
     /// A tree the records' rebuild just listed, handed to the pass that follows it instead of listing again
     /// (review 2026-11-07): taken once.
     listed: std::sync::Mutex<HashMap<String, DeviceTree>>,
-    /// RE3-a: this tick's one snapshot (`None` inside: it could not be read; the listing goes page by page).
-    snapshot: tokio::sync::Mutex<Option<Option<Arc<BackupSnapshot>>>>,
+    /// RE3-a: this tick's one snapshot and when it was read (`None` inside: it could not be read; the listing goes
+    /// page by page).
+    snapshot: tokio::sync::Mutex<Option<(std::time::Instant, Option<Arc<BackupSnapshot>>)>>,
     /// RE3-a: this tick's ops reads by cursor (`None`: the read failed), so backups kept at one cursor read once.
     ops: tokio::sync::Mutex<HashMap<i64, Option<OpsRead>>>,
+    /// fd-12: the backups' digest caches (`None`: no digests, the RE3-a listing).
+    digests: Option<SharedDigestCache>,
 }
 
 impl DesktopBackupHost {
@@ -130,7 +186,15 @@ impl DesktopBackupHost {
             listed: std::sync::Mutex::default(),
             snapshot: tokio::sync::Mutex::default(),
             ops: tokio::sync::Mutex::default(),
+            digests: None,
         }
+    }
+
+    /// fd-12: the regular pass lists only the folders whose digest changed, the rest from `cache` (the scheduler's,
+    /// for this engine run).
+    pub fn with_digest_cache(mut self, cache: SharedDigestCache) -> Self {
+        self.digests = Some(cache);
+        self
     }
 
     /// RE3-a: this device's backup of `c` for a pass, and the clock of its listing. The kept listing of an earlier pass
@@ -142,7 +206,15 @@ impl DesktopBackupHost {
         c: &Category,
         rebuild: bool,
     ) -> Result<(DeviceTree, RebuildClock), HostError> {
-        let kept = if rebuild { None } else { self.kept_tree(c).await? };
+        // fd-12: the folders whose digest changed, the rest from the digest cache; a server without digests (or not
+        // ready) lists as RE3-a did. The records' rebuild keeps its clocked full listing.
+        let kept = match rebuild {
+            true => None,
+            false => match self.digest_tree(c).await? {
+                Some(tree) => Some(tree),
+                None => self.kept_tree(c).await?,
+            },
+        };
         let (tree, clock) = match kept {
             Some(tree) => (tree, RebuildClock::UNKNOWN),
             None => self.full_listing(c, rebuild).await?,
@@ -205,6 +277,190 @@ impl DesktopBackupHost {
         Ok(Some(tree))
     }
 
+    /// fd-12: this device's backup of `c` from the digest walk: every folder whose digest changed (or that the cache
+    /// lacks) listed from one snapshot read after the walk began (page by page when there is none), every other
+    /// folder's children from the cache, so the tree is the one a full listing gives (keys, folders, files,
+    /// `complete`). `None`: no cache, or the digests cannot be used now (logged once per run), and the pass lists as
+    /// RE3-a did. One log line per pass with its request counts.
+    async fn digest_tree(&self, c: &Category) -> Result<Option<DeviceTree>, HostError> {
+        let Some(shared) = &self.digests else {
+            return Ok(None);
+        };
+        if !shared.lock().is_ok_and(|cache| cache.usable(std::time::Instant::now())) {
+            return Ok(None);
+        }
+        let device = self
+            .bridge
+            .backup_folder_state(&self.layout.device_folder_id)
+            .await
+            .map_err(host_error("device_folder_state"))?;
+        if device == BackupFolderState::Gone {
+            return Ok(Some(gone_tree(false, None)));
+        }
+        let (folder_id, live) = self.category_folder(c).await?;
+        if live == Some(false) {
+            return Ok(Some(gone_tree(true, Some(false))));
+        }
+        let key = c.key();
+        let mut cache = match shared.lock() {
+            Ok(mut all) => all.take(&key, &folder_id),
+            Err(_) => return Ok(None),
+        };
+        let walked = self.digest_walk(&key, &folder_id, &mut cache).await;
+        if let Ok(mut all) = shared.lock() {
+            all.put(&key, cache);
+        }
+        match walked {
+            Ok(mut tree) => {
+                tree.category_folder_live = live;
+                Ok(Some(tree))
+            }
+            Err(DigestPassError::Host(error)) => Err(error),
+            Err(DigestPassError::Walk(error)) => {
+                let now = std::time::Instant::now();
+                let fallback = match &error {
+                    WalkError::Unsupported => Some((Fallback::Unsupported, std::time::Duration::ZERO)),
+                    WalkError::NotReady { retry_after_secs } => {
+                        Some((Fallback::NotReady, std::time::Duration::from_secs(*retry_after_secs)))
+                    }
+                    _ => None,
+                };
+                match fallback {
+                    Some((fallback, wait)) => {
+                        if shared.lock().is_ok_and(|mut all| all.fall_back(fallback, wait, now)) {
+                            tracing::info!(
+                                why = fallback.as_str(),
+                                "backup: no folder digests; the passes list as before"
+                            );
+                        }
+                    }
+                    None => tracing::warn!(
+                        category = %key,
+                        %error,
+                        "backup: the folder digest walk failed; this pass lists as before"
+                    ),
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// The walk and the tree of [`Self::digest_tree`] over `cache`, which keeps what this pass may trust.
+    async fn digest_walk(
+        &self,
+        key: &str,
+        root: &str,
+        cache: &mut CategoryCache,
+    ) -> Result<DeviceTree, DigestPassError> {
+        let root_id = parse_id(root).ok_or_else(|| HostError("category folder id is not a uuid".into()))?;
+        let api = self.bridge.api();
+        let digests = RequestCount::default();
+        // The device folder's and the category folder's state.
+        let mut listings = 2usize;
+        let began = std::time::Instant::now();
+        let changed = folder_digest::changed_folders(api, root, &cache.known(), &digests).await?;
+        let changed: HashMap<String, String> = changed.into_iter().map(|f| (f.id, f.digest)).collect();
+
+        let mut folders = HashMap::from([(String::new(), root_id)]);
+        let mut files = Vec::new();
+        let mut complete = true;
+        let mut listed: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut from_cache = 0usize;
+        let mut queue = std::collections::VecDeque::from([(String::new(), root.to_string())]);
+        while let Some((prefix, folder)) = queue.pop_front() {
+            if !seen.insert(folder.clone()) {
+                complete = false;
+                continue;
+            }
+            let cached = (!changed.contains_key(&folder))
+                .then(|| cache.reusable(&folder))
+                .flatten()
+                .map(|entry| entry.children.clone());
+            let children = match cached {
+                Some(children) => {
+                    from_cache += 1;
+                    children
+                }
+                None => {
+                    let (children, all) = self.digest_listing(&folder, began, &mut listings).await?;
+                    cache.folders.insert(
+                        folder.clone(),
+                        FolderEntry {
+                            digest: None,
+                            children: children.clone(),
+                            complete: all,
+                        },
+                    );
+                    listed.push(folder.clone());
+                    complete &= all;
+                    children
+                }
+            };
+            queue.extend(add_children(&prefix, children, &mut folders, &mut files, &mut complete));
+        }
+        // The after-read rule: what this pass read under the walk's digests is trusted only when the category folder's
+        // digest is still the one the walk read (nothing moved under it since).
+        let trusted = match changed.get(root) {
+            None => true,
+            Some(walked) => folder_digest::digest_now(api, root, &digests)
+                .await
+                .is_ok_and(|now| now == *walked),
+        };
+        if trusted {
+            for folder in &listed {
+                if let (Some(entry), Some(digest)) = (cache.folders.get_mut(folder), changed.get(folder)) {
+                    entry.digest = entry.complete.then(|| digest.clone());
+                }
+            }
+        }
+        cache.folders.retain(|folder, _| seen.contains(folder));
+        tracing::info!(
+            category = %key,
+            digest_requests = digests.get(),
+            listing_requests = listings,
+            folders_changed = changed.len(),
+            folders_listed = listed.len(),
+            folders_from_cache = from_cache,
+            trusted,
+            "backup: digest pass"
+        );
+        Ok(DeviceTree {
+            device_folder_live: true,
+            category_folder_live: None,
+            folders,
+            files,
+            complete,
+        })
+    }
+
+    /// One folder's children for the digest pass, and whether they are all: from this tick's snapshot when it was
+    /// read after `since` (the walk's start), else read now; with no snapshot, the folder's pages, paced.
+    async fn digest_listing(
+        &self,
+        folder: &str,
+        since: std::time::Instant,
+        listings: &mut usize,
+    ) -> Result<(Vec<BackupChild>, bool), HostError> {
+        let (snapshot, asked) = self.snapshot_read_since(Some(since)).await;
+        if asked {
+            *listings += 1;
+        }
+        if let Some(snapshot) = snapshot {
+            return Ok((self.bridge.backup_children_in(&snapshot, folder), true));
+        }
+        *listings += 1;
+        if *listings > PAGED_LISTING_BURST {
+            tokio::time::sleep(PAGED_LISTING_PACE).await;
+        }
+        let (children, all, _) = self
+            .bridge
+            .backup_list_children_clocked(folder)
+            .await
+            .map_err(host_error("listing"))?;
+        Ok((children, all))
+    }
+
     /// One page of the ops after `cursor`, read once per tick. `None`: the read failed, or the server's head is
     /// behind the cursor (its log was reset).
     async fn ops_since(&self, cursor: i64) -> Option<OpsRead> {
@@ -243,10 +499,18 @@ impl DesktopBackupHost {
 
     /// This tick's snapshot of the account's tree, read once for every backup the tick lists.
     async fn snapshot(&self) -> Option<Arc<BackupSnapshot>> {
+        self.snapshot_read_since(None).await.0
+    }
+
+    /// This tick's snapshot, read again unless it was read at or after `since`; and whether this asked the server.
+    async fn snapshot_read_since(&self, since: Option<std::time::Instant>) -> (Option<Arc<BackupSnapshot>>, bool) {
         let mut memo = self.snapshot.lock().await;
-        if let Some(snapshot) = memo.as_ref() {
-            return snapshot.clone();
+        if let Some((at, snapshot)) = memo.as_ref()
+            && since.is_none_or(|since| *at >= since)
+        {
+            return (snapshot.clone(), false);
         }
+        let read_at = std::time::Instant::now();
         let snapshot = match self.bridge.backup_snapshot().await {
             Ok(snapshot) => Some(Arc::new(snapshot)),
             Err(error) => {
@@ -257,8 +521,8 @@ impl DesktopBackupHost {
                 None
             }
         };
-        *memo = Some(snapshot.clone());
-        snapshot
+        *memo = Some((read_at, snapshot.clone()));
+        (snapshot, true)
     }
 
     /// A full listing of `c`: from this tick's snapshot (one request for every backup), else page by page, paced.
@@ -472,43 +736,7 @@ impl DesktopBackupHost {
                     children
                 }
             };
-            for BackupChild {
-                id,
-                name,
-                is_folder,
-                size,
-                uploaded_at_ms,
-                ..
-            } in children
-            {
-                let Some(remote_id) = parse_id(&id) else {
-                    complete = false;
-                    continue;
-                };
-                let key = name.as_deref().map(|name| {
-                    if prefix.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!("{prefix}/{name}")
-                    }
-                });
-                if is_folder {
-                    match key {
-                        Some(key) => {
-                            folders.insert(key.clone(), remote_id);
-                            queue.push_back((key, id));
-                        }
-                        None => complete = false,
-                    }
-                } else {
-                    files.push(RemoteEntry {
-                        key: key.unwrap_or_default(),
-                        remote_id,
-                        size,
-                        uploaded_at_ms,
-                    });
-                }
-            }
+            queue.extend(add_children(&prefix, children, &mut folders, &mut files, &mut complete));
         }
         Ok((
             DeviceTree {
@@ -595,6 +823,25 @@ impl BackupHost for DesktopBackupHost {
         // No gate decided it: the backups' last pass and acknowledged notices stay as their gate wrote them.
         self.stop_backups(c, BackupStopReason::Unknown, device_gone, device_gone, None)
             .await
+    }
+}
+
+/// Why a digest pass stopped: a host failure (the pass fails as a listing would) or the walk's answer (the pass lists
+/// as before).
+enum DigestPassError {
+    Host(HostError),
+    Walk(WalkError),
+}
+
+impl From<HostError> for DigestPassError {
+    fn from(error: HostError) -> Self {
+        DigestPassError::Host(error)
+    }
+}
+
+impl From<WalkError> for DigestPassError {
+    fn from(error: WalkError) -> Self {
+        DigestPassError::Walk(error)
     }
 }
 
