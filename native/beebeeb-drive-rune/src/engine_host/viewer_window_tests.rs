@@ -714,6 +714,8 @@ fn the_preview_panels_open_opens_the_windows_viewer() {
     let mut w = window("itsapp");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
+    // The Files list lands on a worker after the sign-in: wait for the row to be drawn, never read it on a fixed beat.
+    w.until_drawn(NOTE_NAME);
     let row =
         w.rt.state
             .listing

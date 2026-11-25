@@ -46,6 +46,14 @@ impl ApiClient {
         Ok(self.get_typed_bulk("/api/v1/sync/snapshot").await?)
     }
 
+    /// [`Self::sync_snapshot`] for the backup pass: the same request with `X-Beebeeb-Origin: backup` (spec Amendment 8).
+    pub async fn sync_snapshot_for_backup(&self) -> anyhow::Result<crate::api_client::SyncSnapshot> {
+        let timeout = std::time::Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS);
+        Ok(self
+            .get_typed_bulk_headers("/api/v1/sync/snapshot", timeout, true)
+            .await?)
+    }
+
     /// `GET /api/v1/sync/ops?since={seq_id}` — every op with `seq_id > since`,
     /// oldest-first. The steady-state delta call: ONE request/tick replaces the
     /// old `1 + folders` full-tree re-walk. Same 429 backoff as `sync_snapshot`.

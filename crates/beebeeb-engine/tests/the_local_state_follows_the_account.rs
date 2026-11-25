@@ -110,9 +110,12 @@ fn the_local_state_follows_the_account() {
     );
     assert!(names().is_err(), "no list for the second account");
     assert_eq!(held.with(|_| ()), Err(LocalStateRefused::SessionChanged));
-    // Its start is refused, and nothing of the first account's is reset, re-owned or deleted.
+    // Its start is refused, and nothing of the first account's is reset, re-owned or deleted. Through a port whose OS
+    // cannot remove the first account's synced items (the trait's default, as on Linux): on Windows the real purge
+    // removes them once they are at rest, and the start then switches the account (w26, `account_switch.rs`), so
+    // the outcome would hang on whether the first engine had settled. The refusal is what this test is about.
     assert_eq!(
-        s.engine.start_sync(folder.clone()),
+        s.engine.start_sync_with(folder.clone(), &common::Port::free()),
         Err(SyncStartRefused::OtherAccountsData)
     );
     assert_eq!(

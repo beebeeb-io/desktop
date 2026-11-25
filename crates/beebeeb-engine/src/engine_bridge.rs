@@ -142,7 +142,7 @@ mod stale_copies;
 pub use stale_copies::{REFRESH_ORDER, RefreshStep, STALE_COPIES_PER_PASS, STALE_COPIES_READ_PER_PASS, StaleCopyPass};
 // LD-0105 W2: a Windows range session's preparation and its "whole" record.
 mod range_fetch;
-pub use backup_tree::{BackupChild, BackupFolderState, tighter_clock};
+pub use backup_tree::{BackupChild, BackupFolderState, BackupSnapshot, tighter_clock};
 #[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
 pub use range_fetch::{PrepEnd, RangePrep};
 mod conflicts;
@@ -285,6 +285,7 @@ mod tests {
     // S6: a hydrate's start look; a save made after it is never replaced (Linux).
     mod start_look_s6;
     mod cursor_2272; // Task 2272: a failed op apply holds the cursor, retries, then parks.
+    mod resnapshot_re3e; // RE3-e: a good snapshot is fetched once at start.
     mod sync;
     mod sync_2;
     mod sync_3;
