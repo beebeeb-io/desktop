@@ -40,7 +40,13 @@ struct DriveMock {
     create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>>,
     /// The next folder create is carried out but answered 500 (its answer lost on the way back).
     lose_create_answer: Arc<AtomicBool>,
+    /// RE3-a: the server answers `/sync/snapshot` (every live node, cursor [`SYNC_HEAD`]) and `/sync/ops` (no
+    /// ops, at the head). Off: both 404, as before.
+    sync_api: Arc<AtomicBool>,
 }
+
+/// RE3-a: the op cursor the mock's sync API is at.
+const SYNC_HEAD: i64 = 7;
 
 const PAGE: usize = 2;
 
@@ -121,6 +127,8 @@ impl DriveMock {
         let create_on_notices: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::default();
         let lose_create_answer = Arc::new(AtomicBool::new(false));
         let lose = Arc::clone(&lose_create_answer);
+        let sync_api = Arc::new(AtomicBool::new(false));
+        let sync_on = Arc::clone(&sync_api);
         let (tree, log, halt) = (Arc::clone(&nodes), Arc::clone(&requests), Arc::clone(&stop));
         let (ahead, rows, fail_later) = (
             Arc::clone(&date_ahead_s),
@@ -160,6 +168,24 @@ impl DriveMock {
                         },
                         None => http_json("500 Internal Server Error", serde_json::json!({ "error": "down" })),
                     }
+                } else if method == "GET" && path == "/api/v1/sync/snapshot" && sync_on.load(Ordering::SeqCst) {
+                    let nodes: Vec<serde_json::Value> = tree
+                        .iter()
+                        .filter(|(_, node)| !node.trashed)
+                        .map(|(id, node)| {
+                            let mut row = node_json(id, node);
+                            row["created_at"] = row["uploaded_at"].clone();
+                            row.as_object_mut().unwrap().remove("uploaded_at");
+                            row
+                        })
+                        .collect();
+                    http_json("200 OK", serde_json::json!({ "seq_id": SYNC_HEAD, "nodes": nodes }))
+                } else if method == "GET" && path.starts_with("/api/v1/sync/ops?") && sync_on.load(Ordering::SeqCst) {
+                    let since: i64 = query_param(path, "since").unwrap().parse().unwrap();
+                    http_json(
+                        "200 OK",
+                        serde_json::json!({ "ops": [], "since": since, "head_seq": SYNC_HEAD }),
+                    )
                 } else if method == "GET" && path.starts_with("/api/v1/files?") {
                     let parent = query_param(path, "parent_id").unwrap_or_default().to_string();
                     let offset: usize = query_param(path, "cursor")
@@ -237,6 +263,7 @@ impl DriveMock {
             fail_later_pages,
             create_on_notices,
             lose_create_answer,
+            sync_api,
         }
     }
 
@@ -1774,3 +1801,74 @@ async fn the_scheduler_switches_off_a_stopped_backup_when_it_starts() {
 
 // The category folder's adoption (a known folder's, never a chosen folder's) and the per-account switches.
 mod owners_and_adoption;
+
+/// RE3-a: the installed 0.9.0 listed the whole backup tree every 10-minute pass, one `GET /files` per folder (~2,700
+/// requests a burst). Two passes over an unchanged tree of 20,000 files in 100 folders: the first lists it from one
+/// snapshot (at most 10 requests in all), the second lists nothing (at most 3: the notices and the ops). The source is
+/// empty, so the records' rebuild stores nothing; it settles instead of running (and listing) again every pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_pass_over_an_unchanged_tree_makes_a_handful_of_requests() {
+    let config_dir = tempfile::tempdir().unwrap();
+    crate::config::CONFIG_DIR_OVERRIDE
+        .scope(config_dir.path().to_path_buf(), async {
+            switch_on(&["pictures"]);
+            let fx = Fixture::new();
+            fx.server.sync_api.store(true, Ordering::SeqCst);
+            let pictures = fx.add(Some(&fx.device.clone()), "Pictures", true, 0);
+            fx.bridge
+                .db
+                .set_backup_category_folder("pictures", Some(&pictures))
+                .unwrap();
+            {
+                let folders: Vec<String> = (0..100)
+                    .map(|i| fx.add(Some(&pictures), &format!("d{i}"), true, 0))
+                    .collect();
+                // The files' names are not opened here (listed by id): sealing 20,000 names would only slow the test.
+                let mut nodes = fx.server.nodes.lock().unwrap();
+                for (i, folder) in folders.iter().enumerate() {
+                    for j in 0..200 {
+                        nodes.insert(
+                            uuid::Uuid::new_v4().to_string(),
+                            Node {
+                                parent: Some(folder.clone()),
+                                name_encrypted: format!("sealed-{i}-{j}"),
+                                is_folder: false,
+                                trashed: false,
+                                size: 5,
+                                uploaded_at: None,
+                            },
+                        );
+                    }
+                }
+            }
+            let (source, sync_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let sources = [(Category::Pictures, source.path())];
+            let seen = |fx: &Fixture| fx.server.requests.lock().unwrap().len();
+
+            let first = run(&fx, &sources, sync_root.path()).await;
+            assert!(first.passes.iter().all(|(_, pass)| pass.is_ok()), "{:?}", first.passes);
+            let after_first = seen(&fx);
+            let second = run(&fx, &sources, sync_root.path()).await;
+            assert!(
+                second.passes.iter().all(|(_, pass)| pass.is_ok()),
+                "{:?}",
+                second.passes
+            );
+            let requests = fx.server.finish();
+            let line = |r: &RecordedRequest| format!("{} {}", r.method, r.path);
+            let (one, two): (Vec<String>, Vec<String>) = (
+                requests[..after_first].iter().map(line).collect(),
+                requests[after_first..].iter().map(line).collect(),
+            );
+            assert!(one.len() <= 10, "the full listing: {} requests: {one:?}", one.len());
+            assert!(
+                !one.iter()
+                    .any(|r| r.starts_with("GET /api/v1/files?") && r.contains("cursor=")),
+                "never page by page: {one:?}"
+            );
+            assert!(two.len() <= 3, "the second pass: {} requests: {two:?}", two.len());
+            assert!(!two.iter().any(|r| r.contains("/sync/snapshot")), "{two:?}");
+            assert_eq!(count_backup_ops(&fx.bridge), 0);
+        })
+        .await;
+}
