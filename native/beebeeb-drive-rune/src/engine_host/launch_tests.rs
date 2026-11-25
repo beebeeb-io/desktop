@@ -284,9 +284,7 @@ fn every_launch_takes_the_launch_lock() {
         held,
         [
             ("src/engine_host/mod.rs".to_string(), 5),
-            ("src/engine_host/open_with_apps.rs".to_string(), 1),
-            // dm-38: Settings' Show in Finder for the app bundle and the kept folder (`open -R`, macOS).
-            ("src/shell/settings_open_finder.rs".to_string(), 1)
+            ("src/engine_host/open_with_apps.rs".to_string(), 1)
         ],
         "the starts held by the lock"
     );

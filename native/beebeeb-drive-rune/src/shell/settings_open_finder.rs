@@ -76,15 +76,22 @@ fn bundle_of(exe: &std::path::Path) -> Option<std::path::PathBuf> {
         .map(std::path::Path::to_path_buf)
 }
 
-/// Shows an ordinary folder or bundle (not a File Provider item) in Finder: `open -R`, the path one argument.
+/// Shows an ordinary folder or bundle (not a File Provider item) in Finder through `NSWorkspace`
+/// (`activateFileViewerSelectingURLs:`), the path one URL, never a child process.
 #[cfg(target_os = "macos")]
 fn reveal(path: Option<&std::path::Path>, s: &mut State) {
-    let started = path.is_some_and(|p| {
-        crate::engine_host::launch::locked(|| {
-            std::process::Command::new("/usr/bin/open").arg("-R").arg(p).spawn().is_ok()
-        })
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSArray, NSString, NSURL};
+    let shown = path.and_then(std::path::Path::to_str).is_some_and(|text| {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(text));
+        // A test build shows nothing.
+        #[cfg(not(test))]
+        NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+        #[cfg(test)]
+        let _ = (url, NSWorkspace::sharedWorkspace, NSArray::<NSURL>::new);
+        true
     });
-    if !started {
+    if !shown {
         log("settings: Finder did not open");
         s.settings.toast = Some("Could not open Finder");
     }
