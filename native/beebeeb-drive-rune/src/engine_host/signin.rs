@@ -546,6 +546,8 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
                 HelloResult::Verified => {
                     let still_asked = attempts[Wait::Hello as usize].load(Ordering::SeqCst) == attempt;
                     if still_asked && engine.unlock_screen_for(asked_for).is_ok() {
+                        // Touch ID is no sign-in job: report the session here so the Finder hold lifts.
+                        super::finder_setup::session_changed();
                         HelloOutcome::Succeeded(NextAfterSignIn::Drive)
                     } else {
                         // Late, or refused by core's rule: nothing opened, and the button works again.

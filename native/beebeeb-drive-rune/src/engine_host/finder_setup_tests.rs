@@ -29,6 +29,52 @@ fn the_session_edges_are_the_triggers() {
     assert_eq!(edge(out, out), None);
 }
 
+/// Both OS input sets: macOS (a screen lock leaves the keys in memory) and Windows Explorer (a lock takes them out).
+#[test]
+fn sign_out_then_first_try_sign_in_sends_keys_arrived() {
+    let (signed_in, out) = (SessionFacts { keys: true, auth: true }, SessionFacts::default());
+    for os_before in [
+        signed_in, /* macOS */
+        SessionFacts {
+            keys: false,
+            auth: true,
+        }, /* Windows, locked */
+    ] {
+        let remembered = after_sign_out(os_before);
+        assert_eq!(remembered, out);
+        // The sign-out thread reports (no edge), then the first sign-in (no 2FA) brings keys and session at once.
+        assert_eq!(edge(remembered, out), None);
+        assert_eq!(edge(remembered, signed_in), Some(Edge::KeysArrived));
+    }
+}
+
+#[test]
+fn lock_then_unlock_lifts_the_hold_on_both_os_input_sets() {
+    let open = SessionFacts { keys: true, auth: true };
+    let remembered = after_lock(open);
+    assert_eq!(
+        remembered,
+        SessionFacts {
+            keys: false,
+            auth: true
+        }
+    );
+    // macOS: the screen lock leaves the facts as they are; Windows: the keys leave. The unlock sees keys either way.
+    assert_eq!(
+        edge(remembered, open),
+        Some(Edge::KeysArrived),
+        "Touch ID or password unlock"
+    );
+}
+
+#[test]
+fn the_session_edge_sites_report_and_remember() {
+    let own = include_str!("finder_setup.rs");
+    assert!(own.contains("remember(after_lock);") && own.contains("remember(after_sign_out);"));
+    assert!(include_str!("signin.rs").contains("unlock_screen_for(asked_for).is_ok() {\n"));
+    assert!(include_str!("account_actions.rs").contains("finder_setup::session_changed();"));
+}
+
 #[test]
 fn every_trigger_call_is_wired_at_its_site() {
     let signin = include_str!("signin.rs");
