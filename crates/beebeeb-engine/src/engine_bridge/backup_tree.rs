@@ -80,9 +80,8 @@ impl BackupSnapshot {
     }
 }
 
-/// A snapshot row's stamp for the records' rebuild. The snapshot carries no `uploaded_at`, and its `updated_at` moves
-/// on a rename or a move, which would count a copy as newer than a change it never saw (a change never backed up).
-/// `created_at` is never later than the current version's upload: a rebuild from it uploads more again, never less.
+/// A snapshot row's stamp. The snapshot carries no `uploaded_at` (RE3-a), and `created_at`/`updated_at` are not the
+/// current version's upload time, so a listing read from it is NEVER used to rebuild records (that reads the pages).
 fn snapshot_stamp_ms(entry: &serde_json::Value) -> i64 {
     ["created_at", "uploaded_at", "updated_at"]
         .iter()
@@ -113,7 +112,7 @@ impl EngineBridge {
 
     /// RE3-a: the account's whole live tree in ONE request (`GET /sync/snapshot`), for a full listing of a backup.
     pub async fn backup_snapshot(&self) -> Result<BackupSnapshot, EngineError> {
-        let snapshot = self.backup_api().sync_snapshot().await?;
+        let snapshot = self.backup_api().sync_snapshot_for_backup().await?;
         Ok(BackupSnapshot::new(snapshot.seq_id, snapshot.nodes))
     }
 
@@ -125,13 +124,6 @@ impl EngineBridge {
                 .filter_map(|row| Some(self.backup_child(row["id"].as_str()?, row, snapshot_stamp_ms(row))))
                 .collect()
         })
-    }
-
-    /// RE3-a: the clock of ONE listing page of `parent` (LD-0123), for the records' rebuild from a snapshot, which
-    /// carries no `Date` of its own.
-    pub async fn backup_listing_clock(&self, parent: &str) -> Result<RebuildClock, EngineError> {
-        let (_, clock) = self.backup_api().list_owned_folder_page_clocked(parent, None).await?;
-        Ok(clock)
     }
 
     /// RE3-a: the account's ops after `since` (`GET /sync/ops`, one page): what a cached backup listing checks
