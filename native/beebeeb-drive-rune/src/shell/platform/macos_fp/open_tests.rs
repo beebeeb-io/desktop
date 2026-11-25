@@ -206,9 +206,15 @@ fn a_plain_file_opens_with_its_default_app_and_a_folder_is_revealed() {
     let _one = GATE_TESTS.lock().unwrap_or_else(|p| p.into_inner());
     let fake = Fake::with_location();
     open_item_with(&fake, "f1").unwrap();
-    assert_eq!(*fake.calls.borrow(), ["resolve_item f1 gate_free=false", "open gate_free=true"]);
+    assert_eq!(
+        *fake.calls.borrow(),
+        ["resolve_item f1 gate_free=false", "open gate_free=true"]
+    );
 
-    let (file, folder) = (std::path::Path::new("/t/dm38/plain.txt"), std::path::Path::new("/t/dm38/folder"));
+    let (file, folder) = (
+        std::path::Path::new("/t/dm38/plain.txt"),
+        std::path::Path::new("/t/dm38/folder"),
+    );
     register_open_item(file, "f1");
     register_item(folder, "d1");
     let fake = Fake::with_location();

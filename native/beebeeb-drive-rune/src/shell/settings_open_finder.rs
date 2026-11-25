@@ -55,7 +55,10 @@ fn run(s: &mut State, tx: &mut Tx, action: Action) {
                 s.settings.toast = Some("Could not open System Settings");
             }
         }
-        Action::ShowApp => reveal(std::env::current_exe().ok().as_deref().and_then(bundle_of).as_deref(), s),
+        Action::ShowApp => reveal(
+            std::env::current_exe().ok().as_deref().and_then(bundle_of).as_deref(),
+            s,
+        ),
         Action::ShowKept(folder) => reveal(Some(std::path::Path::new(&folder)), s),
     }
 }
@@ -76,7 +79,13 @@ fn bundle_of(exe: &std::path::Path) -> Option<std::path::PathBuf> {
 /// Shows an ordinary folder or bundle (not a File Provider item) in Finder: `open -R`, the path one argument.
 #[cfg(target_os = "macos")]
 fn reveal(path: Option<&std::path::Path>, s: &mut State) {
-    let started = path.is_some_and(|p| std::process::Command::new("/usr/bin/open").arg("-R").arg(p).spawn().is_ok());
+    let started = path.is_some_and(|p| {
+        std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(p)
+            .spawn()
+            .is_ok()
+    });
     if !started {
         log("settings: Finder did not open");
         s.settings.toast = Some("Could not open Finder");
