@@ -184,7 +184,7 @@ fn the_board_copy_of_each_frame_is_drawn() {
     assert_eq!(text(&runtime("DW-0602"), "ph-bulk-count"), "3 photos \u{00B7} 42 MB");
     let menu = runtime("DW-0603");
     assert_eq!(text(&menu, "ph-menu-item-3-shortcut"), concat!(beebeeb_engine::primary_key!(), "Plus"));
-    assert_eq!(text(&menu, "ph-menu-item-4-shortcut"), concat!(beebeeb_engine::primary_key!(), "\u{2212}"));
+    assert_eq!(text(&menu, "ph-menu-item-4-shortcut"), if cfg!(target_os = "macos") { "\u{2318}\u{2212}" } else { "Ctrl\u{2212}" });
     let open = runtime("DW-0605");
     assert_eq!(text(&open, "ph-seg-1-label"), "Original \u{00B7} 30.9 MB");
     assert_eq!(

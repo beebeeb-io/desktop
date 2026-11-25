@@ -157,6 +157,8 @@ fn the_live_presses_reach_the_shell_or_the_reconciler() {
     );
 }
 
+/// Only macOS wires the Finder pane (`SettingsUi::wired`); elsewhere every scene is the placeholder.
+#[cfg(target_os = "macos")]
 #[test]
 fn each_scene_draws_its_buttons() {
     for (scene, first) in [
