@@ -50,7 +50,7 @@ cat >"$FB/security" <<'F'
 #!/usr/bin/env bash
 [[ "${FAKE_NO_IDENTITY:-0}" == 0 ]] && echo '  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "Developer ID Application: Test (T)"'
 F
-printf '#!/usr/bin/env bash\necho "cargo $*" >>"$FAKE_LOG"; mkdir -p "$CARGO_TARGET_DIR/release"; : >"$CARGO_TARGET_DIR/release/beebeeb-drive"\n' >"$FB/cargo"
+printf '#!/usr/bin/env bash\necho "cargo $*" >>"$FAKE_LOG"; mkdir -p "$CARGO_TARGET_DIR/release"; printf "beebeeb-updater-not-before=%%s;" "${BEEBEEB_BUILD_NOT_BEFORE:-unset}" >"$CARGO_TARGET_DIR/release/beebeeb-drive"\n' >"$FB/cargo"
 printf '#!/usr/bin/env bash\n[[ "$1" == -s ]] && echo Darwin || echo arm64\n' >"$FB/uname"
 chmod +x "$FB"/*
 

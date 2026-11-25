@@ -38,6 +38,11 @@ export function parseVersion(text) {
   return match ? match.slice(1).map(Number) : null
 }
 
+function compareVersions(a, b) {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1
+  return 0
+}
+
 function atLeast(version, floor) {
   for (let i = 0; i < 3; i++) if (version[i] !== floor[i]) return version[i] > floor[i]
   return true
@@ -116,14 +121,22 @@ function platformEntry(kind, { version, channel, installerName, installerBytes, 
  * channel and version: an entry of another version names another file and the updater would refuse it, so it is
  * not carried over. `ownTargets` are the targets being written now: never kept from the old file.
  */
-export function keptEntries(existing, { version, channel }, ownTargets) {
+export function keptEntries(existing, { version, channel }, ownTargets, { sameVersionOnly = false } = {}) {
   if (!existing) return {}
   if (existing.product !== 'desktop' || existing.channel !== channel) throw new Error(`the existing manifest is for ${existing.product}/${existing.channel}, not desktop/${channel}`)
-  if (existing.version !== version) return {}
+  if (existing.version !== version) {
+    const old = parseVersion(existing.version)
+    const next = parseVersion(version)
+    // Never roll a channel back, whichever platform publishes.
+    if (old && next && compareVersions(next, old) < 0) throw new Error(`the channel already publishes ${existing.version}: refusing to publish the lower ${version}`)
+    // A Mac publish for another version would replace the manifest with a darwin-only one and strand Windows.
+    if (sameVersionOnly) throw new Error(`the channel publishes ${existing.version}, not ${version}: publish the Windows build of ${version} first, a Mac-only manifest would drop the Windows entries`)
+    return {}
+  }
   return Object.fromEntries(Object.entries(existing.platforms ?? {}).filter(([target]) => !ownTargets.includes(target)))
 }
 
-function manifestOf(args, platforms) {
+function manifestOf(args, platforms, options) {
   const { version, channel, notes, date, existing } = args
   const own = Object.keys(platforms)
   return {
@@ -132,7 +145,7 @@ function manifestOf(args, platforms) {
     pub_date: date,
     product: 'desktop',
     channel,
-    platforms: { ...keptEntries(existing, { version, channel }, own), ...platforms },
+    platforms: { ...keptEntries(existing, { version, channel }, own, options), ...platforms },
   }
 }
 
@@ -144,7 +157,7 @@ export function buildManifest(args) {
 
 /** Builds the manifest object of a Mac publish: a `darwin-aarch64` entry (url, signature, size), keeping an `existing` manifest's Windows entries. */
 export function buildDarwinManifest(args) {
-  return manifestOf(args, { [DARWIN_TARGET]: platformEntry('darwin', args) })
+  return manifestOf(args, { [DARWIN_TARGET]: platformEntry('darwin', args) }, { sameVersionOnly: true })
 }
 
 function main(argv) {
