@@ -181,6 +181,12 @@ pub(crate) async fn check_now(bridge: &EngineBridge, sync_root: &Path) -> DriftR
     report
 }
 
+/// One check with a cap on the folders it reads (red-test stub: the cap is not kept yet).
+#[cfg(test)]
+pub(crate) async fn check_capped(bridge: &EngineBridge, sync_root: &Path, _cap: usize) -> DriftReport {
+    check_now(bridge, sync_root).await
+}
+
 /// How one listed folder compares with the mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
@@ -442,11 +448,45 @@ mod tests {
         format!("d{kind:07x}-0013-4000-8000-{n:012x}")
     }
 
+    /// What a test turns on the fake: a version bump only the listing shows (no op), and slow digest answers.
+    #[derive(Default)]
+    struct Knobs {
+        bumps: std::sync::Mutex<HashMap<String, i64>>,
+        digest_delay_ms: std::sync::atomic::AtomicU64,
+    }
+
+    /// A snapshot node as `GET /api/v1/files` carries it: the version under `download_version` (with an object id,
+    /// which the snapshot never sends), none of it at the top.
+    fn listing_row(node: &serde_json::Value, knobs: &Knobs) -> serde_json::Value {
+        let mut row = node.clone();
+        let fields = row.as_object_mut().unwrap();
+        let version = fields.remove("version_number").and_then(|v| v.as_i64()).unwrap_or(0);
+        let object = fields
+            .remove("current_object_version_id")
+            .and_then(|v| v.as_str().map(str::to_string));
+        fields.remove("current_version");
+        if row["is_folder"].as_bool() == Some(true) {
+            row["download_version"] = serde_json::Value::Null;
+        } else {
+            let id = row["id"].as_str().unwrap().to_string();
+            let version = version + knobs.bumps.lock().unwrap().get(&id).copied().unwrap_or(0);
+            let object = object.unwrap_or_else(|| format!("ov-{id}-{version}"));
+            row["download_version"] = json!({ "version_number": version, "object_version_id": object });
+        }
+        row
+    }
+
     /// The fake's own handler, with `GET /api/v1/files` answered as the real server pages it (`files`,
-    /// `next_cursor`): the fake's listing says `items`, which the engine's listing does not read.
-    fn handler(account: Arc<FakeAccount>) -> Handler {
+    /// `next_cursor`, listing-shaped rows): the fake's listing says `items`, which the engine's listing does not read.
+    fn handler(account: Arc<FakeAccount>, knobs: Arc<Knobs>) -> Handler {
         let inner = account_handler(account);
         Arc::new(move |req: &Request| {
+            if req.path.contains("folder-digests") {
+                let ms = knobs.digest_delay_ms.load(std::sync::atomic::Ordering::SeqCst);
+                if ms > 0 {
+                    std::thread::sleep(Duration::from_millis(ms));
+                }
+            }
             if req.method == "GET" && req.path.split('?').next() == Some("/api/v1/files") {
                 let parent = req.query("parent_id").map(str::to_string);
                 let mut snapshot = req.clone();
@@ -461,7 +501,7 @@ mod tests {
                     .unwrap()
                     .iter()
                     .filter(|node| node["parent_id"].as_str().map(str::to_string) == parent)
-                    .cloned()
+                    .map(|node| listing_row(node, &knobs))
                     .collect();
                 return Reply::ok(json!({ "files": files, "next_cursor": null }));
             }
@@ -471,6 +511,7 @@ mod tests {
 
     struct Fixture {
         account: Arc<FakeAccount>,
+        knobs: Arc<Knobs>,
         fake: FakeApi,
         bridge: EngineBridge,
         root: PathBuf,
@@ -488,7 +529,8 @@ mod tests {
             account.add_item(&uid(1, 2), Some(&uid(1, 1)), "Deep", true, 0);
             account.add_item(&uid(2, 3), Some(&uid(1, 2)), "c.txt", false, 30);
             account.add_file_with_content(&uid(2, 4), None, "top.txt", b"top content");
-            let fake = FakeApi::start(handler(account.clone()));
+            let knobs = Arc::new(Knobs::default());
+            let fake = FakeApi::start(handler(account.clone(), knobs.clone()));
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().join("Beebeeb");
             std::fs::create_dir_all(&root).unwrap();
@@ -501,6 +543,7 @@ mod tests {
             let bridge = EngineBridge::new(&crate::identity::TEST, db, api);
             Fixture {
                 account,
+                knobs,
                 fake,
                 bridge,
                 root,
@@ -510,6 +553,15 @@ mod tests {
 
         async fn tick(&self) {
             sync_tick(&self.bridge, &self.root).await.unwrap();
+        }
+
+        /// Wait until no check runs for this root (a check the tick started runs beside it).
+        async fn checks_done(&self) {
+            let started = Instant::now();
+            while with_state(&self.root, |state| state.running) {
+                assert!(started.elapsed() < Duration::from_secs(30), "the check never ended");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
 
         fn digest_requests(&self) -> usize {
@@ -623,6 +675,7 @@ mod tests {
         // A window later, the idle tick runs the check through the tick itself.
         expire_window(&fx.root);
         fx.tick().await;
+        fx.checks_done().await;
         assert_eq!(fx.digest_requests(), 1, "{:?}", fx.fake.routes());
         let before = fx.fake.routes().len();
         let report = check_now(&fx.bridge, &fx.root).await;
@@ -648,10 +701,12 @@ mod tests {
         assert_eq!(fx.digest_requests(), 0, "the first idle ticks only start the window");
         expire_window(&fx.root);
         fx.tick().await;
+        fx.checks_done().await;
         let after_first = fx.digest_requests();
         assert!(after_first >= 3, "the first check, a window later, reads every folder");
         assert_eq!(fx.bridge.db().remote_folder_digests().unwrap().len(), 3);
         fx.tick().await;
+        fx.checks_done().await;
         assert_eq!(fx.digest_requests(), after_first, "within the window: no check");
     }
 
@@ -665,5 +720,136 @@ mod tests {
         fx.account.digests_not_ready(None);
         let report = check_now(&fx.bridge, &fx.root).await;
         assert_eq!(report.action, DriftAction::Agreed, "{report:?}");
+    }
+
+    #[test]
+    fn drift_check_window_is_fifteen_minutes() {
+        assert_eq!(CHECK_EVERY, Duration::from_secs(15 * 60));
+    }
+
+    /// Review 11-26 (1): the listing carries the version under `download_version`; a version the server moved with
+    /// no op (same size) is found.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_reads_the_version_of_listing_shaped_rows() {
+        let fx = Fixture::new();
+        fx.synced_and_checked().await;
+        let mirror = fx.bridge.db().drift_children(&uid(1, 2)).unwrap();
+        println!("drift mirror under Deep: {mirror:?}");
+        assert!(mirror.iter().all(|child| child.current_version > 0), "{mirror:?}");
+        // The server moves c.txt to a newer version, same size, and records no op; the account's digests move with it.
+        fx.knobs.bumps.lock().unwrap().insert(uid(2, 3), 1);
+        fx.account.add_item(&uid(2, 3), Some(&uid(1, 2)), "c.txt", false, 30);
+        let first = check_now(&fx.bridge, &fx.root).await;
+        println!("drift check after a version-only change: {first:?}");
+        assert_eq!(first.disagreeing, 1, "{first:?}");
+        assert_eq!(first.action, DriftAction::Watching);
+        let second = check_now(&fx.bridge, &fx.root).await;
+        assert_eq!(second.action, DriftAction::Resnapshot, "{second:?}");
+    }
+
+    /// Review 11-26 (1): the listing's object id is not compared when the mirror has none (the snapshot never sends
+    /// it), so a synced tree agrees.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_listing_object_ids_agree_with_a_snapshot_mirror() {
+        let fx = Fixture::new();
+        let first = fx.synced_and_checked().await;
+        assert_eq!(first.in_flux, 0);
+    }
+
+    /// Review 11-26 (2): an item in the server's trash (a `Trashing` row in the mirror, not listed by the server)
+    /// leaves its folder and the folders above it storable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_server_trash_is_not_in_flux() {
+        let fx = Fixture::new();
+        fx.tick().await;
+        assert!(fx.account.trash_item(&uid(2, 1)));
+        fx.bridge.db().set_status(&uid(2, 1), FileStatus::Trashing).unwrap();
+        let report = check_now(&fx.bridge, &fx.root).await;
+        println!("drift check with a server-trashed row: {report:?}");
+        assert_eq!(report.in_flux, 0, "{report:?}");
+        assert_eq!(report.disagreeing, 0, "{report:?}");
+        assert_eq!(report.stored, 3, "{report:?}");
+        let idle = check_now(&fx.bridge, &fx.root).await;
+        assert_eq!(idle.action, DriftAction::Unchanged, "{idle:?}");
+        assert_eq!(idle.requests, 1, "{idle:?}");
+    }
+
+    /// Review 11-26 (3): a check reads at most its cap of folders, deepest first, stores each as it is verified, and
+    /// the next check goes on from there; an idle check then costs one request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_is_capped_deepest_first_and_resumes() {
+        let fx = Fixture::new();
+        fx.tick().await;
+        let stored = |fx: &Fixture| {
+            let mut ids: Vec<String> = fx.bridge.db().remote_folder_digests().unwrap().into_keys().collect();
+            ids.sort();
+            ids
+        };
+        let first = check_capped(&fx.bridge, &fx.root, 1).await;
+        println!("drift capped check 1: {first:?}");
+        assert_eq!(first.changed, 1, "{first:?}");
+        assert_eq!(stored(&fx), vec![uid(1, 2)], "Deep, the deepest, first");
+        let second = check_capped(&fx.bridge, &fx.root, 1).await;
+        println!("drift capped check 2: {second:?}");
+        assert_eq!(stored(&fx), vec![uid(1, 1), uid(1, 2)]);
+        let third = check_capped(&fx.bridge, &fx.root, 1).await;
+        println!("drift capped check 3: {third:?}");
+        assert_eq!(stored(&fx).len(), 3);
+        let idle = check_capped(&fx.bridge, &fx.root, 1).await;
+        assert_eq!(idle.action, DriftAction::Unchanged, "{idle:?}");
+        assert_eq!(idle.requests, 1, "{idle:?}");
+    }
+
+    /// Review 11-26 (3): the check the idle tick starts runs beside the tick, not inside it (the tick holds the pull
+    /// lock a save waits for).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_does_not_hold_the_tick() {
+        let fx = Fixture::new();
+        fx.tick().await;
+        fx.tick().await;
+        expire_window(&fx.root);
+        fx.knobs
+            .digest_delay_ms
+            .store(1500, std::sync::atomic::Ordering::SeqCst);
+        let started = Instant::now();
+        fx.tick().await;
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(1), "the tick waited {took:?} for the check");
+        fx.checks_done().await;
+        assert_eq!(fx.bridge.db().remote_folder_digests().unwrap().len(), 3);
+    }
+
+    /// Review 11-26 (8): a folder that drifts at two checks in a row is drift even when the cursor moved, when no op
+    /// touched that folder in between.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_drift_twice_with_ops_elsewhere_resnapshots() {
+        let fx = Fixture::new();
+        fx.synced_and_checked().await;
+        fx.account.add_item(&uid(2, 3), Some(&uid(1, 2)), "c.txt", false, 31);
+        let first = check_now(&fx.bridge, &fx.root).await;
+        assert_eq!(first.action, DriftAction::Watching, "{first:?}");
+        let cursor = fx.bridge.db().get_sync_cursor().unwrap();
+        fx.account.push_newer_version(&uid(2, 4), b"a newer version").unwrap();
+        fx.tick().await;
+        assert_ne!(
+            fx.bridge.db().get_sync_cursor().unwrap(),
+            cursor,
+            "an op elsewhere moved the cursor"
+        );
+        let second = check_now(&fx.bridge, &fx.root).await;
+        println!("drift check 2 with an op elsewhere: {second:?}");
+        assert_eq!(second.action, DriftAction::Resnapshot, "{second:?}");
+        assert!(fx.resnapshot_asked());
+    }
+
+    /// Review 11-26 (9): a check dropped half-way (the engine stopping) does not leave the root marked running.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_dropped_clears_running() {
+        let fx = Fixture::new();
+        fx.tick().await;
+        fx.knobs.digest_delay_ms.store(500, std::sync::atomic::Ordering::SeqCst);
+        let cut = tokio::time::timeout(Duration::from_millis(50), check_now(&fx.bridge, &fx.root)).await;
+        assert!(cut.is_err(), "the check was cut");
+        assert!(!with_state(&fx.root, |state| state.running));
     }
 }
