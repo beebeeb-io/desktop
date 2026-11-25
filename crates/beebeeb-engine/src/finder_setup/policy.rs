@@ -88,6 +88,7 @@ pub struct RetryPolicy {
     /// How long one attempt waits for a freshly added domain to stabilize (≤ 10 s).
     pub stabilize_after_add: Duration,
     /// How long an existing registration gets to confirm it is stable (§5.5 step 3).
+    /// (dm-43: long enough for macOS to list a big tree again; a timeout is retried in the background.)
     pub confirm_existing: Duration,
     /// The read-only `userEnabled` poll while Beebeeb is turned off in System Settings, and while `Ready` (to notice
     /// it being turned off while Beebeeb runs).
@@ -101,13 +102,18 @@ impl Default for RetryPolicy {
             transient: vec![s(0), s(5), s(15), s(45)],
             once: vec![s(0), s(5)],
             stabilize_after_add: s(10),
-            confirm_existing: s(2),
+            confirm_existing: s(60),
             user_disabled_poll: s(3),
         }
     }
 }
 
 impl RetryPolicy {
+    /// The delay before the next try of a confirm that timed out (dm-43): 5, 10, 20, 40, then 60 s.
+    pub fn pending_delay(&self, attempt: u8) -> Duration {
+        Duration::from_secs((5u64 << u32::from(attempt.min(4))).min(60))
+    }
+
     pub fn offsets(&self, reason: FinderFailureReason) -> &[Duration] {
         use FinderFailureReason::*;
         match reason {
@@ -276,7 +282,7 @@ mod tests {
         assert_eq!(policy.max_attempts(Unknown), 2);
         assert_eq!(policy.max_attempts(FolderTaken), 1);
         assert_eq!(policy.stabilize_after_add, Duration::from_secs(10));
-        assert_eq!(policy.confirm_existing, Duration::from_secs(2));
+        assert_eq!(policy.confirm_existing, Duration::from_secs(60));
         assert_eq!(policy.user_disabled_poll, Duration::from_secs(3));
     }
 

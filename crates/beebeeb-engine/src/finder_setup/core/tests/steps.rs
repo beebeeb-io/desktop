@@ -49,7 +49,7 @@ use super::*;
         let mut sim = Sim::new(Applications);
         sim.trigger(Trigger::Launch);
         sim.run(&World::ok(SIGNED_IN, Enabled));
-        assert_eq!(sim.kinds(), vec![Op::Observe, Op::StartEngine, WAIT_2, Op::FinishReady]);
+        assert_eq!(sim.kinds(), vec![Op::Observe, Op::StartEngine, WAIT_CONFIRM, Op::FinishReady]);
         assert_eq!(sim.s.setup, Ready);
         // A second launch-like trigger on a Ready domain never publishes Adding.
         sim.fx.clear();
@@ -324,4 +324,52 @@ use super::*;
             "six triggers during one check → exactly one follow-up"
         );
         assert_eq!(sim.s.setup, Ready);
+    
+    /// dm-43 (also Windows: the core is shared). The shell's `start_sync` races the check's `StartEngine`, so the
+    /// check may "own" an engine the shell wanted. A confirm that times out then must neither fail the check nor
+    /// stop that engine: it stays pending and retries with backoff.
+    #[test]
+    fn a_slow_confirm_of_an_existing_domain_stays_pending_and_never_stops_the_engine() {
+        let mut sim = Sim::new(Applications);
+        sim.trigger(Trigger::KeysArrived);
+        let world = World {
+            stable: Err(stabilization_timeout()),
+            wait_secs: 60,
+            ..World::ok(SIGNED_IN, Enabled)
+        };
+        for _ in 0..40 {
+            match sim.next() {
+                Next::Run(op) => {
+                    sim.ops.push((sim.secs(), op));
+                    let result = answer(&world, op);
+                    if matches!(op, Op::WaitStable(_)) {
+                        sim.now += Duration::from_secs(world.wait_secs);
+                    }
+                    sim.feed(Input::Done(result));
+                }
+                Next::WakeAt(at) => {
+                    sim.now = sim.now.max(at);
+                    sim.feed(Input::Tick { window_visible: false });
+                }
+                Next::Idle => break,
+            }
+            assert_ne!(sim.s.setup, Failed, "never Failed: {:?}", sim.s);
+        }
+        assert!(sim.count(Op::Observe) > 4, "retries past the old four attempts");
+        assert!(sim.ops.iter().any(|(_, op)| *op == WAIT_CONFIRM), "the long budget");
+        assert_eq!(sim.count(Op::StopEngine), 0);
+        assert!(sim.s.check_started_engine, "still the engine's, still running");
     }
+
+    /// The contrast: a landing where the engine must not run (turned off in System Settings) stops it.
+    #[test]
+    fn a_landing_that_owes_a_stop_still_stops_the_engine() {
+        let mut sim = Sim::new(Applications);
+        sim.trigger(Trigger::KeysArrived);
+        sim.run(&World {
+            after_add: Ok(Disabled),
+            ..World::ok(SIGNED_IN, NotRegistered)
+        });
+        assert_eq!(sim.count(Op::StopEngine), 1);
+    }
+}

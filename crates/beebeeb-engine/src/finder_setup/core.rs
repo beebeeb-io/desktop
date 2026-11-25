@@ -209,7 +209,7 @@ mod tests {
     }
 
     const WAIT_10: Op = Op::WaitStable(Duration::from_secs(10));
-    const WAIT_2: Op = Op::WaitStable(Duration::from_secs(2));
+    const WAIT_CONFIRM: Op = Op::WaitStable(Duration::from_secs(60));
 
 
     const SIGNED_IN_OWING: SessionFacts = SessionFacts {

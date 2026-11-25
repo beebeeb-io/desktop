@@ -64,7 +64,7 @@ pub use check::start;
 mod tests {
     use super::*;
     use crate::finder_setup::core::{DomainState, Observation, SessionFacts};
-    use crate::finder_setup::error::{COCOA_DOMAIN, FILE_PROVIDER_DOMAIN, POSIX_DOMAIN};
+    use crate::finder_setup::error::{BRIDGE_DOMAIN, COCOA_DOMAIN, FILE_PROVIDER_DOMAIN, POSIX_DOMAIN, bridge_code};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -157,6 +157,11 @@ mod tests {
         kept: KeptFolder,
         /// What stopping the engine a check started answers.
         stop: Result<(), FpError>,
+        /// What the confirm of an existing domain answers (`WaitStable`).
+        stable: Result<(), FpError>,
+        /// Whether the sync engine runs: `StartEngine` sets it (the check won the race with the shell's own start, which
+        /// then finds it running), `StopEngine` clears it.
+        engine_running: Arc<AtomicBool>,
         /// Whether a Beebeeb window is on screen (`Ports::window_visible`).
         visible: Arc<AtomicBool>,
         /// How many times the driver asked `window_visible`: once per poll wake-up.
@@ -184,6 +189,8 @@ mod tests {
                 remove: Ok(()),
                 kept: KeptFolder::default(),
                 stop: Ok(()),
+                stable: Ok(()),
+                engine_running: Arc::new(AtomicBool::new(false)),
                 visible: Arc::new(AtomicBool::new(false)),
                 visible_asked: Arc::new(AtomicUsize::new(0)),
                 during_add: None,
@@ -221,7 +228,10 @@ mod tests {
                     },
                     domain: Ok(*self.domain.lock().unwrap()),
                 }),
-                Op::StartEngine => OpResult::EngineStarted(Ok(true)),
+                Op::StartEngine => {
+                    self.engine_running.store(true, Ordering::SeqCst);
+                    OpResult::EngineStarted(Ok(true))
+                }
                 Op::AddDomain => {
                     if let Some(hook) = self.during_add.as_mut() {
                         hook();
@@ -229,9 +239,12 @@ mod tests {
                     OpResult::Added(self.add.clone())
                 }
                 Op::ReadDomain => OpResult::Domain(Ok(*self.read.lock().unwrap())),
-                Op::WaitStable(_) => OpResult::Stable(Ok(())),
+                Op::WaitStable(_) => OpResult::Stable(self.stable.clone()),
                 Op::FinishReady => OpResult::Finished(Ok(())),
-                Op::StopEngine => OpResult::EngineStopped(self.stop.clone()),
+                Op::StopEngine => {
+                    self.engine_running.store(false, Ordering::SeqCst);
+                    OpResult::EngineStopped(self.stop.clone())
+                }
                 Op::RemoveDomain => OpResult::Removed(self.remove.clone(), self.kept.clone()),
             };
             async move {

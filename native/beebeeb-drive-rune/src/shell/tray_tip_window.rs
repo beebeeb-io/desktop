@@ -1,5 +1,5 @@
 //! The first-run tray tip (DW-0380) as a Rune window of its own: a small borderless, always-on-top
-//! card by the notification area, placed with the flyout's code ([`flyout::position`] on the same
+//! card by the notification area (on the Mac: under the menu-bar b), placed with the flyout's code ([`flyout::position`] on the same
 //! [`flyout::Anchor`]). The shell opens it when the guide reaches its first step and hides it when the
 //! guide leaves it (`host::Shell::show_tray_tip`). "Got it" and Esc dismiss it: [`TipState::dismissed`]
 //! is set and the main window is told (`host::on_tray_tip_dismissed`), which hides this window and
@@ -12,13 +12,24 @@ use rune::{AppHandle, Cx, El, Key, KeyEvent, Tx, col, el, row};
 use super::flyout::{self, Anchor};
 use super::surfaces::TRAY_TIP_KEY;
 use crate::State;
-use crate::frames::signin::setup::guide::{NEXT_KEY, TRAY_TEXT, TRAY_TITLE};
+use crate::frames::signin::setup::guide::NEXT_KEY;
+#[cfg(not(target_os = "macos"))]
+use crate::frames::signin::setup::guide::{TRAY_TEXT, TRAY_TITLE};
 use crate::theme::tokens::{self, type_};
 use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::kit;
 
+/// The Mac's words: the status item lives in the menu bar, not a notification area.
+#[cfg(target_os = "macos")]
+pub const TRAY_TITLE: &str = "Beebeeb lives in the menu bar";
+#[cfg(target_os = "macos")]
+pub const TRAY_TEXT: &str = "Look for the b at the top right of your screen. If your menu bar is crowded, the b may be hidden behind the notch: hold \u{2318} and drag other icons away to make room. You can also allow Beebeeb in System Settings \u{203A} Menu Bar.";
+
 /// The window's size in points: the card (300 wide) with its padding.
+#[cfg(not(target_os = "macos"))]
 pub const SIZE: (f32, f32) = (332.0, 172.0);
+#[cfg(target_os = "macos")]
+pub const SIZE: (f32, f32) = (332.0, 236.0);
 /// Where the tip's window key is read from (`surfaces::TRAY_TIP_KEY`).
 pub const KEY: &str = TRAY_TIP_KEY;
 
@@ -43,7 +54,21 @@ pub fn with_main(main: AppHandle<State>) -> TipState {
     }
 }
 
+/// The tip's top-left on the Mac, physical pixels: under the status item (`macos_anchor::place_hint`).
+#[cfg(target_os = "macos")]
+pub fn position(a: &Anchor) -> (i32, i32) {
+    use super::flyout::macos_anchor as m;
+    let f = |r: flyout::Rect| m::Frame::new(r.x as f64, r.y as f64, r.w as f64, r.h as f64);
+    let display = m::Display { frame: f(a.monitor), visible: f(a.work), primary: true };
+    let scale = if a.scale.is_finite() && a.scale > 0.0 { a.scale } else { 1.0 };
+    match m::place_hint(a.icon.map(f), &[display], f64::from(SIZE.0), f64::from(SIZE.1)) {
+        Some(p) => m::to_physical(p.x, p.y, scale),
+        None => m::to_physical(f64::from(a.work.x), f64::from(a.work.y), scale),
+    }
+}
+
 /// The tip's top-left, next to the b: the flyout's rule with the tip's size.
+#[cfg(not(target_os = "macos"))]
 pub fn position(a: &Anchor) -> (i32, i32) {
     let scale = if a.scale.is_finite() && a.scale > 0.0 { a.scale } else { 1.0 };
     let (w, h) = (
@@ -141,12 +166,52 @@ mod tray_tip_tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn hint_macos_words_have_no_windows_words() {
+        for t in [TRAY_TITLE, TRAY_TEXT] {
+            let l = t.to_lowercase();
+            for bad in ["windows", "taskbar", "notification area"] {
+                assert!(!l.contains(bad), "{t}");
+            }
+        }
+        assert!(TRAY_TEXT.contains("menu bar") || TRAY_TITLE.contains("menu bar"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn hint_macos_sits_under_the_status_item_inside_the_visible_frame() {
+        let mut a = anchor((0, 38, 1512, 944));
+        a.monitor = Rect { x: 0, y: 0, w: 1512, h: 982 };
+        a.icon = Some(Rect { x: 1300, y: 0, w: 24, h: 24 });
+        let (x, y) = position(&a);
+        let (w, h) = (SIZE.0 as i32, SIZE.1 as i32);
+        assert!(y >= 24, "below the icon: {y}");
+        assert!(x <= 1312 && 1312 <= x + w, "under the icon: {x}");
+        assert!(x >= 0 && x + w <= 1512 && y >= 38 && y + h <= 38 + 944);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn hint_macos_icon_at_the_right_edge_is_clamped_and_never_bottom_right() {
+        let mut a = anchor((0, 38, 1512, 944));
+        a.monitor = Rect { x: 0, y: 0, w: 1512, h: 982 };
+        a.icon = Some(Rect { x: 1490, y: 0, w: 20, h: 24 });
+        let (x, y) = position(&a);
+        assert_eq!(x, 1512 - 8 - SIZE.0 as i32);
+        assert!(y < 100);
+        a.icon = None;
+        assert!(position(&a).1 < 100);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
     fn tray_tip_sits_bottom_right_above_a_bottom_taskbar() {
         let (x, y) = position(&anchor((0, 0, 1920, 1040)));
         assert_eq!((x, y), (1920 - 12 - 332, 1040 - 12 - 172));
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn tray_tip_goes_top_right_under_a_top_taskbar() {
         let (x, y) = position(&anchor((0, 40, 1920, 1040)));
         assert_eq!((x, y), (1920 - 12 - 332, 40 + 12));

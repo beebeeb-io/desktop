@@ -527,7 +527,7 @@ use super::*;
                 Op::ReadDomain,
                 Op::Observe,
                 Op::StartEngine,
-                Op::WaitStable(Duration::from_secs(2)),
+                Op::WaitStable(Duration::from_secs(60)),
                 Op::FinishReady
             ],
             "one read, then exactly one check, and never an add"
@@ -593,7 +593,7 @@ use super::*;
             vec![
                 Op::Observe,
                 Op::StartEngine,
-                Op::WaitStable(Duration::from_secs(2)),
+                Op::WaitStable(Duration::from_secs(60)),
                 Op::FinishReady,
                 Op::ReadDomain
             ],
@@ -800,4 +800,42 @@ use super::*;
         );
         let done = probe.lock().unwrap().take().expect("the receiver is still there");
         assert_eq!(answered(done).await.0, Ok(()));
+    }
+
+    /// dm-43, the Windows path of the shared core: no Applications folder (`Elsewhere`), the cloud-files root is
+    /// already registered, and the shell's own `start_sync` races the check's `StartEngine`. The check wins the race
+    /// (`Ok(true)`, so it "owns" the engine), the confirm then times out again and again while the tree is listed.
+    /// The engine the shell wanted must keep running and the check must stay pending, never `Failed`.
+    #[tokio::test]
+    async fn windows_slow_confirm_keeps_the_engine_the_shell_started() {
+        let clock = FakeClock::new();
+        let (mut ports, record) = FakePorts::new(&clock, DomainState::Enabled);
+        ports.stable = Err(FpError::new(
+            BRIDGE_DOMAIN,
+            bridge_code::STABILIZATION_TIMEOUT,
+            "the first listing is still running",
+        ));
+        let running = ports.engine_running.clone();
+        let (handle, task) = start(
+            ports,
+            clock.clone(),
+            LaunchLocation::Elsewhere,
+            None,
+            RetryPolicy::default(),
+        );
+        tokio::spawn(task);
+        handle.trigger(Trigger::Launch).unwrap();
+        for _ in 0..10_000 {
+            let confirms = ops(&record).iter().filter(|op| matches!(op, Op::WaitStable(_))).count();
+            if confirms >= 6 {
+                break;
+            }
+            assert_ne!(handle.view().setup, FinderSetup::Failed, "{:?}", handle.view());
+            tokio::task::yield_now().await;
+        }
+        let all = ops(&record);
+        assert!(all.iter().filter(|op| matches!(op, Op::WaitStable(_))).count() >= 6, "{all:?}");
+        assert!(!all.contains(&Op::StopEngine), "{all:?}");
+        assert!(running.load(Ordering::SeqCst), "the shell's engine was stopped");
+        assert_ne!(handle.view().setup, FinderSetup::Failed);
     }
