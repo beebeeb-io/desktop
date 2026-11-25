@@ -68,8 +68,8 @@ fn serve(
     (base_url, handle)
 }
 
-/// Red test: a start with a re-snapshot pending (the envelope heal, a name retry) fetches the list once; the next
-/// tick goes to the ops path although the list's apply marked an unreadable name.
+/// A start with a re-snapshot pending (the envelope heal, a name retry) fetches the list once; the next tick goes to
+/// the ops path.
 #[tokio::test]
 async fn resnapshot_clean_start_with_a_good_snapshot_fetches_it_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -81,10 +81,6 @@ async fn resnapshot_clean_start_with_a_good_snapshot_fetches_it_once() {
     sync_tick(&bridge, dir.path()).await.unwrap();
     assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(7));
     assert_eq!(bridge.db().get_file(FILE).unwrap().unwrap().path, "docs/notes.txt");
-    assert!(
-        bridge.db().name_unreadable(UNREADABLE).unwrap(),
-        "the unreadable name is marked"
-    );
     assert_eq!(
         bridge.db().peek_resnapshot_request().unwrap(),
         None,
@@ -99,7 +95,30 @@ async fn resnapshot_clean_start_with_a_good_snapshot_fetches_it_once() {
     );
 }
 
-/// A request made while the list is on its way (the first reconcile pass's name retry after unlock) is served by
+/// Red test: the apply of a list that marks a name unreadable (dc-136b asks for the list again) asks for no second
+/// list: this list was the fresh one, and the same keys read it the same way again.
+#[test]
+fn resnapshot_not_asked_again_by_the_apply_of_a_fresh_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), "http://127.0.0.1:9".into(), KEY);
+    let snapshot: crate::api_client::SyncSnapshot = serde_json::from_value(snapshot()).unwrap();
+
+    apply_snapshot(&bridge, dir.path(), &snapshot, 1_000, 1_000, &mut Vec::new()).unwrap();
+
+    assert!(
+        bridge.db().name_unreadable(UNREADABLE).unwrap(),
+        "the unreadable name is marked"
+    );
+    assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(7));
+    assert_eq!(bridge.db().peek_resnapshot_request().unwrap(), None, "no second list");
+    // Outside a list's apply the same mark still asks for the list (an op's row is not the list).
+    assert!(bridge.db().set_name_unreadable(UNREADABLE, false).unwrap());
+    let row = snap_node(&OTHER_KEY, UNREADABLE, "secret.txt", None, false, 200);
+    process_metadata_row(&bridge, &row, "", 1_000, RowSource::Op, &mut Vec::new()).unwrap();
+    assert!(bridge.db().peek_resnapshot_request().unwrap().is_some());
+}
+
+/// Red test: a request made while the list is on its way (the first reconcile pass's name retry after unlock) is served by
 /// that list: its decrypt runs after the request.
 #[tokio::test]
 async fn resnapshot_asked_while_the_list_is_on_its_way_is_served_by_it() {
