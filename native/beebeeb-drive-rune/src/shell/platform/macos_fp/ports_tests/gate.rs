@@ -6,15 +6,18 @@ use super::super::bridge::GATE_TESTS;
 use super::super::*;
 use beebeeb_engine::finder_setup::core::KeptFolder as EngineKept;
 use beebeeb_engine::finder_setup::error::APP_DOMAIN;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 /// A runtime that does not wait for a bridge call still stuck in the "OS" when the test is done (dropping a runtime
 /// waits for its blocking threads; a real app's runtime outlives every call).
 fn run<T>(future: impl Future<Output = T>) -> T {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let out = runtime.block_on(future);
     runtime.shutdown_background();
     out
@@ -379,4 +382,71 @@ fn the_ports_persist_through_the_host_and_clear_the_owed_flags() {
     });
     p.kept_folder(EngineKept::Unknown);
     assert_eq!(*host.surfaced.lock().unwrap(), vec![Some("/k".to_string()), None]);
+}
+
+/// A bridge whose stabilization blocks for the whole slice and times out, and whose extension is (not) connected.
+struct SlowBridge {
+    connected: bool,
+    stabilizations: AtomicUsize,
+}
+
+impl FpBridge for SlowBridge {
+    fn add_domain(&self) -> Result<(), FpError> {
+        Ok(())
+    }
+    fn domain_state(&self) -> Result<DomainState, FpError> {
+        Ok(DomainState::Enabled)
+    }
+    fn wait_for_domain_ready(&self, timeout: Duration) -> Result<(), FpError> {
+        self.stabilizations.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(timeout);
+        Err(FpError::app(app_code::OP_TIMEOUT, "stabilization timed out"))
+    }
+    fn extension_connected(&self) -> bool {
+        self.connected
+    }
+    fn remove(&self) -> Result<DomainRemoval, RemovalFailure> {
+        unreachable!()
+    }
+}
+
+#[test]
+fn wait_stable_does_not_hold_the_gate() {
+    let _serial = serial();
+    let bridge = Arc::new(SlowBridge {
+        connected: false,
+        stabilizations: AtomicUsize::new(0),
+    });
+    let host = Arc::new(FakeHost::default());
+    let mut p = MacosPorts::with_bridge(host, bridge.clone(), Duration::from_millis(50));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let wait = tokio::spawn(p.run(Op::WaitStable(Duration::from_millis(600))));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(Gate::try_enter().is_ok(), "a signal during the wait gets the gate");
+        let OpResult::Stable(answer) = wait.await.unwrap() else {
+            panic!()
+        };
+        assert!(answer.is_err(), "no extension: stabilization's timeout stays a timeout");
+    });
+    runtime.shutdown_background();
+}
+
+#[test]
+fn enabled_and_extension_connected_is_ready_without_waiting_for_stabilization() {
+    let _serial = serial();
+    let bridge = Arc::new(SlowBridge {
+        connected: true,
+        stabilizations: AtomicUsize::new(0),
+    });
+    let host = Arc::new(FakeHost::default());
+    let mut p = MacosPorts::with_bridge(host, bridge.clone(), Duration::from_millis(50));
+    let started = Instant::now();
+    let answer = run(p.run(Op::WaitStable(Duration::from_secs(60))));
+    assert!(matches!(answer, OpResult::Stable(Ok(()))), "{answer:?}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(bridge.stabilizations.load(Ordering::SeqCst), 0);
 }

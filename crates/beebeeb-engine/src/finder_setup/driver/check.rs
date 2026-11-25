@@ -141,7 +141,12 @@ pub fn start<P: Ports, C: Clock>(
 /// The reconciler as a task that cannot die unseen. The loop borrows the driver and the ports
 /// instead of owning them, so when anything in it panics (a port, the core) both are still here to
 /// report with. A `JoinHandle` supervisor could not do that: the ports die with the task.
-pub(super) async fn run<P: Ports, C: Clock>(mut driver: Driver, mut ports: P, clock: C, mut rx: mpsc::UnboundedReceiver<Event>) {
+pub(super) async fn run<P: Ports, C: Clock>(
+    mut driver: Driver,
+    mut ports: P,
+    clock: C,
+    mut rx: mpsc::UnboundedReceiver<Event>,
+) {
     let outcome = AssertUnwindSafe(drive(&mut driver, &mut ports, &clock, &mut rx))
         .catch_unwind()
         .await;
@@ -220,8 +225,7 @@ pub(super) async fn drive<P: Ports, C: Clock>(
         }
         match core::next_op(&mut driver.core, clock.now(), &driver.policy) {
             Next::Run(op) => {
-                let result = ports.run(op).await;
-                driver.input(Input::Done(result), ports, clock);
+                run_op(driver, ports, clock, rx, op).await;
             }
             Next::WakeAt(at) => {
                 tokio::select! {
@@ -241,6 +245,77 @@ pub(super) async fn drive<P: Ports, C: Clock>(
                 None => return,
             },
         }
+    }
+}
+
+/// An event that changes what the check is doing: it must be applied at once, not after the running operation.
+fn preempts(event: &Event) -> bool {
+    match event {
+        Event::Lock { .. } | Event::Remove { .. } => true,
+        Event::Trigger(trigger) => matches!(trigger, Trigger::SignOut | Trigger::Repair | Trigger::Lock),
+        Event::AppActivated => false,
+    }
+}
+
+/// Operations whose future may be dropped midway: the bridge call runs on a blocking thread that finishes on its own
+/// (the gate is released there), and nothing is held in the host. The engine start, finish, stop and the removal must
+/// run to the end, so they are never raced.
+fn cancel_safe(op: Op) -> bool {
+    matches!(op, Op::Observe | Op::ReadDomain | Op::AddDomain | Op::WaitStable(_))
+}
+
+/// Runs one operation. For a cancel-safe one, a Lock, sign-out or Repair arriving meanwhile is applied at once and the
+/// operation is dropped (its answer is a failed read the core ignores in the phase the event moved it to). Other
+/// events wait for the operation, in order.
+async fn run_op<P: Ports, C: Clock>(
+    driver: &mut Driver,
+    ports: &mut P,
+    clock: &C,
+    rx: &mut mpsc::UnboundedReceiver<Event>,
+    op: Op,
+) {
+    if !cancel_safe(op) {
+        let result = ports.run(op).await;
+        driver.input(Input::Done(result), ports, clock);
+        return;
+    }
+    let mut later = Vec::new();
+    let mut preempted = None;
+    let finished = {
+        let fut = ports.run(op);
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                biased;
+                event = rx.recv() => match event {
+                    Some(event) if preempts(&event) => {
+                        preempted = Some(event);
+                        break None;
+                    }
+                    Some(event) => later.push(event),
+                    None => break Some(None),
+                },
+                result = &mut fut => break Some(Some(result)),
+            }
+        }
+    };
+    match (finished, preempted) {
+        (_, Some(event)) => {
+            for event in later {
+                driver.event(event, ports, clock);
+            }
+            driver.event(event, ports, clock);
+            let abandoned = OpResult::Domain(Err(FpError::app(app_code::OP_TIMEOUT, "the operation was dropped")));
+            driver.input(Input::Done(abandoned), ports, clock);
+        }
+        (Some(Some(result)), None) => {
+            driver.input(Input::Done(result), ports, clock);
+            for event in later {
+                driver.event(event, ports, clock);
+            }
+        }
+        // The handle is gone: nothing to answer; the loop's next `recv` ends the task.
+        _ => {}
     }
 }
 

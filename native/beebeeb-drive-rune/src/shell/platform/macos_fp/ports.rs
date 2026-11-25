@@ -8,12 +8,13 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use beebeeb_engine::config::DesktopConfig;
 use beebeeb_engine::finder_setup::core::{self, DomainState, Observation, Op, OpResult, SessionFacts};
-use beebeeb_engine::finder_setup::driver::{FinderSetupView, LifecycleEvent, Ports, op_limit, within};
-use beebeeb_engine::finder_setup::error::{FailureRecord, FpError, app_code};
+use beebeeb_engine::finder_setup::driver::{op_limit, within, FinderSetupView, LifecycleEvent, Ports};
+use beebeeb_engine::finder_setup::error::{app_code, FailureRecord, FpError};
+use beebeeb_engine::surfaces::phase::FinderFailureReason;
 use tokio::sync::oneshot;
 
 use super::bridge::{self, Gate};
@@ -31,6 +32,10 @@ pub(crate) trait FpBridge: Send + Sync + 'static {
     fn add_domain(&self) -> Result<(), FpError>;
     fn domain_state(&self) -> Result<DomainState, FpError>;
     fn wait_for_domain_ready(&self, timeout: Duration) -> Result<(), FpError>;
+    /// Whether the File Provider extension has connected to the IPC socket.
+    fn extension_connected(&self) -> bool {
+        false
+    }
     /// Removes the domain, keeping what never reached the server (`removal::remove_keeping_unsynced`, never a plain
     /// remove).
     fn remove(&self) -> Result<DomainRemoval, RemovalFailure>;
@@ -48,6 +53,9 @@ impl FpBridge for SystemBridge {
     }
     fn wait_for_domain_ready(&self, timeout: Duration) -> Result<(), FpError> {
         bridge::wait_for_domain_ready(timeout)
+    }
+    fn extension_connected(&self) -> bool {
+        bridge::extension_connected()
     }
     fn remove(&self) -> Result<DomainRemoval, RemovalFailure> {
         removal::remove_keeping_unsynced_gated()
@@ -116,6 +124,49 @@ async fn gated<T: Send + 'static>(
             None => Gate::try_enter()?,
         };
         call()
+    })
+    .await
+    .unwrap_or_else(|_| Err(FpError::app(app_code::UNEXPECTED_BRIDGE_RETURN, "bridge task failed")))
+}
+
+/// How long one stabilization wait runs before readiness is looked at again.
+const STABILIZE_SLICE: Duration = Duration::from_secs(2);
+
+/// Ready = `getDomains` lists the domain Enabled AND the extension has connected to the IPC socket; that is Ready without
+/// waiting for stabilization. Otherwise stabilization runs in slices, off the gate, and the check repeats between them;
+/// a stabilization timeout on an Enabled domain with a connected extension is Ready too. Windows does not use this.
+async fn wait_ready<B: FpBridge>(
+    bridge: Arc<B>,
+    timeout: Duration,
+    gate_wait: Duration,
+    slice: Duration,
+) -> Result<(), FpError> {
+    tokio::task::spawn_blocking(move || {
+        let ready = |bridge: &B| {
+            bridge.extension_connected()
+                && match Gate::enter_waiting(gate_wait).and_then(|_gate| bridge.domain_state()) {
+                    Ok(state) => state == DomainState::Enabled,
+                    Err(_) => false,
+                }
+        };
+        let deadline = Instant::now() + timeout;
+        loop {
+            if ready(&bridge) {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            match bridge.wait_for_domain_ready(left.min(slice)) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if beebeeb_engine::finder_setup::policy::classify(&error) != FinderFailureReason::Timeout {
+                        return Err(error);
+                    }
+                    if Instant::now() >= deadline {
+                        return if ready(&bridge) { Ok(()) } else { Err(error) };
+                    }
+                }
+            }
+        }
     })
     .await
     .unwrap_or_else(|_| Err(FpError::app(app_code::UNEXPECTED_BRIDGE_RETURN, "bridge task failed")))
@@ -270,9 +321,12 @@ impl<H: FpHost, B: FpBridge> Ports for MacosPorts<H, B> {
                 Op::StartEngine => OpResult::EngineStarted(host.start_engine(limit).await),
                 Op::AddDomain => OpResult::Added(within(op, limit, gated(None, move || bridge.add_domain())).await),
                 Op::ReadDomain => OpResult::Domain(within(op, limit, gated(None, move || bridge.domain_state())).await),
-                Op::WaitStable(timeout) => OpResult::Stable(
-                    within(op, limit, gated(None, move || bridge.wait_for_domain_ready(timeout))).await,
-                ),
+                // NOT gated: `waitForStabilization` can block for the whole timeout, and under the gate every
+                // working-set signal met a busy gate (RC5). Readiness is the domain Enabled AND the extension
+                // connected, see `wait_ready`.
+                Op::WaitStable(timeout) => {
+                    OpResult::Stable(within(op, limit, wait_ready(bridge, timeout, gate_wait, STABILIZE_SLICE)).await)
+                }
                 // Cut off as a whole: safe only because the host's finish has one await, the engine slot, before it
                 // spawns.
                 Op::FinishReady => OpResult::Finished(within(op, limit, host.finish_ready()).await),

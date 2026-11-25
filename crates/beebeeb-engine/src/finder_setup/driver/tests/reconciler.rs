@@ -839,3 +839,53 @@ use super::*;
         assert!(running.load(Ordering::SeqCst), "the shell's engine was stopped");
         assert_ne!(handle.view().setup, FinderSetup::Failed);
     }
+
+    /// Ports whose `WaitStable` never answers (the RC5 shape: `waitForStabilization` blocking for its whole timeout).
+    struct HangingWait;
+
+    impl Ports for HangingWait {
+        fn run(&mut self, op: Op) -> impl Future<Output = OpResult> + Send {
+            async move {
+                match op {
+                    Op::Observe => OpResult::Observed(Observation {
+                        facts: SessionFacts {
+                            vault_unlocked: true,
+                            auth_present: true,
+                            signed_out_by_choice: false,
+                            removal_owed: false,
+                        },
+                        domain: Ok(DomainState::Enabled),
+                    }),
+                    Op::StartEngine => OpResult::EngineStarted(Ok(false)),
+                    _ => std::future::pending().await,
+                }
+            }
+        }
+        fn publish(&mut self, _view: &FinderSetupView) {}
+        fn log(&mut self, _event: LifecycleEvent) {}
+        fn persist_failure(&mut self, _record: Option<FailureRecord>) {}
+        fn persist_signed_out_by_choice(&mut self, _value: bool) {}
+        fn kept_folder(&mut self, _kept: KeptFolder) {}
+        fn window_visible(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lock_during_a_long_operation_is_acknowledged_within_a_second() {
+        let clock = FakeClock::new();
+        let (handle, task) = start(
+            HangingWait,
+            clock,
+            LaunchLocation::Applications,
+            None,
+            RetryPolicy::default(),
+        );
+        tokio::spawn(task);
+        handle.trigger(Trigger::Launch).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        handle.lock(Duration::from_secs(1)).await.expect("acknowledged");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(handle.is_held());
+    }

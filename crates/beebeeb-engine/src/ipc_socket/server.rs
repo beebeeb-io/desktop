@@ -1,6 +1,7 @@
 //! `server` items split out of `ipc_socket.rs`.
 
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Bind and 0600-harden the daemon's Unix IPC listener at `path`. Split out
 /// of `serve_ipc_at` (task 1524) so a bind failure can be tested in
@@ -87,6 +88,7 @@ pub async fn serve_ipc_at_with_ready(
     contents: WriteContentsPolicy,
 ) -> std::io::Result<()> {
     let listener = bind_ipc_listener(&path)?;
+    PEER_CONNECTED.store(false, Ordering::SeqCst);
     if let Some(ready) = ready {
         let _ = ready.send(());
     }
@@ -103,6 +105,7 @@ pub async fn serve_ipc_at_with_ready(
             _ = &mut cancel => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
+                    PEER_CONNECTED.store(true, Ordering::SeqCst);
                     let db = db.clone();
                     let bridge = bridge.clone();
                     let write_dedup = write_dedup.clone();
@@ -120,6 +123,15 @@ pub async fn serve_ipc_at_with_ready(
     let _ = std::fs::remove_file(&path);
     tracing::info!("IPC socket stopped at {:?}", path);
     Ok(())
+}
+
+/// Set on the first accepted peer of the running socket, cleared when a socket starts. The Finder readiness check reads
+/// it: a File Provider extension that connected is up, whatever `waitForStabilization` says.
+static PEER_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a peer (the File Provider extension) has connected to the IPC socket since it was bound.
+pub fn peer_connected() -> bool {
+    PEER_CONNECTED.load(Ordering::SeqCst)
 }
 
 /// Read the connecting peer process's UID from a connected Unix stream.
