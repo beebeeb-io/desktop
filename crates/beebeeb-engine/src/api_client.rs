@@ -254,6 +254,7 @@ mod tests {
         ApiClient::new(base, "tok".into(), [0u8; 32])
     }
 
+    mod bearer;
     mod errors;
     mod ids;
     mod link;

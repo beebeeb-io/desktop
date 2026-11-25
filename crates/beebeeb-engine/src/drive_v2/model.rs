@@ -429,6 +429,12 @@ pub fn crumbs(db: &StateDb, folder: Option<&FileEntry>) -> Result<Vec<Crumb>, Dr
     Ok(chain)
 }
 
+/// A system file (`desktop.ini`, `Thumbs.db`, ...) is hidden from listings; its row stays.
+fn hidden_system_file(entry: &FileEntry) -> bool {
+    !entry.is_dir()
+        && crate::engine_bridge::is_system_file_name(entry.path.trim_matches('/').rsplit('/').next().unwrap_or(""))
+}
+
 /// `drive_list`: one folder's children from the copy on this PC, using the
 /// `idx_files_parent_id` index (task 2445). A 70k-row DB reads only one
 /// folder's children instead of every row.
@@ -443,6 +449,9 @@ pub fn list(db: &StateDb, folder_id: Option<&str>, sort: Sort, stale: bool) -> R
     for (entry, contract, child_count) in rows {
         // Shared-with-me roots have no parent; listed in Shared, not in Files.
         if want_parent.is_none() && contract.namespace == Namespace::SharedWithMe {
+            continue;
+        }
+        if hidden_system_file(&entry) {
             continue;
         }
         let path = entry.path.trim_matches('/').to_lowercase();
@@ -506,7 +515,7 @@ pub fn children_of(
         if want_parent.is_none() && contract.namespace == Namespace::SharedWithMe {
             continue;
         }
-        if backups.is_hidden(&entry.path) {
+        if backups.is_hidden(&entry.path) || hidden_system_file(entry) {
             continue;
         }
         let count = if entry.is_dir() { Some(*child_count) } else { None };

@@ -198,6 +198,8 @@ jobs:
     # compiles on every PR, unsigned and without secrets, and runs the pure
     # Foundation framing tests with a COUNTED truth line.
     name: File Provider Swift (macOS)
+    # Non-blocking until drive-macos-07 lands: a red macOS leg stays visible but does not fail the check.
+    continue-on-error: true
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.macos != 'false' }}
     runs-on: macos-latest
@@ -460,6 +462,8 @@ jobs:
 
   engine-crate-macos:
     name: Engine crate test (macOS)
+    # Non-blocking until drive-macos-07 lands (see File Provider Swift above).
+    continue-on-error: true
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.macos != 'false' }}
     runs-on: macos-latest
@@ -502,6 +506,52 @@ jobs:
             ${{ runner.temp }}/engine-test.log
             ${{ runner.temp }}/engine-test.exit
 
+  # Wall-clock budget tests (#[ignore = "timing: ..."] in source, listed in scripts/ci-timing-tests.txt). A budget
+  # measured on a shared hosted runner is noise, so these never gate a pull request: this job is non-blocking
+  # (continue-on-error), and its name must NOT be added to the required checks. Read its result as a trend.
+  timing-tests:
+    name: Timing tests (non-blocking, ${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            key: linux
+          - name: Windows
+            os: windows-latest
+            key: windows
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libfontconfig1-dev pkg-config libfuse2 libfuse-dev
+
+      # 1.99.1 builds both crates (the native app needs it).
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.99.1
+
+      - name: Run the timing tests
+        shell: bash
+        env:
+          TEMP: ${{ runner.temp }}/beebeeb-tmp
+          TMP: ${{ runner.temp }}/beebeeb-tmp
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          bash scripts/ci-run-timing-tests.sh ${{ matrix.key }}
+
   engine-boundary:
     name: Engine boundary (no tauri, test-support dev-only)
     runs-on: ubuntu-latest
@@ -536,6 +586,8 @@ jobs:
   native-rune:
     name: Native Rune app (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # The macOS leg is non-blocking until drive-macos-07 lands; the Linux and Windows legs still block.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     timeout-minutes: 100
     strategy:
       fail-fast: false

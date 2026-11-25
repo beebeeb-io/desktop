@@ -128,6 +128,8 @@ pub trait SearchSource {
     fn rebuild(&mut self) {}
     /// Search opened: a source that reads late reads now, when what it holds is old. Never from a draw.
     fn opened(&mut self) {}
+    /// Search is closed: nothing is built or retried on its behalf until it opens again.
+    fn closed(&mut self) {}
     /// The words in the field or the pill changed: a source that answers late starts on this query now, and
     /// `search` says `Searching` until it has it. Never from a draw.
     fn ask(&mut self, _query: &str, _narrow: Narrow) {}

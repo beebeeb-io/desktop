@@ -939,6 +939,26 @@ fn path_the_system_opens(db: &StateDb, sync_root: &Path, id: &str) -> Result<std
     Ok(path)
 }
 
+/// The file `id` downloaded and decrypted to a copy of its own outside the Beebeeb folder, for an app to open: the
+/// double-click on a file that is not on this PC yet. The copy is the answer's path. Blocks (it runs on the launch
+/// worker, before the launch lock is taken); the press's toast already says it is downloading.
+fn fetch_for_open<C: CredentialStores>(
+    engine: &Engine<C>,
+    turn: beebeeb_engine::account::SessionGeneration,
+    id: &str,
+    wanted: &Path,
+) -> Result<PathBuf, ActionError> {
+    use std::sync::atomic::AtomicBool;
+    let name = wanted.file_name().ok_or(ActionError::Failed)?;
+    let dest = std::env::temp_dir().join("beebeeb-open").join(id).join(name);
+    std::fs::create_dir_all(dest.parent().ok_or(ActionError::Failed)?).map_err(|_| ActionError::Failed)?;
+    save_copy::save_copy(engine, turn, id, &dest, &|_, _| {}, &AtomicBool::new(false)).map_err(|why| match why {
+        save_copy::SaveRefused::NotSignedIn => ActionError::Unavailable,
+        _ => ActionError::Failed,
+    })?;
+    Ok(dest)
+}
+
 impl<C: CredentialStores> EngineFilesSource<C> {
     /// A local file operation, on the signed-in account's local state (the account-bound handle, task 2488) and
     /// the sync root: both are required. Refused when sync is not running for this handle, as the published view
@@ -983,11 +1003,29 @@ impl<C: CredentialStores> EngineFilesSource<C> {
         paths: Vec<PathBuf>,
         start: files_launch::Start,
     ) -> Result<(), ActionError> {
+        self.start_later_fetching(action, paths.into_iter().map(|path| (path, None)).collect(), start)
+    }
+
+    /// [`Self::start_later`], where a path paired with an id is downloaded first when no file is at it (a cloud-only
+    /// file on a system with no placeholders: nothing else would fetch it), then started from the copy.
+    fn start_later_fetching(
+        &mut self,
+        action: files_source::Action,
+        paths: Vec<(PathBuf, Option<String>)>,
+        start: files_launch::Start,
+    ) -> Result<(), ActionError> {
         let turn = self.engine.session_turn();
         let (engine, failed) = (self.engine.clone(), self.start_failed.clone());
         let job = move || {
             let still = || engine.session_turn() == turn;
-            if let Err(why) = paths.iter().try_for_each(|path| start(path, &still))
+            let started = paths.iter().try_for_each(|(path, id)| {
+                let path = match id {
+                    Some(id) if !path.exists() => fetch_for_open(&engine, turn, id, path)?,
+                    _ => path.clone(),
+                };
+                start(&path, &still)
+            });
+            if let Err(why) = started
                 && still()
             {
                 failed
@@ -1004,14 +1042,19 @@ impl<C: CredentialStores> EngineFilesSource<C> {
 
     /// Starts `path` with the system's app when it has one for the kind (and the kind may be run), else in the file
     /// manager with the file selected, on the launch worker.
-    fn start_outside(&mut self, path: PathBuf, openable: bool) -> Result<files_source::Outside, ActionError> {
+    fn start_outside(
+        &mut self,
+        path: PathBuf,
+        id: Option<String>,
+        openable: bool,
+    ) -> Result<files_source::Outside, ActionError> {
         let default = openable && (self.starts.has_default_app)(&path);
-        let (outside, start) = if default {
-            (files_source::Outside::DefaultApp, self.starts.open)
+        let (outside, start, fetch) = if default {
+            (files_source::Outside::DefaultApp, self.starts.open, id)
         } else {
-            (files_source::Outside::Explorer, self.starts.reveal)
+            (files_source::Outside::Explorer, self.starts.reveal, None)
         };
-        self.start_later(files_source::Action::Open, vec![path], start)?;
+        self.start_later_fetching(files_source::Action::Open, vec![(path, fetch)], start)?;
         Ok(outside)
     }
 
@@ -1151,7 +1194,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
             }
         }
         let open = self.starts.open;
-        self.start_later(files_source::Action::Open, paths, open)
+        let paths = paths.into_iter().zip(items.iter().map(|item| Some(item.id.clone()))).collect();
+        self.start_later_fetching(files_source::Action::Open, paths, open)
     }
 
     /// Other… (Windows' app chooser). It opens only while the session of this press is still the one once the
@@ -1174,11 +1218,11 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         } else {
             crate::shell::platform::macos::macos_fp::open::register_item(&path, &item.id);
         }
-        self.start_outside(path, openable)
+        self.start_outside(path, Some(item.id.clone()), openable)
     }
 
     fn open_path_outside(&mut self, path: &Path) -> Result<files_source::Outside, ActionError> {
-        self.start_outside(path.to_path_buf(), true)
+        self.start_outside(path.to_path_buf(), None, true)
     }
 
     fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {
@@ -1417,11 +1461,24 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError> {
-        self.local(|db, sync_root| {
-            let parent_entry = file_ops::resolve_folder(db, parent).map_err(map_drive_err)?;
-            file_ops::create_folder(db, sync_root, parent_entry.as_ref(), name).map_err(map_drive_err)?;
+        // RD-b: every refusal is told in the log (never the name: it is the person's).
+        let at_root = parent.is_none();
+        let done = self.local(|db, sync_root| {
+            let parent_entry = file_ops::resolve_folder(db, parent).map_err(|why| {
+                tracing::warn!(at_root, ?why, "new folder: the parent folder was not found");
+                map_drive_err(why)
+            })?;
+            file_ops::create_folder(db, sync_root, parent_entry.as_ref(), name).map_err(|why| {
+                tracing::warn!(at_root, ?why, "new folder: refused");
+                map_drive_err(why)
+            })?;
             Ok(())
-        })
+        });
+        match &done {
+            Ok(()) => tracing::info!(at_root, "new folder: made"),
+            Err(why) => tracing::warn!(at_root, ?why, "new folder: failed"),
+        }
+        done
     }
 
     fn new_file(&mut self, folder: Option<&str>, name: &str) -> Result<(), ActionError> {

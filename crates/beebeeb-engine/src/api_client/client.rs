@@ -329,11 +329,28 @@ impl ApiClient {
         path: &str,
         read_timeout: Duration,
     ) -> ApiResult<T> {
+        self.get_typed_bulk_headers(path, read_timeout, false).await
+    }
+
+    /// [`Self::get_typed_bulk_with`]; `backup` adds `X-Beebeeb-Origin: backup` (RE3-a: the backup pass's own reads).
+    pub(super) async fn get_typed_bulk_headers<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        read_timeout: Duration,
+        backup: bool,
+    ) -> ApiResult<T> {
         let url = self.url(path);
+        let mut headers = provenance_headers();
+        if backup {
+            headers.insert(
+                beebeeb_types::backup::ORIGIN_HEADER,
+                reqwest::header::HeaderValue::from_static(beebeeb_types::backup::ORIGIN_BACKUP),
+            );
+        }
         let http = api_base_client_builder(&self.base_url)
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(read_timeout)
-            .default_headers(provenance_headers())
+            .default_headers(headers)
             .build()
             .expect("reqwest client");
         let resp = self

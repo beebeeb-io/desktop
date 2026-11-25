@@ -14,6 +14,9 @@ use std::sync::{Condvar, Mutex};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
+/// RE-a: statements kept compiled on the connection (`prepare_cached`).
+const STATEMENT_CACHE: usize = 128;
+
 /// Rows the first pull writes per commit, at most.
 pub const PULL_BATCH_ROWS: usize = 1_000;
 
@@ -51,6 +54,9 @@ unsafe impl Sync for ConnLock {}
 
 impl ConnLock {
     pub(crate) fn new(conn: Connection) -> Self {
+        // RE-a: a pull's per-row statements are cached (`prepare_cached`), not compiled again for each of a 42k-row
+        // first listing's rows; rusqlite keeps 16 by default, fewer than one row's ingest uses.
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         Self {
             owner: Mutex::new((None, 0, 0, 0)),
             freed: Condvar::new(),
@@ -348,6 +354,7 @@ mod tests {
 
     /// dc-170 (1): slow rows commit by time, long before the row count is reached.
     #[test]
+    #[ignore = "timing: wall-clock batch-length budget; runs in the non-blocking Timing tests job (scripts/ci-timing-tests.txt)"]
     fn batch_commits_once_open_max_time_whatever_its_rows() {
         let lock = lock_with_table();
         let mut batch = WriteBatch::open_capped(&lock, 1_000, Duration::from_millis(30)).unwrap();

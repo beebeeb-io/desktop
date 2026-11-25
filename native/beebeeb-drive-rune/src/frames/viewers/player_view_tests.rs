@@ -42,6 +42,7 @@ fn state(at_ms: u64, length_ms: u64) -> PlayState {
         length_ms,
         playing: true,
         buffering: false,
+        net: Default::default(),
         title: "Harbour sessions".into(),
         artist: "Anna".into(),
         reduced_quality: false,

@@ -512,6 +512,22 @@ mod tests {
         assert!(root.path().join("Plans").is_dir(), "the directory exists on disk");
     }
 
+    // RD-b: the root of a mirrored account (cloud-only rows at the root, a same-named folder nested) takes a new folder.
+    #[test]
+    fn create_folder_in_the_root_of_a_mirrored_account() {
+        let root = sync_root();
+        let (_d, db) = temp_db();
+        seed(&db, "d-docs", "/Docs", None, true);
+        seed(&db, "d-nested", "/Docs/Untitled folder", Some("d-docs"), true);
+        seed(&db, "f-1", "/notes.txt", None, false);
+        std::fs::create_dir(root.path().join("Docs")).unwrap();
+        let parent = resolve_folder(&db, None).unwrap();
+        assert!(parent.is_none(), "the root has no entry");
+        let rel = create_folder(&db, root.path(), parent.as_ref(), "Untitled folder").unwrap();
+        assert_eq!(rel, "Untitled folder");
+        assert!(root.path().join("Untitled folder").is_dir());
+    }
+
     #[test]
     fn new_folder_with_taken_name_fails() {
         let root = sync_root();

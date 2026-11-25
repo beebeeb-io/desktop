@@ -384,6 +384,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             let details = crate::frames::global::status_words(s)
                 .or_else(|| super::browse_states::status_words(s))
                 .or_else(|| super::protected::status_words(s))
+                .or_else(|| super::keeping::status_words(&s.actions.source.downloads()))
                 .unwrap_or_else(|| pc_summary(s));
             let name = match &state {
                 Some(state) => format!("{state}. {details}"),

@@ -643,6 +643,12 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         }
     }
 
+    /// Search closed: the retry of a refused build stops (it would rebuild, with the engine's lock, behind a window
+    /// that shows no search).
+    fn closed(&mut self) {
+        self.watching = false;
+    }
+
     /// Try again: build the index now, for the session of the moment (a build on its way is kept).
     fn rebuild(&mut self) {
         self.follow();

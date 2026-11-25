@@ -747,6 +747,16 @@ impl crate::engine_bridge::EngineBridge {
     }
 
     pub async fn prepare_owned_rows(&self, rows: &[Value]) -> anyhow::Result<Vec<PreparedOwnedRow>> {
+        self.prepare_owned_rows_reporting(rows, &mut |_| {}).await
+    }
+
+    /// RE-a: [`Self::prepare_owned_rows`], telling `progress` how many rows are done before each row (the first
+    /// listing's bar and log; the caller decides how often it reports).
+    pub async fn prepare_owned_rows_reporting(
+        &self,
+        rows: &[Value],
+        progress: &mut (dyn FnMut(usize) + Send),
+    ) -> anyhow::Result<Vec<PreparedOwnedRow>> {
         let scope = self.owner_key_scope();
         let master = MasterKey::from_bytes(*self.api().master_key());
         let mut batch = Batch::default();
@@ -759,7 +769,8 @@ impl crate::engine_bridge::EngineBridge {
         }
         let mut prepared = Vec::with_capacity(rows.len());
         let mut pending = PendingRecords::new(self.db());
-        for input in rows {
+        for (done, input) in rows.iter().enumerate() {
+            progress(done);
             scope.check()?;
             let Some(id) = input["id"].as_str().filter(|s| !s.is_empty()) else {
                 continue;

@@ -106,16 +106,15 @@ impl StateDb {
         // Only `handle_rename` (Windows) queues these ops, so other builds skip the query.
         let held: Option<(String, Option<String>)> = if cfg!(any(target_os = "windows", test, feature = "test-support"))
         {
-            tx.query_row(
+            tx.prepare_cached(
                 "SELECT path, parent_id FROM files
                  WHERE file_id = ?1 AND item_kind = 'file'
                    AND EXISTS(SELECT 1 FROM operation_queue
                      WHERE file_id = ?1 AND kind IN ('rename_file', 'move_file')
                        AND CASE WHEN json_valid(metadata_json)
                            THEN json_extract(metadata_json, '$.local_rename') END = 1)",
-                params![entry.file_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            )?
+            .query_row(params![entry.file_id], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?
         } else {
             None

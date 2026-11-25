@@ -74,9 +74,9 @@ fn identity_at(path: &std::path::Path) -> Option<StampIdentity> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileBasicInfo, GetFileInformationByHandle,
-        GetFileInformationByHandleEx,
+        FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION,
+        FILE_BASIC_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
     };
     let file = std::fs::OpenOptions::new()
         .access_mode(FILE_READ_ATTRIBUTES.0)
@@ -169,8 +169,8 @@ pub(super) fn list_dir(dir: &std::path::Path) -> std::io::Result<Vec<Listed>> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{ERROR_NO_MORE_FILES, HANDLE};
     use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
     const DIRECTORY: u32 = 0x10;
     const REPARSE_POINT: u32 = 0x400;
@@ -328,7 +328,7 @@ pub(super) async fn scan_loop(
     sync_root: PathBuf,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    use super::change_feed::{GATHER_INTERVAL, Gathered, set_changes_pending};
+    use super::change_feed::{set_changes_pending, Gathered, GATHER_INTERVAL};
     let mut memo = ScanMemo::default();
     // dc-166: opened on the first pass (blocking I/O), kept across passes.
     let mut feed: Option<Gathered> = None;
@@ -455,7 +455,7 @@ fn backup_keys_changed(bridge: &EngineBridge, memo: &ScanMemo) -> bool {
 pub(super) fn visit_paths(
     sync_root: &std::path::Path,
     paths: &std::collections::BTreeSet<PathBuf>,
-    on_dir: &mut dyn FnMut(&std::path::Path),
+    on_dir: &mut dyn FnMut(&std::path::Path, &DiskStamp),
     on_file: &mut dyn FnMut(&std::path::Path, &DiskStamp),
 ) {
     let mut walked: Option<&std::path::Path> = None;
@@ -493,7 +493,7 @@ pub(super) fn visit_paths(
             continue;
         }
         if ft.is_dir() {
-            on_dir(path);
+            on_dir(path, &DiskStamp::of(&meta));
             walk_dir(sync_root, path, rel.components().count(), on_dir, on_file);
             walked = Some(path);
         } else if ft.is_file() {
@@ -537,7 +537,7 @@ pub(super) fn walk_dir(
     sync_root: &std::path::Path,
     dir: &std::path::Path,
     depth: usize,
-    on_dir: &mut dyn FnMut(&std::path::Path),
+    on_dir: &mut dyn FnMut(&std::path::Path, &DiskStamp),
     on_file: &mut dyn FnMut(&std::path::Path, &DiskStamp),
 ) {
     if depth > MAX_SCAN_DEPTH {
@@ -581,7 +581,7 @@ pub(super) fn walk_dir(
             ListedKind::Dir => {
                 // PRE-ORDER: ensure this directory's vault folder exists BEFORE we
                 // descend, so a nested child resolves its parent (task 0811).
-                on_dir(&path);
+                on_dir(&path, &entry.stamp);
                 walk_dir(sync_root, &path, depth + 1, on_dir, on_file);
             }
             ListedKind::File => on_file(&path, &entry.stamp),
@@ -589,6 +589,69 @@ pub(super) fn walk_dir(
             ListedKind::Other => tracing::debug!("enumeration scan: skipped non-file entry"),
         }
     }
+}
+
+/// RE-e (11-24: 12 POST /files/folder on prod right after the first load): whether the folder at `path`, as its
+/// parent's listing (or, for a path the change journal named, its own metadata) shows it in `stamp`, is a Cloud Files
+/// placeholder. Only the engine mints one, from a server row; a folder made on this PC is a plain folder
+/// (`a_folder_made_on_this_pc_gets_no_cloud_files_identity`), and a link is listed as one and never reaches here.
+/// The listing's reparse-point bit says so without an open; a folder placeholder can list without it (the Windows
+/// test showed one), so a folder without it is asked through one attribute-only open. The caller asks only for a
+/// folder with no row at its path, so a synced tree is never opened for this.
+pub(super) fn is_placeholder_dir(path: &std::path::Path, stamp: &DiskStamp) -> bool {
+    #[cfg(test)]
+    if placeholder_dirs_for_tests::marked(path) {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        const REPARSE_POINT: u32 = 0x400;
+        stamp.attributes & REPARSE_POINT != 0 || placeholder_at(path)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (path, stamp);
+        false
+    }
+}
+
+/// Tests off Windows, where no folder is a placeholder: the folders a test marks as minted from a server row. Per
+/// thread: a scan pass runs on the test's own thread.
+#[cfg(test)]
+pub(crate) mod placeholder_dirs_for_tests {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static MARKED: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+    }
+
+    /// Mark `path` as a placeholder folder for this thread's scans.
+    pub(crate) fn mark(path: &Path) {
+        MARKED.with(|m| m.borrow_mut().insert(path.to_path_buf()));
+    }
+
+    pub(super) fn marked(path: &Path) -> bool {
+        MARKED.with(|m| m.borrow().contains(path))
+    }
+}
+
+/// Whether the entry at `path` (a folder) is a Cloud Files placeholder, through a handle opened for its attributes
+/// only, on the entry itself (never a recall), sharing every access. Not opened: not one.
+#[cfg(target_os = "windows")]
+fn placeholder_at(path: &std::path::Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)
+        .is_ok_and(|folder| crate::windows_cf::placeholders::handle_identity(&folder).0)
 }
 
 #[cfg(test)]

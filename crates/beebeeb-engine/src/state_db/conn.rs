@@ -10,9 +10,11 @@ pub(super) fn upsert_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C
     // one would advance the anchor with no real change — and (c) carry
     // the old parent for reparent detection.
     let old: Option<(String, String, i64, i64, i64, Option<String>)> = conn
-        .query_row(
+        .prepare_cached(
             "SELECT path, status, size_bytes, modified_at, remote_updated_at, parent_id
              FROM files WHERE file_id = ?1",
+        )?
+        .query_row(
             params![e.file_id],
             |row| {
                 Ok((
@@ -26,7 +28,7 @@ pub(super) fn upsert_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C
             },
         )
         .optional()?;
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO files (file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(file_id) DO UPDATE SET
@@ -34,7 +36,8 @@ pub(super) fn upsert_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C
            size_bytes=excluded.size_bytes, modified_at=excluded.modified_at,
            content_hash=excluded.content_hash,
            remote_updated_at=excluded.remote_updated_at",
-        params![
+    )?
+    .execute(params![
             e.file_id,
             e.path,
             e.status.as_str(),
@@ -42,8 +45,7 @@ pub(super) fn upsert_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C
             e.modified_at,
             e.content_hash,
             e.remote_updated_at
-        ],
-    )?;
+        ])?;
     let changed = match &old {
         None => true,
         Some((path, status, size, modified_at, remote_updated_at, _)) => {
@@ -90,7 +92,7 @@ pub(super) fn get_file_conn<C: std::ops::Deref<Target = Connection>>(
     conn: &C,
     file_id: &str,
 ) -> Result<Option<FileEntry>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at,
                 parent_id, item_kind
          FROM files WHERE file_id = ?1",
@@ -426,9 +428,11 @@ pub(super) fn set_file_contract_state_conn<C: std::ops::Deref<Target = Connectio
     // metadata changes (kind, current_version, content_type) record a
     // plain modified. A no-op write records nothing.
     let old: Option<(Option<String>, String, String, i64)> = conn
-        .query_row(
+        .prepare_cached(
             "SELECT parent_id, item_kind, content_type, current_version
              FROM files WHERE file_id = ?1",
+        )?
+        .query_row(
             params![state.file_id],
             |row| {
                 Ok((
@@ -440,7 +444,7 @@ pub(super) fn set_file_contract_state_conn<C: std::ops::Deref<Target = Connectio
             },
         )
         .optional()?;
-    conn.execute(
+    conn.prepare_cached(
         "UPDATE files SET
            namespace = ?2,
            parent_id = ?3,
@@ -460,7 +464,8 @@ pub(super) fn set_file_contract_state_conn<C: std::ops::Deref<Target = Connectio
            last_sync_at = ?17,
            owner_email = ?18
          WHERE file_id = ?1",
-        params![
+    )?
+    .execute(params![
             state.file_id,
             state.namespace.as_str(),
             state.parent_id,
@@ -479,8 +484,7 @@ pub(super) fn set_file_contract_state_conn<C: std::ops::Deref<Target = Connectio
             state.inherited_pin_state.as_str(),
             state.last_sync_at,
             state.owner_email,
-        ],
-    )?;
+        ])?;
     if let Some((old_parent, old_kind, old_content_type, old_version)) = old {
         let parent_changed = old_parent != state.parent_id;
         let metadata_changed = old_kind != state.item_kind.as_str()
@@ -496,7 +500,7 @@ pub(super) fn set_file_contract_state_conn<C: std::ops::Deref<Target = Connectio
 }
 
 pub(super) fn get_file_contract_state_conn(conn: &Connection, file_id: &str) -> Result<Option<FileContractState>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT file_id, namespace, parent_id, shared_root_id, share_id, permission_bits,
                 item_kind, content_type, current_version, current_object_version_id,
                 local_base_version, local_hash, cache_path, cache_bytes, pin_state,

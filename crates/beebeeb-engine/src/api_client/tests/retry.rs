@@ -260,3 +260,19 @@ fn a_snapshot_whose_body_stalls_fails_in_bounded_time() {
         started.elapsed()
     );
 }
+
+#[test]
+fn get_file_rides_out_a_5xx_and_records_a_401() {
+    let (base, hits) = scripted_server(vec![Some(UNAVAILABLE), Some(OK_JSON)]);
+    let client = link_client(base);
+    run_async(client.get_file("f1")).expect("get_file retries a 503 like every typed GET");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    let base = one_shot_server(Some(
+        "HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\nno",
+    ));
+    let client = link_client(base);
+    let err = run_async(client.get_file("f1")).unwrap_err();
+    assert!(err.to_string().contains("401"), "{err}");
+    assert!(client.link().snapshot().last_ok_at.is_some(), "the 401 answer reaches the link monitor");
+}

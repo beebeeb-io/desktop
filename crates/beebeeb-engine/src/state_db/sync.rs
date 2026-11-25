@@ -2,6 +2,11 @@
 
 use super::*;
 
+thread_local! {
+    /// RE3-e: set while this thread applies a fetched snapshot ([`StateDb::during_snapshot_apply`]).
+    static SNAPSHOT_APPLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Changes after an anchor, plus the anchor to resume from.
 type ChangePage = (Vec<FileChange>, Option<Vec<u8>>);
 
@@ -50,15 +55,34 @@ impl StateDb {
     /// rebuilt without the authoritative snapshot. Persisted so the request
     /// survives a restart between ticks. On macOS each call increments a request
     /// counter (spec §6.3.2, I-2(b)); elsewhere it sets a take-once flag.
+    #[track_caller]
     pub fn request_resnapshot(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Self::request_resnapshot_conn(&conn)
+    }
+    /// RE3-e: run `apply` (the apply of a snapshot just fetched) on this thread with the re-snapshot requests it
+    /// raises itself counted as served. Such a request asks for the list again to learn what this very list just
+    /// told (a name it could not read stays unreadable under the same keys), so it only cost Guus's PC a second
+    /// 42k-row snapshot right after start. Requests from other threads still land. Not on macOS: there a
+    /// request raised during a snapshot means it must run again (spec §6.3.2).
+    pub fn during_snapshot_apply<R>(apply: impl FnOnce() -> R) -> R {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SNAPSHOT_APPLY.with(|on| on.set(self.0));
+            }
+        }
+        let _reset = Reset(SNAPSHOT_APPLY.with(|on| on.replace(true)));
+        apply()
     }
     /// [`Self::request_resnapshot`] inside the caller's connection or transaction.
     /// The value counts the requests, so a request made while a snapshot runs is
     /// still pending after that snapshot clears the one it read.
     #[cfg(target_os = "macos")]
+    #[track_caller]
     pub(super) fn request_resnapshot_conn(conn: &Connection) -> Result<()> {
+        // RE3-e: who asked, by call site. At debug: on macOS a waiting upload asks on every pass.
+        tracing::debug!(at = %std::panic::Location::caller(), "re-snapshot requested");
         conn.execute(
             "INSERT INTO sync_state (key, value) VALUES (?1, '1')
              ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
@@ -68,7 +92,15 @@ impl StateDb {
     }
     /// [`Self::request_resnapshot`] inside the caller's connection or transaction.
     #[cfg(not(target_os = "macos"))]
+    #[track_caller]
     pub(super) fn request_resnapshot_conn(conn: &Connection) -> Result<()> {
+        // RE3-e: who asked, by call site (the caller logs why), so a second snapshot is traceable.
+        let at = std::panic::Location::caller();
+        if SNAPSHOT_APPLY.with(std::cell::Cell::get) {
+            tracing::info!(%at, "re-snapshot not requested: the snapshot being applied is the fresh list");
+            return Ok(());
+        }
+        tracing::info!(%at, "re-snapshot requested");
         conn.execute(
             "INSERT INTO sync_state (key, value) VALUES (?1, '1')
              ON CONFLICT(key) DO UPDATE SET value = '1'",

@@ -11,6 +11,7 @@ fn big() -> String {
         .collect()
 }
 
+#[ignore = "timing: wall-clock build/redraw budget; runs in the non-blocking Timing tests job (scripts/ci-timing-tests.txt)"]
 #[test]
 fn budget_ten_thousand_lines() {
     let t = tokens::theme(false);

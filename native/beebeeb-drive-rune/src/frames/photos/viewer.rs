@@ -223,6 +223,7 @@ fn live_stage(photo: El, handle: &crate::media::player::PlayerHandle, own: Optio
                     playing: false,
                     at_ms: 0,
                     length_ms: 0,
+                    buffered_pm: 0,
                 },
                 Times::of,
             );

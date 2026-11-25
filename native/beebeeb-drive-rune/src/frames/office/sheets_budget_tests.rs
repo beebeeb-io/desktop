@@ -74,6 +74,7 @@ fn best(runs: usize, mut f: impl FnMut()) -> Duration {
         .expect("a run")
 }
 
+#[ignore = "timing: wall-clock frame budget; runs in the non-blocking Timing tests job (scripts/ci-timing-tests.txt)"]
 #[test]
 fn office_sheets_budget_clone_and_frame_at_the_cell_cap_fit_a_frame() {
     let view = full();

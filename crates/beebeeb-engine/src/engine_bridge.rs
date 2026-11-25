@@ -142,7 +142,7 @@ mod stale_copies;
 pub use stale_copies::{REFRESH_ORDER, RefreshStep, STALE_COPIES_PER_PASS, STALE_COPIES_READ_PER_PASS, StaleCopyPass};
 // LD-0105 W2: a Windows range session's preparation and its "whole" record.
 mod range_fetch;
-pub use backup_tree::{BackupChild, BackupFolderState, tighter_clock};
+pub use backup_tree::{BackupChild, BackupFolderState, BackupSnapshot, tighter_clock};
 #[cfg_attr(not(target_os = "windows"), allow(unused_imports))]
 pub use range_fetch::{PrepEnd, RangePrep};
 mod conflicts;
@@ -259,6 +259,7 @@ mod tests {
     mod finder_queue_4;
     mod finder_queue_5;
     mod finder_queue_6;
+    mod first_listing_speed; // RE-a: a 42k-row first listing, its budget and its progress.
     mod hydrate_files;
     mod ipc;
     // S6: a kept file this PC does not hold is fetched again (Linux, through the queue).
@@ -284,6 +285,7 @@ mod tests {
     // S6: a hydrate's start look; a save made after it is never replaced (Linux).
     mod start_look_s6;
     mod cursor_2272; // Task 2272: a failed op apply holds the cursor, retries, then parks.
+    mod resnapshot_re3e; // RE3-e: a good snapshot is fetched once at start.
     mod sync;
     mod sync_2;
     mod sync_3;
@@ -554,7 +556,7 @@ use landing::*;
 pub use landing::{finder_staging_candidates, keep_both_name};
 mod staging_bases;
 pub use landing::{
-    FinderWriteItemKind, FinderWriteOutcome, FinderWriteTarget, VersionConflictEntry, is_ignored_finder_name,
+    FinderWriteItemKind, FinderWriteOutcome, FinderWriteTarget, VersionConflictEntry, is_ignored_finder_name, is_system_file_name,
     version_conflict_feed_from_db,
 };
 pub use staging_bases::FinderStagingBases;

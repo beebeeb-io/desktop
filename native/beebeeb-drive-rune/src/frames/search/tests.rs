@@ -335,6 +335,49 @@ fn only_this_groups_scenes_name_the_sample() {
     assert!(naming.is_empty(), "the sample is named outside Search: {naming:?}");
 }
 
+/// RD-a: Esc ends search with words in the field, and a section press away from Files ends it too.
+#[test]
+fn esc_with_words_closes_search_and_another_section_ends_it() {
+    use crate::shell::app::{Event, Route, Section};
+    let mut state = init();
+    state.frames.find.source = Box::new(BoardSearch::new());
+    let mut rt = window(state);
+    rt.poll = Some(crate::shell::host::poll);
+    press(&mut rt, Key::Command('f'), CTRL);
+    type_text(&mut rt, "contr");
+    assert_eq!(text(&rt, "folder-title"), "Search");
+    press(&mut rt, Key::Escape, NONE);
+    assert!(!super::is_open(&rt.state), "one Esc ends search, words or not");
+    assert!(has(&rt, "pane-list"));
+    press(&mut rt, Key::Command('f'), CTRL);
+    type_text(&mut rt, "contr");
+    crate::shell::host::dispatch(&mut rt.state, Event::Navigate(Route::section(Section::Photos)));
+    settle(&mut rt);
+    assert!(!super::is_open(&rt.state), "Photos ends search");
+    assert!(rt.state.search.text.is_empty());
+}
+
+/// macOS: a Cmd+F search (cmd only, no ctrl) ends on Esc and on a section change like a Ctrl+F one.
+#[test]
+fn cmd_f_search_ends_on_esc_and_on_a_section_change() {
+    use crate::shell::app::{Event, Route, Section};
+    const CMD: Mods = Mods { cmd: true, ..NONE };
+    let mut state = init();
+    state.frames.find.source = Box::new(BoardSearch::new());
+    let mut rt = window(state);
+    rt.poll = Some(crate::shell::host::poll);
+    press(&mut rt, Key::Command('f'), CMD);
+    type_text(&mut rt, "contr");
+    assert_eq!(text(&rt, "folder-title"), "Search");
+    press(&mut rt, Key::Escape, NONE);
+    assert!(!super::is_open(&rt.state), "Esc ends a Cmd+F search");
+    press(&mut rt, Key::Command('f'), CMD);
+    type_text(&mut rt, "contr");
+    crate::shell::host::dispatch(&mut rt.state, Event::Navigate(Route::section(Section::Photos)));
+    settle(&mut rt);
+    assert!(!super::is_open(&rt.state), "a section change ends a Cmd+F search");
+}
+
 #[test]
 fn ctrl_f_opens_search_and_esc_takes_the_window_back_to_files() {
     let mut rt = window(init());

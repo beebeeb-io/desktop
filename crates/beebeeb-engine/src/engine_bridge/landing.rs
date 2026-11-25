@@ -139,9 +139,17 @@ pub fn keep_both_name(original: &str, device: &str, hhmm: &str, taken: &std::col
     }
 }
 
+/// OS bookkeeping files (Windows `desktop.ini`/`Thumbs.db`, macOS `.DS_Store`, Office `~$` locks): never
+/// uploaded, never listed in Files. Rows already on the server are only hidden, not deleted.
+pub fn is_system_file_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    lower == "desktop.ini" || lower == "thumbs.db" || lower == ".ds_store" || trimmed.starts_with("~$")
+}
+
 pub fn is_ignored_finder_name(name: &str) -> bool {
     let trimmed = name.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || is_system_file_name(trimmed) {
         return true;
     }
     let lower = trimmed.to_ascii_lowercase();

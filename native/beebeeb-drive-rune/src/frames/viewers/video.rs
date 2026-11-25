@@ -81,6 +81,40 @@ pub fn no_sound_line(prefix: &'static str, why: NoSound, ink: Color, t: &Theme) 
         )
 }
 
+/// While the start buffers: a progress bar and "Buffering 11 MB of 32 MB"; while playing and the download is behind:
+/// "Waiting for the network (1.2 MB/s)". Nothing otherwise.
+pub fn net_row(state: &PlayState, t: &Theme) -> Option<El> {
+    let ink = Color::WHITE;
+    let net = &state.net;
+    let stalled = net.stall_line();
+    let (words, bar) = if state.buffering && state.refused.is_none() && net.total > 0 {
+        (net.buffering_line(), Some(net.start_part()))
+    } else {
+        (stalled?, None)
+    };
+    let _ = t;
+    let mut r = col()
+        .key("video-net")
+        .w_full()
+        .items_center()
+        .gap(scale::space::S4)
+        .child(kit::label("video-net-words", words, CAP, ink));
+    if let Some(part) = bar {
+        r = r.child(
+            el().key("video-net-bar")
+                .role("progressbar")
+                .label("Buffering")
+                .range_value(f64::from(part), 0.0, 1.0)
+                .w(240.0)
+                .h(4.0)
+                .radius(2.0)
+                .fill(ink.alpha(0.3))
+                .child(el().key("video-net-fill").w_frac(part).h_full().radius(2.0).fill(ink)),
+        );
+    }
+    Some(r)
+}
+
 #[cfg(test)]
 pub use super::refusal_text::{OPEN_DEFAULT, OPEN_ELSEWHERE};
 
@@ -182,6 +216,8 @@ pub struct Times {
     pub playing: bool,
     pub at_ms: u64,
     pub length_ms: u64,
+    /// How much of the file is fetched, in thousandths: the timeline's buffered range.
+    pub buffered_pm: u16,
 }
 
 impl Times {
@@ -190,6 +226,7 @@ impl Times {
             playing: state.playing,
             at_ms: state.at_ms,
             length_ms: state.length_ms,
+            buffered_pm: (state.net.buffered_part() * 1000.0) as u16,
         }
     }
 
@@ -403,6 +440,13 @@ fn bar_with(
                 .radius(2.0)
                 .fill(track)
                 .child(
+                    el().key(format!("{prefix}-scrub-buffered"))
+                        .w_frac(f32::from(times.buffered_pm) / 1000.0)
+                        .h_full()
+                        .radius(2.0)
+                        .fill(ink.alpha(0.35)),
+                )
+                .child(
                     el().key(format!("{prefix}-scrub-fill"))
                         .w_frac(part)
                         .h_full()
@@ -456,6 +500,7 @@ pub fn view(ui: &Ui, t: &Theme) -> El {
                 playing: false,
                 at_ms: 0,
                 length_ms: 0,
+                buffered_pm: 0,
             },
             Times::of,
         );
@@ -469,6 +514,9 @@ pub fn view(ui: &Ui, t: &Theme) -> El {
         // The stage keeps playing; the line sits where "Reduced quality on this PC" sits in the bar's words.
         if let Some(why) = state.as_ref().and_then(|s| s.no_sound) {
             body = body.child(no_sound_line("video", why, Color::WHITE, t));
+        }
+        if let Some(net) = state.as_ref().and_then(|s| net_row(s, t)) {
+            body = body.child(net);
         }
         return body.child(files_bar(&handle, &ui.file.id, times, t));
     }

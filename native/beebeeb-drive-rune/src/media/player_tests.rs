@@ -642,7 +642,21 @@ fn helper_read_over_limit_kills() {
     });
     r.open("a", KindHint::Audio);
     r.wait_refused();
-    assert_eq!(r.reads(), 0, "nothing was read for it");
+    // The player's own reads of the file's two ends (RE-d, `player::ranged`) come before the helper's: what counts
+    // is that none of the helper's asks was answered.
+    assert_eq!(
+        r.seen()
+            .iter()
+            .filter(|msg| matches!(msg, ToHelper::Data { .. }))
+            .count(),
+        0,
+        "nothing was read for it"
+    );
+    assert!(
+        r.reads() <= 3,
+        "only the player's own reads of the file's two ends: {}",
+        r.reads()
+    );
 }
 
 #[test]
@@ -675,7 +689,19 @@ fn helper_read_past_end_kills() {
     });
     wraps.open("a", KindHint::Audio);
     wraps.wait_refused();
-    assert_eq!(past.reads() + wraps.reads(), 0, "nothing was read");
+    assert_eq!(
+        past.seen()
+            .iter()
+            .filter(|msg| matches!(msg, ToHelper::Data { .. }))
+            .count()
+            + wraps
+                .seen()
+                .iter()
+                .filter(|msg| matches!(msg, ToHelper::Data { .. }))
+                .count(),
+        0,
+        "nothing was read"
+    );
 }
 
 #[test]
@@ -713,7 +739,15 @@ fn helper_third_read_in_flight_kills() {
     let three = rig(1_000, asks(3));
     three.open("a", KindHint::Audio);
     three.wait_refused();
-    assert_eq!(three.reads(), 0, "nothing was read for them");
+    assert_eq!(
+        three
+            .seen()
+            .iter()
+            .filter(|msg| matches!(msg, ToHelper::Data { .. }))
+            .count(),
+        0,
+        "nothing was read for them"
+    );
 }
 
 #[test]
@@ -1123,7 +1157,11 @@ fn system_answer_restarts_once_in_the_system_profile() {
         .iter()
         .rposition(|msg| matches!(msg, ToHelper::Open { .. }))
         .expect("the second open");
-    assert_eq!(last, [second_open - 1], "one `LastHelper`, right before the second `Open`");
+    assert_eq!(
+        last,
+        [second_open - 1],
+        "one `LastHelper`, right before the second `Open`"
+    );
     r.handle.stop(StopReason::Closed);
     // The system profile's helper answers the same: that is the PC's answer. Never a third start.
     let pc = rig(1_000, no_system_aac);
@@ -1253,4 +1291,36 @@ fn volume_and_mute_reach_the_sound_and_stay_across_next() {
     r.open("c", KindHint::Audio);
     wait_until("c plays", || r.sound.started.load(SeqCst) == 3);
     assert_eq!(r.sound.last_gain(), Some(0.6), "the next item plays at it");
+}
+
+// ---- The buffering model (RE3-c) ----
+
+/// The start bar and the line say fetched of what the start needs, and the file's size caps the need.
+#[test]
+fn net_says_buffering_megabytes_of_the_start_need() {
+    let mut net = super::Net::new(32_000_000);
+    assert_eq!(net.need(), super::START_BYTES);
+    assert_eq!(net.buffering_line(), "Buffering 0 MB of 8 MB");
+    net.record_read(0, 4_000_000, 100);
+    assert_eq!(net.buffering_line(), "Buffering 4 MB of 8 MB");
+    assert!((net.start_part() - 0.5).abs() < 1e-6);
+    net.record_read(4_000_000, 7_000_000, 100);
+    assert_eq!(net.buffering_line(), "Buffering 8 MB of 8 MB");
+    assert!((net.buffered_part() - 11.0 / 32.0).abs() < 1e-6);
+    let small = super::Net::new(3_000_000);
+    assert_eq!(small.need(), 3_000_000);
+}
+
+/// A slow read is a stall with its rate; a fast one clears it; reads never take the part past the file.
+#[test]
+fn net_stalls_on_a_slow_read_and_recovers() {
+    let mut net = super::Net::new(10_000_000);
+    assert_eq!(net.stall_line(), None);
+    net.record_read(0, 1_000_000, 1_000);
+    assert_eq!(net.stall_line().as_deref(), Some("Waiting for the network (1.0 MB/s)"));
+    net.record_read(1_000_000, 1_000_000, 100);
+    assert_eq!(net.stall_line(), None);
+    net.record_read(9_000_000, 5_000_000, 100);
+    assert_eq!(net.fetched, 10_000_000);
+    assert!(net.buffered_part() <= 1.0);
 }
