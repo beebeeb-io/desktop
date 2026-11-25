@@ -558,54 +558,29 @@ impl StateDb {
         let Some(owner) = owner_key_conn(&tx)? else {
             return Ok(false);
         };
-        let expected_remote = expected.remote_id.to_string();
-        let at_expected: Option<(i64, i64, i64)> = tx
-            .query_row(
-                "SELECT size, modified_ms, uploaded_at_ms FROM backup_records
-                 WHERE account_owner = ?1 AND category = ?2 AND key = ?3 AND remote_id = ?4",
-                params![owner, category, expected.key, expected_remote],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        let (size, modified_ms, uploaded_at_ms) = match at_expected {
-            Some(stored) => stored,
-            None => {
-                let named: bool = tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM backup_records
-                                    WHERE account_owner = ?1 AND category = ?2 AND remote_id = ?3)",
-                    params![owner, category, expected_remote],
-                    |row| row.get(0),
-                )?;
-                if named {
-                    return Ok(false);
-                }
-                (
-                    i64::try_from(record.size).unwrap_or(i64::MAX),
-                    record.modified_ms,
-                    record.uploaded_at_ms,
-                )
-            }
-        };
-        tx.execute(
-            "DELETE FROM backup_records WHERE account_owner = ?1 AND category = ?2 AND remote_id = ?3 AND key != ?4",
-            params![owner, category, record.remote_id.to_string(), record.key],
-        )?;
-        if record.remote_id != expected.remote_id {
-            tx.execute(
-                "DELETE FROM backup_records WHERE account_owner = ?1 AND category = ?2 AND remote_id = ?3",
-                params![owner, category, expected_remote],
-            )?;
+        if !put_record_in(&tx, &owner, category, expected, record)? {
+            return Ok(false);
         }
-        tx.execute(
-            "INSERT INTO backup_records (account_owner, category, key, size, modified_ms, remote_id, uploaded_at_ms, state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'backed_up')
-             ON CONFLICT(account_owner, category, key) DO UPDATE SET size = excluded.size,
-                modified_ms = excluded.modified_ms, remote_id = excluded.remote_id,
-                uploaded_at_ms = excluded.uploaded_at_ms, state = excluded.state",
-            params![owner, category, record.key, size, modified_ms, record.remote_id.to_string(), uploaded_at_ms],
-        )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// [`Self::put_backup_record_cas`] for each of `records` (each with its own `expected`) in ONE transaction: a
+    /// records rebuild of tens of thousands of files is one commit, not one fsync per file. How many stored.
+    pub fn put_backup_records_cas(&self, category: &str, records: &[(RecordRef, BackupRecord)]) -> Result<usize> {
+        let mut conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(owner) = owner_key_conn(&tx)? else {
+            return Ok(0);
+        };
+        let mut stored = 0;
+        for (expected, record) in records {
+            if put_record_in(&tx, &owner, category, expected, record)? {
+                stored += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(stored)
     }
 
     /// `BackupHost::mark_removed_elsewhere`: each record still at its key, naming its remote id and `BackedUp`, becomes
@@ -880,4 +855,69 @@ impl StateDb {
         )?;
         Ok(())
     }
+}
+
+/// One compare-and-set of [`StateDb::put_backup_record_cas`] inside the caller's transaction for `owner`.
+fn put_record_in(
+    tx: &Connection,
+    owner: &str,
+    category: &str,
+    expected: &RecordRef,
+    record: &BackupRecord,
+) -> Result<bool> {
+    let expected_remote = expected.remote_id.to_string();
+    let at_expected: Option<(i64, i64, i64)> = tx
+        .query_row(
+            "SELECT size, modified_ms, uploaded_at_ms FROM backup_records
+                 WHERE account_owner = ?1 AND category = ?2 AND key = ?3 AND remote_id = ?4",
+            params![owner, category, expected.key, expected_remote],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let (size, modified_ms, uploaded_at_ms) = match at_expected {
+        Some(stored) => stored,
+        None => {
+            let named: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM backup_records
+                                    WHERE account_owner = ?1 AND category = ?2 AND remote_id = ?3)",
+                params![owner, category, expected_remote],
+                |row| row.get(0),
+            )?;
+            if named {
+                return Ok(false);
+            }
+            (
+                i64::try_from(record.size).unwrap_or(i64::MAX),
+                record.modified_ms,
+                record.uploaded_at_ms,
+            )
+        }
+    };
+    tx.execute(
+        "DELETE FROM backup_records WHERE account_owner = ?1 AND category = ?2 AND remote_id = ?3 AND key != ?4",
+        params![owner, category, record.remote_id.to_string(), record.key],
+    )?;
+    if record.remote_id != expected.remote_id {
+        tx.execute(
+            "DELETE FROM backup_records WHERE account_owner = ?1 AND category = ?2 AND remote_id = ?3",
+            params![owner, category, expected_remote],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO backup_records (account_owner, category, key, size, modified_ms, remote_id, uploaded_at_ms, state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'backed_up')
+             ON CONFLICT(account_owner, category, key) DO UPDATE SET size = excluded.size,
+                modified_ms = excluded.modified_ms, remote_id = excluded.remote_id,
+                uploaded_at_ms = excluded.uploaded_at_ms, state = excluded.state",
+        params![
+            owner,
+            category,
+            record.key,
+            size,
+            modified_ms,
+            record.remote_id.to_string(),
+            uploaded_at_ms
+        ],
+    )?;
+    Ok(true)
 }

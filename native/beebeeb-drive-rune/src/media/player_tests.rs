@@ -1292,3 +1292,35 @@ fn volume_and_mute_reach_the_sound_and_stay_across_next() {
     wait_until("c plays", || r.sound.started.load(SeqCst) == 3);
     assert_eq!(r.sound.last_gain(), Some(0.6), "the next item plays at it");
 }
+
+// ---- The buffering model (RE3-c) ----
+
+/// The start bar and the line say fetched of what the start needs, and the file's size caps the need.
+#[test]
+fn net_says_buffering_megabytes_of_the_start_need() {
+    let mut net = super::Net::new(32_000_000);
+    assert_eq!(net.need(), super::START_BYTES);
+    assert_eq!(net.buffering_line(), "Buffering 0 MB of 8 MB");
+    net.record_read(0, 4_000_000, 100);
+    assert_eq!(net.buffering_line(), "Buffering 4 MB of 8 MB");
+    assert!((net.start_part() - 0.5).abs() < 1e-6);
+    net.record_read(4_000_000, 7_000_000, 100);
+    assert_eq!(net.buffering_line(), "Buffering 8 MB of 8 MB");
+    assert!((net.buffered_part() - 11.0 / 32.0).abs() < 1e-6);
+    let small = super::Net::new(3_000_000);
+    assert_eq!(small.need(), 3_000_000);
+}
+
+/// A slow read is a stall with its rate; a fast one clears it; reads never take the part past the file.
+#[test]
+fn net_stalls_on_a_slow_read_and_recovers() {
+    let mut net = super::Net::new(10_000_000);
+    assert_eq!(net.stall_line(), None);
+    net.record_read(0, 1_000_000, 1_000);
+    assert_eq!(net.stall_line().as_deref(), Some("Waiting for the network (1.0 MB/s)"));
+    net.record_read(1_000_000, 1_000_000, 100);
+    assert_eq!(net.stall_line(), None);
+    net.record_read(9_000_000, 5_000_000, 100);
+    assert_eq!(net.fetched, 10_000_000);
+    assert!(net.buffered_part() <= 1.0);
+}

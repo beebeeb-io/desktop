@@ -45,6 +45,8 @@ fn epoch() -> u64 {
 /// Sync stopped (a stop, a lock, a sign-out): no pass is running and none is asked for, for whoever signs in next.
 pub fn clear_pass_flags() {
     FLAGS_EPOCH.fetch_add(1, Ordering::SeqCst);
+    // RE3-a: the kept listings belong to the sign-in that ended.
+    super::tree_cache::clear();
     PASS_RUNNING.store(0, Ordering::SeqCst);
     RUN_NOW.store(0, Ordering::SeqCst);
 }
@@ -164,9 +166,10 @@ impl BackupScheduler {
         let changed = Arc::clone(&self.changed);
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if event.is_ok_and(|e| !e.kind.is_access())
-                && let Ok(mut at) = changed.lock() {
-                    *at = Some(Instant::now());
-                }
+                && let Ok(mut at) = changed.lock()
+            {
+                *at = Some(Instant::now());
+            }
         });
         let Ok(mut watcher) = watcher else {
             tracing::warn!("backup: no file watcher; passes run on the 10-minute cadence only");
@@ -365,8 +368,15 @@ pub async fn run_passes(
         let mut decision = super::stop::decide(check.as_ref(), last_pass_at, &mark.acknowledged, &listed);
         let mut tree_and_clock = None;
         if matches!(decision, PassDecision::Run { .. }) {
-            // One listing per pass: the stop decision, the records' rebuild and (cached) the pass all read it.
-            let (tree, clock) = match host.device_tree_for_rebuild(&category).await {
+            // One tree per pass: the stop decision, the records' rebuild and (cached) the pass all read it. RE3-a: it is
+            // the kept listing of an earlier pass (one `/sync/ops` read, no listing) unless the records are to be
+            // rebuilt or the kept one cannot be used; a full listing is one snapshot, never one request per folder.
+            let records_empty = bridge
+                .db()
+                .backup_records(&category.key())
+                .map_or(true, |records| records.is_empty());
+            let rebuild = records_empty && !folder_id().is_some_and(|id| super::tree_cache::rebuilt(&id.to_string()));
+            let (tree, clock) = match host.device_tree_for_pass(&category, rebuild).await {
                 Ok(listed) => listed,
                 Err(error) => {
                     tracing::warn!(category = %category.key(), %error, "backup: not listed; no pass");
@@ -480,7 +490,16 @@ pub async fn rebuild_records_if_empty(
     if !host.records(category).await?.is_empty() {
         return Ok(0);
     }
-    if !tree.device_folder_live || tree.category_folder_live == Some(false) || tree.files.is_empty() {
+    // RE3-a: rebuilt once per backup and process. Records that stay empty (nothing on the server matches the folder
+    // now) are not rebuilt again on every pass, and do not ask for a full listing every pass either.
+    let Some(folder) = tree.folders.get("").map(uuid::Uuid::to_string) else {
+        return Ok(0);
+    };
+    if super::tree_cache::rebuilt(&folder) || !tree.device_folder_live || tree.category_folder_live == Some(false) {
+        return Ok(0);
+    }
+    if tree.files.is_empty() {
+        super::tree_cache::mark_rebuilt(&folder);
         return Ok(0);
     }
     let (root, exclude) = (source.to_path_buf(), exclude.to_vec());
@@ -489,16 +508,19 @@ pub async fn rebuild_records_if_empty(
         .map_err(|_| beebeeb_backup::HostError("the rebuild walk stopped before it finished".into()))?
         .map_err(|e| beebeeb_backup::HostError(format!("cannot read the backed-up folder ({:?})", e.kind())))?;
     let records = beebeeb_core::backup::records_from_remote_with_clock(&tree.files, &walk.entries, clock);
-    let mut stored = 0;
-    for record in records {
-        let expected = beebeeb_core::backup::RecordRef {
-            key: record.key.clone(),
-            remote_id: record.remote_id,
-        };
-        if host.put_record(category, &expected, record).await? {
-            stored += 1;
-        }
-    }
+    // One transaction for the whole set: a rebuild of tens of thousands of records is one commit, not an fsync each.
+    let batch: Vec<(beebeeb_core::backup::RecordRef, beebeeb_core::backup::BackupRecord)> = records
+        .into_iter()
+        .map(|record| {
+            let expected = beebeeb_core::backup::RecordRef {
+                key: record.key.clone(),
+                remote_id: record.remote_id,
+            };
+            (expected, record)
+        })
+        .collect();
+    let stored = host.put_records(category, &batch).await?;
+    super::tree_cache::mark_rebuilt(&folder);
     tracing::info!(
         category = %category.key(),
         stored,

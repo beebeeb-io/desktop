@@ -56,7 +56,82 @@ pub(super) fn timestamp_ms(entry: &serde_json::Value) -> i64 {
         .map_or(0, |at| at.timestamp_millis())
 }
 
+/// RE3-a: the account's whole live tree from ONE `GET /sync/snapshot`, its rows indexed by parent. A full listing of a
+/// backup reads its subtree from here instead of one `GET /files` per folder (0.9.0 made ~2,700 of those every 10
+/// minutes). `seq_id` is the op cursor the snapshot was read at: `/sync/ops?since=seq_id` says what changed after it.
+pub struct BackupSnapshot {
+    pub seq_id: i64,
+    by_parent: std::collections::HashMap<String, Vec<serde_json::Value>>,
+}
+
+impl BackupSnapshot {
+    /// Index a snapshot's nodes by parent; a trashed row (the server lists none) and a row with no id are left out.
+    pub fn new(seq_id: i64, nodes: Vec<serde_json::Value>) -> Self {
+        let mut by_parent: std::collections::HashMap<String, Vec<serde_json::Value>> = Default::default();
+        for node in nodes {
+            if node["is_trashed"].as_bool() == Some(true) || node["id"].as_str().is_none() {
+                continue;
+            }
+            if let Some(parent) = node["parent_id"].as_str() {
+                by_parent.entry(parent.to_string()).or_default().push(node);
+            }
+        }
+        Self { seq_id, by_parent }
+    }
+}
+
+/// A snapshot row's stamp. The snapshot carries no `uploaded_at` (RE3-a), and `created_at`/`updated_at` are not the
+/// current version's upload time, so a listing read from it is NEVER used to rebuild records (that reads the pages).
+fn snapshot_stamp_ms(entry: &serde_json::Value) -> i64 {
+    ["created_at", "uploaded_at", "updated_at"]
+        .iter()
+        .find_map(|field| entry[*field].as_str())
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map_or(0, |at| at.timestamp_millis())
+}
+
 impl EngineBridge {
+    /// One listed row as a [`BackupChild`], its name (and a file's content record) opened on this device.
+    fn backup_child(&self, id: &str, entry: &serde_json::Value, uploaded_at_ms: i64) -> BackupChild {
+        let is_folder = entry["is_folder"].as_bool() == Some(true);
+        BackupChild {
+            id: id.to_string(),
+            name: self.open_backup_name(id, entry["name_encrypted"].as_str()),
+            record: (!is_folder)
+                .then(|| self.open_backup_record(id, entry["name_encrypted"].as_str()))
+                .flatten(),
+            is_folder,
+            size: entry["size_bytes"].as_u64().unwrap_or(0),
+            uploaded_at_ms,
+            chunk_count: entry["chunk_count"]
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0),
+        }
+    }
+
+    /// RE3-a: the account's whole live tree in ONE request (`GET /sync/snapshot`), for a full listing of a backup.
+    pub async fn backup_snapshot(&self) -> Result<BackupSnapshot, EngineError> {
+        let snapshot = self.backup_api().sync_snapshot_for_backup().await?;
+        Ok(BackupSnapshot::new(snapshot.seq_id, snapshot.nodes))
+    }
+
+    /// The live children of `parent` in `snapshot`, names opened on this device. A snapshot is whole, so this is
+    /// complete.
+    pub fn backup_children_in(&self, snapshot: &BackupSnapshot, parent: &str) -> Vec<BackupChild> {
+        snapshot.by_parent.get(parent).map_or_else(Vec::new, |rows| {
+            rows.iter()
+                .filter_map(|row| Some(self.backup_child(row["id"].as_str()?, row, snapshot_stamp_ms(row))))
+                .collect()
+        })
+    }
+
+    /// RE3-a: the account's ops after `since` (`GET /sync/ops`, one page): what a cached backup listing checks
+    /// before it is used again.
+    pub async fn backup_ops_since(&self, since: i64) -> Result<crate::api_client::SyncOps, EngineError> {
+        Ok(self.backup_api().sync_ops(since).await?)
+    }
+
     pub(super) fn open_backup_name(&self, id: &str, name_encrypted: Option<&str>) -> Option<String> {
         let (key, _) = owned_key_and_pin(&self.db, self.api.master_key(), id).ok()?;
         beebeeb_core::encrypt::decrypt_name_with_key(&key, name_encrypted?)
@@ -109,21 +184,7 @@ impl EngineBridge {
                 if entry["is_trashed"].as_bool() == Some(true) {
                     continue;
                 }
-                let is_folder = entry["is_folder"].as_bool() == Some(true);
-                children.push(BackupChild {
-                    id: id.to_string(),
-                    name: self.open_backup_name(id, entry["name_encrypted"].as_str()),
-                    record: (!is_folder)
-                        .then(|| self.open_backup_record(id, entry["name_encrypted"].as_str()))
-                        .flatten(),
-                    is_folder,
-                    size: entry["size_bytes"].as_u64().unwrap_or(0),
-                    uploaded_at_ms: timestamp_ms(entry),
-                    chunk_count: entry["chunk_count"]
-                        .as_u64()
-                        .and_then(|n| u32::try_from(n).ok())
-                        .unwrap_or(0),
-                });
+                children.push(self.backup_child(id, entry, timestamp_ms(entry)));
             }
             if children.len() >= BACKUP_LISTING_CAP {
                 return Ok((children, false, clock));

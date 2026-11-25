@@ -51,6 +51,7 @@ impl StateDb {
     /// one row is marked, the server's list is asked for again (the count and the request in one lock). Returns
     /// how many rows wait for it; with none, nothing is asked. The marks stay until a name really opens, so a
     /// call that changes nothing costs one list and is no loop: only a key change calls this.
+    #[track_caller]
     pub fn retry_unreadable_names(&self) -> Result<usize> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let marked = Self::unreadable_name_count_conn(&conn)?;

@@ -87,12 +87,15 @@ impl<C: CredentialStores + 'static> MediaOpener for EngineMediaOpener<C> {
         if !self.is_the_press_account(press) {
             return Err(Refusal::NotSignedIn);
         }
-        let reader = self.engine.open_media_for(press.session, file_id).map_err(refusal_of)?;
+        let mut reader = self.engine.open_media_for(press.session, file_id).map_err(refusal_of)?;
         // The account is asked again once the reader is there: another account that came in while the bytes were
         // being opened gets nothing of them (the reader is dropped, and with it its chunk cache).
         if !self.is_the_press_account(press) {
             return Err(Refusal::NotSignedIn);
         }
+        // RE3-b: the tail chunk (a phone's `moov`) is fetched on its own thread from now on, so the player's first
+        // read of the head (`ranged::prime`) runs beside it, not after it.
+        reader.start_tail_fetch();
         Ok(Box::new(EngineBytes(reader)))
     }
 }
@@ -276,11 +279,13 @@ fn decode_in_a_helper(bytes: &[u8], max_px: u32) -> Result<DecodedPicture, Image
     // A helper that stops answering is ended, so the read below ends too.
     let (done, late) = std::sync::mpsc::channel::<()>();
     let watched = child.clone();
-    let watch = std::thread::Builder::new().name("picture-helper-watch".into()).spawn(move || {
-        if late.recv_timeout(DECODE_WITHIN) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-            watched.kill();
-        }
-    });
+    let watch = std::thread::Builder::new()
+        .name("picture-helper-watch".into())
+        .spawn(move || {
+            if late.recv_timeout(DECODE_WITHIN) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                watched.kill();
+            }
+        });
     if watch.is_err() {
         child.kill();
         return Err(ImageRefusal::Damaged);
