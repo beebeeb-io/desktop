@@ -1,7 +1,7 @@
 #!/bin/sh
 # D-P3-1: every crate that reaches core (crates/beebeeb-engine, and the native Rune app through its lock) pins the
 # SAME core rev, and no other one.
-# Core a5176f9 (kept-key rule #127, local seal #120); was 7d5b5f9 (0.3.0 unreleased: chunk format v2, the two-level lock and its app lock, adopted on v2-native; a
+# Core 9b3219c (folder digest v1 #129); was a5176f9 (kept-key rule #127, local seal #120); was 7d5b5f9 (0.3.0 unreleased: chunk format v2, the two-level lock and its app lock, adopted on v2-native; a
 # release waits for task 2376); was abf4e5d (the two-level lock before round 3 and app lock), 56cd54f (core main
 # before the lock),
 # v0.2.8 = f76ccfc (desktop v2, batch V028), v0.2.5 = f9257d7 (LD-0139), v0.2.3 = df93011,
@@ -13,7 +13,7 @@
 #                                             each case run as its own process, as CI runs it
 # Every refusal prints one line and exits 1; a pass prints one line and exits 0.
 set -eu
-want=a5176f974649bf6c69000188b982898b216046a1
+want=9b3219cf415c553d50cfb8a93f886c2bd0d06332
 
 refuse() { echo "$1"; exit 1; }
 
