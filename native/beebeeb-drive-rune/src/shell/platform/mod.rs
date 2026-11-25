@@ -256,6 +256,9 @@ pub fn current() -> Arc<dyn Platform> {
     }
     #[cfg(target_os = "macos")]
     {
+        // Once per process, before the engine reads a backup folder: reopen the picked folders' sandbox scopes.
+        static SCOPES: std::sync::Once = std::sync::Once::new();
+        SCOPES.call_once(macos_panels::resolve_backup_folders);
         Arc::new(macos::MacPlatform)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
