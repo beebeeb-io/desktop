@@ -718,16 +718,37 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     observer.finishEnumerating(upTo: nil)
                 }
             } catch BeebeebIPCError.daemonUnavailable where containerIdentifier == .rootContainer {
-                // Task 1701: the old fallback enumerated the synthetic
-                // namespace roots so the sidebar kept its shape while the
-                // daemon was down. There are no synthetic roots any more —
-                // an unreachable daemon means an honestly EMPTY listing, not
-                // a fake one.
-                observer.finishEnumerating(upTo: nil)
+                // dm-41: an unreachable daemon is NOT an empty root. Reporting an empty success made the system
+                // trust a blank Finder; report a retryable error so it asks again when the daemon is back.
+                observer.finishEnumeratingWithError(Self.rootListingError())
             } catch {
                 observer.finishEnumeratingWithError(error)
             }
         }
+    }
+
+    /// dm-41: an unreachable daemon at the root is a retryable error, never an empty success.
+    static func rootListingError() -> Error {
+        NSFileProviderError(.serverUnreachable)
+    }
+
+    /// dm-41: the daemon answers "sync anchor expired" for an anchor from another database (0.8.x replica, fresh
+    /// state.db). The system must list again, and the stale materialized filter and anchor must not survive it.
+    static func isAnchorExpired(_ error: Error) -> Bool {
+        if case BeebeebIPCError.daemonRejected(let message) = error {
+            return message.lowercased().contains("sync anchor expired")
+        }
+        return false
+    }
+
+    static func changesError(_ error: Error, stateURL: URL? = WorkingSetStore.stateURL()) -> Error {
+        guard isAnchorExpired(error) else {
+            return error
+        }
+        if let stateURL {
+            WorkingSetStore.reset(at: stateURL)
+        }
+        return NSFileProviderError(.syncAnchorExpired)
     }
 
     private static let resumeTokenPrefix = "beebeeb-page:"
@@ -868,7 +889,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     )
                 }
             } catch {
-                observer.finishEnumeratingWithError(error)
+                observer.finishEnumeratingWithError(Self.changesError(error))
             }
         }
     }

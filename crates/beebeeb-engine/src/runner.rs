@@ -823,6 +823,16 @@ async fn run(
                 }
                 if awaiting_first_list {
                     awaiting_first_list = first_list_owed(&db);
+                    // dm-41 (macOS): the first full listing is in: one change per cloud-only file, then one signal,
+                    // so Finder lists the whole remote tree with the cloud badge.
+                    #[cfg(target_os = "macos")]
+                    if !awaiting_first_list {
+                        match db.record_first_listing_changes() {
+                            Ok(n) if n > 0 => signal_working_set_owing(&mut owed_working_set_signal, &db, "first_listing", &[]),
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(error = %e, "first-listing change rows failed"),
+                        }
+                    }
                     transfers.set_first_list(first_list_after_pull(
                         awaiting_first_list,
                         pulled.as_ref().is_ok_and(|tick| tick.reached_server),

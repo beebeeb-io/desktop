@@ -177,6 +177,13 @@ enum WorkingSetStore {
         return true
     }
 
+    /// dm-41: forget the anchor and the materialized filter. After a re-list (an expired anchor, a fresh state.db)
+    /// the old filter would hide folders the new tree has; an empty set means "report everything".
+    @discardableResult
+    static func reset(at url: URL) -> Bool {
+        save(State(lastAnchor: nil, materializedContainers: []), to: url)
+    }
+
     static func loadState() -> State {
         guard let url = stateURL() else {
             return State(lastAnchor: nil, materializedContainers: [])
