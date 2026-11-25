@@ -105,6 +105,28 @@ pub fn place_popover(icon: Option<Frame>, displays: &[Display]) -> Option<Placem
     Some(clamp_into(v, v.right(), v.y))
 }
 
+/// The first-run hint's frame (w x h points): centred under the status item, `ICON_GAP` below it, clamped into the
+/// visible frame of the icon's display. No icon: the top right of the primary display's visible frame.
+pub fn place_hint(icon: Option<Frame>, displays: &[Display], w: f64, h: f64) -> Option<Placement> {
+    let (d, cx) = match icon.and_then(|i| icon_display(i, displays).map(|d| (i, d))) {
+        Some((i, d)) => (d, i.x + i.w / 2.0 - w / 2.0),
+        None => {
+            let d = displays.iter().find(|d| d.primary).or_else(|| displays.first())?;
+            (d, d.visible.right())
+        }
+    };
+    let v = &d.visible;
+    let y = icon
+        .filter(|i| icon_display(*i, std::slice::from_ref(d)).is_some())
+        .map_or(v.y, |i| i.bottom() + ICON_GAP);
+    let w = w.min((v.w - 2.0 * SCREEN_MARGIN).max(0.0));
+    let h = h.min((v.h - 2.0 * SCREEN_MARGIN).max(0.0));
+    let min_x = v.x + SCREEN_MARGIN;
+    let max_x = (v.right() - SCREEN_MARGIN - w).max(min_x);
+    let max_y = (v.bottom() - SCREEN_MARGIN - h).max(v.y);
+    Some(Placement { x: cx.clamp(min_x, max_x), y: y.clamp(v.y, max_y), w, h })
+}
+
 /// A point position as the physical desktop pixels `WindowHandle::set_position` takes.
 pub fn to_physical(x: f64, y: f64, scale: f64) -> (i32, i32) {
     let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
