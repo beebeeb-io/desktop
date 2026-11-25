@@ -24,7 +24,7 @@ const CHILDREN_SQL: &str = "namespace = 'my_files'
      AND CASE WHEN ?1 = '' THEN (parent_id IS NULL OR parent_id = '') ELSE parent_id = ?1 END";
 
 /// One mirror row under a folder, the fields the drift check compares.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DriftChild {
     pub file_id: String,
     pub path: String,
