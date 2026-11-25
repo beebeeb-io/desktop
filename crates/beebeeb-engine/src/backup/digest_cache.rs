@@ -152,7 +152,7 @@ mod tests {
     use crate::test_api::{FakeApi, Request};
     use beebeeb_backup::DeviceTree;
     use beebeeb_types::backup::Category;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// `Backups/Laptop` in the seeded account (`large_account::id(1, 4)`).
     const LAPTOP: &str = "b0000001-0025-4000-8000-000000000004";
@@ -165,7 +165,6 @@ mod tests {
         cache: SharedDigestCache,
         device: String,
         _dir: tempfile::TempDir,
-        devices: AtomicU32,
     }
 
     fn uid(kind: u32, n: u32) -> String {
@@ -192,7 +191,6 @@ mod tests {
             cache: SharedDigestCache::default(),
             device: String::new(),
             _dir: dir,
-            devices: AtomicU32::new(0),
         };
         Fx {
             device: fx.new_device(),
@@ -206,8 +204,9 @@ mod tests {
 
     impl Fx {
         /// A new live folder at the root to serve as a host's device folder (outside the backup: no digest of it moves).
+        /// Unique in the process: the RE3-a kept listings are process-wide, by device folder.
         fn new_device(&self) -> String {
-            let id = uid(9, self.devices.fetch_add(1, Ordering::SeqCst));
+            let id = uuid::Uuid::new_v4().to_string();
             self.account.add_item(&id, None, &format!("device {id}"), true, 0);
             id
         }
