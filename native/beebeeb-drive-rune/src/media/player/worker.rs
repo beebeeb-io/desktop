@@ -17,7 +17,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::{
     ANSWER_WAIT_MS, AUDIO_PARTS_PER_SECOND, AudioFactory, BATCH_MAX, Clock, Cmd, DEFAULT_FRAME_MS,
     FIRST_ANSWER_WAIT_MS, HELD_FRAMES, LinkFactory, MAX_DURATION_MS, MediaBytes, MediaItem, MediaOpener,
-    NOW_PLAYING_EVERY_MS, NoSound, OPEN_WAIT_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK,
+    NOW_PLAYING_EVERY_MS, Net, NoSound, OPEN_WAIT_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK,
     Waker, lock,
 };
 use crate::media::os_controls::{NowPlaying, OsButton};
@@ -92,6 +92,7 @@ struct Drawn {
     phase: Phase,
     playing: bool,
     buffering: bool,
+    net: Net,
     quarter: u64,
     length_ms: u64,
     no_sound: Option<NoSound>,
@@ -140,6 +141,8 @@ pub(super) struct Worker {
     previous: Option<thread::JoinHandle<()>>,
     /// The item's bytes, from the opener; dropped (with the engine's chunk cache) when the worker ends.
     bytes: Option<Box<dyn MediaBytes>>,
+    /// How far the download is.
+    net: Net,
     len: u64,
     opened: Option<Opened>,
     /// `Opened` is due by this wall-clock time.
@@ -206,6 +209,7 @@ impl Worker {
             commands: start.commands,
             previous: start.previous,
             bytes: None,
+            net: Net::default(),
             len: 0,
             opened: None,
             opened_by: None,
@@ -304,6 +308,7 @@ impl Worker {
         }
         let mut bytes = self.opener.open(&self.item.file_id)?;
         self.len = bytes.len();
+        self.net = Net::new(self.len);
         // RE-d: the file's two ends first (the tail chunk, then the head), so a `moov` written at the end gives the
         // length now, and the helper's first reads come from the reader's cache (`super::ranged`).
         let probed = super::ranged::prime_and_probe(bytes.as_mut(), &self.slots.cancel);
@@ -746,6 +751,11 @@ impl Worker {
                 None => return Err(Exit::Done),
             };
             self.trace.read_us += Trace::us(reading);
+            self.net.record_read(
+                read.offset,
+                read.len,
+                self.clock.now_ms().saturating_sub(started),
+            );
             self.not_counted(self.clock.now_ms().saturating_sub(started));
             if self.slots.cancelled() {
                 return Err(Exit::Done);
@@ -1081,6 +1091,7 @@ impl Worker {
         self.write_pace(clock, at_ms);
         let playing = self.playing && !self.ended_shown;
         let buffering = !self.presented && !self.ended_shown;
+        let net = self.net;
         let feed = length.is_some()
             && (self.now_dirty
                 || self
@@ -1096,6 +1107,7 @@ impl Worker {
                     state.at_ms = at_ms;
                     state.playing = playing;
                     state.buffering = buffering;
+                    state.net = net;
                 }
                 let controls = player.now_playing.as_mut()?;
                 if feed {
@@ -1112,6 +1124,10 @@ impl Worker {
             phase,
             playing,
             buffering,
+            net: Net {
+                rate_bps: 0,
+                ..net
+            },
             quarter: at_ms / 250,
             length_ms: length.unwrap_or(0),
             no_sound: self
