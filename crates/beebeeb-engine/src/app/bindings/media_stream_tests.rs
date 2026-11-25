@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -104,6 +104,8 @@ struct Fake {
     account: Arc<FakeAccount>,
     /// Each file's current version: its object id and its plaintext (the manifest is built from it).
     current: Current,
+    /// So many metadata reads of a file answer 404 first (the file list being rebuilt, RE3-b).
+    misses: Arc<AtomicU32>,
 }
 
 impl Fake {
@@ -135,6 +137,8 @@ fn fake(tag: &str) -> Fake {
     let current: Current = Arc::new(Mutex::new(HashMap::new()));
     let rest: Handler = account_handler(account.clone());
     let current_in = current.clone();
+    let misses = Arc::new(AtomicU32::new(0));
+    let missed = misses.clone();
     let api = FakeApi::start(Arc::new(move |req: &Request| {
         let route = req.route();
         let Some(path) = route.strip_prefix("GET /api/v1/files/") else {
@@ -154,6 +158,12 @@ fn fake(tag: &str) -> Fake {
                 _ => rest(req),
             };
         }
+        if missed
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Reply::error(404, "not_found");
+        }
         let reply = rest(req);
         if reply.status != 200 {
             return reply;
@@ -162,7 +172,12 @@ fn fake(tag: &str) -> Fake {
         row["download_version"] = manifest(&version, &plain);
         Reply::ok(row)
     }));
-    Fake { api, account, current }
+    Fake {
+        api,
+        account,
+        current,
+        misses,
+    }
 }
 
 fn engine_at(base: &str) -> Arc<TestEngine> {
@@ -887,6 +902,7 @@ fn media_real_stride_run_counts_fetches_per_chunk() {
         api,
         account,
         current: Arc::new(Mutex::new(HashMap::new())),
+        misses: Arc::new(AtomicU32::new(0)),
     };
     let engine = engine_at(&fake.api.base);
     signed_in(&engine, &fake.account);
@@ -1193,5 +1209,116 @@ fn media_seek_after_the_windows_last_chunk_begins_a_new_window() {
         reader.shared.lock().job.generation,
         generation + 2,
         "each seek began one window, the reads in a row none"
+    );
+}
+
+// ── 14. RE3-b: an open while the file list is rebuilt, and the tail beside the head ─────────────────────────────────
+
+/// The metadata reads of the file `id` so far.
+fn metadata_reads(fake: &Fake, id: &str) -> usize {
+    let path = format!("/api/v1/files/{id}");
+    fake.api
+        .requests()
+        .iter()
+        .filter(|req| req.method == "GET" && req.path.split('?').next() == Some(path.as_str()))
+        .count()
+}
+
+/// Desktop log 11-25: the clip's state row was a folder's for a moment (the file list being rebuilt) and the open
+/// answered "not found". Now Beebeeb's version is read. Red at the base: `NotFound`.
+#[test]
+fn media_open_reads_beebeeb_when_the_row_is_a_folder() {
+    let (_fake, engine, (_dir, db)) = clip_setup("folder-row");
+    let entry = FileEntry {
+        file_id: CLIP.into(),
+        path: "Invented folder/Invented clip.mp4".into(),
+        status: FileStatus::Local,
+        size_bytes: 0,
+        modified_at: 1_794_000_000,
+        content_hash: None,
+        remote_updated_at: 1_794_000_000,
+        parent_id: None,
+        item_kind: ItemKind::Folder,
+    };
+    db.upsert_file_with_contract(&entry, |contract| contract.item_kind = entry.item_kind.clone())
+        .unwrap();
+    assert!(
+        db.get_file(CLIP).unwrap().unwrap().is_dir(),
+        "precondition: the row is a folder's"
+    );
+    let mut reader = engine
+        .open_media_for(engine.session_turn(), CLIP)
+        .expect("opened from Beebeeb, not \"not found\"");
+    assert_eq!(reader.origin(), MediaOrigin::Beebeeb);
+    assert!(read(&mut reader, 3_000, 100).expect("from Beebeeb")[..] == clip()[3_000..3_100]);
+}
+
+/// A metadata read that answers 404 once (the list being rebuilt) is asked once more and the file opens; one that
+/// answers it twice is "not found". Red at the base: the first 404 was the answer.
+#[test]
+fn media_open_asks_again_once_after_a_not_found() {
+    let (fake, engine, _state) = clip_setup("not-found-once");
+    drop(open(&engine, CLIP));
+    let clean = metadata_reads(&fake, CLIP);
+    fake.misses.store(1, Ordering::SeqCst);
+    let mut reader = open(&engine, CLIP);
+    assert_eq!(
+        metadata_reads(&fake, CLIP) - clean,
+        clean + 1,
+        "the 404, then the open asked once more"
+    );
+    assert!(read(&mut reader, 0, 100).expect("the start")[..] == clip()[..100]);
+
+    fake.misses.store(2, Ordering::SeqCst);
+    let before = metadata_reads(&fake, CLIP);
+    assert_eq!(
+        engine.open_media_for(engine.session_turn(), CLIP).err(),
+        Some(crate::app::viewer_api::OpenFileError::NotFound)
+    );
+    assert_eq!(
+        metadata_reads(&fake, CLIP) - before,
+        2,
+        "asked once more, not again and again"
+    );
+}
+
+/// Desktop log 11-25 (bytes_ms=188896): the player's first reads waited for the tail chunk before the head was
+/// asked for. With the tail fetch started at open, the head read answers while the tail chunk is still under way,
+/// and the tail read then takes the tail fetch's chunk (each chunk fetched once). Red at the base: no tail fetch.
+#[test]
+fn media_tail_fetch_runs_beside_the_head_read() {
+    const CHUNK: u64 = 1_000;
+    let limits = Limits {
+        cache_floor: 8 * CHUNK,
+        cache_ceiling: MEDIA_CACHE_CEILING,
+        two_strides_from: MEDIA_TWO_STRIDES_FROM,
+        read_ahead: 0,
+        refetch_slack: 0,
+    };
+    let len = 20 * CHUNK - 300;
+    let (mut reader, fetches, hold) = holding(len, CHUNK, limits, 19, None);
+    reader.start_tail_fetch();
+    wait_until(|| reader.shared.lock().tail == Some(19));
+    assert_eq!(
+        reader.shared.lock().tail,
+        Some(19),
+        "precondition: the tail chunk is under way"
+    );
+
+    let head = read(&mut reader, 0, 1).expect("the head while the tail is fetched");
+    assert_eq!(head[0], 0);
+    assert!(
+        !hold.answered.load(Ordering::SeqCst),
+        "the head was read before the tail chunk came"
+    );
+
+    hold.released.store(true, Ordering::SeqCst);
+    let tail = read(&mut reader, len - 1, 1).expect("the tail");
+    assert_eq!(tail[0], 19);
+    drop(reader);
+    assert_eq!(
+        *fetches.lock().unwrap(),
+        HashMap::from([(0, 1), (19, 1)]),
+        "the head and the tail chunks, each once"
     );
 }

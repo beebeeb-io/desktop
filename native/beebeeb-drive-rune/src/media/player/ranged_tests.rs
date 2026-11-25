@@ -83,7 +83,8 @@ fn moov_at_end(mdat_len: usize, large: bool, mvhd: Vec<u8>) -> Vec<u8> {
 }
 
 /// The red test of RE-d: 83.5 s at a time scale of 600, `moov` at the end of a 40-chunk file. The length is known
-/// after the head chunk and the tail chunk, the tail one first; no chunk between them is read.
+/// after the head chunk and the tail chunk, the head one first (RE3-b: the engine fetches the tail beside it); no
+/// chunk between them is read.
 #[test]
 fn moov_at_end_says_its_duration_from_the_head_and_tail_chunks() {
     const STRIDE: u64 = 4096;
@@ -96,7 +97,11 @@ fn moov_at_end_says_its_duration_from_the_head_and_tail_chunks() {
     };
     let cancel = AtomicBool::new(false);
     assert_eq!(prime_and_probe(&mut file, &cancel), Some(83_500));
-    assert_eq!(file.touched.first(), Some(&last), "the tail chunk is read first");
+    assert_eq!(
+        file.touched.first(),
+        Some(&0),
+        "the head chunk is read first, the tail fetched beside it"
+    );
     let touched: BTreeSet<u64> = file.touched.iter().copied().collect();
     assert_eq!(
         touched,
