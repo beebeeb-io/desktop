@@ -424,10 +424,13 @@ fn wait_stable_does_not_hold_the_gate() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let wait = tokio::spawn(p.run(Op::WaitStable(Duration::from_millis(600))));
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(Gate::try_enter().is_ok(), "a signal during the wait gets the gate");
-        let OpResult::Stable(answer) = wait.await.unwrap() else {
+        let wait = p.run(Op::WaitStable(Duration::from_millis(600)));
+        let signal = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(Gate::try_enter().is_ok(), "a signal during the wait gets the gate");
+        };
+        let (res, ()) = tokio::join!(wait, signal);
+        let OpResult::Stable(answer) = res else {
             panic!()
         };
         assert!(answer.is_err(), "no extension: stabilization's timeout stays a timeout");
