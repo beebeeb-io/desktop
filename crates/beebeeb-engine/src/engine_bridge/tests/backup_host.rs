@@ -1841,6 +1841,9 @@ async fn a_second_pass_over_an_unchanged_tree_makes_a_handful_of_requests() {
                     }
                 }
             }
+            // The records' rebuild already settled for this backup (it ran in an earlier pass; its cost is the
+            // paged listing, covered by a_rebuilt_record_set_over_unchanged_files_uploads_nothing).
+            crate::backup::tree_cache::mark_rebuilt(&pictures);
             let (source, sync_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let sources = [(Category::Pictures, source.path())];
             let seen = |fx: &Fixture| fx.server.requests.lock().unwrap().len();
@@ -1932,8 +1935,8 @@ async fn a_rebuilt_record_set_over_unchanged_files_uploads_nothing() {
             );
             assert_eq!(
                 requests.iter().filter(|r| r.path.contains("/sync/snapshot")).count(),
-                2,
-                "the passes after the rebuild list from the snapshot, one request each time it is listed in full"
+                1,
+                "the rebuild lists pages; the next pass lists from the snapshot once and keeps it"
             );
         })
         .await;
