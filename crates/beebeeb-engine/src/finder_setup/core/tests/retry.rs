@@ -17,8 +17,8 @@ use super::*;
         assert_eq!((sim.s.attempt, sim.s.max_attempts), (4, 4));
         assert_eq!(
             sim.count(Op::StopEngine),
-            1,
-            "the engine this check started is stopped once"
+            0,
+            "dm-43: a failed check never stops the engine (the shell may have started it)"
         );
         // The person saw Adding throughout: one Adding publish, then one Failed.
         let lands: Vec<FinderSetup> = sim
