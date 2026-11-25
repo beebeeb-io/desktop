@@ -80,11 +80,9 @@ fn bundle_of(exe: &std::path::Path) -> Option<std::path::PathBuf> {
 #[cfg(target_os = "macos")]
 fn reveal(path: Option<&std::path::Path>, s: &mut State) {
     let started = path.is_some_and(|p| {
-        std::process::Command::new("/usr/bin/open")
-            .arg("-R")
-            .arg(p)
-            .spawn()
-            .is_ok()
+        crate::engine_host::launch::locked(|| {
+            std::process::Command::new("/usr/bin/open").arg("-R").arg(p).spawn().is_ok()
+        })
     });
     if !started {
         log("settings: Finder did not open");

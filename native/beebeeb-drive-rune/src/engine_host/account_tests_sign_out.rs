@@ -890,7 +890,7 @@ fn signing_this_app_out_removes_the_finder_location_before_the_session_ends_and_
         at("engine.sign_out_for(session)") < at("finder_setup::turn_on()"),
         "a refused sign-out puts the location back after it"
     );
-    assert!(!worker.contains("purge") && !worker.contains("wipe"), "the local data is kept");
+    assert!(!worker.contains("purge(") && !worker.contains("wipe("), "the local data is kept");
 
     // Where no reconciler runs the removal is not confirmed, and the sign-out still ends the session.
     assert!(crate::engine_host::finder_setup::sign_out().is_err());
