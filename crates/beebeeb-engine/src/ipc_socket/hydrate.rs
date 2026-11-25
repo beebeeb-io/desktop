@@ -6,7 +6,18 @@ use super::*;
 #[allow(clippy::large_enum_variant)]
 pub(super) enum HydrateOutcome {
     Reply(IpcResponse),
-    ClientGone,
+    /// The client hung up. `no_progress`: before it had been sent a single byte count, so the row still
+    /// reads "Downloading, 0.0 of N" in the app (the extension dropped the request, or never took it).
+    ClientGone { no_progress: bool },
+}
+
+/// A hydrate whose client left before any progress went out leaves the row an error the person can see and retry
+/// from, not a quiet `CloudOnly` that looks as if nothing was asked. The hydrate's own guard has put the row back
+/// to `CloudOnly` by the time this runs (the future is dropped); a row in any other state is left as it is.
+pub(super) fn surface_dropped_hydrate(db: &crate::state_db::StateDb, file_id: &str) -> bool {
+    use crate::state_db::FileStatus;
+    db.set_status_if(file_id, FileStatus::CloudOnly, FileStatus::Error)
+        .unwrap_or(false)
 }
 
 /// Whether the client asked for `HydrateProgress` frames before the final reply
@@ -133,6 +144,7 @@ pub(super) async fn hydrate_over_ipc(
     let hydrate = bridge.hydrate_file_with_progress(file_id.as_str(), dest, &allowed_roots, progress_cb);
     tokio::pin!(hydrate);
 
+    let mut progress_sent = false;
     let result = loop {
         tokio::select! {
             biased;
@@ -141,6 +153,7 @@ pub(super) async fn hydrate_over_ipc(
                 if write_frame(write_half, &IpcResponse::HydrateProgress { done, total }).await.is_err() {
                     break None;
                 }
+                progress_sent = true;
             }
             read = frames.fill_more() => {
                 // 0 / error = the peer closed. Bytes = a pipelined request,
@@ -177,7 +190,7 @@ pub(super) async fn hydrate_over_ipc(
                         id_kind,
                         "IPC client went away while flushing the terminal hydrate progress frames"
                     );
-                    return HydrateOutcome::ClientGone;
+                    return HydrateOutcome::ClientGone { no_progress: false };
                 }
             }
             match outcome {
@@ -193,7 +206,7 @@ pub(super) async fn hydrate_over_ipc(
                 id_kind,
                 "IPC client went away mid-hydrate; hydration cancelled"
             );
-            HydrateOutcome::ClientGone
+            HydrateOutcome::ClientGone { no_progress: !progress_sent }
         }
     }
 }
@@ -256,6 +269,31 @@ pub(super) fn hydrate_failure_category(error: &anyhow::Error) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hydrate_the_client_dropped_before_any_progress_shows_an_error_on_the_row() {
+        use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let entry = |id: &str, status| FileEntry {
+            file_id: id.into(),
+            path: id.into(),
+            status,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        db.upsert_file(&entry("a", FileStatus::CloudOnly)).unwrap();
+        db.upsert_file(&entry("b", FileStatus::Local)).unwrap();
+        assert!(surface_dropped_hydrate(&db, "a"));
+        assert_eq!(db.get_file("a").unwrap().unwrap().status, FileStatus::Error);
+        // A row that is something else (here a finished local copy) is never touched.
+        assert!(!surface_dropped_hydrate(&db, "b"));
+        assert_eq!(db.get_file("b").unwrap().unwrap().status, FileStatus::Local);
+    }
 
     #[test]
     fn progress_reporting_round_trips_the_wire_flag() {

@@ -185,3 +185,16 @@ fn the_delegates_draw_bars_tree() {
         );
     }
 }
+
+#[test]
+fn a_paused_bar_offers_resume_and_no_other_bar_does() {
+    let paused = render(|t| bar(Some(Dot::Idle), Some(PAUSED), "", t), false);
+    assert_eq!(get(&paused, "status-text").text.as_deref(), Some("Paused"));
+    let resume = get(&paused, "status-resume");
+    assert_eq!(resume.text.as_deref(), Some("Resume"));
+    assert_eq!(resume.role, "button");
+    for word in [UP_TO_DATE, SYNCING, CHECKING, SYNC_STOPPED] {
+        let others = render(|t| bar(None, Some("x"), "", t), false);
+        assert!(find(&others, "status-resume").is_none(), "{word}");
+    }
+}

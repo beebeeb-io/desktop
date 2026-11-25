@@ -439,7 +439,13 @@ impl Connection {
         .await
         {
             HydrateOutcome::Reply(response) => Some(response),
-            HydrateOutcome::ClientGone => None,
+            HydrateOutcome::ClientGone { no_progress } => {
+                if no_progress {
+                    // The hydrate future is dropped by now, so its guard has put the row back.
+                    hydrate::surface_dropped_hydrate(&self.db, file_id.as_str());
+                }
+                None
+            }
         }
     }
 

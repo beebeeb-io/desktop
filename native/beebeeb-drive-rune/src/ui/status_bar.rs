@@ -103,6 +103,9 @@ pub fn bar(dot: Option<Dot>, state: Option<&str>, details: &str, t: &Theme) -> E
             );
         }
         left = left.child(kit::label("status-text", state, type_::STATUS_STRONG, t.text_secondary));
+        if state == PAUSED {
+            left = left.child(super::sync::resume_item(t));
+        }
     }
     frame(
         vec![
