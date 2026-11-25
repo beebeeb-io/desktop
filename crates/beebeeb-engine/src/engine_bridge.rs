@@ -259,6 +259,7 @@ mod tests {
     mod finder_queue_4;
     mod finder_queue_5;
     mod finder_queue_6;
+    mod first_listing_speed; // RE-a: a 42k-row first listing, its budget and its progress.
     mod hydrate_files;
     mod ipc;
     // S6: a kept file this PC does not hold is fetched again (Linux, through the queue).
@@ -554,7 +555,7 @@ use landing::*;
 pub use landing::{finder_staging_candidates, keep_both_name};
 mod staging_bases;
 pub use landing::{
-    FinderWriteItemKind, FinderWriteOutcome, FinderWriteTarget, VersionConflictEntry, is_ignored_finder_name,
+    FinderWriteItemKind, FinderWriteOutcome, FinderWriteTarget, VersionConflictEntry, is_ignored_finder_name, is_system_file_name,
     version_conflict_feed_from_db,
 };
 pub use staging_bases::FinderStagingBases;

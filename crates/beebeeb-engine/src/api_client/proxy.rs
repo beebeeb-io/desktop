@@ -7,7 +7,30 @@
 /// [`reqwest::Client::builder`] for a client that talks to `api_base` (an origin, no slash at the end), with
 /// [`with_api_base_proxy_rule`] applied. Every client the engine builds for the API base starts here.
 pub fn api_base_client_builder(api_base: &str) -> reqwest::ClientBuilder {
-    with_api_base_proxy_rule(reqwest::Client::builder(), api_base)
+    let builder = with_api_base_proxy_rule(reqwest::Client::builder(), api_base);
+    #[cfg(test)]
+    let builder = fenced_in_tests(builder, api_base);
+    builder
+}
+
+/// Where a unit-test client for a base that is not on this computer is sent: a port nothing answers on, so the
+/// request fails to connect at once.
+#[cfg(test)]
+pub(crate) const TEST_FENCE: &str = "http://127.0.0.1:9";
+
+/// In a unit-test build, a client for a base off this computer goes through [`TEST_FENCE`] and so never reaches it.
+/// dc-re-b2: test bridges built on `https://api.beebeeb.io` with the token `"token"` (the kept-refetch, scan and
+/// runner fixtures) sent their hydrations to production on every test run on a build VM or CI runner: the
+/// `GET /api/v1/files/{id}` 401s with `client=desktop` 0.1.0 in the production log.
+#[cfg(test)]
+fn fenced_in_tests(builder: reqwest::ClientBuilder, api_base: &str) -> reqwest::ClientBuilder {
+    let on_this_computer = reqwest::Url::parse(api_base)
+        .is_ok_and(|url| matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "localhost")));
+    if on_this_computer {
+        builder
+    } else {
+        builder.proxy(reqwest::Proxy::all(TEST_FENCE).expect("the test fence is a valid proxy URL"))
+    }
 }
 
 /// `builder` for `api_base`. A plain `http://` base on this computer (`127.0.0.1`, `[::1]` or `localhost`, any port: a

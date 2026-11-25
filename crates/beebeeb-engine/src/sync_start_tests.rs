@@ -30,6 +30,7 @@ fn body<'a>(source: &'a str, from: &str) -> &'a str {
 
 /// `view()` answers while another thread holds the transition lock and the engine slot (a start that registers, a
 /// stop that waits for the engine): within 50 ms, from the view's own lock only.
+#[ignore = "timing: 50 ms wall-clock budget; runs in the non-blocking Timing tests job (scripts/ci-timing-tests.txt)"]
 #[test]
 fn view_never_waits() {
     let state_dir = crate::state_paths::init_for_test();

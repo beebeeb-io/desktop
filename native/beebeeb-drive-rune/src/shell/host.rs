@@ -568,6 +568,10 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     if super::session_gate::refuses_event(s, &event) {
         return Outcome::Refused;
     }
+    let pressed_section = match &event {
+        Event::Navigate(route) if *route == Route::section(route.section) => Some(route.clone()),
+        _ => None,
+    };
     let outcome = s.shell.app.apply(event);
     sync_sidebar(s);
     crate::frames::settings::sync(s); // what was open inside settings is forgotten when the route leaves it
@@ -575,6 +579,12 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     crate::frames::account::sync(s); // and what was open inside the account sections
     crate::frames::tray::shortcuts::sync(s); // a closed shortcuts list forgets its page
     crate::frames::files::reset::sync(s); // a route that left the Files window closes its dialogs, wiped
+    // A press on a section, the current one too (Files while on Files), ends Search over the window.
+    if let Some(route) = pressed_section {
+        if route.section == s.shell.app.route().section {
+            crate::frames::files::reset::end_search(s);
+        }
+    }
     outcome
 }
 

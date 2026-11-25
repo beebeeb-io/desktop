@@ -8,7 +8,7 @@ use super::*;
 /// naturally regardless of platform separator.
 fn walked_rel(root: &std::path::Path) -> HashSet<String> {
     let mut found: HashSet<String> = HashSet::new();
-    walk_dir(root, root, 0, &mut |_dir| {}, &mut |p, _meta| {
+    walk_dir(root, root, 0, &mut |_dir, _stamp| {}, &mut |p, _meta| {
         let rel = p.strip_prefix(root).unwrap();
         let joined = rel
             .components()

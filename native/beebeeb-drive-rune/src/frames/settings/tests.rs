@@ -150,6 +150,36 @@ fn the_shell_opens_settings_on_general_and_esc_goes_back_to_drive() {
     assert!(find(&rt, "toolbar").is_some());
 }
 
+/// Esc goes back to Drive from every section of the sidebar, not only General.
+#[test]
+fn esc_goes_back_from_every_settings_section() {
+    let mut failed = Vec::new();
+    for pane in SettingsPane::ALL {
+        let mut rt = runtime("");
+        rt.update(|s, _| {
+            host::dispatch(s, Event::OpenSettings(pane));
+        });
+        settle(&mut rt);
+        assert_eq!(on_settings(&rt), Some(pane), "{pane:?} opened");
+        // Esc with nothing focused, and with each of the first Tab stops focused.
+        for tabs in 0..14 {
+            let mut rt = runtime("");
+            rt.update(|s, _| {
+                host::dispatch(s, Event::OpenSettings(pane));
+            });
+            settle(&mut rt);
+            for _ in 0..tabs {
+                key(&mut rt, Key::Tab);
+            }
+            key(&mut rt, Key::Escape);
+            if on_settings(&rt).is_some() {
+                failed.push(format!("{} after {tabs} tabs", pane.label()));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "Esc did nothing in: {failed:?}");
+}
+
 /// A sidebar section another lane draws is the shell's to route: this lane asks, the shell shows it.
 #[test]
 fn a_section_of_another_lane_is_routed_by_the_shell() {

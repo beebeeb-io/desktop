@@ -296,21 +296,40 @@ impl<C: CredentialStores> Engine<C> {
     /// The files that wait for a choice, each with this PC's file and the server's current version, for the session
     /// a person pressed under. See the module's doc.
     pub fn conflicts_for(&self, session: SessionGeneration) -> Result<Conflicts, ConflictsRefused> {
-        let state = self.local_state().map_err(local::<ConflictsRefused>)?;
+        let nothing = || Conflicts {
+            session,
+            files: Vec::new(),
+            unread: 0,
+        };
+        // Is the session still the one asked about? One question, asked where a list is handed over.
+        let still = || self.acct.while_session_is(&self.writes, session, |_| ()).is_some();
+        let state = match self.local_state() {
+            Ok(state) => state,
+            // Nothing has synced on this computer yet (the first run, no state database or an empty one): no file
+            // can wait for a choice. An answer, not a failure (it was said as "could not be read" on every start).
+            // Behind a locked screen a person reads nothing: nothing is shown as waiting, and nothing was read.
+            // Both only for the session asked about.
+            Err(LocalStateRefused::NothingSynced | LocalStateRefused::Locked) => {
+                return if still() {
+                    Ok(nothing())
+                } else {
+                    Err(ConflictsRefused::NotSignedIn)
+                };
+            }
+            Err(refused) => return Err(local::<ConflictsRefused>(refused)),
+        };
         if state.session() != session {
             return Err(ConflictsRefused::NotSignedIn);
         }
+        // A read that failed is said as one: never a list with nothing in it.
         let waiting = state
-            .with(|db| db.list_by_status(FileStatus::Conflict).unwrap_or_default())
-            .map_err(local::<ConflictsRefused>)?;
+            .with(|db| db.list_by_status(FileStatus::Conflict))
+            .map_err(local::<ConflictsRefused>)?
+            .map_err(|_| ConflictsRefused::NoLocalState)?;
         drop(state);
         let waiting: Vec<_> = waiting.into_iter().filter(|entry| !entry.is_dir()).collect();
         if waiting.is_empty() {
-            return Ok(Conflicts {
-                session,
-                files: Vec::new(),
-                unread: 0,
-            });
+            return Ok(nothing());
         }
         let root = self
             .configured_sync_root()
@@ -342,7 +361,7 @@ impl<C: CredentialStores> Engine<C> {
             }
         }
         // A list made for a session that ended is not handed over.
-        if self.acct.while_session_is(&self.writes, session, |_| ()).is_none() {
+        if !still() {
             return Err(ConflictsRefused::NotSignedIn);
         }
         Ok(Conflicts { session, files, unread })

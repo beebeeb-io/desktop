@@ -1,6 +1,6 @@
 # The Office helper's test documents
 
-Every file here is ours: written by a script in this repository, with no third-party content. The latency harness
+Every file here is ours: written by a script in this repository, or (`libreoffice-1.docx`) by our own web office, with no third-party content. The latency harness
 keeps its own files in `latency/`; they are not listed here.
 
 | File | Origin | Pages | sha256 |
@@ -10,6 +10,7 @@ keeps its own files in `latency/`; they are not listed here.
 | `spike.docx` | copied byte for byte from `spikes/2477-office-editor-throwaway/fixtures/spike.docx` (commit `92281ffd`, written by that folder's `make-fixtures.py`) | 3, A4 | `2eb05e616c92c2609930d3a19132492a1889a37c6430c59ae36ea158e256bd1f` |
 | `remote.docx` | copied byte for byte from `spikes/2477-office-editor-throwaway/fixtures/remote.docx` (commit `92281ffd`, same script) | 1, A4, a picture **linked** to `http://127.0.0.1:47477/remote.png` | `4569ff876dc0968186663b0414233fa16f03d4eac2ca03e6b9998a849f629f89` |
 | `sheets-3.xlsx` | `make_fixtures.py` (this folder) | 3 sheets: "Budget", "Notes", "Empty" | `c71ce95f4af2e2d385a7ce74911d2a6707f0f8653544de94086bf89c38dc502d` |
+| `libreoffice-1.docx` | the 11-24 report's test document, byte for byte: made in Beebeeb's web office (LibreOffice), one paragraph of test text, empty author and title | 1, A4 | `ed3080d930deabd40c32b2ce173b8997309816f24090fca501c53c39de56c14e` |
 | `deck-3.pptx` | `make_fixtures.py` (this folder) | 3 slides, 16:9, 960 x 540 pt | `54fc50295b601880eb292a27b25c679e3d4742e17b4dcfe3cd78a4842b8d00bf` |
 
 - **`letter-1.docx` is the page that shows the one page-pixel rule.** Every spike fixture is A4, where single and

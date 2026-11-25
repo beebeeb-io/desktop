@@ -637,11 +637,17 @@ pub fn error_http_status(error: &anyhow::Error) -> Option<u16> {
     if init_conflict_class(error).is_some() {
         return Some(409);
     }
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
-        .and_then(reqwest::Error::status)
-        .map(|status| status.as_u16())
+    error.chain().find_map(|cause| {
+        if let Some(crate::api_client::DesktopApiError::HttpStatus { status, .. }) =
+            cause.downcast_ref::<crate::api_client::DesktopApiError>()
+        {
+            return Some(status.as_u16());
+        }
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .and_then(reqwest::Error::status)
+            .map(|status| status.as_u16())
+    })
 }
 
 /// A guarded queue write matched no row: the op moved since its claim (spec §8.7 S2, S4).

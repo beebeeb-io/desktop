@@ -58,6 +58,8 @@ mod open_in_app_tests;
 #[cfg(test)]
 mod open_with_menu_tests;
 #[cfg(test)]
+mod offline_progress_tests;
+#[cfg(test)]
 mod pins_tests;
 #[cfg(test)]
 mod protected_tests;

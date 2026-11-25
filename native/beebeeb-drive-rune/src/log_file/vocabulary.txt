@@ -1,6 +1,6 @@
-!
 # The words of every string literal and field name at the engine's and this crate's tracing calls, one per line,
 # sorted, lowercase. A test (vocabulary_sync.rs) fails, naming the words, when a log call's word is missing here.
+!
 $home
 +
 0x
@@ -63,6 +63,7 @@ apply
 approved
 archived_legacy_state_dir
 are
+arrived
 as
 aside
 ask
@@ -71,6 +72,7 @@ asked_ms
 asking
 at
 at_ms
+at_root
 atomic
 attempt
 attempting
@@ -251,6 +253,8 @@ decline
 declined
 decoded
 decoder
+decrypt
+decrypt_ms
 decrypted
 deferred
 degraded
@@ -264,6 +268,7 @@ descendant
 descending
 desktop
 dest
+detail
 device
 device_folder_id
 device_id
@@ -341,6 +346,7 @@ exclude
 exclusion
 existing
 exists
+exit
 exited
 expires_in
 explorer
@@ -354,6 +360,7 @@ falling
 feed
 fetch
 fetch_data_callback
+fetch_ms
 fetched
 fetches
 file
@@ -461,6 +468,8 @@ in-sync
 incoming
 index
 indexed_file_count
+ingest
+ingest_ms
 init
 initialized
 inside
@@ -764,6 +773,7 @@ provisional
 provisional_id
 prune
 prune_absent
+prune_ms
 pruned
 pulling
 pump
@@ -1065,6 +1075,7 @@ took
 top-level
 torn
 total
+total_ms
 transfer
 transfer_data
 transferred

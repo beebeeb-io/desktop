@@ -1,14 +1,14 @@
 //! The Files window with what the Files frames add: several selected rows, the menus, the toasts,
 //! the selected item's own details.
 
-use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
+use super::{details, dialogs, list, menus, rename, MenuKind, Toast};
 use super::{select_bar, toolbar};
-use crate::State;
 use crate::theme::icons;
 use crate::theme::scale;
 use crate::theme::tokens::{self, Theme};
 use crate::ui::{button, caption, empty, file_list, kit, menu, status_line, toast};
-use rune::{Cx, El, Tx, col, el, row};
+use crate::State;
+use rune::{col, el, row, Cx, El, Tx};
 
 /// "4 on this PC · 3 available offline · 4 online only", counted from the rows. While the first list still
 /// arrives the rows are only those listed so far, and the words say so: "Listed so far: …" (RC2-10, the large
@@ -363,6 +363,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             let details = crate::frames::global::status_words(s)
                 .or_else(|| super::browse_states::status_words(s))
                 .or_else(|| super::protected::status_words(s))
+                .or_else(|| super::keeping::status_words(&s.actions.source.downloads()))
                 .unwrap_or_else(|| pc_summary(s));
             let name = match &state {
                 Some(state) => format!("{state}. {details}"),
