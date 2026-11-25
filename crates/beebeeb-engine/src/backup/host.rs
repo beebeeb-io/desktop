@@ -273,18 +273,15 @@ impl DesktopBackupHost {
         if live == Some(false) {
             return Ok((gone_tree(true, Some(false)), RebuildClock::UNKNOWN));
         }
-        let snapshot = self.snapshot().await;
-        let (mut tree, mut clock) = match &snapshot {
+        // The records' rebuild needs each file's `uploaded_at` and the server's clock, which the snapshot lacks
+        // (it has created_at/updated_at only), so a rebuild lists page by page, paced, ONCE per backup (never on
+        // every pass); every other full listing is the snapshot. A rebuild's listing is not kept (no cursor): the
+        // next pass lists from the snapshot, once, and keeps that.
+        let snapshot = if clocked { None } else { self.snapshot().await };
+        let (mut tree, clock) = match &snapshot {
             Some(snapshot) => self.list_category(&folder_id, Listing::Snapshot(snapshot)).await?,
             None => self.list_category(&folder_id, Listing::Pages { paced: true }).await?,
         };
-        if clocked && snapshot.is_some() {
-            clock = self
-                .bridge
-                .backup_listing_clock(&folder_id)
-                .await
-                .map_err(host_error("listing"))?;
-        }
         tree.category_folder_live = live;
         let listing = KeptListing {
             category_folder_id: folder_id,

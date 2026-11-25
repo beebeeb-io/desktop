@@ -1841,6 +1841,9 @@ async fn a_second_pass_over_an_unchanged_tree_makes_a_handful_of_requests() {
                     }
                 }
             }
+            // The records' rebuild already settled for this backup (it ran in an earlier pass; its cost is the
+            // paged listing, covered by a_rebuilt_record_set_over_unchanged_files_uploads_nothing).
+            crate::backup::tree_cache::mark_rebuilt(&pictures);
             let (source, sync_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let sources = [(Category::Pictures, source.path())];
             let seen = |fx: &Fixture| fx.server.requests.lock().unwrap().len();
@@ -1868,7 +1871,73 @@ async fn a_second_pass_over_an_unchanged_tree_makes_a_handful_of_requests() {
             );
             assert!(two.len() <= 3, "the second pass: {} requests: {two:?}", two.len());
             assert!(!two.iter().any(|r| r.contains("/sync/snapshot")), "{two:?}");
+            assert!(
+                requests
+                    .iter()
+                    .filter(|r| r.path.contains("/sync/"))
+                    .all(|r| r.origin.as_deref() == Some(beebeeb_types::backup::ORIGIN_BACKUP)),
+                "the snapshot and ops reads carry the backup origin"
+            );
             assert_eq!(count_backup_ops(&fx.bridge), 0);
+        })
+        .await;
+}
+
+/// RE3-a: a backup whose records are empty (a reinstall) with 1,000 files already on the server, unchanged since: the
+/// rebuild stores a record for each and the passes upload NOTHING. The rebuild reads `uploaded_at` from the listing
+/// pages (the snapshot has none), and the passes after it list from the snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rebuilt_record_set_over_unchanged_files_uploads_nothing() {
+    let config_dir = tempfile::tempdir().unwrap();
+    crate::config::CONFIG_DIR_OVERRIDE
+        .scope(config_dir.path().to_path_buf(), async {
+            switch_on(&["pictures"]);
+            let fx = Fixture::new();
+            fx.server.sync_api.store(true, Ordering::SeqCst);
+            let pictures = fx.add(Some(&fx.device.clone()), "Pictures", true, 0);
+            fx.bridge
+                .db
+                .set_backup_category_folder("pictures", Some(&pictures))
+                .unwrap();
+            let source = source_with(1_000);
+            for i in 0..1_000 {
+                // Stamped after the local files' last change.
+                fx.add_stamped(
+                    Some(&pictures),
+                    &format!("f{i}.txt"),
+                    false,
+                    5,
+                    Some("2035-01-01T00:00:00Z".to_string()),
+                );
+            }
+            let sync_root = tempfile::tempdir().unwrap();
+            let sources = [(Category::Pictures, source.path())];
+            assert!(fx.bridge.db.backup_records("pictures").unwrap().is_empty());
+
+            for _ in 0..3 {
+                let report = run(&fx, &sources, sync_root.path()).await;
+                assert!(
+                    report.passes.iter().all(|(_, pass)| pass.is_ok()),
+                    "{:?}",
+                    report.passes
+                );
+                assert_eq!(
+                    count_backup_ops(&fx.bridge),
+                    0,
+                    "a file already on the server is uploaded again"
+                );
+            }
+            assert_eq!(fx.bridge.db.backup_records("pictures").unwrap().len(), 1_000);
+            let requests = fx.server.finish();
+            assert!(
+                !requests.iter().any(|r| r.method == "POST" || r.method == "PUT"),
+                "nothing is written to the server"
+            );
+            assert_eq!(
+                requests.iter().filter(|r| r.path.contains("/sync/snapshot")).count(),
+                1,
+                "the rebuild lists pages; the next pass lists from the snapshot once and keeps it"
+            );
         })
         .await;
 }
