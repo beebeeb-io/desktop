@@ -20,6 +20,12 @@
 - **Sign-out:** signing out clears what the app kept for your account on this PC.
 - **Window size:** the window stays inside your screen the first time you open it.
 - **Shared view:** the footer shows your own account and storage use.
+- **First load:** your file list appears faster when you open the app.
+- **Video:** video streams and plays in the app without a full download first.
+- **Sign-in:** a sign-in problem found on real accounts is fixed.
+- **Dates:** file dates show correctly.
+- **System files:** system files are hidden from your lists.
+- **Search, Trash and folders:** fixes to search, to Trash and to folders.
 
 ### Verification
 
