@@ -241,6 +241,7 @@ pub fn global_status_with(
             file_list: Step::InProgress,
             thumbnails: Step::WaitingForFileList,
         }),
+        paused: running && view.paused && !view.session_ended,
         list_failed: getting && first_list == FirstList::Failed,
         ..GlobalStatus::default()
     }

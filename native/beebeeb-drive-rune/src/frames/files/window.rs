@@ -215,6 +215,44 @@ fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
 }
 
 /// An empty folder (`.kit-empty`): what to do, and that it is encrypted before it uploads.
+/// The first listing is running and this folder has no rows yet: a loading state, never "Nothing here yet".
+fn listing_folder(t: &Theme) -> El {
+    el().key("list-loading")
+        .role("status")
+        .label("Getting your files ready")
+        .grow(1.0)
+        .h_full()
+        .center()
+        .child(kit::label(
+            "list-loading-words",
+            "Getting your files ready",
+            empty::CAP,
+            t.text_tertiary,
+        ))
+}
+
+/// Sync is paused and the list holds nothing: say so, with Resume (which lists the files).
+fn paused_folder(t: &Theme) -> El {
+    let body = empty::empty_state(
+        "paused",
+        &icons::FILES,
+        "Sync is paused",
+        "Resume to list your files and keep them up to date.",
+        t,
+    )
+    .child(
+        col().key("paused-actions").mt(8.0).items_center().child(
+            button::outline_button("paused-resume", "Resume", None, t)
+                .expanded(false)
+                .on_press(|s: &mut State| {
+                    let _ = s.actions.resume_sync();
+                }),
+        ),
+    );
+    el().key("paused-area").role("list").label("Sync is paused").grow(1.0).h_full().center().child(body)
+}
+
+/// An empty folder (`.kit-empty`): what to do, and that it is encrypted before it uploads.
 fn empty_folder(root: bool, t: &Theme) -> El {
     let body = empty::empty_state(
         "empty",
@@ -271,6 +309,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     if super::session::blanks(s) {
         // The session ended and the rows are not to be shown (`session::KEEP_THE_LIST`): only the banner's ask.
         body = body.child(el().key("list-blank").grow(1.0).h_full());
+    } else if s.listing.items.is_empty() && s.list_error.is_none() && super::browse_states::first_listing(s) {
+        body = body.child(listing_folder(&t));
+    } else if s.listing.items.is_empty() && s.list_error.is_none() && s.listing.folder.id.is_none() && super::browse_states::paused(s) {
+        body = body.child(paused_folder(&t));
     } else if empty {
         // Nothing in the folder: no headers, no panel, one way forward (DW-1106).
         body = body.child(empty_folder(s.listing.folder.id.is_none(), &t));
