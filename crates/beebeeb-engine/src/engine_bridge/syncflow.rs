@@ -392,6 +392,7 @@ async fn sync_tick_pull(
     if ops.ops.is_empty() {
         if ops.head_seq.is_some_and(|head| head >= cursor) {
             // The delta came back (empty, at the head): this tick reached the server.
+            super::drift_check::after_idle_pull(bridge, sync_root).await;
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),

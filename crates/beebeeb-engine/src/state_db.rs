@@ -653,6 +653,8 @@ mod system_role;
 mod thumbnail_flag;
 // dc-136b: a row whose newest server name could not be read.
 mod name_unreadable;
+// Folder digests (task 13): what the sync drift check trusts of the server tree, and the mirror reads it compares.
+pub(crate) mod folder_digests;
 mod test_hooks;
 // Task 2409: the changes "Not sent" counts, one row each.
 mod unsent;

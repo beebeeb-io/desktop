@@ -562,6 +562,8 @@ pub use landing::{
 pub use staging_bases::FinderStagingBases;
 
 pub mod syncflow;
+// Folder digests (task 13): the sync drift check, started from the idle pull.
+mod drift_check;
 #[cfg(any(test, feature = "test-support"))]
 pub use syncflow::sync_tick;
 pub use syncflow::sync_tick_outcome;
