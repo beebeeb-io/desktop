@@ -17,7 +17,33 @@ use beebeeb_core::backup::{BackupRecord, FolderPresence, RebuildClock, RecordRef
 use beebeeb_types::backup::{BackupStopReason, Category};
 use uuid::Uuid;
 
-use crate::engine_bridge::{BackupChild, BackupFolderState, EngineBridge};
+use super::tree_cache::{self, KeptListing, OpsVerdict};
+use crate::engine_bridge::{BackupChild, BackupFolderState, BackupSnapshot, EngineBridge};
+
+/// RE3-a: a listing page by page (a server with no snapshot) runs this many folder requests at full speed, then one
+/// every [`PAGED_LISTING_PACE`].
+const PAGED_LISTING_BURST: usize = 20;
+const PAGED_LISTING_PACE: std::time::Duration = std::time::Duration::from_millis(250);
+/// `/sync/ops` answers at most this many ops a page (the server's default): a full page may not be the head.
+const OPS_PAGE: usize = 1_000;
+
+/// Where a full listing reads the folders from.
+enum Listing<'a> {
+    /// The one snapshot of the account's tree (RE3-a).
+    Snapshot(&'a BackupSnapshot),
+    /// `GET /files` per folder, paced after a burst (a server with no snapshot, or a test's direct listing).
+    Pages { paced: bool },
+}
+
+/// One read of the ops after a kept listing's cursor.
+#[derive(Clone)]
+struct OpsRead {
+    ops: Vec<crate::api_client::SyncOp>,
+    /// The cursor the ops were read up to.
+    to: i64,
+    /// The read reached the head: nothing after `to`.
+    caught_up: bool,
+}
 use crate::state_db::{BackupEnqueue, BackupLayout, BackupPassRecord, BackupStopWrite};
 
 /// A failure in the host's words: a kind and never a name or a path (core's rule for `HostError`).
@@ -85,6 +111,10 @@ pub struct DesktopBackupHost {
     /// A tree the records' rebuild just listed, handed to the pass that follows it instead of listing again
     /// (review 2026-11-07): taken once.
     listed: std::sync::Mutex<HashMap<String, DeviceTree>>,
+    /// RE3-a: this tick's one snapshot (`None` inside: it could not be read; the listing goes page by page).
+    snapshot: tokio::sync::Mutex<Option<Option<Arc<BackupSnapshot>>>>,
+    /// RE3-a: this tick's ops reads by cursor (`None`: the read failed), so backups kept at one cursor read once.
+    ops: tokio::sync::Mutex<HashMap<i64, Option<OpsRead>>>,
 }
 
 impl DesktopBackupHost {
@@ -94,17 +124,189 @@ impl DesktopBackupHost {
             layout,
             enabled,
             listed: std::sync::Mutex::default(),
+            snapshot: tokio::sync::Mutex::default(),
+            ops: tokio::sync::Mutex::default(),
         }
+    }
+
+    /// RE3-a: this device's backup of `c` for a pass, and the clock of its listing. The kept listing of an earlier pass
+    /// when it can be used ([`Self::kept_tree`]: no listing, one `/sync/ops` read); else a full listing from one
+    /// snapshot, kept for the next passes. `rebuild`: the records are about to be rebuilt from it, so it is listed in
+    /// full and its clock measured. The pass that follows takes the same tree.
+    pub async fn device_tree_for_pass(
+        &self,
+        c: &Category,
+        rebuild: bool,
+    ) -> Result<(DeviceTree, RebuildClock), HostError> {
+        let kept = if rebuild { None } else { self.kept_tree(c).await? };
+        let (tree, clock) = match kept {
+            Some(tree) => (tree, RebuildClock::UNKNOWN),
+            None => self.full_listing(c, rebuild).await?,
+        };
+        if let Ok(mut listed) = self.listed.lock() {
+            listed.insert(c.key(), tree.clone());
+        }
+        Ok((tree, clock))
+    }
+
+    /// The kept listing of `c`, handed to core as PARTIAL (core marks nothing removed elsewhere from it), when it is
+    /// the remembered category folder's, younger than a day, read from a snapshot, and the ops since it touch none of
+    /// its folders (nor its files, past [`tree_cache::TOUCHED_LISTING_GAP`]). When the ops could not be read to the
+    /// head, the device and category folders are checked by id (two requests) instead. `None`: list in full.
+    async fn kept_tree(&self, c: &Category) -> Result<Option<DeviceTree>, HostError> {
+        let (device, key) = (self.layout.device_folder_id.as_str(), c.key());
+        let Some(kept) = tree_cache::get(device, &key) else {
+            return Ok(None);
+        };
+        let remembered = self
+            .bridge
+            .db()
+            .backup_category_folder(&key)
+            .map_err(db_error("category_folder"))?;
+        if remembered.as_deref() != Some(kept.category_folder_id.as_str())
+            || kept.listed_at.elapsed() >= tree_cache::FULL_LISTING_EVERY
+        {
+            return Ok(None);
+        }
+        let Some(cursor) = kept.cursor else {
+            return Ok(None);
+        };
+        let read = self.ops_since(cursor).await;
+        let checked = match &read {
+            Some(read) => match tree_cache::verdict(&kept, device, &read.ops) {
+                OpsVerdict::FolderTouched => return Ok(None),
+                OpsVerdict::FileTouched if kept.listed_at.elapsed() >= tree_cache::TOUCHED_LISTING_GAP => {
+                    return Ok(None);
+                }
+                // Not moved on: the touch is seen again, and lists once the gap is over.
+                OpsVerdict::FileTouched => read.caught_up,
+                OpsVerdict::Quiet => {
+                    tree_cache::advance(device, &key, read.to);
+                    read.caught_up
+                }
+            },
+            None => false,
+        };
+        if !checked {
+            if self.folder_state(device).await? == BackupFolderState::Gone
+                || self.folder_state(&kept.category_folder_id).await? == BackupFolderState::Gone
+            {
+                return Ok(None);
+            }
+        }
+        let mut tree = kept.tree;
+        tree.device_folder_live = true;
+        tree.category_folder_live = Some(true);
+        tree.complete = false;
+        Ok(Some(tree))
+    }
+
+    /// One page of the ops after `cursor`, read once per tick. `None`: the read failed, or the server's head is
+    /// behind the cursor (its log was reset).
+    async fn ops_since(&self, cursor: i64) -> Option<OpsRead> {
+        let mut memo = self.ops.lock().await;
+        if let Some(read) = memo.get(&cursor) {
+            return read.clone();
+        }
+        let read = match self.bridge.backup_ops_since(cursor).await {
+            Ok(page) => {
+                let last = page.ops.iter().map(|op| op.seq_id).max();
+                match (last, page.head_seq) {
+                    (_, Some(head)) if head < cursor => None,
+                    (Some(last), head) => Some(OpsRead {
+                        caught_up: head.map_or(page.ops.len() < OPS_PAGE, |head| last >= head),
+                        to: last,
+                        ops: page.ops,
+                    }),
+                    (None, head) => Some(OpsRead {
+                        ops: Vec::new(),
+                        to: head.unwrap_or(cursor),
+                        caught_up: true,
+                    }),
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    reason = crate::engine_bridge::error_category(&error),
+                    "backup: the ops since the last listing could not be read; the folders are checked by id"
+                );
+                None
+            }
+        };
+        memo.insert(cursor, read.clone());
+        read
+    }
+
+    /// This tick's snapshot of the account's tree, read once for every backup the tick lists.
+    async fn snapshot(&self) -> Option<Arc<BackupSnapshot>> {
+        let mut memo = self.snapshot.lock().await;
+        if let Some(snapshot) = memo.as_ref() {
+            return snapshot.clone();
+        }
+        let snapshot = match self.bridge.backup_snapshot().await {
+            Ok(snapshot) => Some(Arc::new(snapshot)),
+            Err(error) => {
+                tracing::warn!(
+                    reason = crate::engine_bridge::error_category(&error),
+                    "backup: no snapshot; the backup is listed folder by folder, paced"
+                );
+                None
+            }
+        };
+        *memo = Some(snapshot.clone());
+        snapshot
+    }
+
+    /// A full listing of `c`: from this tick's snapshot (one request for every backup), else page by page, paced.
+    /// A live listing is kept for the next passes. `clocked`: one listing page of the category folder measures the
+    /// server's clock for the records' rebuild (a snapshot carries none).
+    async fn full_listing(&self, c: &Category, clocked: bool) -> Result<(DeviceTree, RebuildClock), HostError> {
+        let device = self
+            .bridge
+            .backup_folder_state(&self.layout.device_folder_id)
+            .await
+            .map_err(host_error("device_folder_state"))?;
+        if device == BackupFolderState::Gone {
+            return Ok((gone_tree(false, None), RebuildClock::UNKNOWN));
+        }
+        let (folder_id, live) = self.category_folder(c).await?;
+        if live == Some(false) {
+            return Ok((gone_tree(true, Some(false)), RebuildClock::UNKNOWN));
+        }
+        let snapshot = self.snapshot().await;
+        let (mut tree, mut clock) = match &snapshot {
+            Some(snapshot) => self.list_category(&folder_id, Listing::Snapshot(snapshot)).await?,
+            None => self.list_category(&folder_id, Listing::Pages { paced: true }).await?,
+        };
+        if clocked && snapshot.is_some() {
+            clock = self
+                .bridge
+                .backup_listing_clock(&folder_id)
+                .await
+                .map_err(host_error("listing"))?;
+        }
+        tree.category_folder_live = live;
+        let listing = KeptListing {
+            category_folder_id: folder_id,
+            tree: tree.clone(),
+            listed_at: std::time::Instant::now(),
+            cursor: snapshot.map(|snapshot| snapshot.seq_id),
+        };
+        tree_cache::put(&self.layout.device_folder_id, &c.key(), listing);
+        tracing::info!(
+            category = %c.key(),
+            files = tree.files.len(),
+            folders = tree.folders.len(),
+            complete = tree.complete,
+            "backup: listed in full"
+        );
+        Ok((tree, clock))
     }
 
     /// [`BackupHost::device_tree`] for the records' rebuild, with the clock its listing measured (LD-0123: core's
     /// `records_from_remote_with_clock` takes it); the pass that follows takes the same listing.
     pub async fn device_tree_for_rebuild(&self, c: &Category) -> Result<(DeviceTree, RebuildClock), HostError> {
-        let (tree, clock) = self.device_tree_clocked(c).await?;
-        if let Ok(mut listed) = self.listed.lock() {
-            listed.insert(c.key(), tree.clone());
-        }
-        Ok((tree, clock))
+        self.device_tree_for_pass(c, true).await
     }
 
     /// This device's backup of `c` as the server has it now, and the clock of the listing that read it. A device or
@@ -122,7 +324,7 @@ impl DesktopBackupHost {
         if live == Some(false) {
             return Ok((gone_tree(true, Some(false)), RebuildClock::UNKNOWN));
         }
-        let (mut tree, clock) = self.list_category(&folder_id).await?;
+        let (mut tree, clock) = self.list_category(&folder_id, Listing::Pages { paced: false }).await?;
         tree.category_folder_live = live;
         Ok((tree, clock))
     }
@@ -231,21 +433,36 @@ impl DesktopBackupHost {
     /// Every live folder and file under `category_folder`, keys joined with `/`, and the tightest clock its pages
     /// measured. A folder whose name cannot be opened is not entered and makes the listing partial; a file's is
     /// listed by id with an empty key.
-    async fn list_category(&self, category_folder: &str) -> Result<(DeviceTree, RebuildClock), HostError> {
+    async fn list_category(
+        &self,
+        category_folder: &str,
+        source: Listing<'_>,
+    ) -> Result<(DeviceTree, RebuildClock), HostError> {
         let root = parse_id(category_folder).ok_or_else(|| HostError("category folder id is not a uuid".into()))?;
         let mut folders = HashMap::from([(String::new(), root)]);
         let mut files = Vec::new();
         let mut complete = true;
         let mut clock = RebuildClock::UNKNOWN;
         let mut queue = std::collections::VecDeque::from([(String::new(), category_folder.to_string())]);
+        let mut requests = 0usize;
         while let Some((prefix, folder_id)) = queue.pop_front() {
-            let (children, all, folder_clock) = self
-                .bridge
-                .backup_list_children_clocked(&folder_id)
-                .await
-                .map_err(host_error("listing"))?;
-            complete &= all;
-            clock = crate::engine_bridge::tighter_clock(clock, folder_clock);
+            let children = match &source {
+                Listing::Snapshot(snapshot) => self.bridge.backup_children_in(snapshot, &folder_id),
+                Listing::Pages { paced } => {
+                    requests += 1;
+                    if *paced && requests > PAGED_LISTING_BURST {
+                        tokio::time::sleep(PAGED_LISTING_PACE).await;
+                    }
+                    let (children, all, folder_clock) = self
+                        .bridge
+                        .backup_list_children_clocked(&folder_id)
+                        .await
+                        .map_err(host_error("listing"))?;
+                    complete &= all;
+                    clock = crate::engine_bridge::tighter_clock(clock, folder_clock);
+                    children
+                }
+            };
             for BackupChild {
                 id,
                 name,
@@ -311,7 +528,9 @@ impl BackupHost for DesktopBackupHost {
             .backup_ensure_folder(&parent.to_string(), name)
             .await
             .map_err(host_error("ensure_folder"))?;
-        parse_id(&id).ok_or_else(|| HostError("a folder id is not a uuid".into()))
+        let id = parse_id(&id).ok_or_else(|| HostError("a folder id is not a uuid".into()))?;
+        tree_cache::add_folder(parent, name, id);
+        Ok(id)
     }
 
     async fn move_file(&self, id: Uuid, new_parent: Uuid, new_name: &str) -> Result<(), HostError> {
