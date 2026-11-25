@@ -580,10 +580,10 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     crate::frames::tray::shortcuts::sync(s); // a closed shortcuts list forgets its page
     crate::frames::files::reset::sync(s); // a route that left the Files window closes its dialogs, wiped
     // A press on a section, the current one too (Files while on Files), ends Search over the window.
-    if let Some(route) = pressed_section {
-        if route.section == s.shell.app.route().section {
-            crate::frames::files::reset::end_search(s);
-        }
+    if let Some(route) = pressed_section
+        && route.section == s.shell.app.route().section
+    {
+        crate::frames::files::reset::end_search(s);
     }
     outcome
 }

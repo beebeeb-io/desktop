@@ -1,4 +1,4 @@
-//! RE-a: the first listing of a 42k-row account (Guus's, 2026-11-24: 41,872 rows, 39 at the root) is whole within a
+//! RE-a: the first listing of a 42k-row account (a real one, 2026-11-24: 41,872 rows, 39 at the root) is whole within a
 //! budget, the bar moves at least every second from the moment the list arrives, and the root is in the database by
 //! the ingest's first report (the Files view reads it from there).
 
@@ -13,7 +13,7 @@ const KEY: [u8; 32] = [0x5a; 32];
 const ROWS: usize = 41_872;
 const FOLDERS: usize = 2_800;
 const AT_ROOT: usize = 39;
-/// The whole listing, decrypt pass included, in a debug test build: 14.4 s measured on the Legion build host
+/// The whole listing, decrypt pass included, in a debug test build: 14.4 s measured on a laptop build host
 /// (2026-11-24, next to another 41k test; decrypt 4.9 s, ingest 9.3 s), so twice that. A release build is several
 /// times faster.
 const BUDGET: Duration = Duration::from_secs(60); // debug build on a loaded shard: 14 s alone, 35 s under 8 shards
