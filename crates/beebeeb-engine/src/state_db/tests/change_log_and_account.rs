@@ -1246,3 +1246,56 @@ fn custody_seen_ids_lists_every_remembered_folder_and_nothing_else() {
     assert_eq!(ids, vec![a.to_string(), b.to_string()]);
     assert!(db.has_seen_folder_custody(&a.to_uppercase()).unwrap());
 }
+
+#[test]
+fn dm41_anchor_ahead_of_the_tip_is_expired() {
+    let db = StateDb::open(":memory:").unwrap();
+    seed_child(&db, "f-1", "/a.txt", ItemKind::File);
+    let tip = db.fp_last_anchor().unwrap().expect("a change minted an anchor");
+    let ahead = (String::from_utf8(tip.clone()).unwrap().parse::<i64>().unwrap() + 500).to_string();
+    let err = db.list_file_changes_paged(Some(ahead.as_bytes()), 100).unwrap_err();
+    assert!(err.to_string().contains("expired"), "got {err}");
+    let err = db.list_file_changes(Some(ahead.as_bytes())).unwrap_err();
+    assert!(err.to_string().contains("expired"), "got {err}");
+    // The current anchor is still fine, and so is a swept log.
+    assert!(db.list_file_changes_paged(Some(&tip), 100).is_ok());
+    db.sweep_file_changes(i64::MAX).unwrap();
+    assert!(db.list_file_changes_paged(Some(&tip), 100).is_ok(), "a swept log must not expire it");
+}
+
+#[test]
+fn dm41_first_listing_writes_one_change_per_cloud_only_file() {
+    let db = StateDb::open(":memory:").unwrap();
+    for i in 0..3 {
+        db.upsert_file(&FileEntry {
+            file_id: format!("c-{i}"),
+            path: format!("/c{i}.txt"),
+            status: FileStatus::CloudOnly,
+            size_bytes: 5,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        })
+        .unwrap();
+    }
+    let sweep_all = |db: &StateDb| db.sweep_file_changes(i64::MAX).unwrap();
+    sweep_all(&db);
+    assert_eq!(db.record_first_listing_changes().unwrap(), 3);
+    assert_eq!(db.record_first_listing_changes().unwrap(), 0, "idempotent");
+    let (changes, _) = db.list_file_changes(None).unwrap().unwrap();
+    assert_eq!(changes.len(), 3);
+}
+
+#[test]
+fn dm41_hydrate_and_evict_write_status_changes() {
+    let db = StateDb::open(":memory:").unwrap();
+    seed_child(&db, "f-1", "/a.txt", ItemKind::File);
+    let count = |db: &StateDb| db.list_file_changes(None).unwrap().unwrap().0.len();
+    let before = count(&db);
+    db.set_status("f-1", FileStatus::CloudOnly).unwrap();
+    assert_eq!(count(&db), before + 1, "evict");
+    db.set_status("f-1", FileStatus::Local).unwrap();
+    assert_eq!(count(&db), before + 2, "hydrate");
+}

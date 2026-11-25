@@ -663,6 +663,35 @@ int beebeeb_fp_signal_working_set(BeebeebFpError *out_error) {
     }
 }
 
+// dm-41: ask the system to forget what it knows below the root and list the whole tree again
+// (reimportItemsBelowItemWithIdentifier: root). Called once when the db identity or app generation
+// changes. Returns: 0 = asked (or domain not registered: nothing to reimport), -1 = error.
+int beebeeb_fp_reimport(BeebeebFpError *out_error) {
+    @autoreleasepool {
+        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+        if (manager == nil) {
+            return 0;
+        }
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block NSError *found_error = nil;
+        [manager reimportItemsBelowItemWithIdentifier:NSFileProviderRootContainerItemIdentifier
+                                    completionHandler:^(NSError *error) {
+            found_error = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        if (wait_result != 0) {
+            BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out asking the Beebeeb File Provider to reimport", out_error);
+            return -1;
+        }
+        if (found_error != nil) {
+            BeebeebFillError(found_error, out_error);
+            return -1;
+        }
+        return 0;
+    }
+}
+
 // Task 1698 part 3: every registered identifier of THIS provider, newline-separated.
 // Returns the count, or -1 (out_error set).
 int beebeeb_fp_list_domains(char *ids_buffer, unsigned long ids_buffer_len, BeebeebFpError *out_error) {

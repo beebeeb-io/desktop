@@ -449,6 +449,7 @@ impl StateDb {
         let tip: i64 = conn.query_row("SELECT COALESCE((SELECT MAX(seq) FROM fp_changes), 0)", [], |row| {
             row.get(0)
         })?;
+        check_anchor_not_ahead(&conn, since, tip)?;
         if tip <= since {
             // Up to date: echo the caller's anchor (or nil at genesis) and
             // deliver nothing. The anchor must not move — a stable anchor on a
@@ -500,6 +501,10 @@ impl StateDb {
                     )
                 })?,
         };
+        let tip_now: i64 = conn.query_row("SELECT COALESCE((SELECT MAX(seq) FROM fp_changes), 0)", [], |row| {
+            row.get(0)
+        })?;
+        check_anchor_not_ahead(&conn, since, tip_now)?;
         let mut stmt = conn.prepare(
             "SELECT seq, file_id, kind, old_parent_id, new_parent_id
              FROM fp_changes WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
@@ -542,6 +547,27 @@ impl StateDb {
         // Full page: there may be more — resume from the last delivered seq.
         let next = changes.last().map(|change| change.seq).unwrap_or(since);
         Ok(Some((changes, Some(anchor_bytes(next)))))
+    }
+    /// dm-41: one `Modified` change for every cloud-only row that has no change in the log yet, so a
+    /// replica that re-lists (or a fresh state.db) hears about the whole remote tree, not just what changed
+    /// after its anchor. Idempotent: rows already in the log are skipped. Returns how many rows it wrote.
+    #[cfg(any(target_os = "macos", test, feature = "test-support"))]
+    pub fn record_first_listing_changes(&self) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT file_id FROM files WHERE status = 'cloud_only'
+                 AND file_id NOT IN (SELECT file_id FROM fp_changes)",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for id in &ids {
+            record_file_change_conn(&tx, id, FpChangeKind::Modified, None)?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
     }
     /// Delete consumed change rows recorded before `before_epoch` (the sweep
     /// runs on a delay so a slow replica can still page through recent
@@ -761,4 +787,25 @@ impl StateDb {
         tx.commit()?;
         Ok(ops.len())
     }
+}
+
+/// dm-41: an anchor ahead of everything this database ever issued came from another database (a replica left
+/// over from 0.8.x, or a state.db made fresh): answer "sync anchor expired" so the system lists again. The
+/// high-water mark is the larger of the log tip and the persistent cursor, so a swept log never expires a
+/// current anchor.
+fn check_anchor_not_ahead(conn: &rusqlite::Connection, since: i64, tip: i64) -> Result<()> {
+    let cursor: i64 = conn
+        .query_row(
+            "SELECT last_anchor FROM fp_sync_anchor WHERE domain_id = '__default__'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    if since > tip.max(cursor) {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "fp sync anchor is ahead of this database (expired)".into(),
+        ));
+    }
+    Ok(())
 }

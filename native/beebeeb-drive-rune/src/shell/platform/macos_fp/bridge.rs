@@ -95,6 +95,7 @@ unsafe extern "C" {
     ) -> i32;
     fn beebeeb_fp_kept_folder_state_for_path(path: *const c_char) -> i32;
     fn beebeeb_fp_signal_working_set(out_error: *mut BeebeebFpErrorC) -> i32;
+    fn beebeeb_fp_reimport(out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_fp_list_domains(ids: *mut c_char, len: usize, out_error: *mut BeebeebFpErrorC) -> i32;
 }
 
@@ -292,6 +293,19 @@ pub(crate) fn signal_working_set() -> Result<WorkingSetSignalOutcome, FpError> {
         other => Err(FpError::app(
             app_code::UNEXPECTED_BRIDGE_RETURN,
             format!("beebeeb_fp_signal_working_set returned {other}"),
+        )),
+    }
+}
+
+/// dm-41: ask the system to list the whole tree again (`reimportItemsBelowItemWithIdentifier:` root), through the gate.
+/// Called once when the stored db identity or app generation changes. Never fails the caller's start.
+pub(crate) fn reimport() -> Result<(), FpError> {
+    let _gate = Gate::try_enter()?;
+    match call(beebeeb_fp_reimport)? {
+        0 => Ok(()),
+        other => Err(FpError::app(
+            app_code::UNEXPECTED_BRIDGE_RETURN,
+            format!("beebeeb_fp_reimport returned {other}"),
         )),
     }
 }

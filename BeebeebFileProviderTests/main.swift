@@ -1986,5 +1986,27 @@ check("an error is logged by its domain and code; a staging cause only in the cl
     ExtensionLog.signalErrorResolvedFailed(copyFailure)
 }
 
+// MARK: dm-41: unreachable daemon at the root, anchor expiry, filter reset
+check("dm41: an unreachable daemon at the root is a retryable error, not an empty success") {
+    let error = FileProviderEnumerator.rootListingError() as NSError
+    try expect(error.domain == NSFileProviderErrorDomain && error.code == NSFileProviderError.serverUnreachable.rawValue,
+               "serverUnreachable expected, got \(error)")
+}
+
+check("dm41: a daemon 'sync anchor expired' answer resets the stale filter and expires the anchor") {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("dm41-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: url) }
+    WorkingSetStore.save(WorkingSetStore.State(lastAnchor: "v1:900", materializedContainers: ["a", "b"]), to: url)
+    let mapped = FileProviderEnumerator.changesError(
+        BeebeebIPCError.daemonRejected("sync anchor expired: fp sync anchor is ahead of this database (expired)"),
+        stateURL: url
+    ) as NSError
+    try expect(mapped.code == NSFileProviderError.syncAnchorExpired.rawValue, "expected syncAnchorExpired, got \(mapped)")
+    let state = WorkingSetStore.load(from: url)
+    try expect(state.materializedContainers.isEmpty && state.lastAnchor == nil, "the stale state must be cleared")
+    let other = FileProviderEnumerator.changesError(BeebeebIPCError.daemonRejected("boom"), stateURL: url)
+    try expect(!FileProviderEnumerator.isAnchorExpired(other), "other errors pass through")
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)
