@@ -7,7 +7,7 @@
 //! under the sandbox is inside the container (HOME is the container).
 
 use std::collections::BTreeMap;
-use std::ffi::{CStr, CString, c_char, c_int, c_long, c_ulong, c_void};
+use std::ffi::{c_char, c_int, c_long, c_ulong, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 
 use super::SaveAnswer;
@@ -61,6 +61,52 @@ fn remember_at(file: &Path, key: &str, data: Vec<u8>) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(file, encode_bookmarks(&map))
+}
+
+/// Bookmark key of one picked backup folder: its own path, hex-encoded (keys hold no spaces), so a second
+/// folder never overwrites the first.
+pub(super) fn folder_key(path: &Path) -> String {
+    let mut key = String::from("folder:");
+    for b in path.as_os_str().as_encoded_bytes() {
+        key.push_str(&format!("{b:02x}"));
+    }
+    key
+}
+
+pub(super) const FOLDER_PREFIX: &str = "folder:";
+
+/// Removes `key` from the store.
+fn forget_at(file: &Path, key: &str) -> std::io::Result<()> {
+    let mut map = std::fs::read_to_string(file)
+        .map(|t| decode_bookmarks(&t))
+        .unwrap_or_default();
+    if map.remove(key).is_some() {
+        std::fs::write(file, encode_bookmarks(&map))?;
+    }
+    Ok(())
+}
+
+/// Resolves every stored `folder:` bookmark with `resolve` (which opens the scope). A bookmark that no longer
+/// resolves to a folder is dropped from the store; its key is returned, so the caller can log why. Never touches
+/// the folder's contents or anything remote.
+pub(super) fn resolve_all_at(
+    file: &Path,
+    mut resolve: impl FnMut(&[u8]) -> Option<PathBuf>,
+) -> (Vec<PathBuf>, Vec<String>) {
+    let map = std::fs::read_to_string(file)
+        .map(|t| decode_bookmarks(&t))
+        .unwrap_or_default();
+    let (mut ok, mut stale) = (Vec::new(), Vec::new());
+    for (key, data) in map.iter().filter(|(k, _)| k.starts_with(FOLDER_PREFIX)) {
+        match resolve(data).filter(|p| p.is_dir()) {
+            Some(path) => ok.push(path),
+            None => stale.push(key.clone()),
+        }
+    }
+    for key in &stale {
+        let _ = forget_at(file, key);
+    }
+    (ok, stale)
 }
 
 fn recall_at(file: &Path, key: &str) -> Option<Vec<u8>> {
@@ -204,7 +250,21 @@ fn remember(key: &str, url: Id) {
     }
 }
 
-/// The folder picker: NSOpenPanel, folders only; the choice is remembered under `key` as a security-scoped bookmark.
+/// At start, before the engine reads any backup folder: reopens the security scope of every folder picked for
+/// Backups. A stale one is dropped and logged (no path), so the folder shows as unreadable rather than silently
+/// missing.
+pub fn resolve_backup_folders() {
+    let Some(file) = store_file() else { return };
+    let (ok, stale) = resolve_all_at(&file, resolve_bookmark);
+    tracing::info!(
+        "backup folder bookmarks: {} reopened, {} stale and dropped",
+        ok.len(),
+        stale.len()
+    );
+}
+
+/// The folder picker: NSOpenPanel, folders only; the choice is remembered as a security-scoped bookmark under its
+/// own per-folder key (`key` is unused here: one key per path).
 /// BLOCKS until closed. `Ok(None)`: closed without a folder.
 pub fn pick_folder(title: &str, start: &Path, key: &str) -> Result<Option<PathBuf>, String> {
     let (title, start, key) = (title.to_string(), start.to_path_buf(), key.to_string());
@@ -224,8 +284,12 @@ pub fn pick_folder(title: &str, start: &Path, key: &str) -> Result<Option<PathBu
             return Ok(None);
         }
         let url = send!(Id; panel, "URL");
-        remember(&key, url);
-        Ok(url_path(url))
+        let path = url_path(url);
+        if let Some(p) = &path {
+            remember(&folder_key(p), url);
+        }
+        let _ = &key;
+        Ok(path)
     })
 }
 
@@ -270,10 +334,54 @@ mod tests {
         let file = dir.path().join("sub/bookmarks.txt");
         let a: Vec<u8> = (0..=255).collect();
         remember_at(&file, "save_folder", a.clone()).unwrap();
-        remember_at(&file, "pick_folder", vec![0, 1, 2]).unwrap();
+        remember_at(&file, "other", vec![0, 1, 2]).unwrap();
         assert_eq!(recall_at(&file, "save_folder"), Some(a));
-        assert_eq!(recall_at(&file, "pick_folder"), Some(vec![0, 1, 2]));
+        assert_eq!(recall_at(&file, "other"), Some(vec![0, 1, 2]));
         assert_eq!(recall_at(&file, "nothing"), None);
         assert_eq!(decode_bookmarks("bad line\nk zz\nk 0\n"), BTreeMap::new());
+    }
+
+    #[test]
+    fn two_folders_keep_two_bookmarks() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("b.txt");
+        let (a, b) = (Path::new("/Users/x/Photos"), Path::new("/Users/x/Docs"));
+        assert_ne!(folder_key(a), folder_key(b));
+        remember_at(&file, &folder_key(a), vec![1]).unwrap();
+        remember_at(&file, &folder_key(b), vec![2]).unwrap();
+        assert_eq!(recall_at(&file, &folder_key(a)), Some(vec![1]));
+        assert_eq!(recall_at(&file, &folder_key(b)), Some(vec![2]));
+    }
+
+    #[test]
+    fn resolve_at_start_opens_each_and_drops_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("b.txt");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let (k1, k2, k3) = (
+            folder_key(&real),
+            folder_key(Path::new("/gone")),
+            folder_key(Path::new("/gone2")),
+        );
+        remember_at(&file, &k1, vec![1]).unwrap();
+        remember_at(&file, &k2, vec![2]).unwrap();
+        remember_at(&file, &k3, vec![3]).unwrap();
+        remember_at(&file, "save_folder", vec![9]).unwrap();
+        let mut calls = Vec::new();
+        let (ok, stale) = resolve_all_at(&file, |d| {
+            calls.push(d.to_vec());
+            (d == [1]).then(|| real.clone())
+        });
+        assert_eq!(
+            calls.len(),
+            3,
+            "each folder bookmark is resolved, the save folder is not"
+        );
+        assert_eq!(ok, vec![real]);
+        assert_eq!(stale.len(), 2);
+        assert_eq!(recall_at(&file, &k2), None);
+        assert_eq!(recall_at(&file, &k1), Some(vec![1]));
+        assert_eq!(recall_at(&file, "save_folder"), Some(vec![9]));
     }
 }
