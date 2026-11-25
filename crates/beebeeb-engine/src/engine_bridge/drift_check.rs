@@ -136,11 +136,12 @@ pub(super) async fn after_idle_pull(bridge: &EngineBridge, sync_root: &Path) {
     }
 }
 
-/// One check now, whatever the window (the window is [`after_idle_pull`]'s). A server found without digests is
-/// not asked again.
+/// One check now, whatever the window; it starts the next window. A server found without digests is not asked
+/// again.
 pub(crate) async fn check_now(bridge: &EngineBridge, sync_root: &Path) -> DriftReport {
     let (unsupported, watching) = with_state(sync_root, |state| {
         state.running = true;
+        state.last_started = Some(Instant::now());
         (state.unsupported, state.watching.take())
     });
     let (report, watching) = if unsupported {
