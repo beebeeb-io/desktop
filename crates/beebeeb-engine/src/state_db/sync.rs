@@ -81,8 +81,21 @@ impl StateDb {
     #[cfg(target_os = "macos")]
     #[track_caller]
     pub(super) fn request_resnapshot_conn(conn: &Connection) -> Result<()> {
-        // RE3-e: who asked, by call site. At debug: on macOS a waiting upload asks on every pass.
-        tracing::debug!(at = %std::panic::Location::caller(), "re-snapshot requested");
+        // RE3-e: who asked, by call site. Info once (when none is pending); debug after: on macOS a waiting
+        // upload asks on every pass.
+        let at = std::panic::Location::caller();
+        let pending: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
+                params![Self::NEEDS_RESNAPSHOT_KEY],
+                |row| row.get(0),
+            )
+            .unwrap_or(true);
+        if pending {
+            tracing::debug!(%at, "re-snapshot requested");
+        } else {
+            tracing::info!(%at, "re-snapshot requested");
+        }
         conn.execute(
             "INSERT INTO sync_state (key, value) VALUES (?1, '1')
              ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
@@ -808,4 +821,33 @@ fn check_anchor_not_ahead(conn: &rusqlite::Connection, since: i64, tip: i64) -> 
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod resnapshot_served_tests {
+    use super::*;
+
+    /// dm-52: the request seen after the list arrived is cleared once it is applied (no second bootstrap);
+    /// one made during the apply raises the counter past it and survives.
+    #[test]
+    fn a_request_during_the_listing_is_served_and_one_during_apply_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // Tick start: nothing pending. The request lands during the listing.
+        assert_eq!(db.peek_resnapshot_request().unwrap(), None);
+        db.request_resnapshot().unwrap();
+        // After the fetch, before the ingest: this list serves it.
+        let served = db.peek_resnapshot_request().unwrap().unwrap();
+        // A second request during the apply.
+        db.request_resnapshot().unwrap();
+        db.clear_resnapshot_request(served).unwrap();
+        assert!(db.peek_resnapshot_request().unwrap().is_some(), "a request made during apply survives");
+
+        // Without one during apply, the clear leaves nothing: no second bootstrap.
+        let db2 = StateDb::open(dir.path().join("state2.db")).unwrap();
+        db2.request_resnapshot().unwrap();
+        let served = db2.peek_resnapshot_request().unwrap().unwrap();
+        db2.clear_resnapshot_request(served).unwrap();
+        assert_eq!(db2.peek_resnapshot_request().unwrap(), None);
+    }
 }
