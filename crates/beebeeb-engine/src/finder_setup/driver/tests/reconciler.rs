@@ -527,7 +527,7 @@ use super::*;
                 Op::ReadDomain,
                 Op::Observe,
                 Op::StartEngine,
-                Op::WaitStable(Duration::from_secs(2)),
+                Op::WaitStable(Duration::from_secs(60)),
                 Op::FinishReady
             ],
             "one read, then exactly one check, and never an add"
@@ -593,7 +593,7 @@ use super::*;
             vec![
                 Op::Observe,
                 Op::StartEngine,
-                Op::WaitStable(Duration::from_secs(2)),
+                Op::WaitStable(Duration::from_secs(60)),
                 Op::FinishReady,
                 Op::ReadDomain
             ],
