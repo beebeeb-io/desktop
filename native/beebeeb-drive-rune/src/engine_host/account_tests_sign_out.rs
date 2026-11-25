@@ -887,7 +887,7 @@ fn signing_this_app_out_removes_the_finder_location_before_the_session_ends_and_
         "the Finder removal comes before the session is dropped"
     );
     assert!(
-        at("engine.sign_out_for(session)") < at("finder_setup::turn_on()"),
+        at("engine.sign_out_for(session)") < at("finder_setup::session_changed()"),
         "a refused sign-out puts the location back after it"
     );
     assert!(!worker.contains("purge(") && !worker.contains("wipe("), "the local data is kept");
