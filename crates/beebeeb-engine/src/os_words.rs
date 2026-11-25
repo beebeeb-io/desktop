@@ -42,6 +42,7 @@ os_lits!(device_word_cap, "This PC", "This Mac", "This computer");
 os_lits!(file_manager, "File Explorer", "Finder", "Files");
 os_lits!(unlock_name, "Windows Hello", "Touch ID", "");
 os_lits!(primary_key, "Ctrl+", "⌘", "Ctrl+");
+os_lits!(process_viewer, "Task Manager", "Activity Monitor", "your system monitor");
 
 /// "this Mac" / "this PC" / "this computer".
 pub const fn device_word() -> &'static str {

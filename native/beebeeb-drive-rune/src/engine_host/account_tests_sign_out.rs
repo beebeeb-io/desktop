@@ -871,3 +871,42 @@ fn a_session_that_changes_while_a_sign_out_is_on_its_way_says_nothing_to_the_nex
     assert_eq!(source.notice(), None);
     assert_eq!(source.pump(), Pumped::default(), "no mark of the old change is left");
 }
+
+/// dm-30: signing this app out takes the Finder location away FIRST (it keeps unsynced files), then ends the
+/// session with the local data kept; a refusal brings the location back. The reconciler is a process-wide
+/// singleton no test can stand in for, so the order is pinned in the closure the sign-out runs on its worker, and
+/// the end is run for real: the session is over and the answer is Done.
+#[test]
+fn signing_this_app_out_removes_the_finder_location_before_the_session_ends_and_keeps_local_data() {
+    let code = include_str!("account_actions.rs");
+    let worker = &code[code.find("fn sign_out_app_as").expect("the sign-out")..];
+    let worker = &worker[..worker.find("pub(super) fn sign_out_result").expect("its end")];
+    let at = |needle: &str| worker.find(needle).unwrap_or_else(|| panic!("{needle} is not in the sign-out"));
+    assert!(
+        at("finder_setup::sign_out()") < at("engine.sign_out_for(session)"),
+        "the Finder removal comes before the session is dropped"
+    );
+    assert!(
+        at("engine.sign_out_for(session)") < at("finder_setup::turn_on()"),
+        "a refused sign-out puts the location back after it"
+    );
+    assert!(!worker.contains("purge(") && !worker.contains("wipe("), "the local data is kept");
+
+    // Where no reconciler runs the removal is not confirmed, and the sign-out still ends the session.
+    assert!(crate::engine_host::finder_setup::sign_out().is_err());
+    let server = server();
+    let engine = signed_in(&server);
+    let mut source = Source::new(engine.clone());
+    assert_eq!(source.sign_out_this_app(), SignOutAnswer::Pending);
+    let began = Instant::now();
+    let answer = loop {
+        source.pump();
+        if let Some(answer) = source.sign_out_result() {
+            break answer;
+        }
+        assert!(began.elapsed() < Duration::from_secs(15), "the sign-out never answered");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(answer, SignOutAnswer::Done);
+    assert!(!engine.has_session());
+}

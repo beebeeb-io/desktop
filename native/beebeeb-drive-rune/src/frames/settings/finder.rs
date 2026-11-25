@@ -164,6 +164,16 @@ pub struct FinderUi {
 }
 
 impl FinderUi {
+    /// The folder macOS kept, while its row shows.
+    pub fn kept(&self) -> Option<&str> {
+        self.kept.as_deref()
+    }
+
+    #[cfg(test)]
+    pub fn set_kept_for_test(&mut self, folder: Option<&str>) {
+        self.kept = folder.map(str::to_owned);
+    }
+
     fn work(&self) -> Work {
         *self.work.lock().unwrap_or_else(PoisonError::into_inner)
     }

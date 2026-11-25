@@ -810,6 +810,7 @@ impl Pane {
 /// and File Explorer frames (DW-0746 and the nine over it), unlike every other section: followed, and flagged.
 fn section_label(section: Pane) -> Option<&'static str> {
     match section {
+        Pane::Finder => Some("Beebeeb in Finder"),
         Pane::General => Some("General"),
         Pane::Notifications => Some("Notifications"),
         Pane::Storage => Some("Storage"),
@@ -867,7 +868,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         // The sidebar and the page are F6 stops, as in account's sections (`ui::focus::pane`).
         .child(focus::pane(
             row().h_full().child(sidebar(
-                pane.section(),
+                // Beebeeb in Finder has its own sidebar entry (macOS); every other pane marks its section.
+                if pane == Pane::Finder { pane } else { pane.section() },
                 ui.drive.photo_previews() != previews::PhotoPreviews::Unavailable,
                 &t,
             )),
@@ -937,7 +939,12 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
 
 /// Every `Intent::Open` target the panes can raise, and the file that takes it (`shell::settings_open`).
 #[allow(dead_code)] // the shell lane reads it
-pub const OPEN_TARGETS: [&str; 7] = [
+pub const OPEN_TARGETS: [&str; 12] = [
+    "finder-show-app",
+    "finder-open",
+    "kept-folder-show",
+    "kept-folder-dismiss",
+    "login-items-and-extensions",
     "log-folder",
     "open-source-licences",
     "privacy",

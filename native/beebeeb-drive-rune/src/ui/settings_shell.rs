@@ -219,10 +219,21 @@ pub const SETTINGS_ITEMS: &[(&str, &Icon, &str)] = &[
 ];
 /// The DRIVE group. The board draws a chevron here; the owner wants a glyph like the SETTINGS group,
 /// so a pane's row never reads as an expandable folder.
+#[cfg(not(target_os = "macos"))]
 pub const DRIVE_ITEMS: &[(&str, &Icon, &str)] = &[
     ("Storage", &ic::DATABASE, "DW-0712"),
     ("Backups", &ic::CLOCK, "DW-0737"),
     (concat!("Sync and ", beebeeb_engine::file_manager!()), &ic::SYNC, "DW-0746"),
+    ("Thumbnails and previews", &ic::IMAGE, "DW-0744"),
+    ("Bandwidth", &ic::GAUGE, "DW-0785"),
+];
+/// On a Mac the group also lists Beebeeb in Finder (dm-18, frame `DM-18`).
+#[cfg(target_os = "macos")]
+pub const DRIVE_ITEMS: &[(&str, &Icon, &str)] = &[
+    ("Storage", &ic::DATABASE, "DW-0712"),
+    ("Backups", &ic::CLOCK, "DW-0737"),
+    (concat!("Sync and ", beebeeb_engine::file_manager!()), &ic::SYNC, "DW-0746"),
+    ("Beebeeb in Finder", &ic::FOLDER_TAB, "DM-18"),
     ("Thumbnails and previews", &ic::IMAGE, "DW-0744"),
     ("Bandwidth", &ic::GAUGE, "DW-0785"),
 ];

@@ -386,9 +386,13 @@ pub fn after_hand(delivery: Delivery) -> Start {
 pub fn start(launch: &Launch, holder: Option<ProfileHolder>) -> Start {
     match holder {
         Some(holder) => Start::Refuse(Refusal::HeldBy(holder)),
-        None => Start::Run {
-            show_window: !launch.autostart,
-        },
+        None => {
+            use super::host::macos_lifecycle::{self as lifecycle, StartWindow};
+            let how = if launch.autostart { lifecycle::Launch::LoginItem } else { lifecycle::Launch::Manual };
+            Start::Run {
+                show_window: lifecycle::start_window(how) == StartWindow::Open,
+            }
+        }
     }
 }
 
@@ -441,8 +445,13 @@ pub fn refusal_message(refusal: &Refusal, identity: AppIdentity) -> String {
             )
         }
         Refusal::NotAnswering => format!(
-            "{name} is already running, but it is not answering. Wait a moment and try again. \
-             If it stays like this, end {name} in Task Manager and open it again."
+            concat!(
+                "{name} is already running, but it is not answering. Wait a moment and try again. ",
+                "If it stays like this, end {name} in ",
+                beebeeb_engine::process_viewer!(),
+                " and open it again."
+            ),
+            name = name
         ),
         Refusal::ChannelUnavailable => format!(
             "{name} could not check whether it is already running, so it did not start a second time. \
@@ -462,6 +471,18 @@ mod tests {
     use super::*;
 
     const REAL: AppIdentity = AppIdentity::Real;
+
+    /// dm-37: the not-answering refusal names the OS's own process list, never Windows' on a Mac.
+    #[test]
+    fn the_not_answering_refusal_names_this_systems_process_list() {
+        let words = refusal_message(&Refusal::NotAnswering, REAL);
+        if cfg!(target_os = "macos") {
+            assert!(words.contains("end Beebeeb in Activity Monitor and open it again."), "{words}");
+            assert!(!words.contains("Task Manager"), "{words}");
+        } else if cfg!(target_os = "windows") {
+            assert!(words.contains("in Task Manager and open it again."), "{words}");
+        }
+    }
 
     /// Task 2455: the control channel's name is taken by a server that is not this user's
     /// Beebeeb. Creating our own pipe fails (the name exists), so the launch tries to hand
