@@ -44,6 +44,7 @@ pub mod engine_status;
 pub mod explorer_command;
 pub mod file_ops;
 pub mod file_provider_port;
+pub mod folder_digest;
 pub mod finder_setup;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod found_while_paused;

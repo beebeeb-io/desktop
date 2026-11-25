@@ -1078,6 +1078,9 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 }
             }
 
+            // ── Folder digests (`fake_digests`); before the single-file arm ──
+            "GET /api/v1/folder-digests" => account.folder_digests_route(req),
+
             // ── Single file (canonical row for the owner-keys prepare path) ──
             route_str if route_str.starts_with("GET /api/v1/files/") && !route_str.contains('?') => {
                 if req.bearer() != Some(&account.session_token) {
