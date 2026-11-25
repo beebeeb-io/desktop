@@ -306,6 +306,12 @@ pub fn run() {
     {
         live.wire_first_run();
     }
+    // macOS: the Finder setup starts here, once (it was only ever reached by the Windows-only first run above).
+    if cfg!(target_os = "macos")
+        && let Some((_, live)) = &real_engine
+    {
+        live.start_finder_setup();
+    }
     let engine: Arc<dyn EngineActions> = match &real_engine {
         Some((opened, live)) => {
             host::log(format!("the engine is open; the stored session says {:?}", opened.gate));
@@ -453,7 +459,7 @@ pub fn run() {
         // The macOS menu bar (§1): Edit and Window from rune, the app's own items from one table.
         #[cfg(target_os = "macos")]
         {
-            main_app = macos_menu::install(main_app, false);
+            main_app = macos_menu::install(main_app, actions.tray_inputs().paused);
         }
         flyout_app = flyout_app.keep_running();
         tray_tip_app = tray_tip_app.keep_running();
@@ -485,6 +491,8 @@ pub fn run() {
         capture_file,
         hide_from_capture,
     };
+    #[cfg(target_os = "macos")]
+    let menu_actions = actions.clone();
     let (shell_actions, shell_platform) = (actions.clone(), platform.clone());
     let init_engine = real_engine
         .as_ref()
@@ -518,6 +526,9 @@ pub fn run() {
             Err(error) => host::log(format!("start at login was not checked ({error})")),
         }
         // Runs on the UI thread once the event loop is up, window or not.
+        // macOS: the app menu's pause item follows the engine's state (Resume Sync while paused).
+        #[cfg(target_os = "macos")]
+        macos_menu::follow_pause(main.clone(), menu_actions);
         main.update(|s, _| {
             s.shell.start_tray();
             s.shell.start_sync();

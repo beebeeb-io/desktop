@@ -40,9 +40,23 @@ fn every_trigger_call_is_wired_at_its_site() {
     assert!(host.contains("mod finder_setup;"), "the module is declared");
     assert!(
         host.contains(
-            "self.first_run.read(&*self.engine);\n        finder_setup::start(self.engine.clone(), self.identity);"
+            "pub fn start_finder_setup(&self) {\n        finder_setup::start(self.engine.clone(), self.identity);"
         ),
-        "the app's start starts the reconciler once the first run is read"
+        "the host has one start of the reconciler, apart from the Windows first run"
+    );
+    assert!(
+        !host.contains("self.first_run.read(&*self.engine);\n        finder_setup::start"),
+        "the first run no longer carries the reconciler's start (macOS never ran it)"
+    );
+    let shell = include_str!("../shell/mod.rs");
+    assert_eq!(
+        shell.matches("live.start_finder_setup();").count(),
+        1,
+        "the macOS start calls finder_setup::start once"
+    );
+    assert!(
+        shell.contains("cfg!(target_os = \"macos\")\n        && let Some((_, live)) = &real_engine"),
+        "the call is for macOS and for the real engine only"
     );
     let own = include_str!("finder_setup.rs");
     for pin in [

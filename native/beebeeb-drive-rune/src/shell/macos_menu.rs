@@ -264,6 +264,22 @@ pub fn install(app: rune::App<State>, paused: bool) -> rune::App<State> {
         .fold(app.standard_menus(), |app, item| app.menu_item(item))
 }
 
+/// Keeps the pause item's words true to the engine: a thread reads the pause state each second and, when it
+/// changed (the status bar, the tray, Settings or a persisted pause all reach it), sets the menu again.
+#[cfg(target_os = "macos")]
+pub fn follow_pause(main: rune::AppHandle<State>, actions: std::sync::Arc<dyn super::actions::ShellActions>) {
+    let mut shown = actions.tray_inputs().paused;
+    let _ = std::thread::Builder::new().name("menu-pause".into()).spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let paused = actions.tray_inputs().paused;
+            if paused != shown && main.set_menu(items(paused)).is_ok() {
+                shown = paused;
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 #[path = "macos_menu_tests.rs"]
 mod tests;

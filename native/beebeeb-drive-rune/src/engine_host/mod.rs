@@ -447,6 +447,11 @@ impl<C: CredentialStores> LiveEngine<C> {
     /// until they end ([`EngineActions::session`]).
     pub fn wire_first_run(&self) {
         self.first_run.read(&*self.engine);
+    }
+
+    /// macOS: the app's start of the Finder setup (domain reconcile, lifecycle events). Not part of the Windows
+    /// first run: `shell::run` calls it on its own, once, for the instance that is the app.
+    pub fn start_finder_setup(&self) {
         finder_setup::start(self.engine.clone(), self.identity);
     }
 
