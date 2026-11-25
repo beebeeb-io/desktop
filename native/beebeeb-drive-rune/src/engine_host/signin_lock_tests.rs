@@ -64,6 +64,14 @@ fn windows_hello_opens_a_locked_screen_only_on_a_verified_prompt() {
         GateState::Locked,
         "a locked screen is the lock screen's gate"
     );
+    // The unlock that signed in asks the plan once, in the background (`ask_plan`): it lands any time after the
+    // restore answered, so wait for it before counting, or it is counted as the lock's own call.
+    let began = Instant::now();
+    while !fake.fake.routes().iter().any(|r| r.ends_with("/billing/subscription"))
+        && began.elapsed() < Duration::from_secs(5)
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
     let asked_of_the_server = fake.fake.routes().len();
     for (result, outcome) in [
         (HelloResult::Failed, HelloOutcome::NotRecognized),
