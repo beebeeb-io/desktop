@@ -21,6 +21,7 @@ use super::digest_cache::{CategoryCache, Fallback, FolderEntry, SharedDigestCach
 use super::tree_cache::{self, KeptListing, OpsVerdict};
 use crate::engine_bridge::{BackupChild, BackupFolderState, BackupSnapshot, EngineBridge};
 use crate::folder_digest::{self, RequestCount, WalkError};
+use std::collections::HashSet;
 
 /// RE3-a: a listing page by page (a server with no snapshot) runs this many folder requests at full speed, then one
 /// every [`PAGED_LISTING_PACE`].
@@ -51,6 +52,99 @@ struct OpsRead {
     caught_up: bool,
 }
 use crate::state_db::{BackupEnqueue, BackupLayout, BackupPassRecord, BackupStopWrite};
+
+/// fd-18: what the device folder's one digest read of a tick says.
+#[derive(Clone)]
+enum DeviceDigests {
+    /// Live: each child folder's digest (the category folders').
+    Live(HashMap<String, String>),
+    /// Gone (its state agrees).
+    Gone,
+    /// No usable answer (no digests, not ready, a failure): the passes list as before.
+    Unusable,
+}
+
+/// fd-18: a tick's device read and the walks done with it, by category key: (category folder id, the walk).
+struct DigestRound {
+    device: DeviceDigests,
+    walks: HashMap<String, (String, Result<Walked, WalkError>)>,
+}
+
+/// One backup's walk.
+struct Walked {
+    /// Every folder whose digest moved (or that the cache lacks), with the digest read for it.
+    changed: HashMap<String, String>,
+    /// Changed folders the cache holds no folder in, not read: their digest is the one their parent's page gave, and
+    /// what is under them now is listed whole.
+    unread: HashSet<String>,
+    requests: u32,
+    /// When the walk began: its listing is read after it.
+    since: std::time::Instant,
+}
+
+/// fd-18: every folder under `root` (itself included) whose digest differs from `known` or is not in it, parents
+/// before children, each with its digest. `root_now` (the root's digest as read already) equal to the known one: no
+/// request. A child folder whose digest equals `known` is not entered. A changed folder in `leaves` (the cache holds
+/// no folder in it) is not read: its parent's page gave its digest, and it goes to `unread` (what it holds now is
+/// listed whole). A child folder gone by the time it is read is skipped (its parent's listing shows it gone).
+async fn walk_changed(
+    api: &crate::api_client::ApiClient,
+    root: &str,
+    root_now: Option<String>,
+    known: &folder_digest::Known,
+    leaves: &HashSet<String>,
+    count: &RequestCount,
+) -> Result<(HashMap<String, String>, HashSet<String>), WalkError> {
+    let mut changed = HashMap::new();
+    let mut unread = HashSet::new();
+    if let Some(now) = root_now {
+        if known.get(root) == Some(&now) {
+            return Ok((changed, unread));
+        }
+        if leaves.contains(root) {
+            changed.insert(root.to_string(), now);
+            unread.insert(root.to_string());
+            return Ok((changed, unread));
+        }
+    }
+    let first = folder_digest::read_folder(api, root, count).await?;
+    changed.insert(root.to_string(), first.digest.clone());
+    let mut queue = std::collections::VecDeque::from([first]);
+    while let Some(folder) = queue.pop_front() {
+        for (child, digest) in folder.child_folders {
+            if known.get(&child) == Some(&digest) {
+                continue;
+            }
+            if leaves.contains(&child) {
+                unread.insert(child.clone());
+                changed.insert(child, digest);
+                continue;
+            }
+            match folder_digest::read_folder(api, &child, count).await {
+                Ok(read) => {
+                    changed.insert(child, read.digest.clone());
+                    queue.push_back(read);
+                }
+                Err(WalkError::FolderGone(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok((changed, unread))
+}
+
+/// Two listings of a folder hold the same children (what the tree reads of them, in any order).
+fn same_children(a: &[BackupChild], b: &[BackupChild]) -> bool {
+    let fields = |children: &[BackupChild]| {
+        let mut out: Vec<(String, Option<String>, bool, u64, i64)> = children
+            .iter()
+            .map(|c| (c.id.clone(), c.name.clone(), c.is_folder, c.size, c.uploaded_at_ms))
+            .collect();
+        out.sort();
+        out
+    };
+    a.len() == b.len() && fields(a) == fields(b)
+}
 
 /// A failure in the host's words: a kind and never a name or a path (core's rule for `HostError`).
 fn host_error(kind: &str) -> impl Fn(crate::engine_bridge::EngineError) -> HostError + '_ {
@@ -175,6 +269,8 @@ pub struct DesktopBackupHost {
     ops: tokio::sync::Mutex<HashMap<i64, Option<OpsRead>>>,
     /// fd-12: the backups' digest caches (`None`: no digests, the RE3-a listing).
     digests: Option<SharedDigestCache>,
+    /// fd-18: this tick's one digest read of the device folder and the walks it decided.
+    round: tokio::sync::Mutex<Option<DigestRound>>,
 }
 
 impl DesktopBackupHost {
@@ -187,6 +283,7 @@ impl DesktopBackupHost {
             snapshot: tokio::sync::Mutex::default(),
             ops: tokio::sync::Mutex::default(),
             digests: None,
+            round: tokio::sync::Mutex::default(),
         }
     }
 
@@ -277,11 +374,13 @@ impl DesktopBackupHost {
         Ok(Some(tree))
     }
 
-    /// fd-12: this device's backup of `c` from the digest walk: every folder whose digest changed (or that the cache
-    /// lacks) listed from one snapshot read after the walk began (page by page when there is none), every other
+    /// fd-12, fd-18: this device's backup of `c` from the digest walk: every folder whose digest changed (or that the
+    /// cache lacks) listed from one snapshot read after the tick's walks (page by page when there is none), every other
     /// folder's children from the cache, so the tree is the one a full listing gives (keys, folders, files,
-    /// `complete`). `None`: no cache, or the digests cannot be used now (logged once per run), and the pass lists as
-    /// RE3-a did. One log line per pass with its request counts.
+    /// `complete`). The device folder's one digest read of the tick ([`Self::digest_round`]) says whether it is live
+    /// and every category folder's digest: an unchanged backup costs no request of its own. `None`: no cache, or the
+    /// digests cannot be used now (logged once per run), and the pass lists as RE3-a did. One log line per pass with
+    /// its request counts.
     async fn digest_tree(&self, c: &Category) -> Result<Option<DeviceTree>, HostError> {
         let Some(shared) = &self.digests else {
             return Ok(None);
@@ -289,91 +388,204 @@ impl DesktopBackupHost {
         if !shared.lock().is_ok_and(|cache| cache.usable(std::time::Instant::now())) {
             return Ok(None);
         }
-        let device = self
-            .bridge
-            .backup_folder_state(&self.layout.device_folder_id)
-            .await
-            .map_err(host_error("device_folder_state"))?;
-        if device == BackupFolderState::Gone {
-            return Ok(Some(gone_tree(false, None)));
-        }
-        let (folder_id, live) = self.category_folder(c).await?;
-        if live == Some(false) {
-            return Ok(Some(gone_tree(true, Some(false))));
-        }
         let key = c.key();
+        let (device, prewalked) = {
+            let mut round = self.round.lock().await;
+            if round.is_none() {
+                *round = Some(self.digest_round(shared).await?);
+            }
+            let round = round.as_mut().expect("read above");
+            (round.device.clone(), round.walks.remove(&key))
+        };
+        let device_children = match device {
+            DeviceDigests::Unusable => return Ok(None),
+            DeviceDigests::Gone => return Ok(Some(gone_tree(false, None))),
+            DeviceDigests::Live(children) => children,
+        };
+        let (folder_id, live, walked) = match prewalked {
+            Some((folder_id, walked)) => (folder_id, Some(true), walked),
+            None => {
+                // Not found under the device folder by its remembered id: resolved as before (its state asked, or the
+                // folder found or made), then walked on its own.
+                let (folder_id, live) = self.category_folder(c).await?;
+                if live == Some(false) {
+                    return Ok(Some(gone_tree(true, Some(false))));
+                }
+                let root_now = device_children.get(&folder_id).cloned();
+                let walked = self.walk(shared, &key, &folder_id, root_now).await;
+                (folder_id, live, walked)
+            }
+        };
+        let walked = match walked {
+            Ok(walked) => walked,
+            Err(error) => {
+                self.walk_failed(shared, &error);
+                return Ok(None);
+            }
+        };
         let mut cache = match shared.lock() {
             Ok(mut all) => all.take(&key, &folder_id),
             Err(_) => return Ok(None),
         };
-        let walked = self.digest_walk(&key, &folder_id, &mut cache).await;
+        let built = self.digest_build(&key, &folder_id, &walked, &mut cache).await;
+        if let Err(error) = cache.write_to(self.bridge.db(), &self.layout.device_folder_id, &key) {
+            tracing::warn!(category = %key, %error, "backup: the folder digests could not be saved; the next pass tries again");
+        }
         if let Ok(mut all) = shared.lock() {
             all.put(&key, cache);
         }
-        match walked {
-            Ok(mut tree) => {
-                tree.category_folder_live = live;
-                Ok(Some(tree))
+        let mut tree = built?;
+        tree.category_folder_live = live;
+        Ok(Some(tree))
+    }
+
+    /// fd-18: the tick's one digest read of the device folder (one request: its digest page lists every category
+    /// folder's digest), and the walk of every backup whose category folder is the remembered one under it, all
+    /// before any listing, so one snapshot read after them serves every backup. A device folder the digests call gone
+    /// is confirmed by its state before it is taken as gone (it turns every backup off).
+    async fn digest_round(&self, shared: &SharedDigestCache) -> Result<DigestRound, HostError> {
+        let count = RequestCount::default();
+        let device_id = &self.layout.device_folder_id;
+        let device = match folder_digest::read_folder(self.bridge.api(), device_id, &count).await {
+            Ok(read) => DeviceDigests::Live(read.child_folders.into_iter().collect()),
+            Err(WalkError::FolderGone(_)) => match self.folder_state(device_id).await? {
+                BackupFolderState::Gone => DeviceDigests::Gone,
+                BackupFolderState::Live => DeviceDigests::Unusable,
+            },
+            Err(error) => {
+                self.walk_failed(shared, &error);
+                DeviceDigests::Unusable
             }
-            Err(DigestPassError::Host(error)) => Err(error),
-            Err(DigestPassError::Walk(error)) => {
-                let now = std::time::Instant::now();
-                let fallback = match &error {
-                    WalkError::Unsupported => Some((Fallback::Unsupported, std::time::Duration::ZERO)),
-                    WalkError::NotReady { retry_after_secs } => {
-                        Some((Fallback::NotReady, std::time::Duration::from_secs(*retry_after_secs)))
-                    }
-                    _ => None,
+        };
+        let mut walks = HashMap::new();
+        if let DeviceDigests::Live(children) = &device {
+            for c in &self.enabled {
+                let Some(folder) = self.remembered_category_folder(c)? else {
+                    continue;
                 };
-                match fallback {
-                    Some((fallback, wait)) => {
-                        if shared.lock().is_ok_and(|mut all| all.fall_back(fallback, wait, now)) {
-                            tracing::info!(
-                                why = fallback.as_str(),
-                                "backup: no folder digests; the passes list as before"
-                            );
-                        }
-                    }
-                    None => tracing::warn!(
-                        category = %key,
-                        %error,
-                        "backup: the folder digest walk failed; this pass lists as before"
-                    ),
-                }
-                Ok(None)
+                let Some(now) = children.get(&folder) else {
+                    continue;
+                };
+                let walked = self.walk(shared, &c.key(), &folder, Some(now.clone())).await;
+                walks.insert(c.key(), (folder, walked));
             }
+        }
+        Ok(DigestRound { device, walks })
+    }
+
+    /// The category folder id of `c` this device remembers, when a pass may take it as live from the device folder's
+    /// digest page (it is a child folder there): a chosen folder's only while its settings entry still names it
+    /// ([`Self::chosen_category_folder`]'s first case). No request.
+    fn remembered_category_folder(&self, c: &Category) -> Result<Option<String>, HostError> {
+        let db = self.bridge.db();
+        let key = c.key();
+        let remembered = db.backup_category_folder(&key).map_err(db_error("category_folder"))?;
+        if remembered.is_none() || !matches!(c, Category::Custom(_)) {
+            return Ok(remembered);
+        }
+        let Some(owner) = db.owner().map_err(db_error("category_folder"))? else {
+            return Ok(None);
+        };
+        let Ok(cfg) = crate::config::DesktopConfig::load_for(self.bridge.identity) else {
+            return Ok(None);
+        };
+        let entry = crate::app::bindings::backup_folders::chosen_for(&cfg.backup_chosen_folders, Some(&owner))
+            .into_iter()
+            .find(|folder| folder.key() == key)
+            .and_then(|folder| folder.folder_id);
+        Ok(remembered.filter(|id| entry.as_deref() == Some(id.as_str())))
+    }
+
+    /// One backup's walk over the cache's digests. `root_now`: the category folder's digest as the device folder's
+    /// page gave it (`None`: asked here when the cache knows one).
+    async fn walk(
+        &self,
+        shared: &SharedDigestCache,
+        key: &str,
+        root: &str,
+        root_now: Option<String>,
+    ) -> Result<Walked, WalkError> {
+        let (known, leaves) = shared.lock().map(|all| all.walk_view(key, root)).unwrap_or_default();
+        let count = RequestCount::default();
+        let since = std::time::Instant::now();
+        let api = self.bridge.api();
+        let root_now = match root_now {
+            Some(digest) => Some(digest),
+            None if known.contains_key(root) => Some(folder_digest::digest_now(api, root, &count).await?),
+            None => None,
+        };
+        let (changed, unread) = walk_changed(api, root, root_now, &known, &leaves, &count).await?;
+        Ok(Walked {
+            changed,
+            unread,
+            requests: count.get(),
+            since,
+        })
+    }
+
+    /// The digests answered no usable walk: an old server or one not ready yet turns them off for a while (logged once
+    /// per run); any other failure lists this pass as before.
+    fn walk_failed(&self, shared: &SharedDigestCache, error: &WalkError) {
+        let now = std::time::Instant::now();
+        let fallback = match error {
+            WalkError::Unsupported => Some((Fallback::Unsupported, std::time::Duration::ZERO)),
+            WalkError::NotReady { retry_after_secs } => {
+                Some((Fallback::NotReady, std::time::Duration::from_secs(*retry_after_secs)))
+            }
+            _ => None,
+        };
+        match fallback {
+            Some((fallback, wait)) => {
+                if shared.lock().is_ok_and(|mut all| all.fall_back(fallback, wait, now)) {
+                    tracing::info!(
+                        why = fallback.as_str(),
+                        "backup: no folder digests; the passes list as before"
+                    );
+                }
+            }
+            None => tracing::warn!(
+                %error,
+                "backup: the folder digest walk failed; this pass lists as before"
+            ),
         }
     }
 
-    /// The walk and the tree of [`Self::digest_tree`] over `cache`, which keeps what this pass may trust.
-    async fn digest_walk(
+    /// The tree of [`Self::digest_tree`] from `walked` over `cache`, which keeps what the next pass compares. Once a
+    /// day (`CategoryCache::full_due`) every folder is listed from one snapshot instead and compared with the cache.
+    async fn digest_build(
         &self,
         key: &str,
         root: &str,
+        walked: &Walked,
         cache: &mut CategoryCache,
-    ) -> Result<DeviceTree, DigestPassError> {
+    ) -> Result<DeviceTree, HostError> {
         let root_id = parse_id(root).ok_or_else(|| HostError("category folder id is not a uuid".into()))?;
-        let api = self.bridge.api();
-        let digests = RequestCount::default();
-        // The device folder's and the category folder's state.
-        let mut listings = 2usize;
-        let began = std::time::Instant::now();
-        let changed = folder_digest::changed_folders(api, root, &cache.known(), &digests).await?;
-        let changed: HashMap<String, String> = changed.into_iter().map(|f| (f.id, f.digest)).collect();
+        let mut listings = 0usize;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        // The daily full comparison: only from a snapshot (never thousands of pages).
+        let full = cache.full_due(now_ms) && {
+            let (snapshot, asked) = self.snapshot_read_since(Some(walked.since)).await;
+            listings += usize::from(asked);
+            snapshot.is_some()
+        };
 
         let mut folders = HashMap::from([(String::new(), root_id)]);
         let mut files = Vec::new();
         let mut complete = true;
-        let mut listed: Vec<String> = Vec::new();
+        let mut listed = 0usize;
         let mut seen = std::collections::HashSet::new();
+        let mut parents: HashMap<String, String> = HashMap::new();
+        let mut differing: Vec<String> = Vec::new();
         let mut from_cache = 0usize;
-        let mut queue = std::collections::VecDeque::from([(String::new(), root.to_string())]);
-        while let Some((prefix, folder)) = queue.pop_front() {
+        // (key prefix, folder id, listed whole: under a folder the walk did not read, so its own digest is unknown)
+        let mut queue = std::collections::VecDeque::from([(String::new(), root.to_string(), false)]);
+        while let Some((prefix, folder, whole)) = queue.pop_front() {
             if !seen.insert(folder.clone()) {
                 complete = false;
                 continue;
             }
-            let cached = (!changed.contains_key(&folder))
+            let walked_digest = walked.changed.get(&folder);
+            let cached = (!whole && !full && walked_digest.is_none())
                 .then(|| cache.reusable(&folder))
                 .flatten()
                 .map(|entry| entry.children.clone());
@@ -383,46 +595,68 @@ impl DesktopBackupHost {
                     children
                 }
                 None => {
-                    let (children, all) = self.digest_listing(&folder, began, &mut listings).await?;
-                    cache.folders.insert(
-                        folder.clone(),
+                    let (children, all) = self.digest_listing(&folder, walked.since, &mut listings).await?;
+                    let old = cache.folders.get(&folder);
+                    // A folder the walk found unchanged whose listing differs from the cache: its digest was wrong.
+                    let differs = !whole
+                        && walked_digest.is_none()
+                        && old.is_some_and(|old| {
+                            old.complete && old.digest.is_some() && !same_children(&old.children, &children)
+                        });
+                    let digest = match walked_digest {
+                        _ if whole || !all || differs => None,
+                        Some(digest) => Some(digest.clone()),
+                        None => old.and_then(|old| old.digest.clone()),
+                    };
+                    if differs {
+                        differing.push(folder.clone());
+                    }
+                    cache.insert(
+                        &folder,
                         FolderEntry {
-                            digest: None,
+                            digest,
                             children: children.clone(),
                             complete: all,
                         },
                     );
-                    listed.push(folder.clone());
+                    listed += 1;
                     complete &= all;
                     children
                 }
             };
-            queue.extend(add_children(&prefix, children, &mut folders, &mut files, &mut complete));
-        }
-        // The after-read rule: what this pass read under the walk's digests is trusted only when the category folder's
-        // digest is still the one the walk read (nothing moved under it since).
-        let trusted = match changed.get(root) {
-            None => true,
-            Some(walked) => folder_digest::digest_now(api, root, &digests)
-                .await
-                .is_ok_and(|now| now == *walked),
-        };
-        if trusted {
-            for folder in &listed {
-                if let (Some(entry), Some(digest)) = (cache.folders.get_mut(folder), changed.get(folder)) {
-                    entry.digest = entry.complete.then(|| digest.clone());
-                }
+            let whole = whole || walked.unread.contains(&folder);
+            for (child_key, child) in add_children(&prefix, children, &mut folders, &mut files, &mut complete) {
+                parents.insert(child.clone(), folder.clone());
+                queue.push_back((child_key, child, whole));
             }
         }
-        cache.folders.retain(|folder, _| seen.contains(folder));
+        // A wrong digest: the folder and every folder above it are entered again by the next walk.
+        for folder in &differing {
+            let mut at = Some(folder.clone());
+            while let Some(folder) = at {
+                cache.untrust(&folder);
+                at = parents.get(&folder).cloned();
+            }
+        }
+        if !differing.is_empty() {
+            tracing::warn!(
+                category = %key,
+                folders = differing.len(),
+                "backup: the daily check found folders whose digest did not change but whose listing did; they are listed again"
+            );
+        }
+        cache.retain(&seen);
+        if full || from_cache == 0 {
+            cache.compared_in_full(now_ms);
+        }
         tracing::info!(
             category = %key,
-            digest_requests = digests.get(),
+            digest_requests = walked.requests,
             listing_requests = listings,
-            folders_changed = changed.len(),
-            folders_listed = listed.len(),
+            folders_changed = walked.changed.len(),
+            folders_listed = listed,
             folders_from_cache = from_cache,
-            trusted,
+            full,
             "backup: digest pass"
         );
         Ok(DeviceTree {
@@ -823,25 +1057,6 @@ impl BackupHost for DesktopBackupHost {
         // No gate decided it: the backups' last pass and acknowledged notices stay as their gate wrote them.
         self.stop_backups(c, BackupStopReason::Unknown, device_gone, device_gone, None)
             .await
-    }
-}
-
-/// Why a digest pass stopped: a host failure (the pass fails as a listing would) or the walk's answer (the pass lists
-/// as before).
-enum DigestPassError {
-    Host(HostError),
-    Walk(WalkError),
-}
-
-impl From<HostError> for DigestPassError {
-    fn from(error: HostError) -> Self {
-        DigestPassError::Host(error)
-    }
-}
-
-impl From<WalkError> for DigestPassError {
-    fn from(error: WalkError) -> Self {
-        DigestPassError::Walk(error)
     }
 }
 

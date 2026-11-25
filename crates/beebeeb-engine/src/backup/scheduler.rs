@@ -121,8 +121,8 @@ pub struct BackupScheduler {
     watched: Vec<PathBuf>,
     /// LD-0139: the stopped backups' switches were reconciled since this scheduler started.
     reconciled: bool,
-    /// fd-12: the backups' folder digest caches for this engine run (in memory only; the scheduler lives as long as
-    /// the runner, and a sign-out empties them).
+    /// fd-12, fd-18: the backups' folder digest caches (read back from the state DB on the first round of a run,
+    /// written by every pass; a sign-out empties them).
     digests: super::digest_cache::SharedDigestCache,
 }
 
@@ -366,10 +366,10 @@ pub async fn run_passes_with_digests(
     let device_folder_id = uuid::Uuid::parse_str(&layout.device_folder_id).ok();
     let mut host = super::host::DesktopBackupHost::new(Arc::clone(bridge), layout.clone(), enabled);
     if let Some(digests) = digests {
-        // The caches belong to this sign-in and this device folder: a sign-out (the epoch moved) or a new layout
-        // empties them.
+        // fd-18: the caches belong to this account and this device folder, and outlive a stop, a lock and a restart
+        // (kept in the state DB); a sign-out or a new layout empties them. The first round of a run reads them back.
         if let Ok(mut cache) = digests.lock() {
-            cache.for_run(epoch(), &layout.device_folder_id);
+            cache.for_run(bridge.db(), &layout.device_folder_id);
         }
         host = host.with_digest_cache(Arc::clone(digests));
     }
