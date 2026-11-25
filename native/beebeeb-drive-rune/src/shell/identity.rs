@@ -65,6 +65,14 @@ const fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
 }
 
 impl AppIdentity {
+    /// Short folder name under HOME for the macOS control socket (SUN_LEN); one per identity.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn control_dir_name(self) -> &'static str {
+        match self {
+            Self::Real => ".bbr",
+            Self::Test => ".bbt",
+        }
+    }
     /// This binary's identity, fixed at compile time. An identifier that is neither app does not compile
     /// (`build.rs` refuses it first; this is the second lock, for a build that bypasses the build script).
     pub const CURRENT: Self = match Self::from_bundle_identifier(BUILT_BUNDLE_IDENTIFIER) {

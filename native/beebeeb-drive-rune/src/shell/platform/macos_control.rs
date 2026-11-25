@@ -40,10 +40,7 @@ pub(super) fn state_dir(identity: AppIdentity) -> Result<PathBuf, String> {
 }
 
 fn control_dir_in(home: &Path, identity: AppIdentity) -> PathBuf {
-    home.join(match identity {
-        AppIdentity::Real => ".bbr",
-        AppIdentity::Test => ".bbt",
-    })
+    home.join(identity.control_dir_name())
 }
 
 fn socket_path(dir: &Path) -> PathBuf {
