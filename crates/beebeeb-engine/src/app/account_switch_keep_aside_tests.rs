@@ -205,7 +205,11 @@ fn the_discard_keeps_a_copy_of_each_left_file_and_switches() {
     let done = pc.engine.discard_and_switch_with(&ask, pc.root(), &port).unwrap();
 
     assert_eq!(done.kept, 2);
-    assert!(done.kept_in.starts_with(pc.engine.config.state_dir.join(crate::sign_out::kept_names::KEPT_FOLDER_NAME)));
+    // The kept writer resolves its root (macOS: /var is /private/var), so compare against the resolved state folder.
+    let kept_root = std::fs::canonicalize(&pc.engine.config.state_dir)
+        .unwrap()
+        .join(crate::sign_out::kept_names::KEPT_FOLDER_NAME);
+    assert!(done.kept_in.starts_with(&kept_root), "{:?} not under {kept_root:?}", done.kept_in);
     let mut kept: Vec<String> = listing(&done.kept_in)
         .into_iter()
         .filter(|path| done.kept_in.join(path).is_file())
