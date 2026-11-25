@@ -166,3 +166,54 @@ fn resnapshot_outside_a_snapshot_apply_is_still_requested() {
         "another thread's request lands"
     );
 }
+
+/// A change newer than the list's `seq_id` that happens while the list downloads is not lost by serving the
+/// request made then: the ops cursor starts at the list's `seq_id`, so the next tick's `/sync/ops?since=7` brings
+/// the change (here a delete at seq 8).
+#[tokio::test]
+async fn resnapshot_a_change_made_during_the_download_arrives_through_the_ops() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.db");
+    let during = db_path.clone();
+    let list = serde_json::json!({
+        "seq_id": 7,
+        "nodes": [
+            snap_node(&KEY, FOLDER, "docs", None, true, 100),
+            snap_node(&KEY, FILE, "notes.txt", Some(FOLDER), false, 100),
+        ],
+    });
+    let ops = serde_json::json!({
+        "since": 7,
+        "head_seq": 8,
+        "ops": [{ "seq_id": 8, "op_type": "file_delete", "payload": { "id": FILE } }],
+    });
+    let (base_url, server) = serve(vec![list, ops], move |i| {
+        if i == 0 {
+            // The request made while the list is on its way (the server deleted the file after the list's seq).
+            StateDb::open(during.clone()).unwrap().request_resnapshot().unwrap();
+        }
+    });
+    let bridge = test_bridge_with_api(&db_path, base_url, KEY);
+    bridge.db().set_sync_cursor(5).unwrap();
+    bridge.db().request_resnapshot().unwrap();
+
+    sync_tick(&bridge, dir.path()).await.unwrap();
+    assert_eq!(
+        bridge.db().get_sync_cursor().unwrap(),
+        Some(7),
+        "the cursor is the list's, not later"
+    );
+    assert_eq!(bridge.db().peek_resnapshot_request().unwrap(), None);
+    assert!(bridge.db().get_file(FILE).unwrap().is_some());
+
+    sync_tick(&bridge, dir.path()).await.unwrap();
+    assert_eq!(bridge.db().get_sync_cursor().unwrap(), Some(8));
+    assert!(
+        bridge.db().get_file(FILE).unwrap().is_none(),
+        "the change after the list is applied by the ops"
+    );
+    assert_eq!(
+        server.join().unwrap(),
+        ["/api/v1/sync/snapshot", "/api/v1/sync/ops?since=7"]
+    );
+}
