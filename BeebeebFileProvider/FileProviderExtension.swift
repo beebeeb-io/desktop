@@ -449,6 +449,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
     }
 
+    /// dm-54: the item already under `parent` with this name and kind, if any.
+    static func existingItem(
+        parent: NSFileProviderItemIdentifier,
+        filename: String,
+        kind: BeebeebItemKind,
+        list: (NSFileProviderItemIdentifier) throws -> [BeebeebProviderItem]
+    ) throws -> BeebeebProviderItem? {
+        try list(parent).first { $0.filename == filename && $0.kind == kind }
+    }
+
     func createItem(
         basedOn itemTemplate: NSFileProviderItem,
         fields: NSFileProviderItemFields,
@@ -481,6 +491,20 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             // the person edited it. The template's identifier is the item the delete was for,
             // and its content version is the base of the edit (REPL.h:462-470).
             let deletionConflicted = options.contains(.deletionConflicted)
+            // dm-54: a reimport or re-enumeration replays creates for items the server already has;
+            // return the existing item instead of creating a duplicate.
+            if options.contains(.mayAlreadyExist),
+               let existing = try Self.existingItem(
+                   parent: itemTemplate.parentItemIdentifier,
+                   filename: itemTemplate.filename,
+                   kind: kind,
+                   list: { try self.ipc.enumerate(containerIdentifier: $0) }
+               ) {
+                completionHandler(FileProviderItem(model: existing), [], false, nil)
+                signalErrorResolvedIfPending()
+                progress.completedUnitCount = 1
+                return progress
+            }
             let result = try ipc.queueCreateItem(
                 parentIdentifier: itemTemplate.parentItemIdentifier,
                 filename: itemTemplate.filename,
@@ -717,9 +741,9 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 } else {
                     observer.finishEnumerating(upTo: nil)
                 }
-            } catch BeebeebIPCError.daemonUnavailable where containerIdentifier == .rootContainer {
-                // dm-41: an unreachable daemon is NOT an empty root. Reporting an empty success made the system
-                // trust a blank Finder; report a retryable error so it asks again when the daemon is back.
+            } catch BeebeebIPCError.daemonUnavailable {
+                // dm-41/dm-54: an unreachable daemon is NOT an empty container, at the root or below it.
+                // Report a retryable error so the system asks again when the daemon is back.
                 observer.finishEnumeratingWithError(Self.rootListingError())
             } catch {
                 observer.finishEnumeratingWithError(error)
@@ -736,13 +760,21 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
     /// state.db). The system must list again, and the stale materialized filter and anchor must not survive it.
     static func isAnchorExpired(_ error: Error) -> Bool {
         if case BeebeebIPCError.daemonRejected(let message) = error {
-            return message.lowercased().contains("sync anchor expired")
+            // dm-54: the engine prefixes every ListChanges failure with "sync anchor expired", but only the
+            // state db's real expiry carries the "(expired)" marker; a transient database error must not
+            // force a full re-list.
+            let lower = message.lowercased()
+            return lower.contains("sync anchor expired") && lower.contains("(expired)")
         }
         return false
     }
 
     static func changesError(_ error: Error, stateURL: URL? = WorkingSetStore.stateURL()) -> Error {
         guard isAnchorExpired(error) else {
+            // dm-54: any other failure is retryable (the system asks again), never a forced re-list.
+            if case BeebeebIPCError.daemonRejected = error {
+                return NSFileProviderError(.serverUnreachable)
+            }
             return error
         }
         if let stateURL {

@@ -2008,5 +2008,40 @@ check("dm41: a daemon 'sync anchor expired' answer resets the stale filter and e
     try expect(!FileProviderEnumerator.isAnchorExpired(other), "other errors pass through")
 }
 
+// MARK: dm-54: mayAlreadyExist, daemon-down below the root, non-expired ListChanges errors
+check("dm54: mayAlreadyExist finds the existing item by parent + name + kind (no second create)") {
+    var listed: [String] = []
+    let found = try FileProviderExtension.existingItem(
+        parent: NSFileProviderItemIdentifier("p1"), filename: "report.txt", kind: .file,
+        list: { parent in listed.append(parent.rawValue); return [item1697(capabilities: 0)] }
+    )
+    try expect(found?.identifier == "1697-item" && listed == ["p1"], "existing item expected, got \(String(describing: found))")
+    let folder = try FileProviderExtension.existingItem(
+        parent: NSFileProviderItemIdentifier("p1"), filename: "report.txt", kind: .folder,
+        list: { _ in [item1697(capabilities: 0)] }
+    )
+    let other = try FileProviderExtension.existingItem(
+        parent: NSFileProviderItemIdentifier("p1"), filename: "new.txt", kind: .file,
+        list: { _ in [item1697(capabilities: 0)] }
+    )
+    try expect(folder == nil && other == nil, "a different kind or name is not the same item")
+}
+
+check("dm54: a non-expired ListChanges error is retryable, never syncAnchorExpired") {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("dm54-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: url) }
+    WorkingSetStore.save(WorkingSetStore.State(lastAnchor: "v1:5", materializedContainers: ["a"]), to: url)
+    let mapped = FileProviderEnumerator.changesError(
+        BeebeebIPCError.daemonRejected("sync anchor expired: database is locked"), stateURL: url
+    ) as NSError
+    try expect(mapped.code == NSFileProviderError.serverUnreachable.rawValue, "serverUnreachable expected, got \(mapped)")
+    try expect(WorkingSetStore.load(from: url).lastAnchor == "v1:5", "state must survive a transient error")
+}
+
+check("dm54: daemon-down error for any container is serverUnreachable") {
+    let error = BeebeebIPCError.daemonUnavailable as NSError
+    try expect(error.code == NSFileProviderError.serverUnreachable.rawValue, "got \(error)")
+}
+
 print("ipc-framing: \(passed) passed, \(failed) failed")
 exit(failed == 0 ? 0 : 1)
