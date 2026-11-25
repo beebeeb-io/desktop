@@ -598,7 +598,8 @@ impl DesktopBackupHost {
                     let (children, all) = self.digest_listing(&folder, walked.since, &mut listings).await?;
                     let old = cache.folders.get(&folder);
                     // A folder the walk found unchanged whose listing differs from the cache: its digest was wrong.
-                    let differs = walked_digest.is_none()
+                    let differs = !whole
+                        && walked_digest.is_none()
                         && old.is_some_and(|old| {
                             old.complete && old.digest.is_some() && !same_children(&old.children, &children)
                         });

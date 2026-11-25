@@ -649,10 +649,14 @@ mod tests {
         assert_eq!(fx.digest_requests(), digests_before, "the rebuild asks no digest");
     }
 
-    /// `Backups/Laptop` adopted as the category folder of this host's device folder (as the layout has it), and the
-    /// backup grown to at least 2,700 folders.
-    fn adopt_and_grow(fx: &Fx) {
+    /// `Backups/Laptop` adopted as the category folder of this host's device folder (as the layout has it).
+    fn adopt(fx: &Fx) {
         fx.account.add_item(LAPTOP, Some(&fx.device), "Pictures", true, 0);
+    }
+
+    /// [`adopt`], and the backup grown to at least 2,700 folders.
+    fn adopt_and_grow(fx: &Fx) {
+        adopt(fx);
         for batch in 0..30u32 {
             let parent = uid(5, batch);
             fx.account
@@ -706,7 +710,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn one_change_five_levels_deep_costs_at_most_depth_plus_two() {
         let fx = fixture();
-        adopt_and_grow(&fx);
+        adopt(&fx);
         let deepest = chain(&fx, 1, 5);
         let (_, _) = fx.digest_pass().await;
         let (_, requests) = fx.digest_pass().await;
@@ -726,7 +730,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_folder_moved_into_a_folder_not_read_is_listed_whole() {
         let fx = fixture();
-        adopt_and_grow(&fx);
+        adopt(&fx);
         let deepest = chain(&fx, 1, 3);
         let (first, _) = fx.digest_pass().await;
         // A folder of the backup with files, moved into the empty deepest folder, and changed on the way.
@@ -753,7 +757,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_daily_full_comparison_catches_a_wrong_digest() {
         let fx = fixture();
-        adopt_and_grow(&fx);
+        adopt(&fx);
         let (first, _) = fx.digest_pass().await;
         // A cache that went wrong while its digests stayed (what a wrong server digest would leave): a folder's files
         // dropped from it.
