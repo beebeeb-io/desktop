@@ -859,7 +859,7 @@ impl StateDb {
 
 /// One compare-and-set of [`StateDb::put_backup_record_cas`] inside the caller's transaction for `owner`.
 fn put_record_in(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     owner: &str,
     category: &str,
     expected: &RecordRef,
