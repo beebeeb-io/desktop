@@ -4,10 +4,10 @@ use super::browse_states::ListedSoFar;
 use super::source::BoardDrive;
 use super::tests::*;
 use super::{Intent, Toast};
-use crate::State;
 use crate::frames::global::source::board;
 use crate::frames::global::{GlobalFixture, Ui};
 use crate::init;
+use crate::State;
 use rune::{Key, Runtime};
 
 fn offline() -> (Runtime<State>, Calls) {
@@ -61,12 +61,10 @@ fn offline_only_files_that_are_not_on_this_pc_are_dimmed_and_say_why() {
         (4, 3, 4),
         "the line counts the rows"
     );
-    assert!(
-        info(&rt, "banner")
-            .label
-            .unwrap_or_default()
-            .starts_with("You're offline.")
-    );
+    assert!(info(&rt, "banner")
+        .label
+        .unwrap_or_default()
+        .starts_with("You're offline."));
 }
 
 #[test]
@@ -329,7 +327,67 @@ fn w31_a_first_list_that_failed_is_said_with_try_again() {
     assert!(find(&rt, "banner").is_some(), "the failure is said");
     let button = info(&rt, "banner-action");
     assert_eq!((button.role, button.label.as_deref()), ("button", Some("Try again")));
-    assert!(find(&rt, "banner-dismiss").is_none(), "it cannot be dismissed while it is true");
+    assert!(
+        find(&rt, "banner-dismiss").is_none(),
+        "it cannot be dismissed while it is true"
+    );
     click(&mut rt, "banner-action");
     assert_eq!(seen.list_retries.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// RD-j: the first listing runs and the folder has no rows applied yet: a loading state, never "Nothing here yet".
+#[test]
+fn first_listing_with_no_rows_applied_shows_loading_not_empty() {
+    use crate::frames::global::source::{Loading, Step};
+    let mut state = init();
+    state.source = Box::new(FoldersOnly(BoardDrive::new()));
+    state.listing.items.clear();
+    let status = crate::frames::global::GlobalStatus {
+        loading: Some(Loading {
+            listed: 28_752,
+            total: 41_879,
+            left: None,
+            file_list: Step::InProgress,
+            thumbnails: Step::WaitingForFileList,
+        }),
+        ..Default::default()
+    };
+    state.global = Ui::new(Box::new(GlobalFixture::of(status)));
+    let (rt, _, _) = spied_on(state);
+    assert!(find(&rt, "empty").is_none(), "no empty state during a first listing");
+    assert!(find(&rt, "list-loading").is_some(), "the loading state");
+    assert_eq!(text(&rt, "storage-value"), "Calculating\u{2026}");
+}
+
+/// RD-j: rows already applied are listed while the listing still runs.
+#[test]
+fn first_listing_with_applied_rows_lists_them() {
+    let (rt, _) = before_the_first_list(crate::frames::global::GlobalStatus {
+        loading: Some(crate::frames::global::source::Loading {
+            listed: 3,
+            total: 10,
+            left: None,
+            file_list: crate::frames::global::source::Step::InProgress,
+            thumbnails: crate::frames::global::source::Step::WaitingForFileList,
+        }),
+        ..Default::default()
+    });
+    assert!(find(&rt, "empty").is_none());
+    assert!(find(&rt, "list-loading").is_none());
+    assert!(find(&rt, "row-0-date").is_some(), "applied rows are listed");
+}
+
+/// RD-j: sync paused and nothing listed: the paused state with Resume, not "Nothing here yet".
+#[test]
+fn first_listing_paused_and_empty_says_paused_with_resume() {
+    let mut state = init();
+    state.listing.items.clear();
+    state.global = Ui::new(Box::new(GlobalFixture::of(crate::frames::global::GlobalStatus {
+        paused: true,
+        ..Default::default()
+    })));
+    let (rt, _, _) = spied_on(state);
+    assert!(find(&rt, "empty").is_none());
+    assert!(find(&rt, "paused").is_some());
+    assert!(find(&rt, "paused-resume").is_some());
 }

@@ -17,6 +17,7 @@ pub mod layout;
 pub mod scheduler;
 pub mod sources;
 pub mod stop;
+pub mod tree_cache;
 
 use crate::backup_protect::{OwnBackupFolder, OwnBackups};
 use crate::state_db::StateDb;

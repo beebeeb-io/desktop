@@ -1,5 +1,5 @@
-//! The first reads of an opened item, before its helper starts (RE-d): the item's LAST bytes first, then its first
-//! ones, so the chunks a player needs to know a file (an MP4 or a MOV whose `moov` is written at the end, as a phone
+//! The first reads of an opened item, before its helper starts (RE-d): the item's first and last bytes (the head
+//! read beside the engine's tail fetch, RE3-b), so the chunks a player needs to know a file (an MP4 or a MOV whose `moov` is written at the end, as a phone
 //! writes it) are fetched at once, and only those. The engine's reader ([`MediaBytes`] over
 //! `beebeeb_engine::app::bindings::media_stream::MediaReader`) fetches only the chunks that cover a range and keeps
 //! them in its cache, so the helper's own reads of the head and of the `moov` that follow are answered from memory;
@@ -17,15 +17,18 @@ use super::{MAX_DURATION_MS, MediaBytes};
 /// The most boxes read at one level (the file's top level, the `moov`'s children).
 pub(super) const MAX_BOXES: u32 = 64;
 
-/// The reads that make the file's two ends arrive first: its last byte (the chunk that holds a trailing `moov`), then
-/// its first (the header and the first frames). A failed read is left to the helper's own reads to say.
+/// The reads that make the file's two ends arrive first: its first byte (the header and the first frames), then its
+/// last (the chunk that holds a trailing `moov`). The head first (RE3-b): the engine's opener starts the tail chunk's
+/// fetch on its own thread at open (`MediaReader::start_tail_fetch`), so the head is fetched beside it and the tail
+/// read then waits only for what is left of that fetch (11-25: tail first, then head, took 189 s on a busy PC). A
+/// failed read is left to the helper's own reads to say.
 pub(super) fn prime(bytes: &mut dyn MediaBytes, cancel: &AtomicBool) {
     let len = bytes.len();
     if len == 0 {
         return;
     }
-    let _ = bytes.read_at(len - 1, 1, cancel);
     let _ = bytes.read_at(0, 1, cancel);
+    let _ = bytes.read_at(len - 1, 1, cancel);
 }
 
 /// [`prime`], then [`duration_ms`]: the item's length as its own header says it, read from its two ends.

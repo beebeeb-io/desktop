@@ -22,6 +22,11 @@
 - **Shared view:** the footer shows your own account and storage use.
 - **First load:** your file list appears faster when you open the app.
 - **Video:** video streams and plays in the app without a full download first.
+- **Video:** video plays in the app while it downloads, with a buffering indicator.
+- **Backup:** backup no longer lists your whole tree every 10 minutes.
+- **First load:** the app downloads your file list once at start.
+- **Loading:** a loading state shows while your files load, instead of "Nothing here yet".
+- **Paused sync:** when sync is paused, the app shows Resume.
 - **Sign-in:** a sign-in problem found on real accounts is fixed.
 - **Dates:** file dates show correctly.
 - **System files:** system files are hidden from your lists.
