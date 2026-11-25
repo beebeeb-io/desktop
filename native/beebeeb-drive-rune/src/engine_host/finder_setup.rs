@@ -374,27 +374,12 @@ mod macos {
     }
 
     /// dm-41: the system's replica may date from another app generation (0.8.x) or from a state.db that was made
-    /// fresh. When the app version or the state.db's birth time differs from the marker kept beside it, ask the
+    /// fresh (the marker lives in the state folder, so a wiped state takes it along). When the app version differs from the marker kept in the state folder, ask the
     /// system once to list the whole tree again; the marker is written only after the bridge said yes.
     pub(super) fn reimport_once_if_changed(identity: &'static beebeeb_engine::identity::EngineIdentity) {
         let _ = std::thread::Builder::new().name("finder-reimport".into()).spawn(move || {
             let Ok(dir) = beebeeb_engine::state_paths::beebeeb_state_dir_for(identity) else { return };
-            let db = beebeeb_engine::state_paths::state_db_path_from_state_dir(&dir);
-            // The engine creates state.db when it starts: wait for it (up to two minutes).
-            let mut born = None;
-            for _ in 0..120 {
-                born = std::fs::metadata(&db).and_then(|m| m.created()).ok();
-                if born.is_some() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            let Some(born) = born else { return };
-            let stamp = born
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let generation = format!("{}:{stamp}", env!("CARGO_PKG_VERSION"));
+            let generation = env!("CARGO_PKG_VERSION").to_string();
             let marker = dir.join("fp-reimport-generation");
             if std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == generation) {
                 return;
