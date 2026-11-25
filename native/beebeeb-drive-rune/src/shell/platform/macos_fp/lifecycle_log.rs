@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
-use beebeeb_engine::diagnostic_redaction::{redact_for_export, KnownNames};
-use beebeeb_engine::finder_setup::driver::{token, LifecycleEvent, TAIL_LINES};
+use beebeeb_engine::diagnostic_redaction::{KnownNames, redact_for_export};
+use beebeeb_engine::finder_setup::driver::{LifecycleEvent, TAIL_LINES, token};
 use beebeeb_engine::surfaces::phase::FinderFailureReason;
 
 pub const FILE_NAME: &str = "lifecycle.log";
@@ -211,7 +211,7 @@ pub fn write_event(
 mod tests {
     use super::*;
     use beebeeb_engine::finder_setup::core::Trigger;
-    use beebeeb_engine::finder_setup::error::{FpError, COCOA_DOMAIN};
+    use beebeeb_engine::finder_setup::error::{COCOA_DOMAIN, FpError};
     use beebeeb_engine::finder_setup::launch_location::LaunchLocation;
     use beebeeb_engine::surfaces::phase::FinderSetup;
     use std::time::{Duration, UNIX_EPOCH};

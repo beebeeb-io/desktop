@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use beebeeb_engine::config::DesktopConfig;
 use beebeeb_engine::finder_setup::core::{self, DomainState, Observation, Op, OpResult, SessionFacts};
-use beebeeb_engine::finder_setup::driver::{op_limit, within, FinderSetupView, LifecycleEvent, Ports};
-use beebeeb_engine::finder_setup::error::{app_code, FailureRecord, FpError};
+use beebeeb_engine::finder_setup::driver::{FinderSetupView, LifecycleEvent, Ports, op_limit, within};
+use beebeeb_engine::finder_setup::error::{FailureRecord, FpError, app_code};
 use tokio::sync::oneshot;
 
 use super::bridge::{self, Gate};

@@ -1,5 +1,5 @@
 use super::*;
-use crate::shell::tray::{tray_model, TrayInputs};
+use crate::shell::tray::{TrayInputs, tray_model};
 
 fn r(x: f64, y: f64, w: f64, h: f64) -> NsRect {
     NsRect { x, y, w, h }
