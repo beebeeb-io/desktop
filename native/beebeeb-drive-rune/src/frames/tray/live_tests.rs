@@ -560,3 +560,17 @@ fn sync_anyway_is_offered_while_the_engine_holds_on_a_metered_connection() {
 fn os(board: &str) -> String {
     beebeeb_engine::os_words::for_this_os(board)
 }
+
+/// RC6: "Open in Finder" follows the macOS Finder setup's Ready state, locked or not.
+#[test]
+fn finder_ready_follows_the_macos_ready_state() {
+    assert!(!live::finder_ready(false, false));
+    assert!(live::finder_ready(false, true));
+    assert!(live::finder_ready(true, false));
+    let locked = snap(&Facts {
+        gate: Gate::Locked,
+        explorer_ready: live::finder_ready(false, true),
+        ..ready()
+    });
+    assert!(locked.explorer_ready);
+}

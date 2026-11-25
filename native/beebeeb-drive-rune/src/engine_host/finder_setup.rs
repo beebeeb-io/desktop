@@ -238,6 +238,12 @@ pub fn view() -> FinderSetupView {
     }
 }
 
+/// The domain is `Ready` (the popover's "Open in Finder" follows it, locked or not).
+pub fn is_ready() -> bool {
+    use beebeeb_engine::surfaces::phase::FinderSetup;
+    view().setup == FinderSetup::Ready
+}
+
 /// The text of "Copy details", with the real lifecycle lines.
 pub fn copy_details(view: &FinderSetupView, app_version: &str, macos_version: &str) -> String {
     beebeeb_engine::finder_setup::driver::copy_details_from(view, app_version, macos_version, lifecycle_tail)

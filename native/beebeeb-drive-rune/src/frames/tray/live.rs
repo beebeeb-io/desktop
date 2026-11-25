@@ -137,6 +137,12 @@ pub struct Facts {
     pub unreadable: bool,
 }
 
+/// "Open in Finder" is on when the shell says Beebeeb is in the file manager or the macOS Finder setup is `Ready`
+/// (RC6: the shell flag was never set on the Mac). The gate does not matter: a locked app still opens Finder.
+pub fn finder_ready(shell: bool, macos_setup_ready: bool) -> bool {
+    shell || macos_setup_ready
+}
+
 /// What the flyout draws for `facts`. `name` is the app's (the build's identity), `now` the clock.
 pub fn snapshot(facts: &Facts, name: &str, now: DateTime<LocalTime>) -> Snapshot {
     let (status, changes) = match facts.gate {

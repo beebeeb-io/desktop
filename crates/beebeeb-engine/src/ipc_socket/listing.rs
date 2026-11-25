@@ -112,12 +112,18 @@ pub fn list_file_provider_items(db: &crate::state_db::StateDb, container_id: &st
             .into_iter()
             .filter(|entry| entry.status != crate::state_db::FileStatus::Trashing)
             .filter(|entry| {
-                entry.parent_id.is_none()
+                // RC6 (dm-58): a folder lists its children by the CONTRACT's parent, so the root lists the rows
+                // whose contract parent is none too (a row the files table says has a parent but the contract does
+                // not, was in neither list). A row naming a parent this Mac has no row for stays in that parent's
+                // container (spec 2026-10-09 §7.2). Empty folders count.
+                let contract = db.get_file_contract_state(&entry.file_id).ok().flatten();
+                let parent = match &contract {
+                    Some(contract) => contract.parent_id.clone(),
+                    None => entry.parent_id.clone(),
+                };
+                parent.is_none()
                     && !entry.path.trim_matches('/').is_empty()
-                    && db
-                        .get_file_contract_state(&entry.file_id)
-                        .ok()
-                        .flatten()
+                    && contract
                         .map(|contract| contract.namespace == crate::state_db::Namespace::MyFiles)
                         .unwrap_or(true)
             })

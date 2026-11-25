@@ -515,3 +515,38 @@ fn review_p2_6_a_foreign_item_is_marked_added_by_someone_else() {
         "and does not mark an owner id"
     );
 }
+
+// ── RC6 (dm-58): the root lists every top-level row ───────────────────────
+
+#[test]
+fn dm58_root_lists_empty_folders_and_rows_whose_contract_has_no_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StateDb::open(dir.path().join("state.db")).unwrap();
+    let add = |id: &str, path: &str, kind: ItemKind, files_parent: Option<&str>, contract_parent: Option<&str>| {
+        let mut entry = live_file_entry(FileStatus::CloudOnly);
+        entry.file_id = id.into();
+        entry.path = path.into();
+        entry.item_kind = kind.clone();
+        entry.parent_id = files_parent.map(String::from);
+        db.upsert_file(&entry).unwrap();
+        let mut contract = live_contract();
+        contract.file_id = id.into();
+        contract.item_kind = kind;
+        contract.parent_id = contract_parent.map(String::from);
+        db.set_file_contract_state(&contract).unwrap();
+    };
+    add("empty-folder", "/testfolder", ItemKind::Folder, None, None);
+    add("stale-files-parent", "/Scaniverse 2026", ItemKind::Folder, Some("gone-folder"), None);
+    add("orphan", "/alright", ItemKind::Folder, Some("gone-folder"), Some("gone-folder"));
+    add("parent", "/real", ItemKind::Folder, None, None);
+    add("child", "/real/inner.txt", ItemKind::File, Some("parent"), Some("parent"));
+
+    let mut root: Vec<String> = list_file_provider_items(&db, FP_ROOT_APPLE)
+        .into_iter()
+        .map(|i| i.identifier)
+        .collect();
+    root.sort();
+    assert_eq!(root, vec!["empty-folder", "parent", "stale-files-parent"]);
+    let inner: Vec<String> = list_file_provider_items(&db, "parent").into_iter().map(|i| i.identifier).collect();
+    assert_eq!(inner, vec!["child"]);
+}

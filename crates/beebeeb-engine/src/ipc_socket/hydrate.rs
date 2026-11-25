@@ -8,7 +8,9 @@ pub(super) enum HydrateOutcome {
     Reply(IpcResponse),
     /// The client hung up. `no_progress`: before it had been sent a single byte count, so the row still
     /// reads "Downloading, 0.0 of N" in the app (the extension dropped the request, or never took it).
-    ClientGone { no_progress: bool },
+    ClientGone {
+        no_progress: bool,
+    },
 }
 
 /// A hydrate whose client left before any progress went out leaves the row an error the person can see and retry
@@ -33,7 +35,11 @@ pub(super) enum ProgressReporting {
 
 impl ProgressReporting {
     pub(super) fn from_wire(progress: bool) -> Self {
-        if progress { Self::On } else { Self::Off }
+        if progress {
+            Self::On
+        } else {
+            Self::Off
+        }
     }
 
     pub(super) fn wanted(self) -> bool {
@@ -145,11 +151,14 @@ pub(super) async fn hydrate_over_ipc(
     tokio::pin!(hydrate);
 
     let mut progress_sent = false;
+    let began = std::time::Instant::now();
+    let mut last_done: u64 = 0;
     let result = loop {
         tokio::select! {
             biased;
             result = &mut hydrate => break Some(result),
             Some((done, total)) = rx.recv() => {
+                last_done = done;
                 if write_frame(write_half, &IpcResponse::HydrateProgress { done, total }).await.is_err() {
                     break None;
                 }
@@ -180,6 +189,7 @@ pub(super) async fn hydrate_over_ipc(
             // frame always precedes the final reply, as the protocol promises
             // (`docs/IPC_PROTOCOL.md`: progress frames stream BEFORE the reply).
             while let Ok((done, total)) = rx.try_recv() {
+                last_done = done;
                 if write_frame(write_half, &IpcResponse::HydrateProgress { done, total })
                     .await
                     .is_err()
@@ -193,6 +203,7 @@ pub(super) async fn hydrate_over_ipc(
                     return HydrateOutcome::ClientGone { no_progress: false };
                 }
             }
+            log_hydrate_rate(file_id.as_str(), last_done, began.elapsed(), outcome.is_ok());
             match outcome {
                 Ok(()) => HydrateOutcome::Reply(IpcResponse::Ok {}),
                 Err(e) => HydrateOutcome::Reply(hydrate_failure_reply(file_id.as_str(), e)),
@@ -206,9 +217,28 @@ pub(super) async fn hydrate_over_ipc(
                 id_kind,
                 "IPC client went away mid-hydrate; hydration cancelled"
             );
-            HydrateOutcome::ClientGone { no_progress: !progress_sent }
+            HydrateOutcome::ClientGone {
+                no_progress: !progress_sent,
+            }
         }
     }
+}
+
+/// One info line per Finder hydrate: bytes, time and rate (RC6: a 367 MB download took 9 min 35 s and nothing said
+/// where). The source (direct or API) and the parallel count are on the engine's own lines.
+pub(super) fn log_hydrate_rate(file_id: &str, bytes: u64, took: std::time::Duration, ok: bool) {
+    let (file_id, id_kind) = crate::engine_bridge::wire_id_fields(file_id);
+    let secs = took.as_secs_f64().max(0.001);
+    tracing::info!(
+        file_id,
+        id_kind,
+        source = "finder",
+        ok,
+        bytes,
+        millis = took.as_millis() as u64,
+        rate = %format!("{:.2} MB/s", bytes as f64 / 1_000_000.0 / secs),
+        "Finder hydrate finished"
+    );
 }
 
 /// The reply to a hydrate that failed: the extension's `fetchContents` fails

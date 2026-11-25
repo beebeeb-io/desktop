@@ -1123,7 +1123,11 @@ impl EngineBridge {
             )
             .into());
         }
-        tracing::debug!(transport = transport.as_str(), "download finished");
+        tracing::info!(
+            transport = transport.as_str(),
+            bytes = plaintext.len() as u64,
+            "download finished"
+        );
         Ok((plaintext, transport))
     }
 

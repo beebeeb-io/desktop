@@ -92,7 +92,7 @@ impl<C: CredentialStores> EngineTraySource<C> {
             paused,
             report,
             progress: progress_of(&view),
-            explorer_ready: self.explorer_ready,
+            explorer_ready: live::finder_ready(self.explorer_ready, super::finder_setup::is_ready()),
             local,
             storage: if ready { self.storage() } else { None },
             unreadable,
