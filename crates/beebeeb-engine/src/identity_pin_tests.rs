@@ -169,7 +169,7 @@ const NAMING_ALLOWED: [(&str, usize, &str); 3] = [
     ),
     (
         "native/beebeeb-drive-rune/src/shell/identity.rs",
-        28,
+        30,
         "the native identity's two variants and `AppIdentity::engine`, the one bridge to the engine's values; \
          `engine_identity()` hands production code `CURRENT`'s",
     ),
