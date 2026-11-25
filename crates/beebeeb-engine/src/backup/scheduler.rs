@@ -508,16 +508,18 @@ pub async fn rebuild_records_if_empty(
         .map_err(|_| beebeeb_backup::HostError("the rebuild walk stopped before it finished".into()))?
         .map_err(|e| beebeeb_backup::HostError(format!("cannot read the backed-up folder ({:?})", e.kind())))?;
     let records = beebeeb_core::backup::records_from_remote_with_clock(&tree.files, &walk.entries, clock);
-    let mut stored = 0;
-    for record in records {
-        let expected = beebeeb_core::backup::RecordRef {
-            key: record.key.clone(),
-            remote_id: record.remote_id,
-        };
-        if host.put_record(category, &expected, record).await? {
-            stored += 1;
-        }
-    }
+    // One transaction for the whole set: a rebuild of tens of thousands of records is one commit, not an fsync each.
+    let batch: Vec<(beebeeb_core::backup::RecordRef, beebeeb_core::backup::BackupRecord)> = records
+        .into_iter()
+        .map(|record| {
+            let expected = beebeeb_core::backup::RecordRef {
+                key: record.key.clone(),
+                remote_id: record.remote_id,
+            };
+            (expected, record)
+        })
+        .collect();
+    let stored = host.put_records(category, &batch).await?;
     super::tree_cache::mark_rebuilt(&folder);
     tracing::info!(
         category = %category.key(),

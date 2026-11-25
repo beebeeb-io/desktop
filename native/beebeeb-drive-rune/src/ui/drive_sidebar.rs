@@ -290,11 +290,15 @@ fn foot(s: &State, standing: Standing, t: &Theme) -> El {
     let details = standing.shows_account_details();
     let blanked = !details && !no_plan;
     let storage = s.storage;
+    let listing = s.global.source.status().loading.is_some();
 
     let storage_value = if blanked {
         String::new()
     } else if no_plan {
         "No plan".to_string()
+    } else if s.global.source.status().loading.is_some() {
+        // The first listing runs: the totals are not known yet, never "0 B".
+        "Calculating\u{2026}".to_string()
     } else if s.storage_known {
         format!(
             "{} of {}",
@@ -309,7 +313,7 @@ fn foot(s: &State, standing: Standing, t: &Theme) -> El {
         .actions
         .source
         .storage_split()
-        .filter(|_| s.storage_known && !no_plan && !blanked);
+        .filter(|_| s.storage_known && !no_plan && !blanked && !listing);
     let quota = storage.quota_bytes.max(1) as f64;
     let (files_bytes, photos_bytes) = match split {
         Some(split) => (split.files_bytes, split.photos_bytes),
