@@ -343,7 +343,7 @@ mod macos {
         }
         let launch = beebeeb_engine::finder_setup::launch_location::current();
         lifecycle_log::event(LifecycleEvent::Launch {
-            app_version: beebeeb_engine::finder_setup::driver::token(env!("CARGO_PKG_VERSION")),
+            app_version: beebeeb_engine::finder_setup::driver::token(RELEASE_VERSION),
             macos_version: macos_version(),
             launch_location: launch,
         });
@@ -379,7 +379,7 @@ mod macos {
     pub(super) fn reimport_once_if_changed(identity: &'static beebeeb_engine::identity::EngineIdentity) {
         let _ = std::thread::Builder::new().name("finder-reimport".into()).spawn(move || {
             let Ok(dir) = beebeeb_engine::state_paths::beebeeb_state_dir_for(identity) else { return };
-            let generation = env!("CARGO_PKG_VERSION").to_string();
+            let generation = RELEASE_VERSION.to_string();
             let marker = dir.join("fp-reimport-generation");
             if std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == generation) {
                 return;
@@ -480,6 +480,12 @@ impl<C: beebeeb_engine::app::CredentialStores + 'static> Session for LiveSession
         self.engine.wake_host();
     }
 }
+
+/// dm-43: the release version (`BEEBEEB_RELEASE_VERSION`, set by the release build), not the crate's 0.0.1.
+pub(super) const RELEASE_VERSION: &str = match option_env!("BEEBEEB_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 #[cfg(test)]
 #[path = "finder_setup_tests.rs"]

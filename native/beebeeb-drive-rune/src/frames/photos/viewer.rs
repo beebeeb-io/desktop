@@ -13,6 +13,17 @@ use crate::theme::tokens::Theme;
 use crate::ui::toolbar::tool;
 use crate::ui::kit;
 
+/// The largest display scale the cap allows for (a 2x Retina display; 1x gets the same cap, never smaller).
+const MAX_SCALE: f32 = 2.0;
+
+/// The size in points a picture of `pixels` is drawn at in a `stage` (contain, aspect kept), never larger than
+/// its pixels times the display `scale`. The layout does the same with `aspect_fit` and `max_w`/`max_h`.
+pub(crate) fn fit_size(pixels: (u32, u32), stage: (f32, f32), scale: f32) -> (f32, f32) {
+    let (pw, ph) = (pixels.0.max(1) as f32, pixels.1.max(1) as f32);
+    let k = (stage.0 / pw).min(stage.1 / ph).min(scale);
+    (pw * k, ph * k)
+}
+
 fn tab(i: usize, words: String, on: bool, t: &Theme) -> El {
     let mut tab = el()
         .key(format!("ph-seg-{i}"))
@@ -314,7 +325,6 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         } else {
             shown.name.clone()
         })
-        .size(600.0, 400.0)
         .radius(4.0);
     let whole = if viewer.original == Original::Whole {
         ui.source.original(viewer.id)
@@ -322,8 +332,18 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         None
     };
     photo = match whole.or_else(|| ui.source.thumbnail(viewer.id, Shape::Preview)) {
-        Some(pixels) => photo.pixels_fit(&pixels, SurfaceFit::Fit),
-        None => photo.fill(white.alpha(0.07)),
+        Some(pixels) => {
+            let (w, h) = pixels.size();
+            let (cap_w, cap_h) = (w as f32 * MAX_SCALE, h as f32 * MAX_SCALE);
+            // The largest box at the picture's own aspect the stage allows, capped at its pixels times the display scale.
+            photo
+                .aspect_fit(w.max(1) as f32 / h.max(1) as f32)
+                .max_w(cap_w)
+                .max_h(cap_h)
+                .pixels_fit(&pixels, SurfaceFit::Fill)
+        }
+        // No picture yet: a placeholder at the board's drawing size.
+        None => photo.size(600.0, 400.0).fill(white.alpha(0.07)),
     };
     // A video the shell's player is playing: its frames on the stage, the bar working (Space and the button
     // play and pause), a refusal in the bar's place.
@@ -416,4 +436,24 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         stage = stage.child(overlay::toast_layer(toast, 118.0, false, t));
     }
     stage
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::fit_size;
+
+    #[test]
+    fn portrait_preview_fills_stage_height() {
+        for scale in [1.0, 2.0] {
+            let (w, h) = fit_size((1290, 1920), (2200.0, 1300.0), scale);
+            assert!((h - 1300.0).abs() < 0.01, "scale {scale}: {h}");
+            assert!(w < 2200.0 && (w / h - 1290.0 / 1920.0).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn never_larger_than_pixels_times_scale() {
+        let (w, h) = fit_size((100, 50), (2200.0, 1300.0), 2.0);
+        assert_eq!((w, h), (200.0, 100.0));
+    }
 }

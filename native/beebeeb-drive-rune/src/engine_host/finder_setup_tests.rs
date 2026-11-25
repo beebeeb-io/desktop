@@ -335,3 +335,12 @@ mod on_ports {
 fn view() -> FinderSetupView {
     FinderSetupView::initial(LaunchLocation::Applications)
 }
+
+/// dm-43: the lifecycle log and the reimport marker carry the release version, not the crate's 0.0.1.
+#[test]
+fn the_version_comes_from_the_release_version_when_set() {
+    assert_eq!(
+        RELEASE_VERSION,
+        option_env!("BEEBEEB_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+    );
+}
