@@ -120,6 +120,7 @@ binding
 bit
 bitmap
 blobs
+bookmarks
 bootstrapping
 both
 branch
