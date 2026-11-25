@@ -45,7 +45,7 @@ fn entries(ui: &Ui, which: Menu) -> Vec<Entry> {
                     Entry::Item {
                         id: label,
                         label,
-                        shortcut: Some(concat!(beebeeb_engine::primary_key!(), "\u{2212}")),
+                        shortcut: Some(if cfg!(target_os = "macos") { "\u{2318}\u{2212}" } else { "Ctrl\u{2212}" }),
                         checked,
                         danger: false,
                         off: false,

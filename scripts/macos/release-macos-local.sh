@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2001  # style notes only: the sed prefixing and the guarded exit are deliberate
 # The local macOS release of the native app (packaging-signing-update.md §4-§7). Fail closed: every gate that can say
 # no runs before the first upload; nothing is published unless the notarised, stapled artefacts were verified.
 #   scripts/macos/release-macos-local.sh <VERSION> <CHANNEL> [--dry-run] [--from-step N]
@@ -135,14 +136,21 @@ step_2() {
   run rm -f "$STAMP"
   run rm -rf "$OUT"
   run mkdir -p "$OUT"
-  # The updater key and Apple credentials never reach the build; the identity and version are set for it only.
+  # The updater key and Apple credentials never reach the build; the identity, version, channel and the updater's
+  # not-before mark (the commit time) are set for it only. Without the mark the app has no updater (NotARelease).
+  local mark; mark="$(git log -1 --format=%ct HEAD)"
+  [[ "$mark" =~ ^[0-9]+$ ]] || fail "cannot read the commit time of HEAD"
   show env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD -u UPDATER_V2_PRIVATE_KEY -u UPDATER_V2_PRIVATE_KEY_PASSWORD \
-    "BEEBEEB_APP_IDENTIFIER=io.beebeeb.app" "BEEBEEB_RELEASE_VERSION=$VERSION" cargo build --release --manifest-path native/beebeeb-drive-rune/Cargo.toml
+    "BEEBEEB_APP_IDENTIFIER=io.beebeeb.app" "BEEBEEB_RELEASE_VERSION=$VERSION" "BEEBEEB_RELEASE_CHANNEL=$CHANNEL" "BEEBEEB_BUILD_NOT_BEFORE=$mark" \
+    cargo build --release --locked --manifest-path native/beebeeb-drive-rune/Cargo.toml
   if ! ((DRY)); then
     env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD -u UPDATER_V2_PRIVATE_KEY -u UPDATER_V2_PRIVATE_KEY_PASSWORD \
       -u BB_NOTARY_KEY_PATH BEEBEEB_APP_IDENTIFIER=io.beebeeb.app BEEBEEB_RELEASE_VERSION="$VERSION" \
-      cargo build --release --manifest-path native/beebeeb-drive-rune/Cargo.toml || fail "release build failed"
-  fi
+      BEEBEEB_RELEASE_CHANNEL="$CHANNEL" BEEBEEB_BUILD_NOT_BEFORE="$mark" \
+      cargo build --release --locked --manifest-path native/beebeeb-drive-rune/Cargo.toml || fail "release build failed"
+    local marks; marks="$(grep -a -o 'beebeeb-updater-not-before=[0-9a-z]*;' "$BIN" | sort -u || true)"
+    [[ "$marks" == "beebeeb-updater-not-before=${mark};" ]] || fail "the binary must carry exactly 'beebeeb-updater-not-before=${mark};', found: ${marks:-nothing}"
+  else say "would check that $BIN carries beebeeb-updater-not-before=$mark;"; fi
   show env BEEBEEB_RELEASE_VERSION="$VERSION" BEEBEEB_MACOS_HARDENED_RUNTIME=1 scripts/macos/bundle-app.sh --identity real --binary "$BIN" --out "$OUT" --sign
   if ! ((DRY)); then
     env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD -u UPDATER_V2_PRIVATE_KEY -u UPDATER_V2_PRIVATE_KEY_PASSWORD \
@@ -230,9 +238,9 @@ step_10() {
 }
 step_11() {
   local out id view status conclusion waited=0
-  show gh workflow run "$WF_PUBLISH" --repo "$REPO" --ref "$WF_REF" -f "version=$VERSION" -f "channel=$CHANNEL" -f publish_existing=true
+  show gh workflow run "$WF_PUBLISH" --repo "$REPO" --ref "$WF_REF" -f "tag=$TAG" -f "channel=$CHANNEL"
   if ((DRY)); then say "(dry-run) would wait for the run it created"; return 0; fi
-  out="$(gh workflow run "$WF_PUBLISH" --repo "$REPO" --ref "$WF_REF" -f "version=$VERSION" -f "channel=$CHANNEL" -f publish_existing=true 2>&1)" || fail "dispatch failed: $out"
+  out="$(gh workflow run "$WF_PUBLISH" --repo "$REPO" --ref "$WF_REF" -f "tag=$TAG" -f "channel=$CHANNEL" 2>&1)" || fail "dispatch failed: $out"
   id="$(grep -oE '/actions/runs/[0-9]+' <<<"$out" | head -1 | grep -oE '[0-9]+$' || true)"
   [[ -n "$id" ]] || fail "gh printed no run URL, so the run cannot be identified; check $WF_PUBLISH by hand. Nothing was guessed."
   while :; do
