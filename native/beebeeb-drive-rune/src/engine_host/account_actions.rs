@@ -178,11 +178,9 @@ impl<C: CredentialStores + 'static> Actions<C> {
                 } else {
                     engine.sign_out_for(session)
                 };
-                if result.is_err() && removed.is_ok() {
-                    // Refused (unsaved edits, a session that moved on): the keys are still here, so the location
-                    // comes back (ruling T3-2).
-                    crate::engine_host::finder_setup::turn_on();
-                }
+                // The session as it is now: signed out, nothing to see; refused (unsaved edits, a session that moved
+                // on), the keys are still here and the edge brings the location back (ruling T3-2).
+                crate::engine_host::finder_setup::session_changed();
                 result
             },
         );

@@ -133,8 +133,29 @@ pub fn on_app_activated() {
     }
 }
 
-/// Lock: cancels a running check and holds, acknowledged before this returns.
+/// What the edge detector remembers after a lock the app itself made: no keys (the screen lock leaves them in
+/// memory on macOS, so without this the unlock is no edge and the hold is never lifted).
+pub(crate) fn after_lock(facts: SessionFacts) -> SessionFacts {
+    SessionFacts { keys: false, ..facts }
+}
+
+/// What the edge detector remembers after a sign-out the app itself made: no session at all.
+pub(crate) fn after_sign_out(_facts: SessionFacts) -> SessionFacts {
+    SessionFacts {
+        keys: false,
+        auth: false,
+    }
+}
+
+fn remember(change: impl FnOnce(SessionFacts) -> SessionFacts) {
+    let mut last = LAST_FACTS.lock().unwrap_or_else(PoisonError::into_inner);
+    *last = change(*last);
+}
+
+/// Lock: cancels a running check and holds, acknowledged before this returns. The post-state is remembered, so
+/// the next `session_changed` after an unlock sees keys arriving (same on the Windows Explorer setup).
 pub fn lock() {
+    remember(after_lock);
     if let Some(running) = current() {
         if let Err(sentence) = wait(running.handle.lock(LOCK_WAIT)) {
             tracing::warn!("finder setup: lock not acknowledged: {sentence}");
@@ -162,6 +183,8 @@ fn remove(trigger: Trigger) -> Result<(), String> {
 
 /// Sign-out: the Finder location is removed and stays removed until keys arrive.
 pub fn sign_out() -> Result<(), String> {
+    // Not in `remove`: Settings "Turn off" holds too but stays signed in, and must not look like keys arriving.
+    remember(after_sign_out);
     remove(Trigger::SignOut)
 }
 
