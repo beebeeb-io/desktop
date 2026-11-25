@@ -122,6 +122,7 @@ bitmap
 blobs
 bootstrapping
 both
+branch
 breadcrumb
 bridge
 brought
@@ -385,6 +386,7 @@ finish
 finished
 fired
 first
+first_ids
 first_pass
 flac
 flagged
@@ -593,6 +595,7 @@ missing
 mixed
 mode
 modifier
+more
 move
 moved
 moved_files
@@ -697,6 +700,7 @@ own-tree
 owner
 ownership
 pace
+paced
 page
 panic
 panicked
@@ -712,6 +716,7 @@ pass
 passes
 password
 path
+paths
 paused
 payload
 pc
@@ -1065,6 +1070,7 @@ their
 theirs
 them
 there
+these
 they
 this
 thread
@@ -1180,6 +1186,7 @@ was
 watch
 watcher
 watching
+way
 web
 went
 were
