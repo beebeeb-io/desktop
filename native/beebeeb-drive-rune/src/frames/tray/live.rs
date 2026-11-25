@@ -155,7 +155,8 @@ pub fn snapshot(facts: &Facts, name: &str, now: DateTime<LocalTime>) -> Snapshot
             } else {
                 match recent(facts.local.as_ref(), name, now) {
                     // The first answer is still out: not a finished-looking empty list.
-                    Changes::Empty { .. } if status == Status::Checking => Changes::Loading,
+                    // ...but once the state database has been read, an empty list is the answer, not a placeholder.
+                    Changes::Empty { .. } if status == Status::Checking && facts.local.is_none() => Changes::Loading,
                     changes => changes,
                 }
             };

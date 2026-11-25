@@ -99,6 +99,8 @@ cpal = "=0.18.2"
 cc = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Names the AppKit view Rune's `WindowHandle::with_raw_handle` lends (the popover's native look). Already in the lock.
+raw-window-handle = "0.6"
 # The File Provider ports (`shell/platform/macos_fp/ports.rs`): the blocking spawn of a bridge call, the removal's answer
 # channel and the op limit's timeout. The tokio the engine already links; no new crate is built.
 tokio = { version = "1", features = ["rt", "sync", "time"] }
