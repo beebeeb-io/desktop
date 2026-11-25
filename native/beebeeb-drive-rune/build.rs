@@ -136,6 +136,12 @@ fn emit_file_provider_bridge() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
+    compile_file_provider_bridge(source);
+}
+
+/// `cc` is a build-dependency on macOS hosts only (Cargo.toml), so the compile lives behind the host gate.
+#[cfg(target_os = "macos")]
+fn compile_file_provider_bridge(source: &str) {
     cc::Build::new()
         .file(source)
         .flag("-fobjc-arc")
@@ -146,6 +152,11 @@ fn emit_file_provider_bridge() {
     for framework in ["Foundation", "AppKit", "FileProvider"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn compile_file_provider_bridge(_source: &str) {
+    println!("cargo:warning=building for macOS from a non-macOS host: the File Provider bridge is not compiled");
 }
 
 fn main() {
