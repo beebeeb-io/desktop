@@ -82,6 +82,18 @@ static LAST_FACTS: Mutex<SessionFacts> = Mutex::new(SessionFacts {
     auth: false,
 });
 static CURRENT: OnceLock<Running> = OnceLock::new();
+/// Rule 6's debt, as far as this run knows: a sign-out whose Finder removal was not confirmed owes it; a confirmed
+/// removal (or the driver's removal-first step) releases it. The engine keeps no reader for it outside tests, so a
+/// restart forgets it (reported).
+static REMOVAL_OWED: AtomicBool = AtomicBool::new(false);
+
+fn removal_owed_now() -> bool {
+    REMOVAL_OWED.load(Ordering::SeqCst)
+}
+
+fn set_removal_owed(owed: bool) {
+    REMOVAL_OWED.store(owed, Ordering::SeqCst);
+}
 
 struct Running {
     handle: beebeeb_engine::finder_setup::driver::FinderSetupHandle,
@@ -170,11 +182,15 @@ fn remove(trigger: Trigger) -> Result<(), String> {
     };
     match wait(running.handle.remove(trigger, REMOVE_WAIT)) {
         Ok(removal) => {
+            set_removal_owed(false);
             note_kept(removal.kept_location("finder setup removal"));
             Ok(())
         }
         Err(failure) => {
             let message = failure.message.clone();
+            if matches!(trigger, Trigger::SignOut) {
+                set_removal_owed(true);
+            }
             note_kept(failure.kept_location("finder setup removal"));
             Err(message)
         }
@@ -400,20 +416,26 @@ mod macos {
     /// fresh (the marker lives in the state folder, so a wiped state takes it along). When the app version differs from the marker kept in the state folder, ask the
     /// system once to list the whole tree again; the marker is written only after the bridge said yes.
     pub(super) fn reimport_once_if_changed(identity: &'static beebeeb_engine::identity::EngineIdentity) {
-        let _ = std::thread::Builder::new().name("finder-reimport".into()).spawn(move || {
-            let Ok(dir) = beebeeb_engine::state_paths::beebeeb_state_dir_for(identity) else { return };
-            let generation = RELEASE_VERSION.to_string();
-            let marker = dir.join("fp-reimport-generation");
-            if std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == generation) {
-                return;
-            }
-            match crate::shell::platform::macos::macos_fp::bridge::reimport() {
-                Ok(()) => {
-                    let _ = std::fs::write(&marker, generation);
+        let _ = std::thread::Builder::new()
+            .name("finder-reimport".into())
+            .spawn(move || {
+                let Ok(dir) = beebeeb_engine::state_paths::beebeeb_state_dir_for(identity) else {
+                    return;
+                };
+                let generation = RELEASE_VERSION.to_string();
+                let marker = dir.join("fp-reimport-generation");
+                if std::fs::read_to_string(&marker).is_ok_and(|seen| seen.trim() == generation) {
+                    return;
                 }
-                Err(_) => tracing::warn!("finder setup: the reimport request did not go through; tried again next start"),
-            }
-        });
+                match crate::shell::platform::macos::macos_fp::bridge::reimport() {
+                    Ok(()) => {
+                        let _ = std::fs::write(&marker, generation);
+                    }
+                    Err(_) => {
+                        tracing::warn!("finder setup: the reimport request did not go through; tried again next start")
+                    }
+                }
+            });
     }
 
     /// `ProductVersion` from the system's version file: no process is started.
@@ -459,10 +481,10 @@ impl<C: beebeeb_engine::app::CredentialStores + 'static> Session for LiveSession
             auth: !matches!(gate, GateState::SignedOut),
         }
     }
-    /// The engine's debt reader is test-only (`StateDb::finder_removal_owed`), so a restart does not remember a debt
-    /// yet (reported); the driver's removal-first step and `start_engine`'s refusal work from what this says.
+    /// The debt this run knows (`REMOVAL_OWED`); the engine's reader is test-only, so a restart does not remember it
+    /// yet (reported). The driver's removal-first step and `start_engine`'s refusal work from what this says.
     fn removal_owed(&self) -> bool {
-        false
+        removal_owed_now()
     }
     fn config_path(&self) -> Option<PathBuf> {
         beebeeb_engine::config::DesktopConfig::path_for(self.identity).ok()
@@ -495,9 +517,11 @@ impl<C: beebeeb_engine::app::CredentialStores + 'static> Session for LiveSession
             _ => Ok(()),
         }
     }
-    /// The engine hands the shell no writer for the debt or the gone mark (`OwnedState` has neither; reported): until
-    /// it does, a confirmed removal clears nothing on disk.
-    fn clear_removal_owed(&self) {}
+    /// The engine hands the shell no writer for the debt on disk (`OwnedState` has none; reported): the run's own
+    /// mark is released.
+    fn clear_removal_owed(&self) {
+        set_removal_owed(false);
+    }
     fn clear_domain_gone(&self) {}
     fn changed(&self) {
         self.engine.wake_host();

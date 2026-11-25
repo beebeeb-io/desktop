@@ -128,6 +128,21 @@ fn copy_details_reads_the_lifecycle_tail_and_names_no_path() {
     assert!(!text.contains("/Users/"), "{text}");
 }
 
+#[test]
+fn a_sign_out_removal_that_failed_is_owed_until_a_removal_is_confirmed() {
+    set_removal_owed(false);
+    assert!(!removal_owed_now());
+    set_removal_owed(true);
+    assert!(removal_owed_now(), "the live session reads the run's debt");
+    set_removal_owed(false);
+    assert!(!removal_owed_now());
+    let src = include_str!("finder_setup.rs");
+    assert!(
+        src.contains("fn removal_owed(&self) -> bool {\n        removal_owed_now()"),
+        "wired to the debt"
+    );
+}
+
 #[cfg(target_os = "macos")]
 mod on_ports {
     use super::*;
