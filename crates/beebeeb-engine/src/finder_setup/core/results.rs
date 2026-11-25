@@ -123,6 +123,14 @@ pub(super) fn on_check_result(
             }
             land_terminal(s, landing, now, policy, fx);
         }
+        // dm-43: an existing domain that did not confirm in time is still being listed by macOS (a reimport, a
+        // first listing). That is "pending", not a failure: retry in the background with backoff, never `Failed`,
+        // and never stop the engine (sync keeps running). Shared with Windows.
+        (Step::Wait(Wait::ConfirmExisting), OpResult::Stable(Err(error)))
+            if policy::classify(&error) == FinderFailureReason::Timeout =>
+        {
+            attempt_pending(s, error, now, policy, fx)
+        }
         (
             _,
             OpResult::EngineStarted(Err(error))
@@ -219,9 +227,30 @@ pub(super) fn attempt_failed(s: &mut CoreState, error: FpError, now: Instant, po
     }
 }
 
-/// Stop the engine this check started (if any), then land.
+/// A timed-out confirm of an existing domain: log it, stay `Adding` and try again after a growing delay. No budget.
+pub(super) fn attempt_pending(s: &mut CoreState, error: FpError, now: Instant, policy: &RetryPolicy, fx: &mut Vec<Effect>) {
+    let reason = FinderFailureReason::Timeout;
+    s.reason = Some(reason);
+    s.max_attempts = policy.max_attempts(reason);
+    s.last_error = Some(error.clone());
+    fx.push(Effect::Transition(Transition {
+        from: s.setup,
+        to: FinderSetup::Adding,
+        reason: Some(reason),
+        error: Some(error),
+        attempt: s.attempt,
+        max_attempts: s.max_attempts,
+    }));
+    s.setup = FinderSetup::Adding;
+    fx.push(Effect::Publish);
+    s.phase = Phase::Backoff(now + policy.pending_delay(s.attempt));
+}
+
+/// Stop the engine this check started, then land, but only where an engine must not run: the person turned the
+/// domain off. A failure or a timeout never stops it (dm-43: the shell's own start can race the check's, and the
+/// check "owned" the engine, so a slow confirm switched sync off for good). Shared with Windows.
 pub(super) fn end_check(s: &mut CoreState, landing: Landing, now: Instant, policy: &RetryPolicy, fx: &mut Vec<Effect>) {
-    if s.check_started_engine {
+    if s.check_started_engine && landing == Landing::UserDisabled {
         s.phase = Phase::Running(Step::StopEngine(landing));
     } else {
         land_terminal(s, landing, now, policy, fx);

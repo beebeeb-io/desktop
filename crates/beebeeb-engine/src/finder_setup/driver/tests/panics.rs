@@ -173,9 +173,9 @@ async fn a_stop_that_did_not_finish_is_logged_and_the_check_still_ends_with_its_
     );
     let clock = FakeClock::new();
     let (mut ports, record) = FakePorts::new(&clock, DomainState::NotRegistered);
-    // The folder is taken: not retryable, so the check ends after one attempt, and it started
-    // an engine (`StartEngine` answers `Ok(true)`), so the end of the check stops it.
-    ports.add = Err(FpError::new(COCOA_DOMAIN, 516, PATH_MESSAGE));
+    // The person turned the domain off right after the add: the engine must not run, and the check started
+    // one (`StartEngine` answers `Ok(true)`), so the end of the check stops it (dm-43: only this landing does).
+    *ports.read.lock().unwrap() = DomainState::Disabled;
     ports.stop = Err(stop_error.clone());
     let (handle, task) = start(
         ports,
@@ -186,16 +186,12 @@ async fn a_stop_that_did_not_finish_is_logged_and_the_check_still_ends_with_its_
     );
     tokio::spawn(task);
     handle.trigger(Trigger::KeysArrived).unwrap();
-    settle(&handle, |v| v.setup == FinderSetup::Failed).await;
+    settle(&handle, |v| v.setup == FinderSetup::UserDisabled).await;
     let view = handle.view();
     assert_eq!(
         view.reason,
-        Some(FinderFailureReason::FolderTaken),
+        Some(FinderFailureReason::UserDisabled),
         "a person is shown the check's reason, not the stop's"
-    );
-    assert_eq!(
-        view.last_failure.as_ref().map(|f| (f.reason, f.code)),
-        Some((FinderFailureReason::FolderTaken, 516))
     );
     assert_eq!(ops(&record).last(), Some(&Op::StopEngine));
     let record = record.lock().unwrap();
