@@ -23,7 +23,11 @@ use crate::engine_bridge::{BackupChild, BackupFolderState, BackupSnapshot, Engin
 /// RE3-a: a listing page by page (a server with no snapshot) runs this many folder requests at full speed, then one
 /// every [`PAGED_LISTING_PACE`].
 const PAGED_LISTING_BURST: usize = 20;
-const PAGED_LISTING_PACE: std::time::Duration = std::time::Duration::from_millis(250);
+const PAGED_LISTING_PACE: std::time::Duration = if cfg!(test) {
+    std::time::Duration::ZERO
+} else {
+    std::time::Duration::from_millis(250)
+};
 /// `/sync/ops` answers at most this many ops a page (the server's default): a full page may not be the head.
 const OPS_PAGE: usize = 1_000;
 
@@ -349,6 +353,14 @@ impl DesktopBackupHost {
         db.set_backup_category_folder(&c.key(), Some(&id))
             .map_err(db_error("category_folder"))?;
         Ok((id, None))
+    }
+
+    /// [`BackupHost::put_record`] for a batch, in one state-DB transaction (the records' rebuild). How many stored.
+    pub async fn put_records(&self, c: &Category, records: &[(RecordRef, BackupRecord)]) -> Result<usize, HostError> {
+        self.bridge
+            .db()
+            .put_backup_records_cas(&c.key(), records)
+            .map_err(db_error("put_record"))
     }
 
     async fn folder_state(&self, id: &str) -> Result<BackupFolderState, HostError> {

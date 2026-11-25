@@ -124,6 +124,8 @@ pub struct GlobalStatus {
     /// `Some`: there is no connection, and this is how old the list is.
     pub offline: Option<ListedAt>,
     pub loading: Option<Loading>,
+    /// Sync is paused (the engine runs, nothing is on its way): an empty Files says so, with Resume.
+    pub paused: bool,
     /// w31: the account's file list has never arrived on this PC and the last try to get it failed. The rows shown
     /// are not the account's files: a banner says so, with Try again.
     pub list_failed: bool,
