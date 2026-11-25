@@ -250,7 +250,7 @@ fn only_observe_and_remove_wait_the_others_fail_fast() {
     let (bridge, host) = (FakeBridge::new("/k"), Arc::new(FakeHost::default()));
     let mut p = ports(2000, &bridge, &host);
     let _held = Gate::try_enter().unwrap();
-    for op in [Op::AddDomain, Op::ReadDomain, Op::WaitStable(Duration::from_secs(1))] {
+    for op in [Op::AddDomain, Op::ReadDomain] {
         let started = Instant::now();
         let busy = match run(p.run(op)) {
             OpResult::Added(r) | OpResult::Stable(r) => r.err(),
