@@ -4,10 +4,10 @@ use super::browse_states::ListedSoFar;
 use super::source::BoardDrive;
 use super::tests::*;
 use super::{Intent, Toast};
-use crate::State;
 use crate::frames::global::source::board;
 use crate::frames::global::{GlobalFixture, Ui};
 use crate::init;
+use crate::State;
 use rune::{Key, Runtime};
 
 fn offline() -> (Runtime<State>, Calls) {
@@ -61,12 +61,10 @@ fn offline_only_files_that_are_not_on_this_pc_are_dimmed_and_say_why() {
         (4, 3, 4),
         "the line counts the rows"
     );
-    assert!(
-        info(&rt, "banner")
-            .label
-            .unwrap_or_default()
-            .starts_with("You're offline.")
-    );
+    assert!(info(&rt, "banner")
+        .label
+        .unwrap_or_default()
+        .starts_with("You're offline."));
 }
 
 #[test]
@@ -329,7 +327,10 @@ fn w31_a_first_list_that_failed_is_said_with_try_again() {
     assert!(find(&rt, "banner").is_some(), "the failure is said");
     let button = info(&rt, "banner-action");
     assert_eq!((button.role, button.label.as_deref()), ("button", Some("Try again")));
-    assert!(find(&rt, "banner-dismiss").is_none(), "it cannot be dismissed while it is true");
+    assert!(
+        find(&rt, "banner-dismiss").is_none(),
+        "it cannot be dismissed while it is true"
+    );
     click(&mut rt, "banner-action");
     assert_eq!(seen.list_retries.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

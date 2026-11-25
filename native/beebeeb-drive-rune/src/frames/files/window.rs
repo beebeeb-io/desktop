@@ -245,11 +245,18 @@ fn paused_folder(t: &Theme) -> El {
             button::outline_button("paused-resume", "Resume", None, t)
                 .expanded(false)
                 .on_press(|s: &mut State| {
-                    let _ = s.actions.resume_sync();
+                    use crate::shell::actions::ShellActions as _;
+                    let _ = s.shell.actions.resume_sync();
                 }),
         ),
     );
-    el().key("paused-area").role("list").label("Sync is paused").grow(1.0).h_full().center().child(body)
+    el().key("paused-area")
+        .role("list")
+        .label("Sync is paused")
+        .grow(1.0)
+        .h_full()
+        .center()
+        .child(body)
 }
 
 /// An empty folder (`.kit-empty`): what to do, and that it is encrypted before it uploads.
@@ -311,7 +318,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         body = body.child(el().key("list-blank").grow(1.0).h_full());
     } else if s.listing.items.is_empty() && s.list_error.is_none() && super::browse_states::first_listing(s) {
         body = body.child(listing_folder(&t));
-    } else if s.listing.items.is_empty() && s.list_error.is_none() && s.listing.folder.id.is_none() && super::browse_states::paused(s) {
+    } else if s.listing.items.is_empty()
+        && s.list_error.is_none()
+        && s.listing.folder.id.is_none()
+        && super::browse_states::paused(s)
+    {
         body = body.child(paused_folder(&t));
     } else if empty {
         // Nothing in the folder: no headers, no panel, one way forward (DW-1106).
