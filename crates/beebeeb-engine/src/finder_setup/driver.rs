@@ -47,7 +47,6 @@ pub use state::FinderSetupView;
 // Started and asked about only by the macOS reconciler wiring (`lib.rs`).
 #[cfg(target_os = "macos")]
 pub use check::spawn;
-#[cfg(target_os = "macos")]
 pub use handle::NOT_RUNNING;
 #[cfg(target_os = "macos")]
 pub use state::FINDER_SETUP_CHANGED_EVENT;

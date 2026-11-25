@@ -8,6 +8,9 @@ publish = false
 # This crate is its own workspace root, with its own `rust-toolchain.toml`; CI builds it with 1.99.1.
 
 [dependencies]
+# The File Provider ports (`macos_fp/ports.rs`) and the Finder setup wait (`engine_host/finder_setup.rs`), on every OS.
+# The tokio the engine already links; no new crate is built.
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 rune = { git = "https://github.com/anomalyco/rune", rev = "c92e462e", default-features = false, features = ["accessibility", "svg"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "c92e462e" }
 rune-notify = { git = "https://github.com/anomalyco/rune", rev = "c92e462e" }
@@ -101,9 +104,6 @@ cc = "1"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Names the AppKit view Rune's `WindowHandle::with_raw_handle` lends (the popover's native look). Already in the lock.
 raw-window-handle = "0.6"
-# The File Provider ports (`shell/platform/macos_fp/ports.rs`): the blocking spawn of a bridge call, the removal's answer
-# channel and the op limit's timeout. The tokio the engine already links; no new crate is built.
-tokio = { version = "1", features = ["rt", "sync", "time"] }
 # The Mac shell (`shell/platform/macos_*.rs`): the menu-bar item, the login item, Touch ID. The versions already in the lock
 # through winit and cpal, except objc2-local-authentication.
 objc2 = "0.6"
