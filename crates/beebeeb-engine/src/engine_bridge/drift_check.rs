@@ -120,11 +120,16 @@ fn with_state<R>(sync_root: &Path, f: impl FnOnce(&mut RootState) -> R) -> R {
     f(all.entry(sync_root.to_path_buf()).or_default())
 }
 
-/// Called from the idle branch of the pull: runs the check when its window is due. Never fails the tick.
+/// Called from the idle branch of the pull: runs the check when its window is due. Never fails the tick. The first
+/// idle tick of a run only starts the window: the first check runs one window later, so idle ticks right after start
+/// stay one `/sync/ops` request each.
 pub(super) async fn after_idle_pull(bridge: &EngineBridge, sync_root: &Path) {
     let due = with_state(sync_root, |state| {
-        let due =
-            !state.unsupported && !state.running && state.last_started.is_none_or(|at| at.elapsed() >= CHECK_EVERY);
+        let Some(started) = state.last_started else {
+            state.last_started = Some(Instant::now());
+            return false;
+        };
+        let due = !state.unsupported && !state.running && started.elapsed() >= CHECK_EVERY;
         if due {
             state.running = true;
             state.last_started = Some(Instant::now());
@@ -423,6 +428,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// Move the window's start one window back, as if the engine had idled that long.
+    fn expire_window(sync_root: &Path) {
+        with_state(sync_root, |state| {
+            state.last_started = Instant::now().checked_sub(CHECK_EVERY);
+        });
+    }
     use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
     use crate::test_api::{FakeApi, Handler, Reply, Request};
 
@@ -606,7 +618,10 @@ mod tests {
         let fx = Fixture::new();
         fx.account.digests_as_old_server(true);
         fx.tick().await;
-        // The first idle tick runs the check through the tick itself.
+        fx.tick().await;
+        assert_eq!(fx.digest_requests(), 0, "the first idle tick only starts the window");
+        // A window later, the idle tick runs the check through the tick itself.
+        expire_window(&fx.root);
         fx.tick().await;
         assert_eq!(fx.digest_requests(), 1, "{:?}", fx.fake.routes());
         let before = fx.fake.routes().len();
@@ -629,8 +644,12 @@ mod tests {
         fx.tick().await;
         assert_eq!(fx.digest_requests(), 0, "the bootstrap tick runs no check");
         fx.tick().await;
+        fx.tick().await;
+        assert_eq!(fx.digest_requests(), 0, "the first idle ticks only start the window");
+        expire_window(&fx.root);
+        fx.tick().await;
         let after_first = fx.digest_requests();
-        assert!(after_first >= 3, "the first idle tick reads every folder");
+        assert!(after_first >= 3, "the first check, a window later, reads every folder");
         assert_eq!(fx.bridge.db().remote_folder_digests().unwrap().len(), 3);
         fx.tick().await;
         assert_eq!(fx.digest_requests(), after_first, "within the window: no check");
