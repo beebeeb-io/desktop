@@ -132,6 +132,15 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         self.office_left();
         let kept = facts.on_this_pc.is_some() && self.engine.is_syncing();
         let state = |state| Body::OfficeState(StateBody::new(state, kept));
+        // macOS ships no Office helper (its sandbox is Windows-only): Quick Look previews the document, in its own
+        // service. Before the route's own answers, so a type the viewer does not ship (.ppt) is shown too. A type
+        // Quick Look does not show falls through, to the page with the other apps (`helper_missing`).
+        #[cfg(target_os = "macos")]
+        if (self.office.helper)().is_none()
+            && let Some(body) = self.mac_begin(opening.session, opening.account.clone(), &opening.file_id, &facts.name)
+        {
+            return body;
+        }
         let kind = match route {
             OfficeRoute::Shows(kind) => kind,
             OfficeRoute::NoPreview(_) => return state(ViewState::NoPreview(Reason::UnsupportedType)),
@@ -381,9 +390,9 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 }
 
 /// The body when the helper is not there. Windows ships it, so its absence is a failure (Stopped). macOS ships no
-/// helper (its sandbox is Windows-only; nothing is parsed unconfined), so there it is a plain "no preview here", never
-/// a failure. Task 63's `open_unsupported(file_ref, UnsupportedReason::OfficeUnavailable)` (Open with Pages/Word)
-/// replaces the macOS arm at the merge: this wrapper is the one line to change.
+/// helper (its sandbox is Windows-only; nothing is parsed unconfined): Quick Look shows the document there
+/// (`office_begin`'s macOS arm, dm-70), and only a document Quick Look does not show reaches this: a plain "no preview
+/// here" with the other apps (task 63's page), never a failure.
 pub(super) fn helper_missing(kept: bool) -> Body {
     if cfg!(target_os = "macos") {
         // Task 63's page: Open with the default app / another app / Show in Finder.

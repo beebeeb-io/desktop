@@ -17,6 +17,10 @@
 //! Nothing is downloaded to open the view or to list the queue: the queue is a read of the local state (owner-checked,
 //! task 2488); a track's bytes are read by the player when it plays.
 //!
+//! macOS (dm-70): the Mac has no player helper, so a recording or a video AVFoundation plays, and any other kind the
+//! app has no viewer for and Quick Look previews, is shown by macOS itself (`viewer_office/mac_preview.rs`): asked
+//! here first, in `media_previews`, `media_body` and `media_poll`.
+//!
 //! Must not: log a name, an id, a title or a byte; keep the queue after the file is left.
 
 use beebeeb_engine::drive_v2::model::{self, Sort as EngineSort};
@@ -26,6 +30,10 @@ use super::*;
 use crate::frames::viewers::kinds::{AudioDoc, Track, VideoDoc};
 use crate::media::StopReason;
 use crate::media::player::{MediaItem, PlayerHandle, Press};
+
+#[cfg(target_os = "macos")]
+#[path = "viewer_office/mac_preview.rs"]
+pub(crate) mod mac_preview;
 
 /// A folder's audio files as the Files listing sorts them, and the folder's name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +47,9 @@ pub struct MediaQueue {
 #[derive(Default)]
 pub(super) struct Media {
     on: Option<Shown>,
+    /// What macOS shows itself, and the seam it is asked through.
+    #[cfg(target_os = "macos")]
+    pub(crate) mac: mac_preview::Native,
 }
 
 struct Shown {
@@ -83,6 +94,15 @@ fn video_drawn(state: Option<&crate::media::player::PlayState>, framed: bool) ->
 /// Whether the platform has a sandbox for the helper and the helper is next to the app's exe.
 pub(super) fn playback_ready() -> bool {
     cfg!(windows) && crate::media::transport::helper_exe().is_some()
+}
+
+/// macOS: whether the Mac itself plays this file, asked of AVFoundation (`AVURLAsset.isPlayable`) on the decrypted
+/// copy. The Mac's answer in place of [`playback_ready`]'s helper: no helper is needed, the system decodes in its own
+/// media services.
+#[cfg(target_os = "macos")]
+#[cfg_attr(not(test), allow(dead_code))] // the app asks through `mac_preview::SystemHost`, the same call
+pub(super) fn playback_ready_for(copy: &std::path::Path) -> bool {
+    crate::shell::platform::macos_preview::playable(copy)
 }
 
 /// The folder's audio files, read from the account's local state (the owner is checked by the handle; a read across
@@ -138,6 +158,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// Whether a list's Open of `name` shows it here: an audio or a video file, when this source plays.
     pub(super) fn media_previews(&self, name: &str) -> bool {
+        // macOS shows what the app has no viewer for and the Mac does: a list's Open brings it here.
+        #[cfg(target_os = "macos")]
+        if self.mac_shower(name).is_some() {
+            return true;
+        }
         kind_hint(name).is_some() && self.media_can_play()
     }
 
@@ -152,6 +177,14 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         folders: &[String],
     ) -> Option<Body> {
         self.media_leave();
+        // macOS: no player here, so the Mac shows it itself. An Office file starts from its own route (`office_begin`).
+        #[cfg(target_os = "macos")]
+        if !self.media_can_play()
+            && self.office_route(name).is_none()
+            && let Some(body) = self.mac_begin(session, account.clone(), file_id, name)
+        {
+            return Some(body);
+        }
         let kind = kind_hint(name).filter(|_| self.media_can_play())?;
         let asked = (kind == KindHint::Audio)
             .then(|| self.engine.media_queue(session, file_id))
@@ -254,6 +287,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     /// What the player says changed since the view was last given a body: the tags, the length, the place, the queue's
     /// current track. `None`: nothing new, or `file_id` is not the recording on screen.
     pub(super) fn media_poll(&mut self, file_id: &str) -> Option<Body> {
+        #[cfg(target_os = "macos")]
+        if let Some(answer) = self.mac_poll(file_id) {
+            return answer;
+        }
         let shown = self.media.on.as_ref().filter(|shown| shown.file_id == file_id)?;
         if !self.media_is_current(shown) {
             let had = shown.drawn.as_ref().is_some_and(|doc| doc.playing);
@@ -296,10 +333,15 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     /// The recording on screen is left: the view's queue goes; what plays keeps playing (Back leaves audio playing).
     pub(super) fn media_leave(&mut self) {
         self.media.on = None;
+        #[cfg(target_os = "macos")]
+        self.mac_leave();
     }
 
     /// The view is closed (the source is dropped): a video stops with its view; audio keeps playing (Back leaves it).
     pub(super) fn media_closed(&mut self) {
+        // What macOS shows closes with the view, and its copy is removed.
+        #[cfg(target_os = "macos")]
+        self.mac_leave();
         if let (Some(shown), Some(player)) = (self.media.on.take(), self.engine.media_player())
             && shown.kind == KindHint::Video
             && player.state().is_some_and(|state| state.file_id == shown.file_id)
