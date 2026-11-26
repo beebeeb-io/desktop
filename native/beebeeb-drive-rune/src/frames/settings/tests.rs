@@ -275,7 +275,7 @@ fn rows_name_what_they_say() {
     let rt = runtime("DW-0701");
     assert_eq!(
         info(&rt, "item-0-0").label.as_deref(),
-        Some("Theme, System. Follows Windows.")
+        Some(format!("Theme, System. {}", ThemeChoice::System.says()).as_str())
     );
     assert_eq!(
         info(&rt, "item-0-0").role,
@@ -660,7 +660,7 @@ fn notifications_off_in_windows_keep_the_choices_out_of_reach_and_open_windows_s
         rt.state.settings.source.notifications().groups[0].1[0].on == Some(true),
         "and a press changes nothing"
     );
-    assert_eq!(info(&rt, "item-1-0-value").text.as_deref(), Some("Off in Windows"));
+    assert_eq!(info(&rt, "item-1-0-value").text.as_deref(), Some(format!("Off in {}", source::os_name()).as_str()));
     tab_to(&mut rt, "btn-0");
     key(&mut rt, Key::Enter);
     assert_eq!(rt.state.settings.intents, vec![Intent::OpenWindowsNotificationSettings]);

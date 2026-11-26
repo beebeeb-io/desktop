@@ -820,7 +820,7 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
             }
         },
         Ask::FreeUp => {
-            if engine.free_up_space().is_err() {
+            if free_up(engine, super::macos_downloaded::system()) {
                 log("drive settings: free up space did not finish");
                 refuse(FREE_UP_FAILED);
             }
@@ -846,6 +846,16 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
             }
             read_local(engine, platform, &account, &send);
         }
+    }
+}
+
+/// Free up space; `true` when it did not finish. A Mac (`system`): each materialised copy that is not kept goes
+/// cloud-only through the File Provider. Elsewhere: the engine's own.
+fn free_up<E: DriveEngine>(engine: &E, system: Option<&dyn super::macos_downloaded::Materialisation>) -> bool {
+    match system {
+        Some(source) => super::macos_downloaded::copies(engine, source)
+            .map_or(true, |copies| super::macos_downloaded::evict_all(source, &copies) > 0),
+        None => engine.free_up_space().is_err(),
     }
 }
 

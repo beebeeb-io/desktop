@@ -156,7 +156,10 @@ fn a_limit_is_changed_with_the_keyboard_and_kept_only_on_save() {
     assert_eq!(ui(&rt).drive.storage().previews.limit.gb, 20);
     assert_eq!(ui(&rt).pane, Pane::Storage, "Esc closed the dialog, not settings");
 
-    // Save keeps the new one, and the row says it.
+    // Save keeps the new one, and the row says it. (A Mac has no downloaded limit to change.)
+    if cfg!(target_os = "macos") {
+        return;
+    }
     press(&mut rt, "btn-1");
     assert_eq!(ui(&rt).dialog, Some(Dialog::Limit(Kept::Downloaded)));
     tab_to(&mut rt, "slider");

@@ -1125,3 +1125,21 @@ fn closing_settings_on_diagnostics_stops_the_sampler() {
     assert!(!more, "and nothing asks for a frame");
     assert!(source.diagnostics().activity.is_empty());
 }
+
+/// dm-65 (a Mac): Downloaded files is the sum of the materialised copies that are not kept; Clear… evicts each.
+#[test]
+fn a_macs_downloaded_size_is_the_materialised_copies_and_clear_evicts_each() {
+    use crate::engine_host::macos_downloaded::fake::Fake as Materialised;
+    let fake = account();
+    let system = Materialised::new(&[("mov", 367_000_000), ("doc", 2_000_000)]);
+    let sent = Mutex::new(Vec::new());
+    reads::read_local_with(&*fake, &FakePlatform::default(), "invented@beebeeb.io", &|a| sent.lock().unwrap().push(a), Some(&system));
+    let downloaded = sent.into_inner().unwrap().into_iter().find_map(|a| match a {
+        Answer::OnThisPc(Some(on)) => Some(on.downloaded),
+        _ => None,
+    });
+    assert_eq!(downloaded, Some(369_000_000));
+    assert!(!free_up(&*fake, Some(&system)));
+    assert_eq!(*system.evicted.lock().unwrap(), ["mov", "doc"]);
+    assert_eq!(*fake.freed.lock().unwrap(), 0, "the engine's own free up is not used on a Mac");
+}

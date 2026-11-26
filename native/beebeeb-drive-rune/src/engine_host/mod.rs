@@ -55,6 +55,7 @@ pub mod backups_devices;
 mod binding_tests;
 pub mod drive_previews;
 pub mod drive_settings;
+mod macos_downloaded;
 pub mod files;
 #[cfg(any(target_os = "windows", test))]
 #[cfg_attr(not(test), allow(dead_code))] // the card is not wired into the Windows app yet

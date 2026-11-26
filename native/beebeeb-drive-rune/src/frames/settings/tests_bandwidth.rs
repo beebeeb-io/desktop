@@ -338,7 +338,7 @@ fn the_metered_wait_is_reached_from_sync_and_the_switch_resumes_sync_at_once() {
     assert_eq!(text(&rt, "fig-1-says"), "Files you open still download");
     assert_eq!(
         text(&rt, "item-1-2-sub"),
-        "Off: sync waits on networks Windows marks as metered"
+        format!("Off: sync waits on networks {} marks as metered", super::source::os_name())
     );
     let switch = info(&rt, "item-1-2-switch");
     assert_eq!(switch.role, "switch");
@@ -355,7 +355,7 @@ fn the_metered_wait_is_reached_from_sync_and_the_switch_resumes_sync_at_once() {
     assert_eq!(text(&rt, "card-0-now"), "2 of 3 devices syncing");
     assert_eq!(
         text(&rt, "item-1-2-sub"),
-        "A network Windows marks as metered, such as a phone's hotspot"
+        format!("A network {} marks as metered, such as a phone's hotspot", super::source::os_name())
     );
     assert!(matches!(rt.state.settings.drive.sync().status, SyncStatus::Running(_)));
     // Off again: it waits again.
