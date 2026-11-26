@@ -12,7 +12,7 @@
 #   APPLE_SIGNING_IDENTITY (required: the Developer ID Application identity, its 40-hex SHA-1)
 #   MACOS_APP_PROVISION_PROFILE, MACOS_FILE_PROVIDER_PROVISION_PROFILE (paths, required)
 #   BB_NOTARY_KEY_ID, BB_NOTARY_ISSUER, BB_NOTARY_KEY_PATH, BB_NOTARY_TIMEOUT
-#   BB_RELEASE_REPO [beebeeb-io/desktop], BB_WORKFLOW_REF [main], BB_MACOS_PUBLISH_WORKFLOW [release-native-macos.yml]
+#   BB_RELEASE_REPO [beebeeb-io/desktop], BB_WORKFLOW_REF [the current branch], BB_MACOS_PUBLISH_WORKFLOW [release-native-macos.yml]
 #   BB_POLL_INTERVAL [15], BB_WORKFLOW_TIMEOUT [1800]
 # The updater signing key is a CI-only secret: it is unset for the build and never read here.
 set -euo pipefail
@@ -42,7 +42,8 @@ case "$CHANNEL" in alpha | beta | stable) ;; *) echo "CHANNEL must be alpha, bet
 
 TAG="desktop-v$VERSION"
 REPO="${BB_RELEASE_REPO:-beebeeb-io/desktop}"
-WF_REF="${BB_WORKFLOW_REF:-main}"
+WF_REF="${BB_WORKFLOW_REF:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null || true)}"
+[[ -n "$WF_REF" ]] || { echo "detached HEAD: set BB_WORKFLOW_REF to the branch the workflow runs from" >&2; exit 2; }
 WF_PUBLISH="${BB_MACOS_PUBLISH_WORKFLOW:-release-native-macos.yml}"
 POLL="${BB_POLL_INTERVAL:-15}" WF_TIMEOUT="${BB_WORKFLOW_TIMEOUT:-1800}"
 IDENTITY="${APPLE_SIGNING_IDENTITY:-}"
@@ -221,6 +222,7 @@ step_8() {
   run hdiutil verify "$DMG"
   require_notarized "$DMG" -t install
 }
+tarball_sha256() { shasum -a 256 "$TARBALL" | cut -d' ' -f1; }
 step_9() {
 
   # The app inside the dmg must itself be stapled; the tarball is made from the stapled app.
@@ -228,6 +230,9 @@ step_9() {
   run rm -f "$TARBALL"
   show env COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$OUT" Beebeeb.app
   if ! ((DRY)); then COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$OUT" Beebeeb.app || fail "tar failed"; fi
+  # The publish workflow signs only a tarball with this hash.
+  show shasum -a 256 "$TARBALL"
+  if ! ((DRY)); then tarball_sha256 > "$WORK/tarball.sha256" || fail "sha256 failed"; fi
 }
 step_10() {
   local up=("$DMG" "$TARBALL")
@@ -237,10 +242,12 @@ step_10() {
   gh release upload "$TAG" "${up[@]}" --clobber --repo "$REPO" || fail "upload failed"
 }
 step_11() {
-  local out id view status conclusion waited=0
-  show gh workflow run "$WF_PUBLISH" --repo "$REPO" --ref "$WF_REF" -f "tag=$TAG" -f "channel=$CHANNEL"
+  local out id view status conclusion waited=0 sha
+  if ((DRY)); then sha="<sha256 of $TARBALL>"; else sha="$(tarball_sha256)" || fail "cannot hash $TARBALL"; fi
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || ((DRY)) || fail "bad tarball sha256 '$sha'"
+  show gh workflow run "$WF_PUBLISH" --repo "$REPO" --ref "$WF_REF" -f "tag=$TAG" -f "channel=$CHANNEL" -f "tarball_sha256=$sha"
   if ((DRY)); then say "(dry-run) would wait for the run it created"; return 0; fi
-  out="$(gh workflow run "$WF_PUBLISH" --repo "$REPO" --ref "$WF_REF" -f "tag=$TAG" -f "channel=$CHANNEL" 2>&1)" || fail "dispatch failed: $out"
+  out="$(gh workflow run "$WF_PUBLISH" --repo "$REPO" --ref "$WF_REF" -f "tag=$TAG" -f "channel=$CHANNEL" -f "tarball_sha256=$sha" 2>&1)" || fail "dispatch failed: $out"
   id="$(grep -oE '/actions/runs/[0-9]+' <<<"$out" | head -1 | grep -oE '[0-9]+$' || true)"
   [[ -n "$id" ]] || fail "gh printed no run URL, so the run cannot be identified; check $WF_PUBLISH by hand. Nothing was guessed."
   while :; do

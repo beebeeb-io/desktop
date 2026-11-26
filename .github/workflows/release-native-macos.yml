@@ -19,6 +19,10 @@ on:
         description: Release tag whose uploaded macOS artefacts are published, desktop-v0.9.0 or later
         required: true
         type: string
+      tarball_sha256:
+        description: SHA-256 (64 hex) of the notarised Beebeeb.app.tar.gz, printed by release-macos-local.sh after step 9
+        required: true
+        type: string
       channel:
         description: v2 channel manifest to publish
         required: true
@@ -46,8 +50,13 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_CHANNEL: ${{ inputs.channel }}
+          TARBALL_SHA256: ${{ inputs.tarball_sha256 }}
         run: |
           set -euo pipefail
+          if [[ ! "$TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::tarball_sha256 must be 64 lowercase hex characters."
+            exit 1
+          fi
           if [[ ! "$RELEASE_TAG" =~ ^desktop-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "::error::Tag '$RELEASE_TAG' must look like desktop-v0.9.0."
             exit 1
@@ -116,6 +125,7 @@ jobs:
       VER: ${{ needs.gate.outputs.version }}
       CHANNEL: ${{ inputs.channel }}
       TAG: ${{ inputs.tag }}
+      TARBALL_SHA256: ${{ inputs.tarball_sha256 }}
       PUBLISH_TARGET: ${{ vars.DESKTOP_RELEASE_PUBLISH_TARGET || 'dir:releases-repo' }}
     steps:
       # Scripts, the signer and the public key come from the dispatched commit; the tag is never checked out.
@@ -191,6 +201,14 @@ jobs:
           mkdir -p work/mac
           mv work/src.tar.gz "work/mac/$want"
           test -s "work/mac/$want"
+          # Refuse before any signing when the asset is not the tarball the notarised build made.
+          actual="$(sha256sum "work/mac/$want" | cut -d' ' -f1)"
+          if [[ "$actual" != "$TARBALL_SHA256" ]]; then
+            rm -f "work/mac/$want"
+            echo "::error::$src on $TAG has sha256 $actual, not the dispatched $TARBALL_SHA256. Refusing to sign."
+            exit 1
+          fi
+          echo "tarball sha256 matches the dispatched hash: $actual"
 
       # This step runs the signer and nothing else: the key reaches it through the environment only.
       - name: Sign the tarball with the updater key
