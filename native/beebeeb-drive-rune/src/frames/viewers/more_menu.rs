@@ -69,7 +69,7 @@ impl Ui {
 
 /// The menu's keys: the arrows, Home and End move, Enter picks, Escape closes. The menu is modal, so nothing else
 /// reaches the file under it.
-fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+pub(super) fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let Some(ui) = super::ui(s) else { return false };
     let Some(open) = ui.more else { return false };
     let entries = entries(ui);

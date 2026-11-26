@@ -1202,6 +1202,10 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
 /// left the file, and [`sync`] drops it here.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     sync(s);
+    // The toolbar's "…" menu is modal: while it is open it takes every key.
+    if ui(s).is_some_and(|ui| ui.more.is_some()) {
+        return more_menu::on_key(s, ev, tx);
+    }
     // A "not built yet" notice goes with the next key.
     if let Some(ui) = ui(s)
         && ui.toast.as_deref().is_some_and(|words| words.starts_with(NOT_BUILT)) {

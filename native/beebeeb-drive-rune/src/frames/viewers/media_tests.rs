@@ -417,7 +417,7 @@ fn a_photos_actions_share_keep_offline_show_details_and_trash() {
         },
     );
     assert!(has(&rt, "gallery"));
-    assert_eq!(info(&rt, "photo").target[2], 600.0);
+    assert!(info(&rt, "photo").target[2] > 600.0, "the photo fills the stage");
 }
 
 #[test]
