@@ -7,7 +7,7 @@
 use rune::{Align, Cx, El, TextStyle, col, el, row};
 
 use super::chrome::{self, FilesControls};
-use super::source::{Kept, Kind, Standing};
+use super::source::{CopyState, Kept, KeptProgress, Kind, Standing};
 use super::{MENU_ITEMS, RowMenu, Section, icons};
 use crate::State;
 use crate::source::{DriveItem, format_size};
@@ -21,7 +21,7 @@ use crate::ui::menu::{self as shared_menu, Entry};
 use crate::ui::view_state::{self, ViewState};
 use crate::ui::{button, kit};
 
-const COL_STATUS_W: f32 = 132.0;
+const COL_STATUS_W: f32 = 200.0;
 const COL_SIZE_W: f32 = 84.0;
 const COL_CONTAINS_W: f32 = 110.0;
 const COL_PC_W: f32 = 34.0;
@@ -125,12 +125,17 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             chrome::status_line(
                 s,
                 ui,
-                format!(
-                    "{} available offline \u{00B7} {} on {os}",
-                    kept.len(),
-                    format_size(bytes),
-                    os = beebeeb_engine::device_word!()
-                ),
+                // While kept files come down the line says how far they are (dm-68): the kept total is not on
+                // this device yet, so it is not claimed as such.
+                match ui.downloading() {
+                    Some(running) => downloading_words(running),
+                    None => format!(
+                        "{} available offline \u{00B7} {} on {os}",
+                        kept.len(),
+                        format_size(bytes),
+                        os = beebeeb_engine::device_word!()
+                    ),
+                },
                 &t,
             )
         };
@@ -324,7 +329,7 @@ fn rows(count: usize, t: &Theme) -> El {
                         }
                     },
                     move |s: &State, i| match s.this_pc.kept().get(i) {
-                        Some(item) => kept_row(i, item, s.this_pc.selected == Some(i), count, &t)
+                        Some(item) => kept_row(i, item, s.this_pc.copy_state(&item.id), s.this_pc.selected == Some(i), count, &t)
                             .on_press(move |s: &mut State| s.this_pc.select(i))
                             .on_double_press(move |s: &mut State| {
                                 s.this_pc.select(i);
@@ -341,15 +346,13 @@ fn rows(count: usize, t: &Theme) -> El {
 
 /// One kept item: the shared row with this section's cells. Keys: `row-<i>` and
 /// `row-<i>-tile|icon|name|date|size|dash|pc` (`date` is the Status cell, `dash` the Contains cell).
-fn kept_row(i: usize, item: &Kept, selected: bool, count: usize, t: &Theme) -> El {
+fn kept_row(i: usize, item: &Kept, copy: Option<CopyState>, selected: bool, count: usize, t: &Theme) -> El {
     const CONTAINS: TextStyle = crate::theme::scale::text::NOTE;
     let k = format!("row-{i}");
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
     let icon = icon_for(&item.name, item.kind == Kind::Folder, mime_of(&item.kind));
     let cells = vec![
-        kit::label(format!("{k}-date"), item.status.label(), type_::META_MONO, meta)
-            .w(COL_STATUS_W)
-            .truncate(),
+        status_cell(&k, item, &copy, meta, t),
         kit::label(format!("{k}-size"), format_size(item.bytes), type_::META_MONO, meta)
             .w(COL_SIZE_W)
             .align(Align::End),
@@ -372,6 +375,94 @@ fn kept_row(i: usize, item: &Kept, selected: bool, count: usize, t: &Theme) -> E
         ..RowLook::default()
     };
     file_row::row(&k, &item.name, icon, &item.name, cells, look, t)
+}
+
+/// The words over a copy's bar: "45% · 5.1 of 11.3 MB", a folder's "3 of 12 files · 45%".
+pub fn progress_words(p: &KeptProgress) -> String {
+    match p.files {
+        Some((n, m)) => format!("{n} of {m} files \u{00B7} {}%", p.percent),
+        None => format!("{}% \u{00B7} {}", p.percent, figures(p.done, p.total)),
+    }
+}
+
+/// The status line while kept files come down: "Downloading 3 files · 5.1 of 11.3 MB".
+pub fn downloading_words((files, done, total): (u32, u64, u64)) -> String {
+    format!(
+        "Downloading {files} {} \u{00B7} {}",
+        if files == 1 { "file" } else { "files" },
+        figures(done, total)
+    )
+}
+
+/// "5.1 of 11.3 MB": both in the unit of the whole.
+fn figures(done: u64, total: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * KB;
+    const GB: f64 = MB * KB;
+    let (unit, size, decimals) = match total as f64 {
+        t if t >= GB => ("GB", GB, 1),
+        t if t >= MB => ("MB", MB, 1),
+        _ => ("KB", KB, 0),
+    };
+    let part = |n: u64| format!("{:.*}", decimals, n as f64 / size);
+    format!("{} of {} {unit}", part(done), part(total))
+}
+
+/// The Status cell: the state's words; while a copy comes down its words over a bar; a failed copy says so, with Try
+/// again (dm-68).
+fn status_cell(k: &str, item: &Kept, copy: &Option<CopyState>, meta: rune::Color, t: &Theme) -> El {
+    match copy {
+        Some(CopyState::Running(p)) => {
+            let words = progress_words(p);
+            col()
+                .key(format!("{k}-download"))
+                .w(COL_STATUS_W)
+                .gap(space::S4)
+                .child(kit::label(format!("{k}-date"), words.clone(), type_::CAPTION.lh(13.5), meta).truncate())
+                .child(
+                    el().key(format!("{k}-bar"))
+                        .role("progressbar")
+                        .label(format!("{}, {words}", item.name))
+                        .w_full()
+                        .h(4.0)
+                        // A capsule: the radius is clamped to half the 4px height.
+                        .radius(crate::theme::scale::radius::PILL)
+                        .clip_rounded(crate::theme::scale::radius::PILL)
+                        .fill(t.text.alpha(0.09))
+                        .child(
+                            el().key(format!("{k}-bar-fill"))
+                                .h(4.0)
+                                .w_frac(f32::from(p.percent) / 100.0)
+                                .radius(crate::theme::scale::radius::PILL)
+                                .fill(t.text_tertiary),
+                        ),
+                )
+        }
+        Some(CopyState::Failed) => {
+            let id = item.id.clone();
+            row()
+                .key(format!("{k}-failed"))
+                .w(COL_STATUS_W)
+                .center_y()
+                .gap(space::S6)
+                .child(kit::label(format!("{k}-date"), "Download failed", type_::META_MONO, t.red).truncate())
+                .child(
+                    button::button(
+                        button::keys(&format!("{k}-retry")),
+                        "Try again",
+                        None,
+                        button::Variant::Secondary,
+                        button::Size::Sm,
+                        button::ButtonState::Enabled,
+                        t,
+                    )
+                    .on_press(move |s: &mut State| s.this_pc.try_keep_again(&id)),
+                )
+        }
+        None => kit::label(format!("{k}-date"), item.status.label(), type_::META_MONO, meta)
+            .w(COL_STATUS_W)
+            .truncate(),
+    }
 }
 
 const MENU_KEY: &str = "menu";

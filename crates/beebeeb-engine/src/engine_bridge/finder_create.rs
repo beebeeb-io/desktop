@@ -457,10 +457,51 @@ impl EngineBridge {
         if copy_missing {
             return Err(anyhow::Error::new(QueuedCopyMissing));
         }
+        // Dm-68: a file kept on this Mac was fetched once already (the pin's own fetch, into the state folder). The
+        // system's fetch of it is served from that copy while it still is the current version's bytes, so a keep is
+        // ONE download. Anything else (no copy, another version, bytes that differ) goes to the server as before.
+        if let Some(copy) = self.current_copy_on_this_device(&file_id, dest) {
+            // Gone since it was looked at: the server has it.
+            if let Ok(mut held) = std::fs::File::open(&copy) {
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let bytes = write_hydrated_from_reader(dest, allowed_roots, &mut held)?;
+                if let Some(progress) = progress {
+                    progress(bytes, bytes);
+                }
+                log_hydrate_served(&file_id, HydrateSource::Copy);
+                return Ok(HydrateSource::Copy);
+            }
+        }
         self.hydrate_file_with_progress(&file_id, dest, allowed_roots, progress)
             .await?;
         log_hydrate_served(&file_id, HydrateSource::Server);
         Ok(HydrateSource::Server)
+    }
+
+    /// Dm-68: the copy of `file_id` this device holds outside the system's own (where a hydrate recorded it,
+    /// `record_hydrated_destination`), when it is exactly the current version's content: the row is `Local`, the
+    /// agreed content is recorded for the current version, and the bytes there hash to it. `None` for anything less
+    /// (and for `dest` itself): never a guess, the server is asked then.
+    #[cfg_attr(not(any(target_os = "macos", any(test, feature = "test-support"))), allow(dead_code))]
+    fn current_copy_on_this_device(&self, file_id: &str, dest: &Path) -> Option<PathBuf> {
+        let entry = self.db.get_file(file_id).ok().flatten()?;
+        if entry.status != FileStatus::Local || entry.is_dir() {
+            return None;
+        }
+        let contract = self.db.get_file_contract_state(file_id).ok().flatten()?;
+        let (copy, agreed) = (PathBuf::from(contract.cache_path?), contract.local_hash?);
+        if contract.local_base_version != contract.current_version || copy == dest {
+            return None;
+        }
+        if self.db.sync_folder_upload_queued(file_id).unwrap_or(true) {
+            return None;
+        }
+        if !std::fs::symlink_metadata(&copy).is_ok_and(|meta| meta.is_file()) {
+            return None;
+        }
+        (cached_sha256_file_hex(file_id, &copy).ok()? == agreed).then_some(copy)
     }
 
     /// A Finder thumbnail (spec §5.6, §7.2): through the alias, and never while the item's

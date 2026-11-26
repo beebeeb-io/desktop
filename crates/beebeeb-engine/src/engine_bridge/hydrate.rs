@@ -1499,6 +1499,84 @@ mod refetch_streaming_tests {
         }
     }
 
+    /// A row for the served file: cloud-only, at the served version.
+    #[cfg(not(target_os = "windows"))]
+    fn seed_cloud_only(bridge: &EngineBridge, size: usize) {
+        let entry = FileEntry {
+            file_id: ID.into(),
+            path: "big.bin".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: size as i64,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        bridge
+            .db
+            .upsert_file_with_contract(&entry, |contract| {
+                contract.item_kind = ItemKind::File;
+                contract.current_version = 3;
+            })
+            .unwrap();
+    }
+
+    /// Dm-68: keeping a file on this Mac is ONE download. The pin's own fetch brings the bytes down (the row then
+    /// reads `local`, what the Available offline row shows as "On this Mac"); the system's fetch of the same file
+    /// that follows (the File Provider's, for the Finder copy) is served from that copy and asks the server for no
+    /// chunk. Before, the hydrate of a keep ran twice: 2 x the file's chunks.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_kept_files_hydrate_is_one_download_and_the_finder_fetch_reads_its_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("state-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let plain = content(6 * STRIDE + 321);
+        let server = serve(&plain, true);
+        let bridge = bridge(dir.path(), &server);
+        seed_cloud_only(&bridge, plain.len());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // The keep: the pin queues the file's fetch, the queue step runs it.
+        let pinned = bridge.set_recursive_pin(&sync_root, ID, true).unwrap();
+        assert_eq!(pinned.hydrate_operations, 1);
+        rt.block_on(bridge.process_due_operations(&sync_root, now_secs())).unwrap();
+        assert_eq!(bridge.db.get_file(ID).unwrap().unwrap().status, FileStatus::Local);
+        assert_eq!(std::fs::read(sync_root.join("big.bin")).unwrap(), plain);
+        let downloaded = server.chunk_requests.lock().unwrap().len();
+        assert_eq!(downloaded, 7, "the keep's one download: every chunk once");
+
+        // The system's fetch of the kept file: the copy, with its whole size as the progress, and no request.
+        let staging = dir.path().join("hydrate-cache");
+        std::fs::create_dir_all(&staging).unwrap();
+        let dest = staging.join("big.bin");
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let heard = said.clone();
+        let progress = move |done: u64, total: u64| heard.lock().unwrap().push((done, total));
+        let source = rt
+            .block_on(bridge.serve_hydrate(ID, &dest, &[staging.as_path()], Some(&progress)))
+            .unwrap();
+        assert_eq!(source, HydrateSource::Copy);
+        assert_eq!(std::fs::read(&dest).unwrap(), plain);
+        assert_eq!(*said.lock().unwrap(), vec![(plain.len() as u64, plain.len() as u64)]);
+        assert_eq!(
+            server.chunk_requests.lock().unwrap().len(),
+            downloaded,
+            "one download per keep: the second fetch read the first's copy"
+        );
+        assert_eq!(bridge.db.get_file(ID).unwrap().unwrap().status, FileStatus::Local);
+
+        // A copy that is no longer the current version's bytes is never handed over: the server is asked.
+        std::fs::write(sync_root.join("big.bin"), b"edited here").unwrap();
+        let again = staging.join("again.bin");
+        let source = rt
+            .block_on(bridge.serve_hydrate(ID, &again, &[staging.as_path()], None))
+            .unwrap();
+        assert_eq!(source, HydrateSource::Server);
+        assert_eq!(std::fs::read(&again).unwrap(), plain);
+    }
+
     /// A placeholder whose size is not the file's: nothing is handed over, the real size comes back,
     /// and a pinned file costs no chunk download at all.
     #[test]

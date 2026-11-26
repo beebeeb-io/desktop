@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use super::*;
 use crate::engine_host::open::{self, Opened};
-use crate::frames::tray::source::{BoardFixture, Action, Changes, FRAMES, Hidden, Status, What};
+use crate::frames::tray::source::{Action, BoardFixture, Changes, FRAMES, Hidden, Status, What};
 use crate::shell::actions::EngineActions;
 use crate::shell::tray::tray_model;
 
@@ -571,7 +571,11 @@ fn a_real_account_from_signed_out_to_locked_shows_what_the_engine_knows() {
     let locked = tray.snapshot();
     assert_eq!(
         (&locked.status, &locked.changes, locked.button),
-        (&Status::LockedSyncOff, &Changes::Hidden(Hidden::Locked), Some((Action::Unlock, true)))
+        (
+            &Status::LockedSyncOff,
+            &Changes::Hidden(Hidden::Locked),
+            Some((Action::Unlock, true))
+        )
     );
     let facts = tray.facts();
     assert!(
@@ -718,4 +722,43 @@ fn a_running_engine_gives_the_b_its_reports_and_up_to_date_only_after_a_finished
     engine.set_view_for_test(|view| view.start = Start::NotAsked);
     assert!(!engine.is_syncing());
     assert_eq!(b(&live), (EngineState::NotRunning, None, "Not syncing"));
+}
+
+/// Dm-68: the flyout's downloading row takes its figures from the transfer board; a row the board does not hold, and
+/// a row of another kind, stay as they are.
+#[test]
+fn a_downloading_row_says_how_far_the_board_has_it() {
+    let row = |id: &str, kind: RowKind| Row {
+        id: Some(id.into()),
+        path: format!("/{id}.bin"),
+        at: 1,
+        kind,
+    };
+    let mut local = Local {
+        rows: vec![
+            row("held", RowKind::Downloading { bytes: 100 }),
+            row("not-held", RowKind::Downloading { bytes: 100 }),
+            row("up", RowKind::Uploading { bytes: 100 }),
+            row("no-total", RowKind::Downloading { bytes: 100 }),
+        ],
+        ..Local::default()
+    };
+    say_how_far(
+        &mut local,
+        &[
+            ("held".into(), 150, 100),
+            ("up".into(), 5, 10),
+            ("no-total".into(), 0, 0),
+        ],
+    );
+    let kinds: Vec<RowKind> = local.rows.iter().map(|r| r.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            RowKind::DownloadingSoFar { done: 100, total: 100 },
+            RowKind::Downloading { bytes: 100 },
+            RowKind::Uploading { bytes: 100 },
+            RowKind::Downloading { bytes: 100 },
+        ]
+    );
 }

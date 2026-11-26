@@ -574,3 +574,39 @@ fn finder_ready_follows_the_macos_ready_state() {
     });
     assert!(locked.explorer_ready);
 }
+
+/// Dm-68: a download the transfer board holds says how far it is, with its fraction for a bar.
+#[test]
+fn a_download_under_way_says_its_percent_and_bytes() {
+    assert_eq!(
+        live::downloading_so_far(5_347_737, 11_840_437),
+        "Downloading \u{00B7} 45% \u{00B7} 5.1 of 11.3 MB"
+    );
+    assert_eq!(
+        live::downloading_so_far(0, 2048),
+        "Downloading \u{00B7} 0% \u{00B7} 0 of 2 KB"
+    );
+    let local = Local {
+        moving: 1,
+        rows: vec![row(
+            "/IMGL1558.jpg",
+            ago(0),
+            RowKind::DownloadingSoFar {
+                done: 5_920_218,
+                total: 11_840_437,
+            },
+        )],
+        ..Local::default()
+    };
+    let Changes::Rows { rows, .. } = snap(&with_local(ready(), local)).changes else {
+        panic!("rows");
+    };
+    match &rows[0].what {
+        What::Moving { text, fraction, upload } => {
+            assert_eq!(text, "Downloading \u{00B7} 49% \u{00B7} 5.6 of 11.3 MB");
+            assert!(fraction.is_some_and(|f| (f - 0.5).abs() < 0.01));
+            assert!(!upload);
+        }
+        other => panic!("a moving row, got {other:?}"),
+    }
+}

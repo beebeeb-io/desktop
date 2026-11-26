@@ -108,6 +108,11 @@ pub enum RowKind {
     Downloading {
         bytes: u64,
     },
+    /// Dm-68: coming down now, and how far the engine's transfer board says it is (`total` > 0).
+    DownloadingSoFar {
+        done: u64,
+        total: u64,
+    },
     Failed,
     Uploaded,
     Downloaded,
@@ -298,6 +303,25 @@ fn newest(local: Option<&Local>) -> Option<i64> {
     local?.rows.iter().map(|row| row.at).max()
 }
 
+/// Dm-68: a download's line while it runs: "Downloading · 45% · 5.1 of 11.3 MB" (both figures in the whole's unit).
+pub fn downloading_so_far(done: u64, total: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * KB;
+    const GB: f64 = MB * KB;
+    let (unit, size, decimals) = match total as f64 {
+        t if t >= GB => ("GB", GB, 1),
+        t if t >= MB => ("MB", MB, 1),
+        _ => ("KB", KB, 0),
+    };
+    let part = |n: u64| format!("{:.*}", decimals, n as f64 / size);
+    let percent = (done.min(total) as f64 / total.max(1) as f64 * 100.0) as u8;
+    format!(
+        "Downloading \u{00B7} {percent}% \u{00B7} {} of {} {unit}",
+        part(done.min(total)),
+        part(total)
+    )
+}
+
 fn change(row: &Row, now: DateTime<LocalTime>) -> Change {
     let name = leaf(&row.path);
     let dot = "\u{00B7}";
@@ -322,6 +346,14 @@ fn change(row: &Row, now: DateTime<LocalTime>) -> Change {
             What::Moving {
                 text: moving("Downloading", bytes),
                 fraction: None,
+                upload: false,
+            },
+            tile_for(&name),
+        ),
+        RowKind::DownloadingSoFar { done, total } => (
+            What::Moving {
+                text: downloading_so_far(done, total),
+                fraction: Some((done.min(total) as f64 / total.max(1) as f64) as f32),
                 upload: false,
             },
             tile_for(&name),
