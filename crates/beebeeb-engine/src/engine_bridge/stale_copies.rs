@@ -9,7 +9,10 @@
 //!   version's size and time; the next open fetches the current version. A kept file is fetched again right after.
 //! - **Linux:** a re-download of the current version into its place is queued (`HydrateFile`); the hydrate refuses
 //!   over a change, at its start and again right before it replaces the file.
-//! - **macOS:** nothing (the File Provider fetches on the working-set signal).
+//! - **macOS:** no fetch of the engine's own is queued (dm-72): the copy is Finder's, and the system fetches its new
+//!   version itself, once, when it hears of it. The pass signals the File Provider's working set for the copies the
+//!   rule names, ONCE per file and version for this engine run ([`EngineBridge::signal_stale_copies`]); the item's
+//!   new content version goes with the change the pull logged.
 //!
 //! Bytes that are not the agreed content are a change: they are left exactly as they are, and an edit sent on the
 //! older version is parked as the two-versions question, as before.
@@ -84,6 +87,8 @@ pub struct StaleCopyPass {
     pub emptied: Vec<String>,
     /// Windows: kept files among them, to fetch again now, off the tick: they join the tick's kept fetch (S6).
     pub refetch: Vec<KeptPlace>,
+    /// macOS: the File Provider was signalled for these (the system fetches Finder's copy again); nothing queued.
+    pub signalled: Vec<String>,
     /// Bytes that are not the agreed content: a change, left as it is.
     pub changed: usize,
     /// Not done this pass (open elsewhere, not wholly on disk, nothing at its place, the row moved): next tick.
@@ -95,6 +100,11 @@ impl EngineBridge {
     /// calls it off the async workers, after the pull, before the queue step.
     pub fn refresh_stale_copies(&self, sync_root: &Path) -> Result<StaleCopyPass, EngineError> {
         let mut pass = StaleCopyPass::default();
+        if kept_bytes_come_by_the_systems_fetch() {
+            self.signal_stale_copies(&mut pass)?;
+            return Ok(pass);
+        }
+        // A test build on a Mac that did not ask for the Mac rule: nothing, as before dm-72.
         if cfg!(target_os = "macos") {
             return Ok(pass);
         }
@@ -122,6 +132,46 @@ impl EngineBridge {
             );
         }
         Ok(pass)
+    }
+
+    /// Dm-72, the Mac's pass: the copies behind their version are Finder's (the File Provider's materialised items),
+    /// so the engine fetches nothing itself and queues nothing: a fetch of its own was a second copy in the hidden
+    /// state folder and a second download beside the system's. The system is told instead: ONE working-set signal
+    /// for the copies named for the first time at their version in this engine run; it then reads the changes (the
+    /// pull logged each item's new content version) and fetches Finder's copy again, through the one Finder fetch
+    /// per file (dm-71). A busy bridge gate signals nothing and remembers nothing: the next tick's pass asks again.
+    /// Any other failure is the system's: logged, and not asked again for this version (the pull's own signal and
+    /// the system's next look carry the change).
+    fn signal_stale_copies(&self, pass: &mut StaleCopyPass) -> Result<(), EngineError> {
+        let behind: Vec<(String, i64)> = self
+            .db
+            .list_stale_agreed_copies(STALE_COPIES_READ_PER_PASS)?
+            .into_iter()
+            .map(|copy| (copy.file_id, copy.current_version))
+            .collect();
+        let new = signalled::not_yet(&self.db, &behind);
+        if new.is_empty() {
+            return Ok(());
+        }
+        match crate::file_provider_port::signal_working_set() {
+            Ok(_) => {}
+            Err(error) if crate::file_provider_port::is_gate_busy(&error) => {
+                tracing::debug!("stale copies: the bridge gate was busy; the signal is the next tick's");
+                pass.later += new.len();
+                return Ok(());
+            }
+            // `redacted()`: the OS message can name a file or a folder.
+            Err(error) => {
+                tracing::warn!(error = %error.redacted(), "stale copies: the signal to the File Provider failed")
+            }
+        }
+        signalled::remember(&self.db, &new);
+        pass.signalled = new.into_iter().map(|(file_id, _)| file_id).collect();
+        tracing::info!(
+            signaled = pass.signalled.len(),
+            "stale copies: the File Provider fetches the current version"
+        );
+        Ok(())
     }
 
     /// dc-103c (design 1640 "Not done" (b)): placeholders holding only RANGES of a version the pull moved past have no
@@ -205,6 +255,48 @@ impl EngineBridge {
         self.enqueue_hydrate_operation(&entry, now_secs(), REFRESH_REASON)?;
         pass.queued.push(copy.file_id.clone());
         Ok(())
+    }
+}
+
+/// Dm-72: which copies the Mac's pass signalled the File Provider for, per state database, for this engine run:
+/// file id to the version it was behind. Nothing of it is stored; a new run signals once more.
+mod signalled {
+    use super::*;
+    use std::sync::{Mutex, Weak};
+
+    type Signalled = Vec<(Weak<StateDb>, HashMap<String, i64>)>;
+
+    /// A database that is gone leaves the list (its `Weak` keeps the address from naming another one meanwhile).
+    static SIGNALLED: Mutex<Signalled> = Mutex::new(Vec::new());
+
+    fn of<T>(db: &Arc<StateDb>, with: impl FnOnce(&mut HashMap<String, i64>) -> T) -> T {
+        let mut all = SIGNALLED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        all.retain(|(known, _)| known.strong_count() > 0);
+        let at = match all.iter().position(|(known, _)| known.as_ptr() == Arc::as_ptr(db)) {
+            Some(at) => at,
+            None => {
+                all.push((Arc::downgrade(db), HashMap::new()));
+                all.len() - 1
+            }
+        };
+        with(&mut all[at].1)
+    }
+
+    /// Those of `behind` (file id, current version) not signalled at that version yet. A file no longer behind is
+    /// forgotten, so the list holds only what the rule names now.
+    pub(super) fn not_yet(db: &Arc<StateDb>, behind: &[(String, i64)]) -> Vec<(String, i64)> {
+        of(db, |known| {
+            known.retain(|file_id, _| behind.iter().any(|(id, _)| id == file_id));
+            behind
+                .iter()
+                .filter(|(file_id, version)| known.get(file_id) != Some(version))
+                .cloned()
+                .collect()
+        })
+    }
+
+    pub(super) fn remember(db: &Arc<StateDb>, new: &[(String, i64)]) {
+        of(db, |known| known.extend(new.iter().cloned()));
     }
 }
 

@@ -93,6 +93,22 @@ impl EngineBridge {
             .await
     }
 
+    /// Dm-72: the download of a Finder fetch (the File Provider's `fetchContents`, [`Self::serve_hydrate`]): the
+    /// bytes written to `dest_path` are handed to the system and become Finder's copy of the file. On a Mac that copy
+    /// is the file's one copy on this computer, so the version and content it holds are recorded as agreed, as for
+    /// a copy in the sync folder: the app's own reads then know Finder's copy is the current version (and stop
+    /// reading it when a newer one comes in), and the stale pass knows which copies to signal the system for.
+    pub(super) async fn hydrate_for_finder(
+        &self,
+        file_id: &str,
+        dest_path: &Path,
+        allowed_roots: &[&Path],
+        progress: Option<&HydrateProgressFn>,
+    ) -> anyhow::Result<()> {
+        self.hydrate_from(file_id, dest_path, allowed_roots, progress, HydrateStart::Finder)
+            .await
+    }
+
     /// S6 (R7 b): a hydrate the queue runs (a pin, a re-download, a kept fetch). Never the person's resolution: unknown
     /// bytes at the place refuse it whatever the row's status, so the retry of a failed fetch (its row left `Error`)
     /// never replaces a file made at the place meanwhile.
@@ -163,6 +179,17 @@ impl EngineBridge {
         // only copy. It refuses, and the file keeps its bytes. A Finder fetch (macOS) writes
         // to the extension's own staging copy, never there.
         let in_sync_folder = self.dest_is_files_sync_folder_place(file_id, dest_path, allowed_roots)?;
+        // Dm-72: on a Mac the bytes of a Finder fetch become the file's one copy on this computer (Finder's). Not
+        // while a change of the file's own is on its way out (a held Finder write, a queued upload): its landing
+        // records the content.
+        let finders_copy = !in_sync_folder
+            && matches!(start, HydrateStart::Finder)
+            && kept_bytes_come_by_the_systems_fetch()
+            && !self.db.sync_folder_upload_queued(file_id)?
+            && !self
+                .db
+                .item_presentation(file_id)?
+                .is_some_and(|presentation| presentation.held_write_queued);
         // Task 1640 (review N1b): the version a legacy download (no `download_version`) records,
         // read BEFORE the download: at most the version the bytes are, so a later change can only
         // be refused as stale, never accepted over a newer one.
@@ -188,7 +215,7 @@ impl EngineBridge {
                 tracing::warn!(file_id = %file_id, "hydrate refused: not the place that was looked at");
                 return Err(anyhow::Error::new(UnsentLocalChange));
             }
-            (true, HydrateStart::Here | HydrateStart::Queued) => {
+            (true, HydrateStart::Here | HydrateStart::Queued | HydrateStart::Finder) => {
                 Some(PlaceSeen::take_async(dest_path).await?.fingerprint)
             }
         };
@@ -310,7 +337,7 @@ impl EngineBridge {
                         refuse_changed(&mut buf, "the local file was changed while the download was written"),
                     );
                 }
-                let hydrated_hash = in_sync_folder.then(|| sha256_hex(&buf));
+                let hydrated_hash = (in_sync_folder || finders_copy).then(|| sha256_hex(&buf));
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
                 buf.zeroize();
@@ -1330,6 +1357,8 @@ impl EngineBridge {
 enum HydrateStart {
     /// A caller here and now (the IPC hydrate, Keep both, a conflict's own path): its own start look.
     Here,
+    /// Dm-72: a Finder fetch (the File Provider's): as `Here`, and on a Mac its bytes are recorded as Finder's copy.
+    Finder,
     /// The queue: its own start look, and never the person's resolution (R7 b).
     Queued,
     /// The caller's start look (Keep there's, taken before its safety copy).

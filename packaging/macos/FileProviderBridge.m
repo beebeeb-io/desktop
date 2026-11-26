@@ -539,6 +539,36 @@ int beebeeb_reveal_scoped_url(void *handle, BeebeebFpError *out_error) {
     }
 }
 
+// dm-72: the app's own read of Finder's copy of an item (a kept file's one copy on a Mac). `handle` is the scoped
+// URL beebeeb_fp_resolve_item returned; it stays the caller's (released by beebeeb_release_url_handle as before).
+// Writes the URL's path and starts its security scope: the sandbox lets this process read there only between this
+// call and beebeeb_fp_end_item_access. It makes no File Provider call and opens nothing. Returns: 1 = path written
+// and the scope started (the caller MUST call beebeeb_fp_end_item_access with the same handle), 0 = path written,
+// no scope was granted (a read may be refused), -1 = no path (no handle, not a file URL, or the buffer is too small).
+int beebeeb_fp_begin_item_access(void *handle, char *path_buffer, unsigned long path_buffer_len) {
+    @autoreleasepool {
+        if (handle == NULL || path_buffer == NULL || path_buffer_len == 0) {
+            return -1;
+        }
+        NSURL *url = (__bridge NSURL *)handle;
+        const char *fs_path = url.isFileURL ? url.fileSystemRepresentation : NULL;
+        if (fs_path == NULL || strlen(fs_path) >= path_buffer_len) {
+            return -1;
+        }
+        strlcpy(path_buffer, fs_path, path_buffer_len);
+        return [url startAccessingSecurityScopedResource] ? 1 : 0;
+    }
+}
+
+// dm-72: ends the scope beebeeb_fp_begin_item_access started (only after it returned 1). Does not release the handle.
+void beebeeb_fp_end_item_access(void *handle) {
+    @autoreleasepool {
+        if (handle != NULL) {
+            [(__bridge NSURL *)handle stopAccessingSecurityScopedResource];
+        }
+    }
+}
+
 // A handle the caller will not open (an error between the resolve and the open): releases it.
 void beebeeb_release_url_handle(void *handle) {
     @autoreleasepool {
