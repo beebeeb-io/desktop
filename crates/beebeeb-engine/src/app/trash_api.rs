@@ -15,7 +15,7 @@
 
 use zeroize::Zeroizing;
 
-use super::settings_api::{AccountCallError, kind_of};
+use super::settings_api::{kind_of, AccountCallError};
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
 use crate::account_dto::DesktopTrashItem;
@@ -50,6 +50,10 @@ impl std::fmt::Debug for TrashListing {
     }
 }
 
+#[cfg(test)]
+#[path = "trash_api_tests.rs"]
+mod local_mark_tests;
+
 impl<C: CredentialStores> Engine<C> {
     /// Every item in the account's Trash (`GET /api/v1/files?trashed=true`, every page), from the server only, for
     /// the session in memory, each name decrypted with that session's vault key. Nothing is read from this
@@ -77,7 +81,7 @@ impl<C: CredentialStores> Engine<C> {
         if !self.acct.session_unchanged_since(session) {
             return Err(AccountCallError::NotSignedIn);
         }
-        let items = raw.iter().filter_map(|meta| trash_item_from_meta(meta, &key)).collect();
+        let items = trash_roots(raw.iter().filter_map(|meta| trash_item_from_meta(meta, &key)).collect());
         // The hand-over: only while the session in memory is the one the token and the key were copied from, asked
         // with no session change half done. A listing made for a session that is ending is dropped here.
         if !self.session_is_still(session, &key) {
@@ -150,6 +154,7 @@ impl<C: CredentialStores> Engine<C> {
         let mut trashed = false;
         let mut outcome = Ok(());
         for id in file_ids {
+            let id_str = *id;
             let id = id.to_string();
             let sent = self.account_call_for(session, move |api| async move {
                 match api.trash_file_sent(&id).await {
@@ -159,7 +164,10 @@ impl<C: CredentialStores> Engine<C> {
                 }
             });
             outcome = match sent {
-                Ok(true) => Ok(()),
+                Ok(true) => {
+                    self.mark_trashed_locally(id_str);
+                    Ok(())
+                }
                 Ok(false) => Err(NotTrashed::Protected),
                 Err(kind) => Err(NotTrashed::Call(kind)),
             };
@@ -174,6 +182,15 @@ impl<C: CredentialStores> Engine<C> {
             self.request_resnapshot();
         }
         outcome
+    }
+
+    /// After the server accepted a trash: park the item (and a folder's subtree) `Trashing` in this account's
+    /// local state, so the Files view (which reads it) drops it now instead of waiting for a re-snapshot, and the
+    /// snapshot's `Trashing` guard keeps it from coming back. Best effort: no local state, no row: nothing.
+    fn mark_trashed_locally(&self, id: &str) {
+        if let Ok(state) = self.local_state_for_changes() {
+            let _ = state.with(|db| db.mark_subtree_trashing(id));
+        }
     }
 
     /// Whether the session in memory is, now, the very one `generation` and `key` were copied from: asked with no
@@ -239,6 +256,25 @@ impl<C: CredentialStores> Engine<C> {
     pub fn wake_host(&self) {
         self.host.wake();
     }
+}
+
+/// What a person trashed, as Trash lists it: each row once, and never a row whose parent folder is itself in Trash
+/// (it went with that folder, comes back with its restore and goes with its delete for good). The server's flat
+/// Trash holds every cascade-trashed row: listed as it came, a folder that holds a folder of the same name showed
+/// twice (RD-d2). A row whose parent is not in the listing (a live folder, the root, or a server that sends no
+/// parent) is kept. Order is kept.
+pub fn trash_roots(items: Vec<DesktopTrashItem>) -> Vec<DesktopTrashItem> {
+    let folders: std::collections::HashSet<String> = items
+        .iter()
+        .filter(|item| item.is_folder)
+        .map(|item| item.id.clone())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| !item.parent_id.as_ref().is_some_and(|parent| folders.contains(parent)))
+        .filter(|item| seen.insert(item.id.clone()))
+        .collect()
 }
 
 /// The server's row with its name decrypted (`owner_keys::display_name`), without the local state.
@@ -359,6 +395,51 @@ mod tests {
         let meta = json!({ "id": ID, "uploaded_by": "someone" });
         let item = trash_item_from_meta(&meta, &key()).expect("a row with an id");
         assert_eq!(item.name, owner_keys::blocked_name(ID));
+    }
+
+    fn listed(id: &str, name: &str, is_folder: bool, parent: Option<&str>) -> DesktopTrashItem {
+        DesktopTrashItem {
+            id: id.into(),
+            name: name.into(),
+            is_folder,
+            size_bytes: 0,
+            updated_at: String::new(),
+            parent_id: parent.map(str::to_string),
+        }
+    }
+
+    /// RD-d2: a folder trashed with a same-named folder inside it ("Film (2025)/Film (2025)/film.mkv") listed the
+    /// name twice: the server's flat Trash holds every cascade-trashed row, and the view drew each one.
+    #[test]
+    fn what_a_trashed_folder_holds_is_listed_once_under_it_never_as_rows_of_its_own() {
+        let items = vec![
+            listed("f-outer", "An invented film (2025)", true, None),
+            listed("f-inner", "An invented film (2025)", true, Some("f-outer")),
+            listed("film", "An invented film (2025).mkv", false, Some("f-inner")),
+            listed("loose", "An invented loose file.pdf", false, Some("a-live-folder")),
+            listed("top", "An invented top file.txt", false, None),
+        ];
+        let ids: Vec<String> = trash_roots(items).into_iter().map(|item| item.id).collect();
+        assert_eq!(ids, ["f-outer", "loose", "top"]);
+    }
+
+    #[test]
+    fn the_same_row_twice_is_listed_once() {
+        let items = vec![
+            listed("a", "An invented note.txt", false, None),
+            listed("a", "An invented note.txt", false, None),
+        ];
+        assert_eq!(trash_roots(items).len(), 1);
+    }
+
+    /// A listing without parents (an older server) keeps every row: nothing is hidden on a guess.
+    #[test]
+    fn rows_without_a_parent_are_all_kept() {
+        let items = vec![
+            listed("a", "An invented folder", true, None),
+            listed("b", "An invented folder", true, None),
+        ];
+        assert_eq!(trash_roots(items).len(), 2);
     }
 
     #[test]

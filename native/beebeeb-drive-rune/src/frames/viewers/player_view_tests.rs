@@ -8,12 +8,12 @@ use rune::{Env, Runtime};
 
 use super::super::set_scene;
 use super::{
-    Times, Toggle, ask_size, letterbox, no_sound_line, no_sound_words, refusal_words, refusal_words_with, seek_target,
-    space_toggles, toggle_for,
+    ask_size, letterbox, no_sound_line, no_sound_words, refusal_words, refusal_words_with, seek_target, space_toggles,
+    toggle_for, Times, Toggle,
 };
 use crate::media::player::{NoSound, PlayState, Refusal};
 use crate::theme::tokens::theme;
-use crate::{State, init, view};
+use crate::{init, view, State};
 
 fn scene(frame: &str) -> Runtime<State> {
     let mut state = init();
@@ -42,6 +42,7 @@ fn state(at_ms: u64, length_ms: u64) -> PlayState {
         length_ms,
         playing: true,
         buffering: false,
+        net: Default::default(),
         title: "Harbour sessions".into(),
         artist: "Anna".into(),
         reduced_quality: false,
@@ -132,7 +133,10 @@ fn refusal_words_name_the_format() {
     assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Aac)).contains("AAC"));
     assert!(refusal_words(&Refusal::NoSystemMedia(Codec::Aac)).contains("no media codecs"));
     assert!(refusal_words(&Refusal::CouldNotPlay).contains("damaged"));
-    assert_ne!(refusal_words(&Refusal::NoSandbox), refusal_words(&Refusal::NotInstalled));
+    assert_ne!(
+        refusal_words(&Refusal::NoSandbox),
+        refusal_words(&Refusal::NotInstalled)
+    );
 }
 
 /// A window that draws only the no-sound line, so the test needs no player.
@@ -169,7 +173,10 @@ fn no_sound_line_names_the_missing_track() {
         .into_iter()
         .find(|e| e.key.as_deref() == Some("video-no-sound-words") && !e.exiting)
         .expect("the line is drawn");
-    assert_eq!(words.text.as_deref(), Some("No sound: this PC has no decoder for AAC audio"));
+    assert_eq!(
+        words.text.as_deref(),
+        Some("No sound: this PC has no decoder for AAC audio")
+    );
 }
 
 /// 7. The line offers "Open in another app\u{2026}" one press away.
@@ -392,7 +399,10 @@ fn a_too_old_windows_says_so_in_the_media_view() {
 #[test]
 fn media_no_decoder_without_a_name_says_this_kind_of_file() {
     let words = refusal_words(&Refusal::NoDecoder(String::new()));
-    assert_eq!(words, "Beebeeb doesn't support this kind of file yet. Open it in another app.");
+    assert_eq!(
+        words,
+        "Beebeeb doesn't support this kind of file yet. Open it in another app."
+    );
     assert!(!words.contains("  "), "{words}");
 }
 
@@ -401,14 +411,20 @@ fn media_no_decoder_without_a_name_says_this_kind_of_file() {
 /// so does every refusal while the switch is held off (the PC was never asked).
 #[test]
 fn media_a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app() {
-    use super::{OPEN_DEFAULT, OPEN_ELSEWHERE, refusal_action, refusal_action_with};
+    use super::{refusal_action, refusal_action_with, OPEN_DEFAULT, OPEN_ELSEWHERE};
     assert_eq!(OPEN_DEFAULT, "Open in default app");
     let hevc = Refusal::NoSystemDecoder(Codec::Hevc);
     let words = refusal_words(&hevc);
-    assert!(words.contains("HEVC (H.265)") && words.contains("doesn't have the decoder"), "{words}");
+    assert!(
+        words.contains("HEVC (H.265)") && words.contains("doesn't have the decoder"),
+        "{words}"
+    );
     assert!(words.contains("Microsoft Store"), "{words}");
     assert!(words.contains("default app"), "{words}");
-    assert!(!words.contains("yet"), "the PC has no decoder; it is not Beebeeb that cannot yet: {words}");
+    assert!(
+        !words.contains("yet"),
+        "the PC has no decoder; it is not Beebeeb that cannot yet: {words}"
+    );
     for why in [
         hevc.clone(),
         Refusal::NoSystemDecoder(Codec::H264),
@@ -469,7 +485,7 @@ mod media_keys {
         AudioFactory, AudioSink, Link, LinkFactory, MediaBytes, MediaOpener, PlayerHandle, Refusal,
     };
     use crate::media::video::VideoSurface;
-    use crate::{State, init};
+    use crate::{init, State};
 
     struct NoOpener;
     impl MediaOpener for NoOpener {
@@ -580,7 +596,11 @@ mod media_keys {
             assert_eq!(toast(&state).as_deref(), Some("Volume 90 %"));
             assert!(on_key(&mut state, Key::Up));
             assert!(on_key(&mut state, Key::Up));
-            assert_eq!(super::super::super::media::volume_percent(&player), 100, "stops at 100 %");
+            assert_eq!(
+                super::super::super::media::volume_percent(&player),
+                100,
+                "stops at 100 %"
+            );
             assert_eq!(toast(&state).as_deref(), Some("Volume 100 %"));
             for _ in 0..12 {
                 on_key(&mut state, Key::Down);
@@ -606,7 +626,11 @@ mod media_keys {
             assert!(on_key(&mut state, Key::Text("m".into())), "M is the player's on {id}");
             assert!(player.muted());
             assert_eq!(toast(&state).as_deref(), Some("Muted"));
-            assert_eq!(super::super::super::media::volume_percent(&player), 90, "muting keeps the volume");
+            assert_eq!(
+                super::super::super::media::volume_percent(&player),
+                90,
+                "muting keeps the volume"
+            );
             assert!(on_key(&mut state, Key::Text("M".into())));
             assert!(!player.muted());
             assert_eq!(toast(&state).as_deref(), Some("Sound on"));
@@ -646,7 +670,10 @@ mod media_keys {
         let (audio, _) = opened("a1");
         let f = key(Key::Text("f".into()));
         assert!(super::super::super::chrome::full_screen_key(&video, &f));
-        assert!(!super::super::super::chrome::full_screen_key(&audio, &f), "a recording has no picture");
+        assert!(
+            !super::super::super::chrome::full_screen_key(&audio, &f),
+            "a recording has no picture"
+        );
         let ctrl_f = KeyEvent {
             key: Key::Text("f".into()),
             mods: Mods {
