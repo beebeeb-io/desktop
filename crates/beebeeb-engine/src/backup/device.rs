@@ -22,7 +22,7 @@ pub const PLATFORM: Platform = if cfg!(target_os = "windows") {
 
 /// The OS's stable machine id: Windows `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid`, Linux
 /// `/etc/machine-id` (else `/var/lib/dbus/machine-id`). `None` when there is none: then this device has no
-/// backup id and no pass runs. macOS (`IOPlatformUUID`) comes with Task D5.
+/// backup id and no pass runs. macOS: `IOPlatformUUID` from IOKit (no `ioreg` process; works in the App Sandbox).
 pub fn machine_id() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
@@ -34,9 +34,100 @@ pub fn machine_id() -> Option<String> {
             .iter()
             .find_map(|path| machine_id_from_file(std::path::Path::new(path)))
     }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::platform_uuid()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         None
+    }
+}
+
+/// macOS: the IOKit / SystemConfiguration reads, by direct FFI (no extra crates).
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::ffi::{c_char, c_void, CString};
+
+    type CFTypeRef = *const c_void;
+    const UTF8: u32 = 0x0800_0100;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringCreateWithCString(alloc: CFTypeRef, s: *const c_char, enc: u32) -> CFTypeRef;
+        fn CFStringGetLength(s: CFTypeRef) -> isize;
+        fn CFStringGetMaximumSizeForEncoding(len: isize, enc: u32) -> isize;
+        fn CFStringGetCString(s: CFTypeRef, buf: *mut c_char, size: isize, enc: u32) -> u8;
+        fn CFGetTypeID(c: CFTypeRef) -> usize;
+        fn CFStringGetTypeID() -> usize;
+        fn CFRelease(c: CFTypeRef);
+    }
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+        fn IOServiceGetMatchingService(main_port: u32, matching: *mut c_void) -> u32;
+        fn IORegistryEntryCreateCFProperty(entry: u32, key: CFTypeRef, alloc: CFTypeRef, options: u32) -> CFTypeRef;
+        fn IOObjectRelease(obj: u32) -> i32;
+    }
+
+    #[link(name = "SystemConfiguration", kind = "framework")]
+    unsafe extern "C" {
+        fn SCDynamicStoreCopyComputerName(store: CFTypeRef, encoding: *mut u32) -> CFTypeRef;
+    }
+
+    /// An owned CF string, converted to a Rust `String` and released. `None` for null, a non-string or an empty one.
+    unsafe fn take_string(cf: CFTypeRef) -> Option<String> {
+        if cf.is_null() {
+            return None;
+        }
+        // SAFETY: `cf` is a live, owned CF object; it is released exactly once, here.
+        let out = unsafe {
+            if CFGetTypeID(cf) == CFStringGetTypeID() {
+                let cap = CFStringGetMaximumSizeForEncoding(CFStringGetLength(cf), UTF8) + 1;
+                let mut buf = vec![0u8; usize::try_from(cap).unwrap_or(0).max(1)];
+                if CFStringGetCString(cf, buf.as_mut_ptr().cast(), cap, UTF8) != 0 {
+                    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+                    String::from_utf8(buf[..end].to_vec()).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        unsafe { CFRelease(cf) };
+        out.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    /// `IOPlatformUUID` of the `IOPlatformExpertDevice`.
+    pub fn platform_uuid() -> Option<String> {
+        let class = CString::new("IOPlatformExpertDevice").ok()?;
+        let key = CString::new("IOPlatformUUID").ok()?;
+        // SAFETY: plain IOKit/CF calls; the matching dictionary is consumed by `IOServiceGetMatchingService`, the
+        // service and the key and the property are each released once. Main port 0 is `kIOMainPortDefault`.
+        unsafe {
+            let service = IOServiceGetMatchingService(0, IOServiceMatching(class.as_ptr()));
+            if service == 0 {
+                return None;
+            }
+            let cf_key = CFStringCreateWithCString(std::ptr::null(), key.as_ptr(), UTF8);
+            let value = if cf_key.is_null() {
+                std::ptr::null()
+            } else {
+                let v = IORegistryEntryCreateCFProperty(service, cf_key, std::ptr::null(), 0);
+                CFRelease(cf_key);
+                v
+            };
+            IOObjectRelease(service);
+            take_string(value)
+        }
+    }
+
+    /// The computer name ("Guus's MacBook Pro"), as System Settings > Sharing shows it.
+    pub fn computer_name() -> Option<String> {
+        // SAFETY: a null store asks for the current user's; the returned name is owned and released in `take_string`.
+        unsafe { take_string(SCDynamicStoreCopyComputerName(std::ptr::null(), std::ptr::null_mut())) }
     }
 }
 
@@ -50,8 +141,8 @@ fn machine_id_from_file(path: &std::path::Path) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn windows_machine_guid() -> Option<String> {
-    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegGetValueW};
     use windows::core::w;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY};
     let mut buf = [0u16; 64];
     let mut bytes = u32::try_from(std::mem::size_of_val(&buf)).ok()?;
     // SAFETY: `buf` is a live, writable buffer of `bytes` bytes; the value is read as REG_SZ from the 64-bit view.
@@ -78,6 +169,11 @@ fn windows_machine_guid() -> Option<String> {
 /// The device's name for the identity rule: today's source, the one the old mirror named `Backups/<device>` from
 /// (the mirror, removed in LD-0113, called `runner::device_name` too).
 fn backup_device_name() -> Option<String> {
+    // macOS: the computer name the person set; the host name (`Guuss-MacBook-Pro.local`) only when there is none.
+    #[cfg(target_os = "macos")]
+    if let Some(name) = mac::computer_name() {
+        return Some(name);
+    }
     crate::runner::device_name()
 }
 
@@ -143,7 +239,7 @@ pub(crate) fn permitted_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beebeeb_core::backup::{DeviceFolderCandidate, DeviceFolderChoice, FolderManifest, find_device_folder};
+    use beebeeb_core::backup::{find_device_folder, DeviceFolderCandidate, DeviceFolderChoice, FolderManifest};
 
     fn legacy_folder(name: &str) -> DeviceFolderCandidate {
         DeviceFolderCandidate {
@@ -304,6 +400,20 @@ mod tests {
         let me = device_self(&crate::identity::REAL).expect("a name and a machine id");
         assert_eq!(me.device_id, beebeeb_core::backup::device_id_from_machine_id(&id));
         assert_eq!(me.platform, Platform::Windows);
+    }
+
+    /// Native rung: IOKit gives this Mac's platform UUID, stable across calls, and a name and device exist.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn platform_uuid_is_read_on_macos() {
+        let id = machine_id().expect("IOPlatformUUID is readable");
+        assert!(uuid::Uuid::parse_str(&id).is_ok(), "IOPlatformUUID is a UUID");
+        assert_eq!(machine_id().as_deref(), Some(id.as_str()), "the same id every time");
+        assert!(backup_device_name().is_some_and(|n| !n.is_empty()));
+        let me = device_self(&crate::identity::REAL).expect("a name and a machine id");
+        assert_eq!(me.device_id, beebeeb_core::backup::device_id_from_machine_id(&id));
+        assert_eq!(me.platform, Platform::Macos);
+        assert!(device_self(&crate::identity::TEST).is_some());
     }
 
     #[test]
