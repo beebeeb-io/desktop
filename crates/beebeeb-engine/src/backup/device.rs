@@ -272,6 +272,10 @@ mod tests {
 
         // This machine: the folder the old mirror made here (named from `runner::device_name`, as the mirror does)
         // is adopted by the name `device_self` uses.
+        // On macOS the backup name is the computer name (no old mirror ever ran there: it had no machine id).
+        #[cfg(target_os = "macos")]
+        let mine = legacy_folder(&backup_device_name().expect("the test machine has a name"));
+        #[cfg(not(target_os = "macos"))]
         let mine = legacy_folder(&crate::runner::device_name().expect("the test machine has a name"));
         let me = device_self_from(&crate::identity::REAL, backup_device_name().unwrap(), "test-machine").unwrap();
         let me_on_windows = DeviceSelf {
