@@ -17,8 +17,10 @@ fn kept_item(id: &str, kind: Kind, status: KeptStatus) -> Kept {
 fn snapshot(kind: Kind, files: &[(&str, FileStatus)], downloads: &[(&str, u64, u64)]) -> Snapshot {
     let mut s = Snapshot::default();
     s.kept.push(kept_item("top", kind, KeptStatus::NotOnPcYet));
-    s.kept_files
-        .insert("top".into(), files.iter().map(|(id, st)| (id.to_string(), st.clone())).collect());
+    s.kept_files.insert(
+        "top".into(),
+        files.iter().map(|(id, st)| (id.to_string(), st.clone())).collect(),
+    );
     s.downloads = downloads.iter().map(|(id, d, t)| (id.to_string(), (*d, *t))).collect();
     s
 }
