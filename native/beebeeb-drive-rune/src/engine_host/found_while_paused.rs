@@ -166,7 +166,8 @@ impl<E: Decisions> FoundWhilePausedSource<E> {
                 Answer::Reviewed(turn, Ok(review)) => {
                     self.turn = Some(turn);
                     self.card.held = Some(held_of(review));
-                    self.card.said = None;
+                    // `said` is not cleared here: the re-read that follows a refused upload would
+                    // otherwise wipe the engine's refusal. The next action clears it (begin).
                 }
                 Answer::Reviewed(_, Err(words)) => {
                     // Not read: nothing is decided on an old read.
