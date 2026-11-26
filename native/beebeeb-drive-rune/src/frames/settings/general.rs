@@ -253,3 +253,48 @@ fn report_problem(crash: Option<&crate::log_file::crash::CrashRecord>, t: &Theme
     dialogs::dialog("Report a problem", 460.0, "Report a problem", None, body, foot, t)
         .modal(false, |s: &mut State| s.settings.dialog = None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::source::{Os, ThemeChoice};
+
+    #[test]
+    fn theme_row_names_the_os_it_follows() {
+        assert_eq!(ThemeChoice::System.says_on(Os::Windows), "Follows Windows.");
+        assert_eq!(ThemeChoice::System.says_on(Os::Mac), "Follows macOS.");
+        assert_eq!(ThemeChoice::System.says_on(Os::Other), "Follows the system.");
+        assert_eq!(ThemeChoice::Light.says_on(Os::Mac), "Always light.");
+        assert_eq!(ThemeChoice::Dark.says_on(Os::Mac), "Always dark.");
+        #[cfg(target_os = "macos")]
+        assert_eq!(ThemeChoice::System.says(), "Follows macOS.");
+    }
+
+    /// Every settings frame, drawn with this Mac's words, holds no Windows-only word.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn no_settings_frame_says_a_windows_word_on_a_mac() {
+        let bad = ["Windows", "Explorer", "this PC", "This PC", " PC ", "Hello", "Start menu", "OneDrive"];
+        let mut found = Vec::new();
+        for (id, _) in super::super::FRAMES {
+            let mut state = crate::init();
+            if !super::super::scene(id, &mut state) {
+                continue;
+            }
+            let env = rune::Env { system_dark: false, scale: 2.0 };
+            let mut rt = rune::Runtime::new(state, crate::view, (958.0, 718.0), env);
+            rt.frame(0.0);
+            rt.frame(0.016);
+            for e in rt.elements() {
+                for said in [e.text.as_deref(), e.label.as_deref()].into_iter().flatten() {
+                    let padded = format!(" {said} ");
+                    if let Some(w) = bad.iter().find(|w| padded.contains(**w)) {
+                        found.push(format!("{id} {}: {w}: {said}", e.key.as_deref().unwrap_or("")));
+                    }
+                }
+            }
+        }
+        found.sort();
+        found.dedup();
+        assert!(found.is_empty(), "Windows words on a Mac:\n{}", found.join("\n"));
+    }
+}

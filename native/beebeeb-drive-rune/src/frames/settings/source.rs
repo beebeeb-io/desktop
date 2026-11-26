@@ -14,6 +14,26 @@ pub enum ThemeChoice {
     Dark,
 }
 
+/// The OS a sentence is worded for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Os {
+    Windows,
+    Mac,
+    Other,
+}
+
+impl Os {
+    pub const fn this() -> Os {
+        if cfg!(target_os = "windows") {
+            Os::Windows
+        } else if cfg!(target_os = "macos") {
+            Os::Mac
+        } else {
+            Os::Other
+        }
+    }
+}
+
 impl ThemeChoice {
     pub const ALL: [ThemeChoice; 3] = [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark];
 
@@ -27,8 +47,17 @@ impl ThemeChoice {
 
     /// What the choice does, as the Theme row says it (DW-0787).
     pub fn says(self) -> &'static str {
+        self.says_on(Os::this())
+    }
+
+    /// [`Self::says`] in one OS's words (the System choice names the OS it follows).
+    pub fn says_on(self, os: Os) -> &'static str {
         match self {
-            Self::System => "Follows Windows.",
+            Self::System => match os {
+                Os::Windows => "Follows Windows.",
+                Os::Mac => "Follows macOS.",
+                Os::Other => "Follows the system.",
+            },
             Self::Light => "Always light.",
             Self::Dark => "Always dark.",
         }

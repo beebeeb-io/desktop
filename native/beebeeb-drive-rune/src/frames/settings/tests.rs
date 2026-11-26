@@ -275,7 +275,7 @@ fn rows_name_what_they_say() {
     let rt = runtime("DW-0701");
     assert_eq!(
         info(&rt, "item-0-0").label.as_deref(),
-        Some("Theme, System. Follows Windows.")
+        Some(format!("Theme, System. {}", ThemeChoice::System.says()).as_str())
     );
     assert_eq!(
         info(&rt, "item-0-0").role,
