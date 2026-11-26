@@ -213,6 +213,11 @@ impl Ui {
         self.source.copy_state(id)
     }
 
+    /// The kept files coming down now: `(files, bytes done, bytes of them)` (dm-68).
+    pub fn downloading(&self) -> Option<(u32, u64, u64)> {
+        self.source.downloading()
+    }
+
     /// Try again on a kept item whose copy failed.
     pub fn try_keep_again(&mut self, id: &str) {
         self.source.try_keep_again(id);

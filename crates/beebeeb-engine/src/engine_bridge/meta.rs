@@ -10,6 +10,9 @@ pub enum HydrateSource {
     Queue,
     /// The server, as every fetch did before.
     Server,
+    /// Dm-68: the copy this device already holds of the file's current version (a kept file the engine fetched):
+    /// nothing is downloaded a second time.
+    Copy,
 }
 
 #[cfg_attr(not(any(target_os = "macos", any(test, feature = "test-support"))), allow(dead_code))]
@@ -18,6 +21,7 @@ impl HydrateSource {
         match self {
             HydrateSource::Queue => "queue",
             HydrateSource::Server => "server",
+            HydrateSource::Copy => "copy",
         }
     }
 }

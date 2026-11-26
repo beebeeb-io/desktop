@@ -1202,4 +1202,14 @@ fn available_offline_rows_show_progress_and_a_failure_with_try_again() {
     assert!(!has(&rt, "row-2-retry"), "the failure goes once it is tried again");
     // The other two keep their bars.
     assert!(has(&rt, "row-0-bar"));
+    // The status line says how many files come down and how far, not the kept total as if it were here.
+    assert_eq!(text(&rt, "status-details"), "Downloading 2 files \u{00B7} 11.3 of 30.3 MB");
+}
+
+/// Dm-68: with nothing coming down the status line names what is kept, as before.
+#[test]
+fn the_status_line_names_the_kept_total_when_nothing_comes_down() {
+    let rt = runtime(scenes::dw_0715, false);
+    assert!(text(&rt, "status-details").contains("available offline"));
+    assert_eq!(super::offline::downloading_words((1, 5_347_737, 11_840_437)), "Downloading 1 file \u{00B7} 5.1 of 11.3 MB");
 }

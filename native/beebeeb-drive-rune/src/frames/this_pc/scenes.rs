@@ -129,4 +129,6 @@ pub const RENDER_SCENES: &[(&str, fn(&mut State))] = &[
     ("this-pc-parked", parked),
     ("this-pc-parked-choose", parked_choose),
     ("this-pc-parked-remove", parked_remove),
+    // Dm-68: Available offline mid-download (a folder's count, a file's percent and bytes, a failed copy).
+    ("this-pc-offline-progress", dm_68),
 ];

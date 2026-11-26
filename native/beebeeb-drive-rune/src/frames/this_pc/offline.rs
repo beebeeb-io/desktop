@@ -125,12 +125,17 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             chrome::status_line(
                 s,
                 ui,
-                format!(
-                    "{} available offline \u{00B7} {} on {os}",
-                    kept.len(),
-                    format_size(bytes),
-                    os = beebeeb_engine::device_word!()
-                ),
+                // While kept files come down the line says how far they are (dm-68): the kept total is not on
+                // this device yet, so it is not claimed as such.
+                match ui.downloading() {
+                    Some(running) => downloading_words(running),
+                    None => format!(
+                        "{} available offline \u{00B7} {} on {os}",
+                        kept.len(),
+                        format_size(bytes),
+                        os = beebeeb_engine::device_word!()
+                    ),
+                },
                 &t,
             )
         };
@@ -378,6 +383,15 @@ pub fn progress_words(p: &KeptProgress) -> String {
         Some((n, m)) => format!("{n} of {m} files \u{00B7} {}%", p.percent),
         None => format!("{}% \u{00B7} {}", p.percent, figures(p.done, p.total)),
     }
+}
+
+/// The status line while kept files come down: "Downloading 3 files · 5.1 of 11.3 MB".
+pub fn downloading_words((files, done, total): (u32, u64, u64)) -> String {
+    format!(
+        "Downloading {files} {} \u{00B7} {}",
+        if files == 1 { "file" } else { "files" },
+        figures(done, total)
+    )
 }
 
 /// "5.1 of 11.3 MB": both in the unit of the whole.

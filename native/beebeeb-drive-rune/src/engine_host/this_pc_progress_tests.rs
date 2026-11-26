@@ -81,3 +81,51 @@ fn a_file_that_failed_says_so() {
 fn an_item_the_read_does_not_hold_says_nothing() {
     assert_eq!(copy_state(&Snapshot::default(), "top"), None);
 }
+
+/// The status line's count: every kept file the board has coming down, once, with its bytes; none while none runs.
+#[test]
+fn the_kept_files_coming_down_are_counted_once_with_their_bytes() {
+    let mut s = snapshot(
+        Kind::Folder,
+        &[
+            ("a", FileStatus::Local),
+            ("b", FileStatus::Downloading),
+            ("c", FileStatus::Downloading),
+        ],
+        &[("b", 50, 100), ("c", 300, 200), ("not-kept", 1, 9)],
+    );
+    assert_eq!(downloading(&s), Some((2, 250, 300)));
+    s.downloads.clear();
+    assert_eq!(downloading(&s), None);
+}
+
+/// One row from the engine's reads, start to end: "Not on this Mac yet" with nothing said, then its percent and
+/// bytes, then "On this Mac" (the listing's own words) with nothing more to say and nothing counted as coming down.
+#[test]
+fn a_rows_words_follow_the_engines_reads_to_on_this_device() {
+    let words = |status: KeptStatus, files: &[(&str, FileStatus)], downloads: &[(&str, u64, u64)]| {
+        let mut s = snapshot(Kind::Document, files, downloads);
+        s.kept[0].status = status;
+        match copy_state(&s, "top") {
+            Some(CopyState::Running(p)) => format!("{}% ({} of {})", p.percent, p.done, p.total),
+            Some(CopyState::Failed) => "failed".into(),
+            None => s.kept[0].status.label().to_string(),
+        }
+    };
+    let waiting = words(KeptStatus::NotOnPcYet, &[("top", FileStatus::CloudOnly)], &[]);
+    let half = words(
+        KeptStatus::NotOnPcYet,
+        &[("top", FileStatus::Downloading)],
+        &[("top", 5_347_737, 11_840_437)],
+    );
+    let here = words(KeptStatus::UpToDate, &[("top", FileStatus::Local)], &[]);
+    assert_eq!(waiting, KeptStatus::NotOnPcYet.label());
+    assert_eq!(half, "45% (5347737 of 11840437)");
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        (waiting.as_str(), here.as_str()),
+        ("Not on this Mac yet", "On this Mac")
+    );
+    assert_eq!(here, KeptStatus::UpToDate.label());
+    assert_ne!(waiting, here);
+}

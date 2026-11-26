@@ -864,6 +864,23 @@ pub(crate) fn copy_state(snapshot: &Snapshot, id: &str) -> Option<CopyState> {
     Some(CopyState::Running(KeptProgress { done, total, files: files_count, percent: percent.min(100) }))
 }
 
+/// The kept files the transfer board has coming down at the read: `(files, bytes done, bytes of them)`, each file
+/// once (a kept folder's files are its own). `None` while none runs: the status line then names what is kept.
+pub(crate) fn downloading(snapshot: &Snapshot) -> Option<(u32, u64, u64)> {
+    let mut seen = std::collections::HashSet::new();
+    let (mut files, mut done, mut total) = (0u32, 0u64, 0u64);
+    for (file, _) in snapshot.kept_files.values().flatten() {
+        if let Some((d, t)) = snapshot.downloads.get(file)
+            && seen.insert(file.as_str())
+        {
+            files += 1;
+            done += (*d).min(*t);
+            total += *t;
+        }
+    }
+    (files > 0).then_some((files, done, total))
+}
+
 impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
     fn wired(&self) -> bool {
         TURNED_ON
@@ -1052,6 +1069,10 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
 
     fn copy_state(&self, id: &str) -> Option<CopyState> {
         copy_state(self.held()?, id)
+    }
+
+    fn downloading(&self) -> Option<(u32, u64, u64)> {
+        downloading(self.held()?)
     }
 
     fn try_keep_again(&mut self, id: &str) {

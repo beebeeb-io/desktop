@@ -199,6 +199,8 @@ pub enum KeptStatus {
 impl KeptStatus {
     pub fn label(self) -> &'static str {
         match self {
+            // Dm-68: a Mac says where the copy is ("On this Mac"); the Windows board (DW-0715) keeps "Up to date".
+            KeptStatus::UpToDate if cfg!(target_os = "macos") => concat!("On ", beebeeb_engine::device_word!()),
             KeptStatus::UpToDate => "Up to date",
             KeptStatus::NotOnPcYet => concat!("Not on ", beebeeb_engine::device_word!(), " yet"),
         }
@@ -329,6 +331,11 @@ pub trait ThisPcSource {
     }
     /// Try a failed copy again: keep the item once more (dm-68).
     fn try_keep_again(&mut self, _id: &str) {}
+    /// The kept files coming down now, for the status line (dm-68): `(files, bytes done, bytes of them)`. `None`
+    /// while none runs.
+    fn downloading(&self) -> Option<(u32, u64, u64)> {
+        None
+    }
     /// Stop keeping one item here; it stays in Beebeeb and becomes online only.
     fn remove_from_pc(&mut self, id: &str);
     /// Stop keeping every item here.
@@ -678,6 +685,25 @@ impl ThisPcSource for FixtureSource {
 
     fn copy_state(&self, id: &str) -> Option<CopyState> {
         self.copies.get(id).cloned()
+    }
+
+    /// A sample counts what its scene set: a folder's running copies as one file each is not known, so one per item.
+    fn downloading(&self) -> Option<(u32, u64, u64)> {
+        let running: Vec<&KeptProgress> = self
+            .kept
+            .iter()
+            .filter_map(|k| match self.copies.get(&k.id) {
+                Some(CopyState::Running(p)) => Some(p),
+                _ => None,
+            })
+            .collect();
+        (!running.is_empty()).then(|| {
+            (
+                running.len() as u32,
+                running.iter().map(|p| p.done).sum(),
+                running.iter().map(|p| p.total).sum(),
+            )
+        })
     }
 
     /// A sample's retry works at once: the failure goes.
