@@ -66,7 +66,7 @@ pub fn open_label(default_app: Option<&str>) -> String {
 
 /// "Show in Finder" / "Show in File Explorer".
 pub fn show_label() -> String {
-    beebeeb_engine::os_words::for_this_os("Show in File Explorer")
+    format!("Show in {}", beebeeb_engine::os_words::file_manager())
 }
 
 /// Where the file is, in the page's words.
