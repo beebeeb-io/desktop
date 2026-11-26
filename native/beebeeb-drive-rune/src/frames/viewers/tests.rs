@@ -1403,7 +1403,7 @@ fn focus_after_the_unsaved_question_goes_to_the_editor_or_else_the_toolbar() {
 /// shared toolbar draws: a note, code, a photo, audio, a PDF, a table, an archive.
 #[test]
 fn the_more_button_opens_the_action_menu_for_every_viewer_kind() {
-    let words = |rt: &Runtime<State>, i: usize| info(rt, &format!("more-menu-item-{i}-label")).label.unwrap_or_default();
+    let words = |rt: &Runtime<State>, i: usize| info(rt, &format!("more-menu-item-{i}")).label.unwrap_or_default();
     for frame in ["DW-1513", "DW-1512", "DW-1501", "DW-1503", "DW-1505", "DW-1514", "DW-1515"] {
         let mut rt = runtime(frame);
         assert!(!has(&rt, "more-menu"), "{frame}: closed at first");
