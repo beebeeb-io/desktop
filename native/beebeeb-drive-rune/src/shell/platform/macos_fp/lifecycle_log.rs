@@ -10,9 +10,11 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
-use beebeeb_engine::diagnostic_redaction::{KnownNames, redact_for_export};
-use beebeeb_engine::finder_setup::driver::{LifecycleEvent, TAIL_LINES, token};
+use beebeeb_engine::diagnostic_redaction::KnownNames;
+use beebeeb_engine::finder_setup::driver::{token, LifecycleEvent, TAIL_LINES};
 use beebeeb_engine::surfaces::phase::FinderFailureReason;
+
+use crate::log_file::redact;
 
 pub const FILE_NAME: &str = "lifecycle.log";
 pub const MAX_BYTES: u64 = 1024 * 1024;
@@ -57,7 +59,7 @@ pub fn format_line(event: &LifecycleEvent, names: &KnownNames, at: SystemTime) -
                         underlying.code
                     ));
                 }
-                let redacted = redact_for_export(&error.message, names).text;
+                let redacted = in_words(&error.message, names);
                 line.push_str(&format!(" message=\"{}\"", redacted.replace(['"', '\n', '\r'], " ")));
             }
             line
@@ -72,6 +74,45 @@ pub fn format_line(event: &LifecycleEvent, names: &KnownNames, at: SystemTime) -
         }
     };
     format!("{stamp} {body}")
+}
+
+/// An unknown word the main log's filter always masks: it stands in for a known name.
+const NAME_STANDIN: &str = "zzname";
+
+/// An OS or bridge message in words: a word stays when it is in the main log's fixed vocabulary (or a number), every
+/// other word, path, URL or secret becomes `<…>`; the state DB's known names are removed first, so a file name that is
+/// also an ordinary word is masked too.
+fn in_words(message: &str, names: &KnownNames) -> String {
+    let mut text = message.to_string();
+    for name in names.names() {
+        text = replace_name(&text, name);
+    }
+    redact::message(&text).replace(['"', '\n', '\r'], " ")
+}
+
+/// Replace `name` (already lowercase) at word boundaries, ASCII case-insensitively.
+fn replace_name(text: &str, name: &str) -> String {
+    let hay = text.to_ascii_lowercase();
+    if name.is_empty() || !hay.contains(name) {
+        return text.to_string();
+    }
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let (mut out, mut last, mut from) = (String::new(), 0, 0);
+    while let Some(rel) = hay[from..].find(name) {
+        let (start, end) = (from + rel, from + rel + name.len());
+        let ok = text[..start].chars().next_back().is_none_or(|c| !word(c))
+            && text[end..].chars().next().is_none_or(|c| !word(c));
+        if ok {
+            out.push_str(&text[last..start]);
+            out.push_str(NAME_STANDIN);
+            last = end;
+            from = end;
+        } else {
+            from = start + hay[start..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 pub struct LifecycleLog {
@@ -211,7 +252,7 @@ pub fn write_event(
 mod tests {
     use super::*;
     use beebeeb_engine::finder_setup::core::Trigger;
-    use beebeeb_engine::finder_setup::error::{COCOA_DOMAIN, FpError};
+    use beebeeb_engine::finder_setup::error::{FpError, COCOA_DOMAIN};
     use beebeeb_engine::finder_setup::launch_location::LaunchLocation;
     use beebeeb_engine::surfaces::phase::FinderSetup;
     use std::time::{Duration, UNIX_EPOCH};
