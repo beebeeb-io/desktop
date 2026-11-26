@@ -22,6 +22,8 @@ mod linux;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 #[cfg(target_os = "macos")]
+pub(crate) mod macos_open_url;
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_panels;
 #[cfg(windows)]
 mod windows;

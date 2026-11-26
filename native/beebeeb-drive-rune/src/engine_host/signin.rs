@@ -831,13 +831,19 @@ pub fn open_web_page(url: &str) -> Result<(), ()> {
         OPENED.with(|o| o.borrow_mut().push(url.to_string()));
         Ok(())
     }
-    #[cfg(not(test))]
+    // A Mac opens a web address through `NSWorkspace openURL` (`open_path` there is the Finder-location opener, which
+    // cannot open an address: Settings' web rows did nothing).
+    #[cfg(all(not(test), target_os = "macos"))]
+    {
+        crate::shell::platform::macos_open_url::open_url(url)
+    }
+    #[cfg(all(not(test), not(target_os = "macos")))]
     open_on_the_launch_worker(url, super::open_path)
 }
 
 /// The one launch worker the pages open on: the window's thread never waits for the launch lock. A
 /// page has no session (the sign-in page opens signed out), so its start compares none.
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, target_os = "macos"), allow(dead_code))]
 fn open_on_the_launch_worker(url: &str, start: super::files_launch::Start) -> Result<(), ()> {
     static PAGES: std::sync::LazyLock<super::launcher::Launcher> = std::sync::LazyLock::new(Default::default);
     PAGES.open(
