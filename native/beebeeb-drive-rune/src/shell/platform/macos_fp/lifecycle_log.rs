@@ -335,22 +335,6 @@ mod tests {
             assert!(!line.contains(leaked), "{leaked} leaked: {line}");
         }
         assert!(line.contains('<'), "{line}");
-
-        // The state DB's names must reach the redactor, and the assertions above cannot tell:
-        // `redact_for_export` turns any unknown word into `[name]` by itself. `2025` is a bare
-        // number its allow-list keeps, so only the known-name scan can remove it. The control
-        // proves the number survives without the names, so the second assertion can go red.
-        let numbered = transition("could not open Tax 2025");
-        let control = format_line(&numbered, &KnownNames::new(), at());
-        assert!(
-            control.contains("2025"),
-            "control: a bare number must survive without names: {control}"
-        );
-        let with_names = format_line(&numbered, &names(&["Tax 2025/aangifte.pdf"]), at());
-        assert!(
-            !with_names.contains("2025"),
-            "the known names did not reach the redactor: {with_names}"
-        );
     }
 
     #[test]
@@ -368,11 +352,10 @@ mod tests {
 
     #[test]
     fn a_file_name_that_is_also_an_ordinary_word_stays_redacted() {
-        let line = format_line(
-            &transition("Timed out waiting for the Photos domain"),
-            &names(&["Photos"]),
-            at(),
-        );
+        let message = transition("Timed out waiting for the Photos domain");
+        let control = format_line(&message, &KnownNames::new(), at());
+        assert!(control.contains("Photos"), "control: an ordinary word stays: {control}");
+        let line = format_line(&message, &names(&["Photos"]), at());
         assert!(!line.contains("Photos"), "{line}");
         let line = format_line(&transition("could not open Letter.docx"), &KnownNames::new(), at());
         assert!(!line.contains("Letter") && !line.contains("docx"), "{line}");
