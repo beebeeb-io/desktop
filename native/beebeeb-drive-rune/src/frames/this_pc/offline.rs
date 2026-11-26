@@ -425,14 +425,15 @@ fn status_cell(k: &str, item: &Kept, copy: &Option<CopyState>, meta: rune::Color
                         .label(format!("{}, {words}", item.name))
                         .w_full()
                         .h(4.0)
-                        .radius(2.0)
-                        .clip_rounded(2.0)
+                        // A capsule: the radius is clamped to half the 4px height.
+                        .radius(crate::theme::scale::radius::PILL)
+                        .clip_rounded(crate::theme::scale::radius::PILL)
                         .fill(t.text.alpha(0.09))
                         .child(
                             el().key(format!("{k}-bar-fill"))
                                 .h(4.0)
                                 .w_frac(f32::from(p.percent) / 100.0)
-                                .radius(2.0)
+                                .radius(crate::theme::scale::radius::PILL)
                                 .fill(t.text_tertiary),
                         ),
                 )
