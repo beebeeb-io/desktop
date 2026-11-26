@@ -205,6 +205,26 @@ impl KeptStatus {
     }
 }
 
+/// How far a kept item's copy has come, for its row (dm-68).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeptProgress {
+    /// Bytes of the copies running now.
+    pub done: u64,
+    pub total: u64,
+    /// A folder's files on this PC of all it holds: `(n, m)`.
+    pub files: Option<(u32, u32)>,
+    /// Hundredths of the whole, 0..=100: bytes for a file; files (a running one counted by its bytes) for a folder.
+    pub percent: u8,
+}
+
+/// What a kept item's row says of its copy (dm-68): none while it needs no say (here, or waiting to start).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CopyState {
+    Running(KeptProgress),
+    /// A file of it failed to come down.
+    Failed,
+}
+
 /// What a kept item holds: a folder's item count, or the folder a file is in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Contains {
@@ -303,6 +323,12 @@ pub trait ThisPcSource {
     fn kept_count(&self) -> usize {
         self.kept().len()
     }
+    /// How a kept item's copy is coming down, or that it failed (dm-68). `None`: nothing to say of it.
+    fn copy_state(&self, _id: &str) -> Option<CopyState> {
+        None
+    }
+    /// Try a failed copy again: keep the item once more (dm-68).
+    fn try_keep_again(&mut self, _id: &str) {}
     /// Stop keeping one item here; it stays in Beebeeb and becomes online only.
     fn remove_from_pc(&mut self, id: &str);
     /// Stop keeping every item here.
@@ -315,6 +341,16 @@ pub struct FixtureSource {
     history: Vec<Change>,
     problems: Vec<Change>,
     kept: Vec<Kept>,
+    /// How each kept item's copy stands (dm-68), by id; a sample says nothing unless a scene sets it.
+    copies: std::collections::HashMap<String, CopyState>,
+}
+
+impl FixtureSource {
+    /// A scene of a copy coming down, or failed, on the kept item `id`.
+    pub fn with_copy(mut self, id: &str, state: CopyState) -> Self {
+        self.copies.insert(id.to_string(), state);
+        self
+    }
 }
 
 fn day(d: u32, m: u32) -> NaiveDate {
@@ -499,6 +535,7 @@ impl FixtureSource {
             history,
             problems,
             kept: Self::board_kept(),
+            copies: Default::default(),
         }
     }
 
@@ -595,6 +632,7 @@ impl FixtureSource {
     pub fn nothing_kept() -> FixtureSource {
         FixtureSource {
             kept: Vec::new(),
+            copies: Default::default(),
             ..Self::synced()
         }
     }
@@ -636,6 +674,17 @@ impl ThisPcSource for FixtureSource {
 
     fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
         std::borrow::Cow::Borrowed(&self.kept)
+    }
+
+    fn copy_state(&self, id: &str) -> Option<CopyState> {
+        self.copies.get(id).cloned()
+    }
+
+    /// A sample's retry works at once: the failure goes.
+    fn try_keep_again(&mut self, id: &str) {
+        if self.copies.get(id) == Some(&CopyState::Failed) {
+            self.copies.remove(id);
+        }
     }
 
     fn remove_from_pc(&mut self, id: &str) {

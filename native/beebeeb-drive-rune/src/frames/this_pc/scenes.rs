@@ -50,6 +50,24 @@ pub fn dw_0715(s: &mut State) {
     open(s, Section::AvailableOffline, FixtureSource::synced());
 }
 
+/// Dm-68: Documents (a folder) 5 of 12 files down, Invoices 2026 halfway, the third item failed.
+pub fn dm_68(s: &mut State) {
+    use super::source::{CopyState, KeptProgress, ThisPcSource};
+    let mut source = FixtureSource::synced()
+        .with_copy(
+            "k-documents",
+            CopyState::Running(KeptProgress { done: 6_000_000, total: 20_000_000, files: Some((5, 12)), percent: 45 }),
+        )
+        .with_copy(
+            "k-invoices",
+            CopyState::Running(KeptProgress { done: 5_900_000, total: 11_800_000, files: None, percent: 50 }),
+        );
+    if let Some(third) = source.kept().get(2).map(|k| k.id.clone()) {
+        source = source.with_copy(&third, CopyState::Failed);
+    }
+    open(s, Section::AvailableOffline, source);
+}
+
 /// The menu on Invoices 2026, Remove from this PC lit.
 pub fn dw_1306(s: &mut State) {
     dw_0715(s);

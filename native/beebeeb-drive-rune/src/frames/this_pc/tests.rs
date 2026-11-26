@@ -1187,3 +1187,19 @@ fn a_kept_file_opens_through_open_file() {
 fn os(board: &str) -> String {
     beebeeb_engine::os_words::for_this_os(board)
 }
+
+/// Dm-68: a kept item's row says how far its copy is, a failed one says so with Try again.
+#[test]
+fn available_offline_rows_show_progress_and_a_failure_with_try_again() {
+    let mut rt = runtime(scenes::dm_68, false);
+    assert_eq!(text(&rt, "row-0-date"), "5 of 12 files \u{00B7} 45%");
+    assert_eq!(text(&rt, "row-1-date"), "50% \u{00B7} 5.6 of 11.3 MB");
+    assert_eq!(info(&rt, "row-0-bar").role, "progressbar");
+    assert!(has(&rt, "row-1-bar-fill"));
+    assert_eq!(text(&rt, "row-2-date"), "Download failed");
+    assert!(has(&rt, "row-2-retry"));
+    click(&mut rt, "row-2-retry");
+    assert!(!has(&rt, "row-2-retry"), "the failure goes once it is tried again");
+    // The other two keep their bars.
+    assert!(has(&rt, "row-0-bar"));
+}
