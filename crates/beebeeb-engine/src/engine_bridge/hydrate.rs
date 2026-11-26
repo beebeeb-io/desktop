@@ -1551,8 +1551,9 @@ mod refetch_streaming_tests {
         let staging = dir.path().join("hydrate-cache");
         std::fs::create_dir_all(&staging).unwrap();
         let dest = staging.join("big.bin");
-        let said = Mutex::new(Vec::new());
-        let progress = |done: u64, total: u64| said.lock().unwrap().push((done, total));
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let heard = said.clone();
+        let progress = move |done: u64, total: u64| heard.lock().unwrap().push((done, total));
         let source = rt
             .block_on(bridge.serve_hydrate(ID, &dest, &[staging.as_path()], Some(&progress)))
             .unwrap();
