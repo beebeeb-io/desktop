@@ -70,7 +70,7 @@ pub(crate) fn mbps(kib_per_s: u64) -> Option<u32> {
 }
 
 pub(super) fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, account: &str, send: &dyn Fn(Answer)) {
-    read_local_with(engine, platform, account, send, super::macos_downloaded::system());
+    read_local_with(engine, platform, account, send, crate::engine_host::macos_downloaded::system());
 }
 
 /// [`read_local`] with the system's account of what is downloaded (a Mac's; `None`: the engine's cache is the truth).
@@ -79,7 +79,7 @@ pub(super) fn read_local_with<E: DriveEngine>(
     platform: &dyn Platform,
     account: &str,
     send: &dyn Fn(Answer),
-    system: Option<&dyn super::macos_downloaded::Materialisation>,
+    system: Option<&dyn crate::engine_host::macos_downloaded::Materialisation>,
 ) {
     send(Answer::OpenAtLogin(platform.autostart_enabled().ok()));
     if !still_for(engine, account) {
@@ -89,12 +89,12 @@ pub(super) fn read_local_with<E: DriveEngine>(
         return;
     }
     // A Mac's downloaded copies are the system's materialised items; the engine's cache holds none of them.
-    let system_copies = system.and_then(|source| super::macos_downloaded::copies(engine, source).ok());
+    let system_copies = system.and_then(|source| crate::engine_host::macos_downloaded::copies(engine, source).ok());
     let read = engine.local_state(|db| -> Result<_, String> {
         let rows = rows(db)?;
         let (limit_bytes, status_on_files) = engine.local_settings()?;
         let downloaded = match &system_copies {
-            Some(copies) => super::macos_downloaded::bytes_of(copies),
+            Some(copies) => crate::engine_host::macos_downloaded::bytes_of(copies),
             None => db.cache_bytes_by_effective_pin(false).map_err(|_| "cache")?,
         };
         let summary = db.kept_summary().map_err(|_| "kept")?;

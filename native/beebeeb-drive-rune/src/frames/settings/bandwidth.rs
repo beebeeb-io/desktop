@@ -673,9 +673,9 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, metered_control: bool
     let on = bw.sync_on_metered;
     let metered = Item::new(Some(&ic::WIFI), "Sync on metered connections")
         .sub(if on {
-            "A network Windows marks as metered, such as a phone's hotspot"
+            format!("A network {} marks as metered, such as a phone's hotspot", super::source::os_name())
         } else {
-            "Off: sync waits on networks Windows marks as metered"
+            format!("Off: sync waits on networks {} marks as metered", super::source::os_name())
         })
         .ruled();
     let mut rows = vec![

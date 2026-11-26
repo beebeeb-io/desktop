@@ -1129,7 +1129,7 @@ fn closing_settings_on_diagnostics_stops_the_sampler() {
 /// dm-65 (a Mac): Downloaded files is the sum of the materialised copies that are not kept; Clear… evicts each.
 #[test]
 fn a_macs_downloaded_size_is_the_materialised_copies_and_clear_evicts_each() {
-    use super::macos_downloaded::fake::Fake as Materialised;
+    use crate::engine_host::macos_downloaded::fake::Fake as Materialised;
     let fake = account();
     let system = Materialised::new(&[("mov", 367_000_000), ("doc", 2_000_000)]);
     let sent = Mutex::new(Vec::new());

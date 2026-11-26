@@ -32,9 +32,9 @@ pub(super) fn removable(items: &[Item], kept: &HashMap<String, (i64, bool)>) -> 
 
 /// The bytes of those copies, for "Downloaded files".
 pub(super) fn bytes_of(items: &[Item]) -> i64 {
-    items
-        .iter()
-        .fold(0_i64, |sum, item| sum.saturating_add(i64::try_from(item.bytes).unwrap_or(i64::MAX)))
+    items.iter().fold(0_i64, |sum, item| {
+        sum.saturating_add(i64::try_from(item.bytes).unwrap_or(i64::MAX))
+    })
 }
 
 /// The copies Clear… may remove right now, asked of the system and of the engine's kept set. `Err`: the system
@@ -76,7 +76,7 @@ struct System;
 
 #[cfg(all(target_os = "macos", not(test)))]
 mod bridge {
-    use crate::shell::platform::macos_fp::bridge::BeebeebFpErrorC;
+    use crate::shell::platform::macos::macos_fp::bridge::BeebeebFpErrorC;
     use std::ffi::{c_char, CString};
 
     unsafe extern "C" {
@@ -152,7 +152,13 @@ pub(super) mod fake {
     impl Fake {
         pub fn new(list: &[(&str, u64)]) -> Self {
             Fake {
-                list: list.iter().map(|(id, bytes)| Item { id: id.to_string(), bytes: *bytes }).collect(),
+                list: list
+                    .iter()
+                    .map(|(id, bytes)| Item {
+                        id: id.to_string(),
+                        bytes: *bytes,
+                    })
+                    .collect(),
                 evicted: Mutex::new(Vec::new()),
                 fail: Vec::new(),
             }
@@ -165,7 +171,11 @@ pub(super) mod fake {
         }
         fn evict(&self, id: &str) -> Result<(), String> {
             self.evicted.lock().unwrap().push(id.to_string());
-            if self.fail.iter().any(|f| f == id) { Err("no".into()) } else { Ok(()) }
+            if self.fail.iter().any(|f| f == id) {
+                Err("no".into())
+            } else {
+                Ok(())
+            }
         }
     }
 }
@@ -178,7 +188,10 @@ mod tests {
     #[test]
     fn downloaded_is_the_sum_of_the_materialised_copies_that_are_not_kept() {
         let fake = Fake::new(&[("a", 367_000_000), ("b", 1_000), ("kept", 5_000_000)]);
-        let kept = HashMap::from([("kept".to_string(), (5_000_000, true)), ("a".to_string(), (367_000_000, false))]);
+        let kept = HashMap::from([
+            ("kept".to_string(), (5_000_000, true)),
+            ("a".to_string(), (367_000_000, false)),
+        ]);
         let copies = removable(&fake.items().unwrap(), &kept);
         assert_eq!(copies.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
         assert_eq!(bytes_of(&copies), 367_001_000);
@@ -190,12 +203,28 @@ mod tests {
         fake.fail = vec!["b".into()];
         let items = fake.items().unwrap();
         assert_eq!(evict_all(&fake, &items), 1);
-        assert_eq!(*fake.evicted.lock().unwrap(), ["a", "b", "c"], "one failure stops nothing");
+        assert_eq!(
+            *fake.evicted.lock().unwrap(),
+            ["a", "b", "c"],
+            "one failure stops nothing"
+        );
     }
 
     #[test]
     fn the_bridge_list_reads_and_skips_what_it_cannot() {
         let got = parse("id-1\t367\nid-2\t0\nbroken\tx\n\n\t5\n");
-        assert_eq!(got, vec![Item { id: "id-1".into(), bytes: 367 }, Item { id: "id-2".into(), bytes: 0 }]);
+        assert_eq!(
+            got,
+            vec![
+                Item {
+                    id: "id-1".into(),
+                    bytes: 367
+                },
+                Item {
+                    id: "id-2".into(),
+                    bytes: 0
+                }
+            ]
+        );
     }
 }

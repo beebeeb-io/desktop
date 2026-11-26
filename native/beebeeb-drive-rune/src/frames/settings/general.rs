@@ -1,14 +1,14 @@
 //! General (DW-0701), with a new version available (DW-0781), and the Theme menu open (DW-0787).
 
-use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::Theme;
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::settings_shell as shell;
+use crate::State;
 use rune::El;
 
-use super::source::{Press, UPDATE_CAPTION, Update};
+use super::source::{Press, Update, UPDATE_CAPTION};
 use super::{Dialog, Intent, MenuKind, SettingsUi};
 use crate::ui::settings_dialog::{self as dialogs, Weight};
 
@@ -273,14 +273,26 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn no_settings_frame_says_a_windows_word_on_a_mac() {
-        let bad = ["Windows", "Explorer", "this PC", "This PC", " PC ", "Hello", "Start menu", "OneDrive"];
+        let bad = [
+            "Windows",
+            "Explorer",
+            "this PC",
+            "This PC",
+            " PC ",
+            "Hello",
+            "Start menu",
+            "OneDrive",
+        ];
         let mut found = Vec::new();
         for (id, _) in super::super::FRAMES {
             let mut state = crate::init();
             if !super::super::scene(id, &mut state) {
                 continue;
             }
-            let env = rune::Env { system_dark: false, scale: 2.0 };
+            let env = rune::Env {
+                system_dark: false,
+                scale: 2.0,
+            };
             let mut rt = rune::Runtime::new(state, crate::view, (958.0, 718.0), env);
             rt.frame(0.0);
             rt.frame(0.016);

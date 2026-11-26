@@ -2,20 +2,20 @@
 //! two limit dialogs (DW-0713 thumbnails and previews, DW-0714 downloaded files) and the
 //! question before downloaded copies are removed (DW-0780).
 
-use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::scale::space as sp;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::kit;
 use crate::ui::settings_controls::{self as controls, Emphasis};
-use crate::ui::settings_dialog::{self as dialogs, DIALOG_TITLE, Weight};
+use crate::ui::settings_dialog::{self as dialogs, Weight, DIALOG_TITLE};
 use crate::ui::settings_list::{self as lists, Item, Trailing};
 use crate::ui::settings_meter as meters;
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell::{self as shell, PANE_TITLE, SUB};
-use crate::ui::view_state::{ViewState, try_again, view_state};
+use crate::ui::view_state::{try_again, view_state, ViewState};
+use crate::State;
 use rune::tok::Family;
-use rune::{El, col, el, row};
+use rune::{col, el, row, El};
 
 use super::drive::{Control, Insights, Kept, KeptOnPc, UseKind};
 use super::{Dialog, SettingsUi};
@@ -219,9 +219,11 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             1,
             Some(concat!("On ", beebeeb_engine::device_word!())),
             pc,
-            Some(
-                concat!("Clearing only removes copies on ", beebeeb_engine::device_word!(), ". Your files stay safe in Beebeeb, and your file list is always kept."),
-            ),
+            Some(concat!(
+                "Clearing only removes copies on ",
+                beebeeb_engine::device_word!(),
+                ". Your files stay safe in Beebeeb, and your file list is always kept."
+            )),
             t,
         ),
     ];
@@ -299,7 +301,10 @@ pub fn free_up(ui: &SettingsUi, first: usize, t: &Theme) -> El {
             .on_press(|s: &mut State| {
                 s.settings.drive.clear(Kept::Downloaded);
                 s.settings.dialog = None;
-                s.settings.toast = Some(concat!("Downloaded copies removed from ", beebeeb_engine::device_word!()));
+                s.settings.toast = Some(concat!(
+                    "Downloaded copies removed from ",
+                    beebeeb_engine::device_word!()
+                ));
             }),
         dialogs::button(first + 1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
     ];
@@ -308,7 +313,11 @@ pub fn free_up(ui: &SettingsUi, first: usize, t: &Theme) -> El {
         380.0,
         notices::tile(0, Tone::Neutral, &ic::DOWNLOAD_TRAY, t),
         &format!("Free up {used}?"),
-        concat!("Downloaded copies are removed from ", beebeeb_engine::device_word!(), ". Your files stay in Beebeeb and download again when you open them. Available offline files stay."),
+        concat!(
+            "Downloaded copies are removed from ",
+            beebeeb_engine::device_word!(),
+            ". Your files stay in Beebeeb and download again when you open them. Available offline files stay."
+        ),
         foot,
         t,
     )
@@ -348,13 +357,17 @@ mod tests {
         let mut state = crate::init();
         assert!(crate::frames::settings::scene("DW-0712", &mut state));
         state.settings.drive = Box::new(BoardDrive::new());
-        let env = rune::Env { system_dark: false, scale: 2.0 };
+        let env = rune::Env {
+            system_dark: false,
+            scale: 2.0,
+        };
         let mut rt = rune::Runtime::new(state, crate::view, (958.0, 718.0), env);
         rt.frame(0.0);
         rt.frame(0.016);
         let said: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
         assert!(said.iter().any(|t| t == "Clear…"), "{said:?}");
-        assert!(!said.iter().any(|t| t == "Change limit"), "{said:?}");
+        // Only the previews row has one.
+        assert_eq!(said.iter().filter(|t| *t == "Change limit").count(), 1, "{said:?}");
     }
 
     fn keys_with(insights: crate::frames::settings::drive::Insights) -> Vec<String> {
