@@ -627,9 +627,9 @@ fn a_kind_with_no_preview_never_opens_the_viewer_from_a_list_and_its_route_says_
     w.settle();
     assert_eq!(w.route_item().as_deref(), Some(PLAN));
     let drawn = w.drawn();
-    assert!(drawn.contains("No preview for this kind of file yet"), "{drawn}");
+    assert!(drawn.contains("Beebeeb can\u{2019}t show this kind of file here"), "{drawn}");
     // "Save a copy…" has nowhere to go on this source: it is not drawn (never a button that only says "not built").
-    assert!(drawn.contains("Open in another app\u{2026}") && !drawn.contains("Save a copy"));
+    assert!(drawn.contains("Open with another app\u{2026}") && !drawn.contains("Save a copy"));
     assert!(!drawn.contains(&format!(concat!(
         "Decrypting {NOTE_NAME} on ",
         beebeeb_engine::device_word!()

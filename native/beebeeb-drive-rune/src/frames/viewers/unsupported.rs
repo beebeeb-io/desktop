@@ -47,6 +47,7 @@ impl UnsupportedReason {
 
 /// Shows `file_ref` (its id and name stay) as the unsupported page for `reason`: whatever it held is wiped first.
 /// Another module (the office viewer, when its helper cannot run) calls this in place of an error.
+#[allow(dead_code)] // the office viewer (task 64) calls it
 pub fn open_unsupported(file_ref: &mut OpenFile, reason: UnsupportedReason) {
     file_ref.wipe();
     file_ref.body = Body::NotPreviewable(reason.preview());
@@ -83,7 +84,7 @@ fn ext_of(name: &str) -> Option<&str> {
 }
 
 /// The page.
-pub(super) fn page(file: &OpenFile, _reason: UnsupportedReason, origin: Origin, t: &Theme) -> El {
+pub(super) fn page(file: &OpenFile, _reason: UnsupportedReason, copies: bool, origin: Origin, t: &Theme) -> El {
     let default_app =
         ext_of(&file.name).and_then(|ext| crate::engine_host::open_with_apps::default_app_name(ext, || {}));
     let body = format!("{} {} {}", file.facts, SENTENCE, local_state(origin));
@@ -94,7 +95,7 @@ pub(super) fn page(file: &OpenFile, _reason: UnsupportedReason, origin: Origin, 
             }
         }
     };
-    let buttons = vec![
+    let mut buttons = vec![
         button(
             keys("state-btn-0"),
             &open_label(default_app.as_deref()),
@@ -126,6 +127,21 @@ pub(super) fn page(file: &OpenFile, _reason: UnsupportedReason, origin: Origin, 
         )
         .on_press(press(Intent::ShowInFolder)),
     ];
+    // "Save a copy…" only where there is somewhere to save to (never a button that only says "not built").
+    if copies {
+        buttons.push(
+            button(
+                keys("state-btn-3"),
+                "Save a copy\u{2026}",
+                None,
+                Variant::Ghost,
+                Size::Md,
+                ButtonState::Enabled,
+                t,
+            )
+            .on_press(press(Intent::SaveCopy)),
+        );
+    }
     super::states::empty_view(&icons::INFO, &file.name, body.trim(), buttons, t)
 }
 

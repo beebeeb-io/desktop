@@ -433,7 +433,7 @@ fn stopped(why: Stopped, t: &Theme) -> El {
 fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin, t: &Theme) -> El {
     // The kinds this app cannot show get the one calm page (`unsupported`), with the three ways out.
     if let Some(reason) = super::unsupported::UnsupportedReason::of(why) {
-        return super::unsupported::page(file, reason, origin, t);
+        return super::unsupported::page(file, reason, copies, origin, t);
     }
     // What happened to the bytes before this app looked at them: decrypted, or read from the copy on this PC.
     let it_was = if was_decrypted(origin) {

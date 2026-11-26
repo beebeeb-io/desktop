@@ -452,12 +452,52 @@ fn save_a_copy_is_drawn_only_where_it_has_somewhere_to_go() {
     };
     let with = buttons(false);
     assert!(
-        with.contains("Open in another app\u{2026}") && with.contains("Save a copy\u{2026}"),
+        with.contains("Open with another app\u{2026}") && with.contains("Save a copy\u{2026}"),
         "{with}"
     );
     let without = buttons(true);
-    assert!(without.contains("Open in another app\u{2026}"), "{without}");
+    assert!(without.contains("Open with another app\u{2026}"), "{without}");
     assert!(!without.contains("Save a copy"), "{without}");
+}
+
+#[test]
+fn an_unsupported_file_and_a_player_refusal_get_the_page_with_three_buttons_and_a_failed_download_keeps_try_again() {
+    for why in [
+        NoPreview::NoViewer,
+        NoPreview::PlayerRefused,
+        NoPreview::OfficeUnavailable,
+    ] {
+        let (mut rt, _script) = window(Script {
+            answers: VecDeque::from([Ok(Body::NotPreviewable(why))]),
+            ..Script::default()
+        });
+        route_to_file(&mut rt);
+        let page = drawn(&rt);
+        assert!(
+            page.contains("Beebeeb can\u{2019}t show this kind of file here"),
+            "{page}"
+        );
+        assert!(
+            page.contains("Open with default app") || page.contains("Open with "),
+            "{page}"
+        );
+        assert!(page.contains("Open with another app\u{2026}"), "{page}");
+        assert!(page.contains(&super::unsupported::show_label()), "{page}");
+        assert!(
+            !page.contains("Try again") && !page.contains("Couldn\u{2019}t"),
+            "{page}"
+        );
+    }
+    let (mut rt, _script) = window(Script {
+        answers: VecDeque::from([Ok(Body::Failed)]),
+        ..Script::default()
+    });
+    route_to_file(&mut rt);
+    let failed = drawn(&rt);
+    assert!(
+        failed.contains("Try again") && !failed.contains("Open with another app"),
+        "{failed}"
+    );
 }
 
 #[test]
@@ -525,7 +565,10 @@ fn a_text_a_source_cannot_save_does_not_name_the_edit_key() {
     assert!(hint(false).contains(&beebeeb_engine::os_words::for_this_os("Ctrl+E to edit")));
     let read_only = hint(true);
     assert!(read_only.contains(text::READ_ONLY_HINT), "{read_only}");
-    assert!(!read_only.contains(&beebeeb_engine::os_words::for_this_os("Ctrl+E to edit")), "{read_only}");
+    assert!(
+        !read_only.contains(&beebeeb_engine::os_words::for_this_os("Ctrl+E to edit")),
+        "{read_only}"
+    );
 }
 
 #[test]
