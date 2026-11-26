@@ -90,7 +90,7 @@ rel() {
   [[ -n "${PRE:-}" ]] && eval "$PRE"
   LOG="$T/$name.log"; : >"$LOG"; : >"$T/key"
   OUT="$(cd "$R" && env PATH="$FB:$PATH" FAKE_LOG="$LOG" HOME="$T/home" CARGO_TARGET_DIR="$T/$name.tgt" \
-    BB_RELEASE_WORK="$T/$name.work" APPLE_SIGNING_IDENTITY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+    BB_RELEASE_WORK="$T/$name.work" APPLE_SIGNING_IDENTITY=FAKE_SIGNING_IDENTITY_FIXTURE \
     MACOS_APP_PROVISION_PROFILE="$T/key" MACOS_FILE_PROVIDER_PROVISION_PROFILE="$T/key" BB_NOTARY_KEY_PATH="$T/key" \
     BB_NOTARY_KEY_ID=K BB_NOTARY_ISSUER=I BB_POLL_INTERVAL=0 TAURI_SIGNING_PRIVATE_KEY=secret "${envs[@]}" \
     scripts/macos/release-macos-local.sh "${ARGS[@]}" 2>&1)"; RC=$?
