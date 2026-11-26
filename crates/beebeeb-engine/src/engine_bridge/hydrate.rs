@@ -1577,6 +1577,146 @@ mod refetch_streaming_tests {
         assert_eq!(std::fs::read(&again).unwrap(), plain);
     }
 
+    /// Dm-71: a keep on a Mac is ONE download and ONE copy. The pin queues no fetch of the engine's own (nothing comes
+    /// down, nothing lands in the hidden state folder); the system's fetch (the File Provider's, for Finder's copy) is
+    /// the download: every chunk once, its progress on the transfer board the Available offline row reads, to the
+    /// whole size, and the row then reads `local` ("On this Mac").
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_keep_on_a_mac_is_one_download_by_the_finder_fetch_and_leaves_no_hidden_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("state-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let plain = content(6 * STRIDE + 321);
+        let server = serve(&plain, true);
+        let bridge = bridge(dir.path(), &server);
+        seed_cloud_only(&bridge, plain.len());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // The keep: pinned, and nothing queued for the engine to fetch.
+        system_fetch_for_test(true);
+        let pinned = bridge.set_recursive_pin(&sync_root, ID, true);
+        system_fetch_for_test(false);
+        assert_eq!(pinned.unwrap().hydrate_operations, 0);
+        rt.block_on(bridge.process_due_operations(&sync_root, now_secs())).unwrap();
+        assert_eq!(
+            server.chunk_requests.lock().unwrap().len(),
+            0,
+            "the engine downloads nothing itself"
+        );
+        assert!(!sync_root.join("big.bin").exists(), "no hidden copy");
+        assert_eq!(bridge.db.get_file(ID).unwrap().unwrap().status, FileStatus::CloudOnly);
+
+        // The system's fetch of the kept item: the one download.
+        let staging = dir.path().join("hydrate-cache");
+        std::fs::create_dir_all(&staging).unwrap();
+        let dest = staging.join("big.bin");
+        let said = Mutex::new(Vec::new());
+        let on_board = Mutex::new(Vec::new());
+        let progress = |done: u64, total: u64| {
+            said.lock().unwrap().push((done, total));
+            on_board.lock().unwrap().push(bridge.transfers.get(ID).map(|t| t.total));
+        };
+        let source = rt
+            .block_on(bridge.serve_hydrate(ID, &dest, &[staging.as_path()], Some(&progress)))
+            .unwrap();
+        assert_eq!(source, HydrateSource::Server);
+        assert_eq!(
+            server.chunk_requests.lock().unwrap().len(),
+            7,
+            "one download: every chunk once"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), plain);
+        let whole = plain.len() as u64;
+        assert_eq!(
+            said.lock().unwrap().last(),
+            Some(&(whole, whole)),
+            "progress reaches 100%"
+        );
+        let on_board = on_board.lock().unwrap();
+        assert!(
+            !on_board.is_empty() && on_board.iter().all(|row| *row == Some(whole)),
+            "the fetch is on the transfer board while it runs: {on_board:?}"
+        );
+        assert_eq!(bridge.db.get_file(ID).unwrap().unwrap().status, FileStatus::Local);
+        assert!(
+            !sync_root.join("big.bin").exists(),
+            "one copy: the system's, none in the state folder"
+        );
+    }
+
+    /// Dm-71: one download in flight per file. A Finder fetch that starts while the keep's fetch of the same file
+    /// runs asks the server for no chunk: it waits, hears the progress and copies the finished file.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_finder_fetch_started_mid_keep_reuses_the_one_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = content(6 * STRIDE + 321);
+        let server = serve(&plain, true);
+        let bridge = bridge(dir.path(), &server);
+        seed_cloud_only(&bridge, plain.len());
+        let staging = dir.path().join("hydrate-cache");
+        std::fs::create_dir_all(&staging).unwrap();
+        let (keep, finder) = (staging.join("keep.bin"), staging.join("finder.bin"));
+        let roots = [staging.as_path()];
+        let heard = Mutex::new(Vec::new());
+        let progress = |done: u64, total: u64| heard.lock().unwrap().push((done, total));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Polled in this order: the keep's fetch leads before the second one looks.
+        let (first, second) = rt.block_on(async {
+            tokio::join!(
+                bridge.serve_hydrate(ID, &keep, &roots, None),
+                bridge.serve_hydrate(ID, &finder, &roots, Some(&progress)),
+            )
+        });
+        assert_eq!(
+            (first.unwrap(), second.unwrap()),
+            (HydrateSource::Server, HydrateSource::Copy)
+        );
+        assert_eq!(server.chunk_requests.lock().unwrap().len(), 7, "0 extra chunk requests");
+        assert_eq!(std::fs::read(&keep).unwrap(), plain);
+        assert_eq!(std::fs::read(&finder).unwrap(), plain);
+        let whole = plain.len() as u64;
+        assert_eq!(heard.lock().unwrap().last(), Some(&(whole, whole)));
+        assert_eq!(bridge.db.get_file(ID).unwrap().unwrap().status, FileStatus::Local);
+
+        // Nothing is left in flight: the next fetch leads again and downloads.
+        let again = staging.join("again.bin");
+        let source = rt.block_on(bridge.serve_hydrate(ID, &again, &roots, None)).unwrap();
+        assert_eq!(source, HydrateSource::Server);
+        assert_eq!(server.chunk_requests.lock().unwrap().len(), 14);
+    }
+
+    /// Dm-71: a leader that fails leaves nothing in flight, and the fetch behind it does not wait for ever: it starts
+    /// over and answers for itself.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_finder_fetch_behind_one_that_fails_starts_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = content(2 * STRIDE);
+        let server = serve(&plain, true);
+        let bridge = bridge(dir.path(), &server);
+        seed_cloud_only(&bridge, plain.len());
+        let staging = dir.path().join("hydrate-cache");
+        std::fs::create_dir_all(&staging).unwrap();
+        // The leader's destination cannot be written: a folder is in its place.
+        let blocked = staging.join("blocked.bin");
+        std::fs::create_dir_all(blocked.join("in-the-way")).unwrap();
+        let behind = staging.join("behind.bin");
+        let roots = [staging.as_path()];
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (first, second) = rt.block_on(async {
+            tokio::join!(
+                bridge.serve_hydrate(ID, &blocked, &roots, None),
+                bridge.serve_hydrate(ID, &behind, &roots, None),
+            )
+        });
+        assert!(first.is_err());
+        assert_eq!(second.unwrap(), HydrateSource::Server);
+        assert_eq!(std::fs::read(&behind).unwrap(), plain);
+    }
+
     /// A placeholder whose size is not the file's: nothing is handed over, the real size comes back,
     /// and a pinned file costs no chunk download at all.
     #[test]

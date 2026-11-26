@@ -953,3 +953,172 @@ pub(super) fn modify_base_version(
     }
     parse_base_version_number(version_identifier)
 }
+
+/// Dm-71: on a Mac a kept file's bytes come down ONCE, by the system's own fetch (the File Provider's, for the item
+/// whose content policy says keep downloaded). The pin then queues no fetch of the engine's own into the state
+/// folder: that was a second copy on disk (a kept 367 MB file took 734 MB) and, when the two overlapped, a second
+/// download. Windows pins through Cloud Files; Linux keeps the queued fetch. A test build keeps the queued fetch on
+/// every OS unless the test asks for the Mac rule ([`system_fetch_for_test`]), so the suites read the same everywhere.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub(super) fn kept_bytes_come_by_the_systems_fetch() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        SYSTEM_FETCH_FOR_TEST.with(|on| on.get())
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        cfg!(target_os = "macos")
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static SYSTEM_FETCH_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A test's pin changes on this thread follow the Mac rule (`on`) or the queued fetch.
+#[cfg(test)]
+pub(super) fn system_fetch_for_test(on: bool) {
+    SYSTEM_FETCH_FOR_TEST.with(|cell| cell.set(on));
+}
+
+pub(super) use one_fetch::FinderFetch;
+
+/// Dm-71: one download in flight per file, for the Finder fetches (a Mac's; compiled and tested everywhere).
+#[cfg_attr(not(any(target_os = "macos", any(test, feature = "test-support"))), allow(dead_code))]
+mod one_fetch {
+    use super::*;
+
+    /// What a fetch that leads hands each one that waited: where its finished copy is, and the word back that the
+    /// waiter is done with it (dropped when it is).
+    type FetchHandover = (PathBuf, tokio::sync::oneshot::Sender<()>);
+
+    struct FetchInFlight {
+        progress: Arc<tokio::sync::watch::Sender<(u64, u64)>>,
+        waiting: Vec<tokio::sync::oneshot::Sender<FetchHandover>>,
+    }
+
+    /// Dm-71: the Finder fetches running now, one per file of one state database (the key's number is that database's
+    /// address: several bridges work on one).
+    static FETCHES_IN_FLIGHT: std::sync::Mutex<Option<HashMap<(usize, String), FetchInFlight>>> =
+        std::sync::Mutex::new(None);
+
+    fn fetches<T>(with: impl FnOnce(&mut HashMap<(usize, String), FetchInFlight>) -> T) -> T {
+        let mut held = FETCHES_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        with(held.get_or_insert_with(HashMap::new))
+    }
+
+    /// Dm-71: one download in flight per file. The first Finder fetch of a file leads and downloads; one that starts
+    /// while it runs follows: it asks the server for nothing, hears the leader's progress and copies the leader's
+    /// finished file.
+    pub(in crate::engine_bridge) enum FinderFetch {
+        Lead(FetchLead),
+        Follow(FetchFollow),
+    }
+
+    impl FinderFetch {
+        pub(in crate::engine_bridge) fn join(db: &Arc<StateDb>, file_id: &str) -> Self {
+            let key = (Arc::as_ptr(db) as usize, file_id.to_string());
+            fetches(|map| match map.get_mut(&key) {
+                Some(running) => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    running.waiting.push(tx);
+                    FinderFetch::Follow(FetchFollow {
+                        handover: rx,
+                        progress: running.progress.subscribe(),
+                    })
+                }
+                None => {
+                    let progress = Arc::new(tokio::sync::watch::channel((0, 0)).0);
+                    map.insert(
+                        key.clone(),
+                        FetchInFlight {
+                            progress: progress.clone(),
+                            waiting: Vec::new(),
+                        },
+                    );
+                    FinderFetch::Lead(FetchLead { key, progress })
+                }
+            })
+        }
+    }
+
+    /// The fetch that downloads. Dropped without [`Self::hand_over`] (it failed, or its caller went away): the ones
+    /// waiting hear nothing was left for them and start over, one of them as the next leader.
+    pub(in crate::engine_bridge) struct FetchLead {
+        key: (usize, String),
+        progress: Arc<tokio::sync::watch::Sender<(u64, u64)>>,
+    }
+
+    impl FetchLead {
+        /// The leader's progress, for the ones waiting.
+        pub(in crate::engine_bridge) fn report(&self, done: u64, total: u64) {
+            let _ = self.progress.send((done, total));
+        }
+
+        /// The download is whole at `copy`: every fetch that waited copies it, and this returns once each is done with
+        /// it (the leader's caller removes the file right after). One that joins meanwhile is handed it too.
+        pub(in crate::engine_bridge) async fn hand_over(self, copy: &Path) {
+            loop {
+                let next = fetches(|map| {
+                    let waiter = map.get_mut(&self.key).and_then(|running| running.waiting.pop());
+                    if waiter.is_none() {
+                        map.remove(&self.key);
+                    }
+                    waiter
+                });
+                let Some(waiter) = next else { break };
+                let (done, finished) = tokio::sync::oneshot::channel();
+                if waiter.send((copy.to_path_buf(), done)).is_ok() {
+                    let _ = finished.await;
+                }
+            }
+        }
+    }
+
+    impl Drop for FetchLead {
+        fn drop(&mut self) {
+            // After `hand_over` the entry is gone already; a later leader's entry (same key) is never this one's.
+            fetches(|map| {
+                if map
+                    .get(&self.key)
+                    .is_some_and(|running| Arc::ptr_eq(&running.progress, &self.progress))
+                {
+                    map.remove(&self.key);
+                }
+            });
+        }
+    }
+
+    /// A fetch that waits for the leader's download of the same file.
+    pub(in crate::engine_bridge) struct FetchFollow {
+        handover: tokio::sync::oneshot::Receiver<FetchHandover>,
+        progress: tokio::sync::watch::Receiver<(u64, u64)>,
+    }
+
+    impl FetchFollow {
+        /// Wait for the leader, passing its progress on. `None`: it left nothing (failed or cancelled).
+        pub(in crate::engine_bridge) async fn wait(
+            mut self,
+            progress: Option<&HydrateProgressFn>,
+        ) -> Option<FetchHandover> {
+            loop {
+                tokio::select! {
+                    biased;
+                    handed = &mut self.handover => return handed.ok(),
+                    changed = self.progress.changed() => {
+                        if changed.is_err() {
+                            return self.handover.await.ok();
+                        }
+                        let (done, total) = *self.progress.borrow_and_update();
+                        if let (Some(progress), true) = (progress, total > 0) {
+                            progress(done, total);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

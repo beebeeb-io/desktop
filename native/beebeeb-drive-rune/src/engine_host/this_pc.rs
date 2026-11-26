@@ -124,6 +124,28 @@ pub const SETTLED_KEPT_BOTH: &str = concat!(beebeeb_engine::device_word_cap!(), 
 pub const SETTLED_SENT_AGAIN: &str = concat!(beebeeb_engine::device_word_cap!(), "'s version is queued to be sent.");
 pub const SETTLED_REMOVED: &str = "Removed from the list. The file on Beebeeb is as it was.";
 
+/// Dm-71: keep offline on a Mac goes through the File Provider only. The pin (the engine's, which on a Mac queues no
+/// fetch of its own) makes the item's content policy "keep downloaded"; this asks the system to fetch it now, by the
+/// bridge's pin call. The extension's fetch is the one download and the one copy on disk.
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_keep {
+    use crate::shell::platform::macos::macos_fp::bridge::BeebeebFpErrorC;
+    use std::ffi::{c_char, CString};
+
+    unsafe extern "C" {
+        fn beebeeb_fp_request_download(identifier: *const c_char, out_error: *mut BeebeebFpErrorC) -> i32;
+    }
+
+    /// `false`: the system refused or did not answer (a folder is one it may refuse: its files are fetched by
+    /// their own content policy). Waits up to ten seconds: a worker's.
+    pub(super) fn ask_for_download(id: &str) -> bool {
+        let Ok(id) = CString::new(id) else { return false };
+        let mut error = BeebeebFpErrorC::zeroed();
+        // SAFETY: `id` is a NUL-terminated string that outlives the call, and `error` is the bridge's own struct.
+        unsafe { beebeeb_fp_request_download(id.as_ptr(), &mut error) == 0 }
+    }
+}
+
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is a state database in a folder of
 /// its own.
 pub trait ThisPcEngine: Send + Sync + 'static {
@@ -457,6 +479,11 @@ fn run<E: ThisPcEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
         },
         Ask::Keep(id) => {
             let kept = engine.syncing() && owns_state(engine, &whose) && engine.set_kept_for(whose.session, &id, true).is_ok();
+            // Dm-71: on a Mac the kept bytes come by the system's one fetch; it is asked for it now.
+            #[cfg(all(target_os = "macos", not(test)))]
+            if kept && !macos_keep::ask_for_download(&id) {
+                log("this pc: the system was not asked for a kept item's download (it fetches it at its next look)");
+            }
             (!kept).then_some(NOT_KEPT_AGAIN)
         }
         Ask::Release(ids) => {
