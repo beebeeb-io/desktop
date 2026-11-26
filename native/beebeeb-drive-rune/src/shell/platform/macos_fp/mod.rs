@@ -13,11 +13,16 @@ pub(crate) mod removal;
 use beebeeb_engine::file_provider_port::{FileProviderPort, WorkingSetSignalOutcome};
 use beebeeb_engine::finder_setup::error::FpError;
 
-/// The engine's port over the bridge: one working-set signal, through the one bridge gate.
+/// The engine's port over the bridge: one working-set signal, through the one bridge gate, and (dm-72) the read of
+/// Finder's copy of an item.
 pub struct FileProviderBridgePort;
 
 impl FileProviderPort for FileProviderBridgePort {
     fn signal_working_set(&self) -> Result<WorkingSetSignalOutcome, FpError> {
         bridge::signal_working_set()
+    }
+
+    fn with_finder_copy(&self, item_id: &str, read: &mut dyn FnMut(&std::path::Path)) -> bool {
+        bridge::with_finder_copy(item_id, read)
     }
 }

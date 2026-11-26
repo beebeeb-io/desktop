@@ -23,6 +23,16 @@ pub trait FileProviderPort: Send + Sync + 'static {
     /// Signal the replica's working set, through the one bridge gate. A busy gate answers at once with the error
     /// [`is_gate_busy`] recognises; any other error is the OS failing. Never blocks on a gate another call holds.
     fn signal_working_set(&self) -> Result<WorkingSetSignalOutcome, FpError>;
+
+    /// Dm-72: Finder's own copy of the item `item_id` (the system's place for it in the File Provider domain).
+    /// `read` is called once with its path, and only for the length of that call may the app read there (the
+    /// security scope of the URL the system returned is held around it). `false`: the system named no place (the
+    /// item is not in Finder, the gate was busy, the call failed) and `read` was not called. The path may be a
+    /// file without its bytes (online only): the caller asks its attributes before it opens it.
+    fn with_finder_copy(&self, item_id: &str, read: &mut dyn FnMut(&std::path::Path)) -> bool {
+        let _ = (item_id, read);
+        false
+    }
 }
 
 /// Pure decision core for the runner's signal path: an operation batch that
@@ -71,6 +81,88 @@ pub(crate) fn signal_working_set() -> Result<WorkingSetSignalOutcome, FpError> {
             "no File Provider port is installed",
         )),
     }
+}
+
+/// Dm-72: whether a file's copy on this computer is Finder's (the File Provider's materialised item), not a file
+/// in the engine's own folder: a Mac. A test build says so only inside [`with_finder_copies`], so the suites read
+/// the same on every OS.
+pub(crate) fn local_copies_are_finders() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        FINDER_COPIES_FOR_TEST.with(|on| on.get())
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        cfg!(target_os = "macos")
+    }
+}
+
+/// Dm-72: [`FileProviderPort::with_finder_copy`] through the installed port. No port installed: `false`.
+pub(crate) fn with_finder_copy(item_id: &str, read: &mut dyn FnMut(&std::path::Path)) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(port) = TEST_PORT.with(|port| port.borrow().clone()) {
+        return port.with_finder_copy(item_id, read);
+    }
+    let port = PORT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    port.is_some_and(|port| port.with_finder_copy(item_id, read))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static FINDER_COPIES_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A Mac's File Provider for a test: Finder's copies by item id, and a count of the working-set signals.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+pub struct FinderCopiesPort {
+    copies: Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
+    signals: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FinderCopiesPort {
+    /// Finder holds `item_id` at `path` (a file with or without its bytes).
+    pub fn put(&self, item_id: &str, path: &std::path::Path) {
+        let mut copies = self.copies.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        copies.insert(item_id.to_string(), path.to_path_buf());
+    }
+
+    pub fn signals(&self) -> usize {
+        self.signals.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FileProviderPort for FinderCopiesPort {
+    fn signal_working_set(&self) -> Result<WorkingSetSignalOutcome, FpError> {
+        self.signals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(WorkingSetSignalOutcome::Delivered)
+    }
+
+    fn with_finder_copy(&self, item_id: &str, read: &mut dyn FnMut(&std::path::Path)) -> bool {
+        let copies = self.copies.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(path) = copies.get(item_id).cloned() else {
+            return false;
+        };
+        drop(copies);
+        read(&path);
+        true
+    }
+}
+
+/// Run `f` as on a Mac (tests only): this thread's File Provider is `port`, and a file's copy on this computer is
+/// the one Finder holds there.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_finder_copies<T>(port: Arc<FinderCopiesPort>, f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FINDER_COPIES_FOR_TEST.with(|on| on.set(self.0));
+        }
+    }
+    let _restore = Restore(FINDER_COPIES_FOR_TEST.with(|on| on.replace(true)));
+    with_port(port, f)
 }
 
 /// A port whose gate is always busy and that counts how often it was asked (tests only).

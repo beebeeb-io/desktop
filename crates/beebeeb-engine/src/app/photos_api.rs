@@ -376,7 +376,14 @@ impl<C: CredentialStores> Engine<C> {
         else {
             return Ok(None);
         };
-        let facts = facts_of_copy(&sync_root, &entry.path, true);
+        // Dm-72: on a Mac the copy is Finder's; one in the engine's own folder (kept before dm-71) is read as before.
+        let mut facts = None;
+        if crate::file_provider_port::local_copies_are_finders() {
+            crate::file_provider_port::with_finder_copy(file_id, &mut |path| facts = Some(facts_of_path(path, true)));
+        }
+        let facts = facts
+            .filter(|facts| facts.duration_seconds.is_some())
+            .unwrap_or_else(|| facts_of_copy(&sync_root, &entry.path, true));
         // Handed over only for the session it was read for.
         state.still_this_session()?;
         Ok(facts.duration_seconds)
@@ -404,6 +411,28 @@ impl<C: CredentialStores> Engine<C> {
         if !mime_for_name(&leaf_name(&entry)).is_some_and(|mime| mime.starts_with("image/")) {
             return Ok(None);
         }
+        // Dm-72: on a Mac the copy of a file kept there is Finder's (the File Provider's materialised item); the
+        // engine's own folder holds none since dm-71. It is the picture's copy while its every byte is on disk (an
+        // online-only item is a file without them: asked from its attributes, never opened) and it is the version the
+        // local state holds (after a newer version came in, Finder's copy is the older one until the system has
+        // fetched it again). Otherwise the engine's own folder is asked, as everywhere (a file kept before dm-71).
+        if crate::file_provider_port::local_copies_are_finders() {
+            let behind = state
+                .with(|db| super::viewer_api::copy_is_behind(db, file_id))?
+                .unwrap_or(true);
+            let mut fits = false;
+            if !behind {
+                crate::file_provider_port::with_finder_copy(file_id, &mut |path| fits = copy_fits(path, max_bytes));
+            }
+            if fits {
+                state.still_this_session()?;
+                return Ok(Some(LocalPicture {
+                    version: entry.remote_updated_at.max(0),
+                    at: CopyAt::Finder(file_id.to_string()),
+                    max_bytes,
+                }));
+            }
+        }
         let Some(sync_root) = crate::config::DesktopConfig::load_for(self.identity)
             .ok()
             .and_then(|config| config.sync_root)
@@ -413,18 +442,13 @@ impl<C: CredentialStores> Engine<C> {
         let Ok(path) = local_file_path_under_sync_root(&sync_root, &entry.path) else {
             return Ok(None);
         };
-        // Only a copy that is wholly here: opening a placeholder on Windows would start a download.
-        if !copy_is_wholly_here(&path) {
-            return Ok(None);
-        }
-        let fits = std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 0 && metadata.len() <= max_bytes);
-        if !fits {
+        if !copy_fits(&path, max_bytes) {
             return Ok(None);
         }
         state.still_this_session()?;
         Ok(Some(LocalPicture {
             version: entry.remote_updated_at.max(0),
-            path,
+            at: CopyAt::Path(path),
             max_bytes,
         }))
     }
@@ -443,23 +467,52 @@ impl<C: CredentialStores> Engine<C> {
 pub struct LocalPicture {
     /// The version the copy was last in step with the account at (a thumbnail made of it is kept under this).
     pub version: i64,
-    path: std::path::PathBuf,
+    at: CopyAt,
     max_bytes: u64,
+}
+
+/// Where a picture's copy is: a file in the engine's own folder, or (a Mac, dm-72) Finder's copy of the item, whose
+/// place is asked of the system again at every read.
+enum CopyAt {
+    Path(std::path::PathBuf),
+    Finder(String),
 }
 
 impl LocalPicture {
     /// BLOCKS (the disk): the copy's bytes. `None`: it went away, was freed meanwhile, grew past the limit or
     /// cannot be read. Never downloads.
     pub fn read(&self) -> Option<Zeroizing<Vec<u8>>> {
-        if !copy_is_wholly_here(&self.path) {
-            return None;
+        match &self.at {
+            CopyAt::Path(path) => read_copy(path, self.max_bytes),
+            CopyAt::Finder(file_id) => {
+                let mut bytes = None;
+                crate::file_provider_port::with_finder_copy(file_id, &mut |path| {
+                    bytes = read_copy(path, self.max_bytes)
+                });
+                bytes
+            }
         }
-        let mut bytes = Zeroizing::new(Vec::new());
-        std::fs::File::open(&self.path)
-            .and_then(|file| file.take(self.max_bytes + 1).read_to_end(&mut bytes))
-            .ok()?;
-        (!bytes.is_empty() && bytes.len() as u64 <= self.max_bytes).then_some(bytes)
     }
+}
+
+/// Whether the copy at `path` is wholly here (opening a placeholder on Windows, or an online-only item on a Mac,
+/// would start a download) and holds between one byte and `max_bytes`. Asked from its attributes alone.
+fn copy_fits(path: &std::path::Path, max_bytes: u64) -> bool {
+    copy_is_wholly_here(path)
+        && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0 && metadata.len() <= max_bytes)
+}
+
+/// BLOCKS (the disk): the bytes of the copy at `path`, at most `max_bytes`. `None`: not wholly here, gone, grown
+/// past the limit, empty or unreadable.
+fn read_copy(path: &std::path::Path, max_bytes: u64) -> Option<Zeroizing<Vec<u8>>> {
+    if !copy_is_wholly_here(path) {
+        return None;
+    }
+    let mut bytes = Zeroizing::new(Vec::new());
+    std::fs::File::open(path)
+        .and_then(|file| file.take(max_bytes + 1).read_to_end(&mut bytes))
+        .ok()?;
+    (!bytes.is_empty() && bytes.len() as u64 <= max_bytes).then_some(bytes)
 }
 
 /// What the head of the copy at `rel_path` under `sync_root` says. Nothing for a path that leaves the folder or a
@@ -468,9 +521,14 @@ fn facts_of_copy(sync_root: &std::path::Path, rel_path: &str, video: bool) -> Ph
     let Ok(path) = local_file_path_under_sync_root(sync_root, rel_path) else {
         return PhotoMeta::default();
     };
+    facts_of_path(&path, video)
+}
+
+/// What the head of the copy at `path` says. Nothing for a file that cannot be read.
+fn facts_of_path(path: &std::path::Path, video: bool) -> PhotoMeta {
     // A video's length is read only from a copy that is wholly on this PC (the rule of the viewer's read): a freed
     // copy stays "Local" in the state for a while, and opening a placeholder on Windows starts a download.
-    if video && !copy_is_wholly_here(&path) {
+    if video && !copy_is_wholly_here(path) {
         return PhotoMeta::default();
     }
     let mut head = Zeroizing::new(Vec::new());

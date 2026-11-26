@@ -600,7 +600,9 @@ impl<C: CredentialStores> Engine<C> {
             | FileStatus::Error
             | FileStatus::Trashing => return Ok(None),
         };
-        let length = match self.open_local_copy_in_memory(file_id, 0, &AtomicBool::new(false)) {
+        // The copy in the engine's own folder only (dm-72): the stream reads by its place there, so Finder's copy on
+        // a Mac is not this one, and a file kept there streams from Beebeeb as before.
+        let length = match self.open_own_folder_copy_in_memory(file_id, 0, &AtomicBool::new(false)) {
             Err(OpenFileError::TooLarge { size }) => size,
             Ok(LocalCopy::Opened(copy)) => copy.bytes.len() as u64,
             Ok(LocalCopy::NotHere | LocalCopy::Behind) => return Ok(None),

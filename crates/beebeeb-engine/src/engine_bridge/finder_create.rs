@@ -507,8 +507,7 @@ impl EngineBridge {
         }
         // The one download. Its progress goes to the caller and (inside the hydrate) to the transfer board, which the
         // Available offline row and a fetch waiting behind this one read; its end makes the row `Local`.
-        self.hydrate_file_with_progress(&file_id, dest, allowed_roots, progress)
-            .await?;
+        self.hydrate_for_finder(&file_id, dest, allowed_roots, progress).await?;
         lead.hand_over(dest).await;
         log_hydrate_served(&file_id, HydrateSource::Server);
         Ok(HydrateSource::Server)

@@ -77,6 +77,8 @@ unsafe extern "C" {
         out_error: *mut BeebeebFpErrorC,
     ) -> i32;
     fn beebeeb_release_url_handle(handle: *mut c_void);
+    fn beebeeb_fp_begin_item_access(handle: *mut c_void, path_buffer: *mut c_char, path_buffer_len: usize) -> i32;
+    fn beebeeb_fp_end_item_access(handle: *mut c_void);
     fn beebeeb_fp_domain_user_enabled(out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_fp_add_domain(out_error: *mut BeebeebFpErrorC) -> i32;
     fn beebeeb_fp_wait_for_domain_ready(timeout_seconds: f64, out_error: *mut BeebeebFpErrorC) -> i32;
@@ -205,6 +207,46 @@ pub(crate) fn resolve_item(item_id: &str) -> Result<Option<UrlHandle>, FpError> 
     let mut out = BeebeebFpErrorC::zeroed();
     let code = unsafe { beebeeb_fp_resolve_item(identifier.as_ptr(), &mut handle, &mut out) };
     decode_resolve("beebeeb_fp_resolve_item", code, UrlHandle::from_raw(handle), out)
+}
+
+/// Dm-72: Finder's own copy of the item `item_id`, for the app's own read of it. The system is asked for the item's
+/// place (through the gate, waited for briefly: a burst of reads takes turns); `read` is then called once with its
+/// path, outside the gate, while the security scope of the URL the system returned is held. `false`: no place (the
+/// item is not in Finder, the gate stayed busy, the system failed) and `read` was not called. Never logs the path.
+pub(crate) fn with_finder_copy(item_id: &str, read: &mut dyn FnMut(&std::path::Path)) -> bool {
+    let resolved = match Gate::enter_waiting(FINDER_COPY_GATE_WAIT) {
+        Ok(_gate) => resolve_item(item_id),
+        Err(_) => return false,
+    };
+    match resolved {
+        Ok(Some(url)) => read_at_url(&url, read),
+        Ok(None) | Err(_) => false,
+    }
+}
+
+/// How long a read of Finder's copy waits for the gate. Short: the caller falls back to Beebeeb's version.
+const FINDER_COPY_GATE_WAIT: Duration = Duration::from_millis(250);
+
+/// The second half of [`with_finder_copy`]: the handle's path, its scope held around `read`. No File Provider call.
+fn read_at_url(url: &UrlHandle, read: &mut dyn FnMut(&std::path::Path)) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    /// Ends the scope when the read is over, a panic in it included.
+    struct Scope(*mut c_void);
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            unsafe { beebeeb_fp_end_item_access(self.0) }
+        }
+    }
+    let mut buffer = vec![0 as c_char; 4096];
+    // SAFETY: the handle is a live retained NSURL, and the buffer's length is the one passed.
+    let started = unsafe { beebeeb_fp_begin_item_access(url.0.as_ptr(), buffer.as_mut_ptr(), buffer.len()) };
+    if started < 0 {
+        return false;
+    }
+    let _scope = (started == 1).then(|| Scope(url.0.as_ptr()));
+    let bytes: Vec<u8> = buffer.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
+    read(std::path::Path::new(std::ffi::OsStr::from_bytes(&bytes)));
+    true
 }
 
 static GATE: Mutex<()> = Mutex::new(());
@@ -440,6 +482,40 @@ mod bridge_error_tests {
         }
     }
 
+    /// The tests that make URL handles run one at a time (the live-handle count is process-wide).
+    static HANDLE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Dm-72: the app's read of Finder's copy. A file URL's path reaches the read, which reads the file there; a URL
+    /// that is no file reads nothing; the handle stays the caller's and is released once.
+    #[test]
+    fn a_file_urls_path_reaches_the_read_and_a_url_that_is_no_file_reads_nothing() {
+        unsafe extern "C" {
+            fn beebeeb_test_url_handle(url: *const c_char) -> *mut c_void;
+            fn beebeeb_test_live_handles() -> i64;
+        }
+        let _serial = HANDLE_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let before = unsafe { beebeeb_test_live_handles() };
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("photo.jpg");
+        std::fs::write(&file, b"finder's copy").unwrap();
+        let handle = |text: String| {
+            let url = CString::new(text).unwrap();
+            UrlHandle::from_raw(unsafe { beebeeb_test_url_handle(url.as_ptr()) }).expect("a handle")
+        };
+
+        let mut read = None;
+        let found = read_at_url(&handle(format!("file://{}", file.display())), &mut |path| {
+            read = std::fs::read(path).ok()
+        });
+        assert!(found);
+        assert_eq!(read.as_deref(), Some(&b"finder's copy"[..]));
+
+        let mut called = false;
+        let found = read_at_url(&handle("https://example.invalid/".into()), &mut |_| called = true);
+        assert!(!found && !called, "a URL that is no file is never read");
+        assert_eq!(unsafe { beebeeb_test_live_handles() }, before, "no handle leaks");
+    }
+
     /// The bridge's resolve returns only `1` with a handle, `0`, or an error. A `1` without a handle and any other
     /// return are app errors; a handle on any path that does not return it is released (the count of live handles is
     /// back where it started).
@@ -450,8 +526,7 @@ mod bridge_error_tests {
             fn beebeeb_test_live_handles() -> i64;
         }
         // The live-handle count is process-wide: serialize with the other test that makes handles.
-        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let _serial = HANDLE_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let handle = || {
             let url = CString::new("https://example.invalid/").unwrap();
             UrlHandle::from_raw(unsafe { beebeeb_test_url_handle(url.as_ptr()) })

@@ -887,9 +887,10 @@ async fn run(
                         // freeing work, so it waits for the start-up guard's pass, as the stamp pass does (spec U4).
                         #[cfg(target_os = "windows")]
                         let stale_copies_allowed = crate::unknown_check::STARTUP_GUARD.allows_freeing();
-                        // macOS: the File Provider fetches on the working-set signal; the pass has nothing to do.
+                        // macOS (dm-72): the pass queues no fetch; it signals the File Provider once for a copy
+                        // behind its version, and the system fetches Finder's copy again.
                         #[cfg(not(target_os = "windows"))]
-                        let stale_copies_allowed = cfg!(not(target_os = "macos"));
+                        let stale_copies_allowed = true;
                         #[cfg(target_os = "windows")]
                         let mut stale_refetch = Vec::new();
                         if tick.reached_server && stale_copies_allowed {

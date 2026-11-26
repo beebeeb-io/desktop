@@ -4,7 +4,7 @@
 //! native test in `windows_cf/ld0105_native_tests.rs` and the order's unit test in `engine_bridge/stale_copies.rs`.
 
 use super::reg_1640::regression_1640_synced_file;
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(target_os = "windows"))]
 use super::reg_1640::regression_1640_web_saves;
 use super::*;
 
@@ -427,4 +427,126 @@ async fn stale_2523_a_save_while_the_redownload_is_written_is_kept() {
     assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty());
     assert_eq!(row.status, FileStatus::Local, "the row is back to what it was");
     assert_eq!(left, vec!["notes.txt".to_string()], "no written copy is left behind");
+}
+
+/// Dm-72, the Mac's arm (run on every OS by the Mac rule): another device's version of a kept file reaches a Mac
+/// without a fetch of the engine's own. The pass signals the File Provider once and queues nothing; nothing comes
+/// down and nothing is written into the state folder; the system's fetch of Finder's copy is the ONE download, a
+/// second Finder fetch started beside it copies it, and the row then leaves the rule's set (no signal every tick).
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn dm72_on_a_mac_a_kept_files_new_version_signals_finder_and_comes_down_once() {
+    use crate::file_provider_port::{FinderCopiesPort, with_finder_copies};
+    let master_key = [72u8; 32];
+    let file = "72000000-0000-4000-8000-000000000001";
+    let (dir, sync_root, server, bridge, hidden) = regression_1640_synced_file(master_key, file).await;
+    bridge.db.set_recursive_pin(file, true, 1).unwrap();
+    regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+    sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+    let chunk_downloads = |server: &VersionedServerMock| {
+        let state = server.state.lock().unwrap();
+        let chunks = state
+            .requests
+            .iter()
+            .filter(|(method, path)| method == "GET" && path.contains("/chunks/"));
+        chunks.count()
+    };
+    let before = chunk_downloads(&server);
+    let finder = Arc::new(FinderCopiesPort::default());
+    let mac_pass = || {
+        system_fetch_for_test(true);
+        let pass = with_finder_copies(finder.clone(), || bridge.refresh_stale_copies(&sync_root));
+        system_fetch_for_test(false);
+        pass.unwrap()
+    };
+
+    let pass = mac_pass();
+    println!(
+        "dm-72 pass: signalled={:?} queued={:?} signals={}",
+        pass.signalled,
+        pass.queued,
+        finder.signals()
+    );
+    assert_eq!(
+        pass.signalled,
+        vec![file.to_string()],
+        "the File Provider is signalled for the item"
+    );
+    assert!(pass.queued.is_empty() && pass.emptied.is_empty() && pass.refetch.is_empty());
+    assert_eq!(finder.signals(), 1, "one working-set signal");
+    assert!(
+        bridge.db.list_operations_for_file(file).unwrap().is_empty(),
+        "no engine fetch is queued"
+    );
+    drain_upload_queue(&bridge, &sync_root).await;
+    assert_eq!(chunk_downloads(&server), before, "the engine downloads nothing itself");
+    assert_eq!(
+        std::fs::read(&hidden).unwrap(),
+        b"version one",
+        "nothing is written into the state folder"
+    );
+    assert_eq!(mac_pass(), StaleCopyPass::default(), "signalled once for this version");
+    assert_eq!(finder.signals(), 1);
+
+    // The system's fetch of Finder's copy, and Finder opening the file while it runs: one download.
+    let staging = dir.path().join("hydrate-cache");
+    std::fs::create_dir_all(&staging).unwrap();
+    let (system, opened) = (staging.join("system.txt"), staging.join("opened.txt"));
+    let roots = [staging.as_path()];
+    system_fetch_for_test(true);
+    let (first, second) = tokio::join!(
+        bridge.serve_hydrate(file, &system, &roots, None),
+        bridge.serve_hydrate(file, &opened, &roots, None),
+    );
+    system_fetch_for_test(false);
+    assert_eq!(
+        (first.unwrap(), second.unwrap()),
+        (HydrateSource::Server, HydrateSource::Copy)
+    );
+    assert_eq!(chunk_downloads(&server) - before, 1, "one download of the new version");
+    assert_eq!(std::fs::read(&system).unwrap(), b"edited on the web");
+    assert_eq!(std::fs::read(&opened).unwrap(), b"edited on the web");
+    let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+    assert_eq!(
+        (contract.current_version, contract.local_base_version),
+        (2, 2),
+        "agreed at the current version"
+    );
+    assert_eq!(
+        contract.local_hash.as_deref(),
+        Some(sha256_hex(b"edited on the web").as_str()),
+        "Finder's copy is recorded as the current version's content"
+    );
+    assert_eq!(bridge.db.get_file(file).unwrap().unwrap().status, FileStatus::Local);
+    assert_eq!(
+        mac_pass(),
+        StaleCopyPass::default(),
+        "the fetched copy leaves the rule's set"
+    );
+    assert_eq!(finder.signals(), 1, "no signal every tick");
+    drop(server.finish());
+}
+
+/// Dm-72: a busy bridge gate signals nothing and remembers nothing, so the next tick's pass asks again.
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn dm72_on_a_mac_a_busy_gate_leaves_the_signal_to_the_next_pass() {
+    use crate::file_provider_port::{BusyGatePort, FinderCopiesPort, with_finder_copies, with_port};
+    let master_key = [73u8; 32];
+    let file = "72000000-0000-4000-8000-000000000002";
+    let (_dir, sync_root, server, bridge, _hidden) = regression_1640_synced_file(master_key, file).await;
+    regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+    sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+    system_fetch_for_test(true);
+    let busy = Arc::new(BusyGatePort::default());
+    let met_busy = with_port(busy.clone(), || bridge.refresh_stale_copies(&sync_root));
+    let finder = Arc::new(FinderCopiesPort::default());
+    let next = with_finder_copies(finder.clone(), || bridge.refresh_stale_copies(&sync_root));
+    system_fetch_for_test(false);
+    let (met_busy, next) = (met_busy.unwrap(), next.unwrap());
+    assert_eq!((busy.asked(), met_busy.signalled.len(), met_busy.later), (1, 0, 1));
+    assert_eq!(next.signalled, vec![file.to_string()], "the next pass signals");
+    assert_eq!(finder.signals(), 1);
+    assert!(bridge.db.list_operations_for_file(file).unwrap().is_empty());
+    drop(server.finish());
 }
