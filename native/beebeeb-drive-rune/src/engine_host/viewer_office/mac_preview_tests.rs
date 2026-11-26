@@ -415,3 +415,26 @@ fn a_copy_nobody_takes_is_removed() {
     drop(copy);
     assert!(!path.exists() && !path.parent().unwrap().exists());
 }
+
+#[test]
+fn a_copy_a_crash_left_is_removed_when_the_next_is_made() {
+    let dir = tempfile::tempdir().unwrap();
+    // A run that ended without closing its viewer: its copy is still there. Files' Open has a copy of its own.
+    let left = TempCopy::write(dir.path(), "old", "invented-old.docx", b"old bytes").expect("written");
+    let left_path = left.path().to_path_buf();
+    std::mem::forget(left);
+    let opened = dir.path().join("opened-by-files");
+    std::fs::create_dir(&opened).unwrap();
+    std::fs::write(opened.join("invented.pdf"), b"another app has this open").unwrap();
+
+    let next = TempCopy::write(dir.path(), "new", "invented-new.docx", b"new bytes").expect("written");
+    assert!(
+        !left_path.exists() && !left_path.parent().unwrap().exists(),
+        "the copy left behind is gone"
+    );
+    assert!(next.path().is_file());
+    assert!(
+        opened.join("invented.pdf").is_file(),
+        "a copy Files' Open made is not this module's to remove"
+    );
+}

@@ -12,7 +12,8 @@
 //!   read as any viewer's are (`viewer_read::read`: the copy on this Mac, else the download), up to [`PREVIEW_MAX`].
 //! - **When the copy goes:** when the viewer closes or opens another file, when the session is not the one it was
 //!   opened for (a lock, a sign-out, another account), when the person closes the panel, and when the panel could
-//!   not show it. [`TempCopy`]'s drop removes it, so a copy nobody took is removed too.
+//!   not show it. [`TempCopy`]'s drop removes it, so a copy nobody took is removed too. A copy a crash or a quit
+//!   left behind is removed when the next one is made (`TempCopy::sweep`).
 //! - **What the window says:** the viewer's own "Decrypting" page with the engine's progress while the copy is
 //!   made, and at 100 percent while the panel shows it (its Cancel closes both); after the person closes the panel,
 //!   the page with the other apps. There is no page of its own yet for "shown in Quick Look".
@@ -137,11 +138,26 @@ impl TempCopy {
         root.join(format!("{id}.preview"))
     }
 
-    /// Writes `bytes` as `<root>/<id>.preview/<name>`, in place of a copy an earlier run left there.
+    /// Removes every preview copy below `root`: what a run that ended without closing its viewer (a crash, a quit)
+    /// left there. Only folders this module names (`*.preview`), never a copy Files' Open made.
+    fn sweep(root: &Path) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "preview") && path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+    }
+
+    /// Writes `bytes` as `<root>/<id>.preview/<name>`. One copy at a time (the system has one panel): any copy an
+    /// earlier run left below `root` is removed first.
     fn write(root: &Path, file_id: &str, name: &str, bytes: &[u8]) -> std::io::Result<TempCopy> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let folder = Self::folder(root, file_id);
-        let _ = std::fs::remove_dir_all(&folder);
+        Self::sweep(root);
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&folder)?;
         // The name's last part only: the system reads the kind from its extension.
         let name = Path::new(name).file_name().unwrap_or_else(|| "file".as_ref());
