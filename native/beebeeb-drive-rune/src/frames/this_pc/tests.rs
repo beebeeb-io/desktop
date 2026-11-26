@@ -143,7 +143,7 @@ fn each_filter_lists_the_boards_changes() {
 fn a_click_on_a_filter_narrows_the_list_and_checks_its_tab() {
     let mut rt = runtime(scenes::dw_1301, false);
     assert_eq!(text(&rt, "seg-0-problems-3-label"), "Problems \u{00B7} 3");
-    click(&mut rt, if cfg!(target_os = "macos") { "seg-0-this-mac" } else { "seg-0-this-pc" });
+    click(&mut rt, &format!("seg-0-{}", crate::ui::settings_shell::slug(beebeeb_engine::os_words::device_word_cap())));
     assert_eq!(rt.state.this_pc.filter, Filter::ThisPc);
     assert!(rt.state.this_pc.changes().iter().all(|c| c.origin.label() == os("This PC")));
     assert!(!has(&rt, "problems-bar"));

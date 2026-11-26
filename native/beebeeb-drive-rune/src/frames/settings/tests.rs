@@ -410,8 +410,12 @@ fn every_built_frame_renders_and_names_no_city_and_no_provider() {
     );
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
-        assert!(find(&rt, "set-main").is_some(), "{frame}");
         assert!(find(&rt, "caption-bar").is_some(), "{frame}: the same window");
+        // Only macOS wires the Finder pane (`SettingsUi::wired`); elsewhere those scenes draw the placeholder.
+        if !cfg!(target_os = "macos") && frame.starts_with("DM-18") {
+            continue;
+        }
+        assert!(find(&rt, "set-main").is_some(), "{frame}");
         // Five board frames of Bandwidth draw the pane from its devices down, without its heading.
         if rt.state.settings.bandwidth.crop != super::bandwidth::Crop::FromDevices {
             assert_eq!(info(&rt, "set-title").role, "heading", "{frame}");

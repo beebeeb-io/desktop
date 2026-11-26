@@ -223,12 +223,12 @@ fn column(c: usize, list: &List, t: &Theme) -> El {
 }
 
 /// The board's Windows words in this OS's: "Ctrl+Shift+N" becomes "\u{21E7}\u{2318}N" on a Mac, "File Explorer" "Finder".
-/// Windows (and anything but macOS) gets the board's text unchanged.
+/// Windows keeps the board's text ("File Explorer" is its file manager); Linux's file manager is "Files".
 fn os_text(board: &str) -> String {
-    if !cfg!(target_os = "macos") {
-        return board.to_string();
-    }
     let board = board.replace("File Explorer", beebeeb_engine::os_words::file_manager());
+    if !cfg!(target_os = "macos") {
+        return board;
+    }
     match board.strip_prefix("Ctrl+") {
         Some(rest) if !rest.contains(' ') => beebeeb_engine::os_words::shortcut(rest),
         _ => board,

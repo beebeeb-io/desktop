@@ -406,7 +406,7 @@ fn in_the_menu_tab_and_the_pointer_move_the_one_lit_item() {
     assert_eq!(rt.state.frames.shared.menu.as_ref().map(|m| m.hot), Some(3));
     assert_eq!(
         focused(&rt).as_deref(),
-        Some(if cfg!(target_os = "macos") { "mi-show-in-finder" } else { "mi-show-in-file-explorer" }),
+        Some(format!("mi-show-in-{}", crate::ui::settings_shell::slug(beebeeb_engine::os_words::file_manager())).as_str()),
         "focus is on the lit item"
     );
     press(&mut rt, Key::Enter);

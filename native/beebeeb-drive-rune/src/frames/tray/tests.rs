@@ -72,7 +72,7 @@ const BUILT: [(&str, &str, &str, Option<(&str, bool)>); 19] = [
         "DW-1211",
         "Beebeeb is locked",
         "Sync keeps running while it's locked.",
-        Some(("Unlock with Windows Hello", true)),
+        Some((concat!("Unlock with ", beebeeb_engine::unlock_name!()), true)),
     ),
     ("DW-1212", "", "", None),
     (
