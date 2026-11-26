@@ -352,11 +352,11 @@ mod tests {
 
     #[test]
     fn a_file_name_that_is_also_an_ordinary_word_stays_redacted() {
-        let message = transition("Timed out waiting for the Photos domain");
+        let message = transition("Timed out waiting for the Provider domain");
         let control = format_line(&message, &KnownNames::new(), at());
-        assert!(control.contains("Photos"), "control: an ordinary word stays: {control}");
-        let line = format_line(&message, &names(&["Photos"]), at());
-        assert!(!line.contains("Photos"), "{line}");
+        assert!(control.contains("Provider"), "control: an ordinary word stays: {control}");
+        let line = format_line(&message, &names(&["Provider"]), at());
+        assert!(!line.contains("Provider"), "{line}");
         let line = format_line(&transition("could not open Letter.docx"), &KnownNames::new(), at());
         assert!(!line.contains("Letter") && !line.contains("docx"), "{line}");
     }
