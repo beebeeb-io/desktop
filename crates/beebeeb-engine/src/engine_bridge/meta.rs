@@ -994,25 +994,27 @@ mod one_fetch {
     type FetchHandover = (PathBuf, tokio::sync::oneshot::Sender<()>);
 
     struct FetchInFlight {
-        progress: Arc<tokio::sync::watch::Sender<(u64, u64)>>,
+        /// Which leader's this is: a later leader of the same file has another number.
+        lead: u64,
         waiting: Vec<tokio::sync::oneshot::Sender<FetchHandover>>,
     }
 
-    /// Dm-71: the Finder fetches running now, one per file of one state database (the key's number is that database's
-    /// address: several bridges work on one).
-    static FETCHES_IN_FLIGHT: std::sync::Mutex<Option<HashMap<(usize, String), FetchInFlight>>> =
-        std::sync::Mutex::new(None);
+    type Fetches = HashMap<(usize, String), FetchInFlight>;
 
-    fn fetches<T>(with: impl FnOnce(&mut HashMap<(usize, String), FetchInFlight>) -> T) -> T {
+    /// The Finder fetches running now, one per file of one state database (the key's number is that database's
+    /// address: several bridges work on one).
+    static FETCHES_IN_FLIGHT: std::sync::Mutex<Option<Fetches>> = std::sync::Mutex::new(None);
+    static NEXT_LEAD: AtomicU64 = AtomicU64::new(1);
+
+    fn fetches<T>(with: impl FnOnce(&mut Fetches) -> T) -> T {
         let mut held = FETCHES_IN_FLIGHT
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         with(held.get_or_insert_with(HashMap::new))
     }
 
-    /// Dm-71: one download in flight per file. The first Finder fetch of a file leads and downloads; one that starts
-    /// while it runs follows: it asks the server for nothing, hears the leader's progress and copies the leader's
-    /// finished file.
+    /// One download in flight per file. The first Finder fetch of a file leads and downloads; one that starts while
+    /// it runs follows: it asks the server for nothing and copies the leader's finished file.
     pub(in crate::engine_bridge) enum FinderFetch {
         Lead(FetchLead),
         Follow(FetchFollow),
@@ -1025,21 +1027,18 @@ mod one_fetch {
                 Some(running) => {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     running.waiting.push(tx);
-                    FinderFetch::Follow(FetchFollow {
-                        handover: rx,
-                        progress: running.progress.subscribe(),
-                    })
+                    FinderFetch::Follow(FetchFollow { handover: rx })
                 }
                 None => {
-                    let progress = Arc::new(tokio::sync::watch::channel((0, 0)).0);
+                    let lead = NEXT_LEAD.fetch_add(1, Ordering::Relaxed);
                     map.insert(
                         key.clone(),
                         FetchInFlight {
-                            progress: progress.clone(),
+                            lead,
                             waiting: Vec::new(),
                         },
                     );
-                    FinderFetch::Lead(FetchLead { key, progress })
+                    FinderFetch::Lead(FetchLead { key, lead })
                 }
             })
         }
@@ -1049,17 +1048,12 @@ mod one_fetch {
     /// waiting hear nothing was left for them and start over, one of them as the next leader.
     pub(in crate::engine_bridge) struct FetchLead {
         key: (usize, String),
-        progress: Arc<tokio::sync::watch::Sender<(u64, u64)>>,
+        lead: u64,
     }
 
     impl FetchLead {
-        /// The leader's progress, for the ones waiting.
-        pub(in crate::engine_bridge) fn report(&self, done: u64, total: u64) {
-            let _ = self.progress.send((done, total));
-        }
-
-        /// The download is whole at `copy`: every fetch that waited copies it, and this returns once each is done with
-        /// it (the leader's caller removes the file right after). One that joins meanwhile is handed it too.
+        /// The download is whole at `copy`: every fetch that waited copies it, and this returns once each is done
+        /// with it (the leader's caller removes the file right after). One that joins meanwhile is handed it too.
         pub(in crate::engine_bridge) async fn hand_over(self, copy: &Path) {
             loop {
                 let next = fetches(|map| {
@@ -1082,10 +1076,7 @@ mod one_fetch {
         fn drop(&mut self) {
             // After `hand_over` the entry is gone already; a later leader's entry (same key) is never this one's.
             fetches(|map| {
-                if map
-                    .get(&self.key)
-                    .is_some_and(|running| Arc::ptr_eq(&running.progress, &self.progress))
-                {
+                if map.get(&self.key).is_some_and(|running| running.lead == self.lead) {
                     map.remove(&self.key);
                 }
             });
@@ -1095,26 +1086,25 @@ mod one_fetch {
     /// A fetch that waits for the leader's download of the same file.
     pub(in crate::engine_bridge) struct FetchFollow {
         handover: tokio::sync::oneshot::Receiver<FetchHandover>,
-        progress: tokio::sync::watch::Receiver<(u64, u64)>,
     }
 
     impl FetchFollow {
-        /// Wait for the leader, passing its progress on. `None`: it left nothing (failed or cancelled).
+        /// Wait for the leader, saying how far its download is (`so_far`, read a few times a second) to
+        /// `progress`. `None`: the leader left nothing (it failed or was cancelled).
         pub(in crate::engine_bridge) async fn wait(
             mut self,
+            so_far: impl Fn() -> Option<(u64, u64)>,
             progress: Option<&HydrateProgressFn>,
         ) -> Option<FetchHandover> {
             loop {
                 tokio::select! {
                     biased;
                     handed = &mut self.handover => return handed.ok(),
-                    changed = self.progress.changed() => {
-                        if changed.is_err() {
-                            return self.handover.await.ok();
-                        }
-                        let (done, total) = *self.progress.borrow_and_update();
-                        if let (Some(progress), true) = (progress, total > 0) {
-                            progress(done, total);
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                        if let (Some(progress), Some((done, total))) = (progress, so_far())
+                            && total > 0
+                        {
+                            progress(done.min(total), total);
                         }
                     }
                 }

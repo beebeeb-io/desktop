@@ -458,14 +458,15 @@ impl EngineBridge {
             return Err(anyhow::Error::new(QueuedCopyMissing));
         }
         // Dm-71: one download in flight per file. A fetch that starts while another of the same file runs (the
-        // system's own fetch of a kept file, and Finder opening it meanwhile) waits for that one, hears its progress
+        // system's own fetch of a kept file, and Finder opening it meanwhile) waits for that one, says its progress
         // and copies its finished file: it asks the server for nothing.
         let lead = loop {
             match FinderFetch::join(&self.db, &file_id) {
                 FinderFetch::Lead(lead) => break lead,
                 FinderFetch::Follow(follow) => {
+                    let so_far = || self.transfers.get(&file_id).map(|t| (t.done, t.total));
                     // The leader failed or its caller went away: start over (as the next leader, or behind one).
-                    let Some((copy, done)) = follow.wait(progress).await else {
+                    let Some((copy, done)) = follow.wait(so_far, progress).await else {
                         continue;
                     };
                     // Gone since it was handed over: start over.
@@ -504,15 +505,9 @@ impl EngineBridge {
                 return Ok(HydrateSource::Copy);
             }
         }
-        // The one download. Its progress goes to the caller, to the ones waiting behind it, and (inside the hydrate)
-        // to the transfer board the Available offline row reads; its end makes the row `Local`.
-        let said = |done: u64, total: u64| {
-            lead.report(done, total);
-            if let Some(progress) = progress {
-                progress(done, total);
-            }
-        };
-        self.hydrate_file_with_progress(&file_id, dest, allowed_roots, Some(&said))
+        // The one download. Its progress goes to the caller and (inside the hydrate) to the transfer board, which the
+        // Available offline row and a fetch waiting behind this one read; its end makes the row `Local`.
+        self.hydrate_file_with_progress(&file_id, dest, allowed_roots, progress)
             .await?;
         lead.hand_over(dest).await;
         log_hydrate_served(&file_id, HydrateSource::Server);
