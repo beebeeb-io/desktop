@@ -418,7 +418,7 @@
    }
   ],
   "verb": "click",
-  "name": "Verify phrase",
+  "name": "Verify master key",
   "role": "button"
  },
  "DW-0801#1": {

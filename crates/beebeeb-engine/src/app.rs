@@ -746,7 +746,7 @@ impl<C: CredentialStores> Engine<C> {
         Ok(())
     }
 
-    /// Unlock with the 12 12 words of your master key: the key they derive is proven to be the signed-in account's by the
+    /// Unlock with the 12 words of your master key: the key they derive is proven to be the signed-in account's by the
     /// server's recorded check (`recovery::verify_vault_key_from_phrase`), and only then stored and put in memory.
     /// `Err` is the sentence to show (`gate::phrase_error`).
     pub fn unlock_with_phrase(&self, phrase: Zeroizing<String>) -> Result<(), &'static str> {

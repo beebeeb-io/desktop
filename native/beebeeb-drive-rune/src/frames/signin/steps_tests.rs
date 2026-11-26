@@ -629,7 +629,7 @@ fn recovery_proves_the_phrase_then_sets_a_new_password_from_the_keyboard() {
         Some(WORD_KEYS[0]),
         "the email is there: the first word is next"
     );
-    assert!(!info(&rt, "btn-0").focusable, "Verify phrase waits for twelve words");
+    assert!(!info(&rt, "btn-0").focusable, "Verify master key waits for twelve words");
     // "Enter moves to the next word."
     type_(&mut rt, board::WORDS[0]);
     press(&mut rt, Key::Enter);

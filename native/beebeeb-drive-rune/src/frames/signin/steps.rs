@@ -409,7 +409,7 @@ impl Ui {
         self.recovering
     }
 
-    /// Verify phrase is dimmed until the email and all twelve words are in (DW-A47).
+    /// Verify master key is dimmed until the email and all twelve words are in (DW-A47).
     pub fn can_verify_phrase(&self) -> bool {
         self.screen == Screen::Recover
             && !self.recovering
@@ -417,7 +417,7 @@ impl Ui {
             && self.words.iter().all(|w| !w.text.is_empty())
     }
 
-    /// Verify phrase: the key is derived on this device; the phrase never leaves it.
+    /// Verify master key: the key is derived on this device; it never leaves it.
     pub fn verify_phrase(&mut self) {
         if !self.can_verify_phrase() {
             return;

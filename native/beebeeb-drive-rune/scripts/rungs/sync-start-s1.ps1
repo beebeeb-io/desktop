@@ -430,7 +430,7 @@ try {
     Check ($credsBefore -gt 0) "R1.4 the count sees the TEST app's entries after the password ($credsBefore)"
     Paste-Phrase $hwnd 'zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong' | Out-Null
     Press (Wait-For $hwnd 'Restore keys' $T::Button) | Out-Null
-    Check (@(Wait-Names $hwnd "That phrase doesn*" 1).Count -ge 1) "R1.4 DW-A24: that phrase doesn't open this account"
+    Check (@(Wait-Names $hwnd "That master key doesn*" 1).Count -ge 1) "R1.4 DW-A24: that master key doesn't open this account"
     for ($i = 0; $i -lt 20 -and (Requests $verify) -le $checksBefore; $i++) { Pump 500 }
     Pump 1000
     $checks1 = (Requests $verify) - $checksBefore
