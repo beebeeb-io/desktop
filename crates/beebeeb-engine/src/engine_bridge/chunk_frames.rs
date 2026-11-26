@@ -4,6 +4,9 @@
 use super::*;
 use futures_util::StreamExt as _;
 
+/// Chunks fetched and checked one by one before the parallel window opens.
+const PROBE_CHUNKS: u32 = 2;
+
 impl EngineBridge {
     /// Download + decrypt chunk indices `[range.start, range.end)` for
     /// `file_id`, concatenating the plaintext into one [`Zeroizing`] buffer.
@@ -112,10 +115,16 @@ impl EngineBridge {
         // RC6 (dm-58): the whole-file API route fetched one chunk at a time, so a 367 MB Finder download ran at
         // one round trip per chunk. Frames are now fetched a few at a time, in order; decryption stays in order.
         let parallel = api_fetch_parallel(limit, download_kbps_limit, range.len());
+        // The first PROBE_CHUNKS are fetched one at a time and checked before the window opens, so a server that
+        // ignores the pin (or has replaced the version) is refused at the chunk, with nothing past it requested.
         let mut prefetched = (parallel > 1).then(|| {
-            Box::pin(ordered_fetch(range.clone(), parallel, move |i| async move {
-                self.download_content_frame(file_id, i, pin, meter, None).await
-            }))
+            let fetch = move |i: u32| async move { self.download_content_frame(file_id, i, pin, meter, None).await };
+            let split = range.start.saturating_add(PROBE_CHUNKS).min(range.end);
+            Box::pin(ordered_fetch(range.start..split, 1, fetch).chain(ordered_fetch(
+                split..range.end,
+                parallel,
+                fetch,
+            )))
         });
         let started = std::time::Instant::now();
         for i in range {

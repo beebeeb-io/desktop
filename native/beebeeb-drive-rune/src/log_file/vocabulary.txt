@@ -169,6 +169,7 @@ child
 chosen
 chunk
 chunk_count
+chunks
 claims
 claims_cleared
 class
@@ -579,6 +580,7 @@ max_attempts
 max_bytes
 max_new_uploads
 may
+mb
 meanwhile
 media
 merged
@@ -588,6 +590,7 @@ metadata
 mid-hydrate
 migrated
 migration
+millis
 min
 mine
 mints
@@ -706,6 +709,7 @@ paced
 page
 panic
 panicked
+parallel
 parameters
 parent
 parent_id
@@ -808,6 +812,7 @@ raised
 ran
 range
 ranges
+rate
 rc
 re-bootstrapping
 re-download
