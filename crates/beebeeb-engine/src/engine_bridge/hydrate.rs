@@ -1611,11 +1611,12 @@ mod refetch_streaming_tests {
         let staging = dir.path().join("hydrate-cache");
         std::fs::create_dir_all(&staging).unwrap();
         let dest = staging.join("big.bin");
-        let said = Mutex::new(Vec::new());
-        let on_board = Mutex::new(Vec::new());
-        let progress = |done: u64, total: u64| {
-            said.lock().unwrap().push((done, total));
-            on_board.lock().unwrap().push(bridge.transfers.get(ID).map(|t| t.total));
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let on_board = Arc::new(Mutex::new(Vec::new()));
+        let (says, rows, board) = (said.clone(), on_board.clone(), bridge.transfers.clone());
+        let progress = move |done: u64, total: u64| {
+            says.lock().unwrap().push((done, total));
+            rows.lock().unwrap().push(board.get(ID).map(|t| t.total));
         };
         let source = rt
             .block_on(bridge.serve_hydrate(ID, &dest, &[staging.as_path()], Some(&progress)))
@@ -1659,8 +1660,9 @@ mod refetch_streaming_tests {
         std::fs::create_dir_all(&staging).unwrap();
         let (keep, finder) = (staging.join("keep.bin"), staging.join("finder.bin"));
         let roots = [staging.as_path()];
-        let heard = Mutex::new(Vec::new());
-        let progress = |done: u64, total: u64| heard.lock().unwrap().push((done, total));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let hears = heard.clone();
+        let progress = move |done: u64, total: u64| hears.lock().unwrap().push((done, total));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         // Polled in this order: the keep's fetch leads before the second one looks.
