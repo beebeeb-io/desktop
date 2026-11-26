@@ -142,13 +142,10 @@ fn ask_default(_ext: &str) -> Option<(String, String)> {
 }
 
 /// macOS: the app chooser and the start with the app picked, on the copy of the file the engine keeps on this Mac.
-/// Never a registry-like write, never a shell: `/usr/bin/open` and `/usr/bin/osascript` get their arguments as
-/// arguments.
+/// Never a registry-like write, never a shell, never a child process: `NSWorkspace` and `NSOpenPanel`.
 #[cfg(target_os = "macos")]
 pub(crate) mod mac {
     use std::path::{Path, PathBuf};
-    use std::process::Command;
-
     use crate::frames::files::source::ActionError;
 
     /// `(app path, app name)` of the default app for files ending in `ext` (no dot).
@@ -165,32 +162,46 @@ pub(crate) mod mac {
 
     /// The app the person picks in the system's chooser (`/Applications`, apps only). `None`: cancelled.
     pub(crate) fn choose_app() -> Option<PathBuf> {
-        const SCRIPT: &str = "POSIX path of (choose file of type {\"com.apple.application-bundle\"} \
-             with prompt \"Open with\" default location (POSIX file \"/Applications\"))";
-        let out = Command::new("/usr/bin/osascript").args(["-e", SCRIPT]).output().ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let text = String::from_utf8(out.stdout).ok()?;
-        let text = text.trim();
-        (text.ends_with(".app") || text.ends_with(".app/")).then(|| PathBuf::from(text))
+        crate::shell::platform::macos_panels::pick_app()
     }
 
-    /// Opens `file` with the app at `app`.
+    /// Opens `file` with the app at `app` through `NSWorkspace` (never a child `open`).
     pub(crate) fn open_with(app: &Path, file: &Path) -> Result<(), ActionError> {
-        let ok = Command::new("/usr/bin/open").arg("-a").arg(app).arg(file).status();
-        match ok {
-            Ok(status) if status.success() => Ok(()),
-            _ => Err(ActionError::Failed),
+        use objc2_app_kit::{NSWorkspace, NSWorkspaceOpenConfiguration};
+        use objc2_foundation::{NSArray, NSString, NSURL};
+        let (Some(app), Some(file)) = (app.to_str(), file.to_str()) else {
+            return Err(ActionError::Failed);
+        };
+        let app = NSURL::fileURLWithPath(&NSString::from_str(app));
+        let file = NSURL::fileURLWithPath(&NSString::from_str(file));
+        let config = unsafe { NSWorkspaceOpenConfiguration::configuration() };
+        #[cfg(not(test))]
+        unsafe {
+            NSWorkspace::sharedWorkspace().openURLs_withApplicationAtURL_configuration_completionHandler(
+                &NSArray::from_retained_slice(&[file]),
+                &app,
+                &config,
+                None,
+            );
         }
+        #[cfg(test)]
+        let _ = (app, file, config, NSWorkspace::sharedWorkspace, NSArray::<NSURL>::new);
+        Ok(())
     }
 
-    /// Shows `file` in Finder.
+    /// Shows `file` in Finder through `NSWorkspace`.
     pub(crate) fn reveal(file: &Path) -> Result<(), ActionError> {
-        match Command::new("/usr/bin/open").arg("-R").arg(file).status() {
-            Ok(status) if status.success() => Ok(()),
-            _ => Err(ActionError::Failed),
-        }
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::{NSArray, NSString, NSURL};
+        let Some(text) = file.to_str() else {
+            return Err(ActionError::Failed);
+        };
+        let url = NSURL::fileURLWithPath(&NSString::from_str(text));
+        #[cfg(not(test))]
+        NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+        #[cfg(test)]
+        let _ = (url, NSWorkspace::sharedWorkspace, NSArray::<NSURL>::new);
+        Ok(())
     }
 }
 

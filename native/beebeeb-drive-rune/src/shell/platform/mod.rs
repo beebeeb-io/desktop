@@ -22,7 +22,7 @@ mod linux;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 #[cfg(target_os = "macos")]
-mod macos_panels;
+pub(crate) mod macos_panels;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]

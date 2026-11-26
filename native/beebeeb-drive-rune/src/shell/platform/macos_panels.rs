@@ -293,6 +293,31 @@ pub fn pick_folder(title: &str, start: &Path, key: &str) -> Result<Option<PathBu
     })
 }
 
+/// The app chooser: NSOpenPanel on `/Applications`, application bundles only (dm-63, "Open with another app").
+/// BLOCKS until closed. `None`: cancelled.
+pub fn pick_app() -> Option<PathBuf> {
+    on_main(move || {
+        let panel = send!(Id; class("NSOpenPanel"), "openPanel");
+        if panel.is_null() {
+            return None;
+        }
+        send!((); panel, "setCanChooseDirectories:", 0u8 => u8);
+        send!((); panel, "setCanChooseFiles:", 1u8 => u8);
+        send!((); panel, "setAllowsMultipleSelection:", 0u8 => u8);
+        let msg = nsstring("Open with");
+        send!((); panel, "setMessage:", msg => Id);
+        // Apps only: the panel's own filter by type name.
+        let ext = nsstring("app");
+        let array = send!(Id; class("NSArray"), "arrayWithObject:", ext => Id);
+        send!((); panel, "setAllowedFileTypes:", array => Id);
+        set_start(panel, Path::new("/Applications"));
+        if send!(c_long; panel, "runModal") != MODAL_OK {
+            return None;
+        }
+        url_path(send!(Id; panel, "URL")).filter(|p| p.extension().is_some_and(|e| e == "app"))
+    })
+}
+
 /// The save panel: NSSavePanel with `name` filled in; the folder is remembered under `key`. BLOCKS until closed.
 pub fn pick_save_path(name: &str, start: PathBuf, key: &str) -> SaveAnswer {
     let (name, key) = (name.to_string(), key.to_string());
