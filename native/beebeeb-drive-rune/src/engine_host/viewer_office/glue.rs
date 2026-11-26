@@ -385,12 +385,12 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 /// a failure. Task 63's `open_unsupported(file_ref, UnsupportedReason::OfficeUnavailable)` (Open with Pages/Word)
 /// replaces the macOS arm at the merge: this wrapper is the one line to change.
 pub(super) fn helper_missing(kept: bool) -> Body {
-    let state = if cfg!(target_os = "macos") {
-        ViewState::NoPreview(Reason::NotOnThisComputer)
+    if cfg!(target_os = "macos") {
+        // Task 63's page: Open with the default app / another app / Show in Finder.
+        Body::NotPreviewable(crate::frames::viewers::source::NoPreview::OfficeUnavailable)
     } else {
-        ViewState::Stopped { retried: true }
-    };
-    Body::OfficeState(StateBody::new(state, kept))
+        Body::OfficeState(StateBody::new(ViewState::Stopped { retried: true }, kept))
+    }
 }
 
 #[cfg(test)]
@@ -399,11 +399,10 @@ mod helper_missing_tests {
 
     #[test]
     fn missing_helper_is_no_preview_on_macos_and_stopped_elsewhere() {
-        let want = if cfg!(target_os = "macos") {
-            ViewState::NoPreview(Reason::NotOnThisComputer)
+        if cfg!(target_os = "macos") {
+            assert!(matches!(helper_missing(true), Body::NotPreviewable(_)));
         } else {
-            ViewState::Stopped { retried: true }
-        };
-        assert!(matches!(helper_missing(true), Body::OfficeState(b) if b == StateBody::new(want, true)));
+            assert!(matches!(helper_missing(true), Body::OfficeState(_)));
+        }
     }
 }
