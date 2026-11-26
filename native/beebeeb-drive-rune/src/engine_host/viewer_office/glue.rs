@@ -142,7 +142,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         }
         let Some(helper) = (self.office.helper)() else {
             crate::office_log::helper_not_started("not installed beside the app", "");
-            return state(ViewState::Stopped { retried: true });
+            return helper_missing(kept);
         };
         // Writable .docx / .xlsx / .pptx go to an editing session; everything else (read-only, no write right, an older
         // format) to the viewer, as before. The version must have been read, as the text editor's.
@@ -377,5 +377,33 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         if let Some(mut shown) = self.office.shown.take() {
             shown.end(CloseWhy::Closed);
         }
+    }
+}
+
+/// The body when the helper is not there. Windows ships it, so its absence is a failure (Stopped). macOS ships no
+/// helper (its sandbox is Windows-only; nothing is parsed unconfined), so there it is a plain "no preview here", never
+/// a failure. Task 63's `open_unsupported(file_ref, UnsupportedReason::OfficeUnavailable)` (Open with Pages/Word)
+/// replaces the macOS arm at the merge: this wrapper is the one line to change.
+pub(super) fn helper_missing(kept: bool) -> Body {
+    let state = if cfg!(target_os = "macos") {
+        ViewState::NoPreview(Reason::NotOnThisComputer)
+    } else {
+        ViewState::Stopped { retried: true }
+    };
+    Body::OfficeState(StateBody::new(state, kept))
+}
+
+#[cfg(test)]
+mod helper_missing_tests {
+    use super::*;
+
+    #[test]
+    fn missing_helper_is_no_preview_on_macos_and_stopped_elsewhere() {
+        let want = if cfg!(target_os = "macos") {
+            ViewState::NoPreview(Reason::NotOnThisComputer)
+        } else {
+            ViewState::Stopped { retried: true }
+        };
+        assert!(matches!(helper_missing(true), Body::OfficeState(b) if b == StateBody::new(want, true)));
     }
 }
