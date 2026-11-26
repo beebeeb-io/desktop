@@ -36,7 +36,7 @@ fn actions(buttons: Vec<El>) -> El {
 }
 
 /// A state's words and actions through `ui::view_state`, centred on the stage.
-fn empty_view(icon: &'static Icon, title: &str, body: &str, buttons: Vec<El>, t: &Theme) -> El {
+pub(super) fn empty_view(icon: &'static Icon, title: &str, body: &str, buttons: Vec<El>, t: &Theme) -> El {
     stage(
         view_state(
             ViewState::Empty {
@@ -168,7 +168,11 @@ pub fn status(body: &Body, origin: Origin) -> Option<Status> {
             dot: Dot::Warn,
             text: "No preview here".into(),
             details: match why {
-                NoPreview::NoViewer | NoPreview::Heic | NoPreview::TooBig { .. } => "Nothing was downloaded",
+                NoPreview::NoViewer
+                | NoPreview::PlayerRefused
+                | NoPreview::OfficeUnavailable
+                | NoPreview::Heic
+                | NoPreview::TooBig { .. } => "Nothing was downloaded",
                 NoPreview::OverLimit { .. } => "Stopped; nothing was kept",
                 // The file arrived whole and was read as it is: the trouble is the PDF's own content, and the line
                 // does not speak of decrypting (RC2-3).
@@ -427,6 +431,10 @@ fn stopped(why: Stopped, t: &Theme) -> El {
 /// The file is in Beebeeb and is not shown here: why, and the ways out. `copies`: "Save a copy…" has somewhere to
 /// go (`ViewerSource::saves_copies`); a button with no target is not drawn.
 fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin, t: &Theme) -> El {
+    // The kinds this app cannot show get the one calm page (`unsupported`), with the three ways out.
+    if let Some(reason) = super::unsupported::UnsupportedReason::of(why) {
+        return super::unsupported::page(file, reason, origin, t);
+    }
     // What happened to the bytes before this app looked at them: decrypted, or read from the copy on this PC.
     let it_was = if was_decrypted(origin) {
         concat!("It was decrypted on ", beebeeb_engine::device_word!())
@@ -434,13 +442,6 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
         concat!("It was read from the copy on ", beebeeb_engine::device_word!())
     };
     let (title, words) = match why {
-        NoPreview::NoViewer => (
-            "No preview for this kind of file yet",
-            format!(
-                "{} is safe in Beebeeb. This app can't show this kind of file yet, so nothing was downloaded.",
-                file.name
-            ),
-        ),
         NoPreview::Heic => (
             "HEIC photos can\u{2019}t be shown here yet",
             format!(
@@ -503,6 +504,11 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin
             format!(
                 "This PDF has {pages} pages, more than a preview lists. Open it in your PDF app. Nothing was kept."
             ),
+        ),
+        // Drawn by `unsupported::page` above; never reaches this table.
+        NoPreview::NoViewer | NoPreview::PlayerRefused | NoPreview::OfficeUnavailable => (
+            "Beebeeb can\u{2019}t show this kind of file here",
+            String::new(),
         ),
         NoPreview::PictureTooBig { width, height } => (
             "Too large to preview here",

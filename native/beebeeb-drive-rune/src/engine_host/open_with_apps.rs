@@ -129,10 +129,69 @@ fn ask_default(ext: &str) -> Option<(String, String)> {
     Some((exe, name))
 }
 
-/// Every other system: not asked here (the Office editor, and so its guard, runs on Windows only).
-#[cfg(not(windows))]
+/// macOS: the app Launch Services opens `ext` with (`NSWorkspace`), as `(its path, its name)`.
+#[cfg(target_os = "macos")]
+fn ask_default(ext: &str) -> Option<(String, String)> {
+    mac::default_app(ext)
+}
+
+/// Every other system: not asked here.
+#[cfg(not(any(windows, target_os = "macos")))]
 fn ask_default(_ext: &str) -> Option<(String, String)> {
     None
+}
+
+/// macOS: the app chooser and the start with the app picked, on the copy of the file the engine keeps on this Mac.
+/// Never a registry-like write, never a shell: `/usr/bin/open` and `/usr/bin/osascript` get their arguments as
+/// arguments.
+#[cfg(target_os = "macos")]
+pub(crate) mod mac {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use crate::frames::files::source::ActionError;
+
+    /// `(app path, app name)` of the default app for files ending in `ext` (no dot).
+    pub(crate) fn default_app(ext: &str) -> Option<(String, String)> {
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::{NSString, NSURL};
+        // A name of the kind is enough for Launch Services: it answers by the type, not by a file that exists.
+        let probe = NSURL::fileURLWithPath(&NSString::from_str(&format!("/Beebeeb-type-probe.{ext}")));
+        let app = NSWorkspace::sharedWorkspace().URLForApplicationToOpenURL(&probe)?;
+        let path = app.path()?.to_string();
+        let name = Path::new(&path).file_stem()?.to_string_lossy().into_owned();
+        Some((path, name))
+    }
+
+    /// The app the person picks in the system's chooser (`/Applications`, apps only). `None`: cancelled.
+    pub(crate) fn choose_app() -> Option<PathBuf> {
+        const SCRIPT: &str = "POSIX path of (choose file of type {\"com.apple.application-bundle\"} \
+             with prompt \"Open with\" default location (POSIX file \"/Applications\"))";
+        let out = Command::new("/usr/bin/osascript").args(["-e", SCRIPT]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(out.stdout).ok()?;
+        let text = text.trim();
+        (text.ends_with(".app") || text.ends_with(".app/")).then(|| PathBuf::from(text))
+    }
+
+    /// Opens `file` with the app at `app`.
+    pub(crate) fn open_with(app: &Path, file: &Path) -> Result<(), ActionError> {
+        let ok = Command::new("/usr/bin/open").arg("-a").arg(app).arg(file).status();
+        match ok {
+            Ok(status) if status.success() => Ok(()),
+            _ => Err(ActionError::Failed),
+        }
+    }
+
+    /// Shows `file` in Finder.
+    pub(crate) fn reveal(file: &Path) -> Result<(), ActionError> {
+        match Command::new("/usr/bin/open").arg("-R").arg(file).status() {
+            Ok(status) if status.success() => Ok(()),
+            _ => Err(ActionError::Failed),
+        }
+    }
 }
 
 /// The path of this app's own program, as Windows names a handler's.

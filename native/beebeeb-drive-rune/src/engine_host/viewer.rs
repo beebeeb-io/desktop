@@ -153,6 +153,14 @@ pub trait ViewerEngine: Send + Sync + 'static {
     /// Ask the system to open the file with its own app, from the account's folder on this PC. Never
     /// `Elsewhere::NotBound`.
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere;
+    /// The app chooser, then the file in the app picked (macOS). Default: not here.
+    fn choose_elsewhere(&self, _file_id: &str) -> Elsewhere {
+        Elsewhere::NotBound
+    }
+    /// The file shown in the file manager (macOS). Default: not here.
+    fn reveal_elsewhere(&self, _file_id: &str) -> Elsewhere {
+        Elsewhere::NotBound
+    }
     /// Wake the window's loop: an answer or progress is waiting.
     fn wake(&self);
     /// Beebeeb is open: signed in and not locked ([`Engine::lock_state`] is `Open`). Never waits. A screen lock keeps
@@ -308,6 +316,66 @@ impl<C: CredentialStores> LiveViewerEngine<C> {
     }
 }
 
+impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
+    /// The path the system opens the file from, or why not.
+    fn elsewhere_path(&self, file_id: &str) -> Result<std::path::PathBuf, Elsewhere> {
+        if !self.engine.is_syncing() {
+            return Err(Elsewhere::NeedsSync);
+        }
+        let Ok(sync_root) = self.engine.sync_root() else {
+            return Err(Elsewhere::NeedsSync);
+        };
+        let path = self.engine.local_state_for_changes().and_then(|state| {
+            state.with(|db| {
+                // A folder is not a file to open from a viewer.
+                file_ops::resolve(db, file_id).ok().filter(|entry| !entry.is_dir())?;
+                super::path_the_system_opens(db, &sync_root, file_id).ok()
+            })
+        });
+        match path {
+            Ok(Some(path)) => Ok(path),
+            _ => Err(Elsewhere::Refused),
+        }
+    }
+
+    /// macOS: the chooser and the app picked (`reveal` false), or Finder with the file selected (`reveal` true), on a
+    /// thread of its own (the chooser waits for the person). Elsewhere: not here.
+    fn mac_elsewhere(&self, file_id: &str, reveal: bool) -> Elsewhere {
+        let path = match self.elsewhere_path(file_id) {
+            Ok(path) => path,
+            Err(why) => return why,
+        };
+        #[cfg(target_os = "macos")]
+        {
+            use super::open_with_apps::mac;
+            let (engine, turn) = (self.engine.clone(), self.engine.session_turn());
+            let started = std::thread::Builder::new().name("viewer-elsewhere".into()).spawn(move || {
+                let done = if reveal {
+                    mac::reveal(&path)
+                } else if let Some(app) = mac::choose_app() {
+                    if engine.session_turn() == turn {
+                        mac::open_with(&app, &path)
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    Ok(())
+                };
+                if done.is_err() {
+                    log("viewer: the file did not open in another app");
+                }
+                engine.wake_host();
+            });
+            if started.is_ok() { Elsewhere::Opened } else { Elsewhere::Refused }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (path, reveal);
+            Elsewhere::NotBound
+        }
+    }
+}
+
 impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
     fn session_turn(&self) -> SessionGeneration {
         self.engine.session_turn()
@@ -348,23 +416,9 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
     /// is not opened for safety is refused, and the system is asked without a shell, after the handle answered.
     /// "Sync is off" and "refused" are two answers.
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere {
-        if !self.engine.is_syncing() {
-            return Elsewhere::NeedsSync;
-        }
-        let Ok(sync_root) = self.engine.sync_root() else {
-            return Elsewhere::NeedsSync;
-        };
-        let path = self.engine.local_state_for_changes().and_then(|state| {
-            state.with(|db| {
-                // A folder is not a file to open from a viewer.
-                file_ops::resolve(db, file_id).ok().filter(|entry| !entry.is_dir())?;
-                super::path_the_system_opens(db, &sync_root, file_id).ok()
-            })
-        });
-        // `Opened` is "the system was asked": the start itself runs on the launch worker, for this session, and the
-        // window's thread never waits for the launch lock (R-OW1).
-        let Ok(Some(path)) = path else {
-            return Elsewhere::Refused;
+        let path = match self.elsewhere_path(file_id) {
+            Ok(path) => path,
+            Err(why) => return why,
         };
         let asked = self.launcher.open_for(
             &self.engine,
@@ -376,6 +430,14 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
             Ok(()) => Elsewhere::Opened,
             Err(()) => Elsewhere::Refused,
         }
+    }
+
+    fn choose_elsewhere(&self, file_id: &str) -> Elsewhere {
+        self.mac_elsewhere(file_id, false)
+    }
+
+    fn reveal_elsewhere(&self, file_id: &str) -> Elsewhere {
+        self.mac_elsewhere(file_id, true)
     }
 
     fn screen_open(&self) -> bool {
@@ -1277,6 +1339,20 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
             return Elsewhere::Refused;
         }
         self.engine.open_elsewhere(file_id)
+    }
+
+    fn choose_elsewhere(&mut self, file_id: &str) -> Elsewhere {
+        if self.current(file_id).is_none() {
+            return Elsewhere::Refused;
+        }
+        self.engine.choose_elsewhere(file_id)
+    }
+
+    fn reveal_elsewhere(&mut self, file_id: &str) -> Elsewhere {
+        if self.current(file_id).is_none() {
+            return Elsewhere::Refused;
+        }
+        self.engine.reveal_elsewhere(file_id)
     }
 
     fn previews(&self, name: &str) -> bool {

@@ -97,7 +97,7 @@ pub mod open;
 pub(crate) mod launch;
 #[cfg(test)]
 mod launch_tests;
-mod open_with_apps;
+pub(crate) mod open_with_apps;
 pub mod passkeys;
 pub mod photos;
 pub mod search;

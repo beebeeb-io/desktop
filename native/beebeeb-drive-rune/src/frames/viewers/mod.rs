@@ -48,6 +48,7 @@ mod photo;
 mod settle;
 pub mod source;
 mod states;
+pub mod unsupported;
 mod style;
 mod table;
 mod text;
@@ -99,6 +100,10 @@ pub enum Intent {
     NewMenu,
     /// The system's "Open with" for this file, decrypted for the app the person picks.
     OpenInAnotherApp,
+    /// The unsupported page's "Open with another app…": the system's app chooser, then the file opens in the app picked.
+    ChooseApp,
+    /// The unsupported page's "Show in Finder".
+    ShowInFolder,
     /// DW-0407: share this file.
     Share,
     /// DW-0413: this file's versions.
@@ -355,6 +360,20 @@ impl Ui {
                 }
                 Elsewhere::NotBound => {}
             }
+        }
+        if matches!(intent, Intent::ChooseApp | Intent::ShowInFolder) {
+            let id = self.file.id.clone();
+            let answer = if intent == Intent::ChooseApp {
+                self.source.choose_elsewhere(&id)
+            } else {
+                self.source.reveal_elsewhere(&id)
+            };
+            self.toast = match answer {
+                Elsewhere::Opened => None,
+                Elsewhere::NeedsSync => Some(NEEDS_SYNC_ELSEWHERE.to_string()),
+                Elsewhere::Refused | Elsewhere::NotBound => Some(NOT_OPENED_ELSEWHERE.to_string()),
+            };
+            return;
         }
         // The shell's router takes it (`shell::intents::drain_viewer_intents`); while nothing there answers it,
         // the router's fallback says "Not built yet: <what>".
