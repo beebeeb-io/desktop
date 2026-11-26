@@ -692,6 +692,95 @@ int beebeeb_fp_reimport(BeebeebFpError *out_error) {
     }
 }
 
+// dm-65: Settings > Storage > "Downloaded files". The items the system holds on disk for this domain (materialised),
+// one per line as "<item identifier>\t<bytes>"; a folder has no size and is left out. Returns the count (lines that
+// fit are written, bounded by the buffer), 0 when the domain is not registered, or -1 (out_error set).
+@interface BeebeebMaterialisedObserver : NSObject <NSFileProviderEnumerationObserver>
+@property(nonatomic, strong) NSMutableString *lines;
+@property(nonatomic, assign) int count;
+@property(nonatomic, strong) NSError *error;
+@property(nonatomic, strong) dispatch_semaphore_t done;
+@end
+@implementation BeebeebMaterialisedObserver
+- (void)didEnumerateItems:(NSArray<id<NSFileProviderItem>> *)updatedItems {
+    for (id<NSFileProviderItem> item in updatedItems) {
+        NSNumber *size = nil;
+        if ([item respondsToSelector:@selector(documentSize)]) {
+            size = item.documentSize;
+        }
+        if (size == nil || item.itemIdentifier.length == 0) {
+            continue;
+        }
+        [self.lines appendFormat:@"%@\t%llu\n", item.itemIdentifier, size.unsignedLongLongValue];
+        self.count += 1;
+    }
+}
+- (void)finishEnumeratingUpToPage:(NSFileProviderPage)nextPage {
+    dispatch_semaphore_signal(self.done);
+}
+- (void)finishEnumeratingWithError:(NSError *)error {
+    self.error = error;
+    dispatch_semaphore_signal(self.done);
+}
+@end
+
+int beebeeb_fp_materialised(char *buffer, unsigned long buffer_len, BeebeebFpError *out_error) {
+    @autoreleasepool {
+        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+        if (manager == nil) {
+            return 0;
+        }
+        BeebeebMaterialisedObserver *observer = [[BeebeebMaterialisedObserver alloc] init];
+        observer.lines = [NSMutableString string];
+        observer.done = dispatch_semaphore_create(0);
+        id<NSFileProviderEnumerator> enumerator = [manager enumeratorForMaterializedItems];
+        [enumerator enumerateItemsForObserver:observer startingAtPage:NSFileProviderInitialPageSortedByDate];
+        long wait_result = dispatch_semaphore_wait(observer.done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        if (wait_result != 0) {
+            BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out listing the downloaded items", out_error);
+            return -1;
+        }
+        if (observer.error != nil) {
+            BeebeebFillError(observer.error, out_error);
+            return -1;
+        }
+        BeebeebCopyString(observer.lines, buffer, buffer_len);
+        return observer.count;
+    }
+}
+
+// dm-65: make ONE item cloud-only again (evictItemWithIdentifier:), the call Finder's "Remove Download" makes.
+// Returns 0 = evicted (or domain not registered), -1 (out_error set).
+int beebeeb_fp_evict_item(const char *identifier, BeebeebFpError *out_error) {
+    @autoreleasepool {
+        if (identifier == NULL || identifier[0] == 0) {
+            BeebeebFillBridgeError(BeebeebBridgeNoIdentifier, @"no item identifier given", out_error);
+            return -1;
+        }
+        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+        if (manager == nil) {
+            return 0;
+        }
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block NSError *found_error = nil;
+        [manager evictItemWithIdentifier:[NSString stringWithUTF8String:identifier]
+                       completionHandler:^(NSError *error) {
+            found_error = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        if (wait_result != 0) {
+            BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out making an item cloud-only", out_error);
+            return -1;
+        }
+        if (found_error != nil) {
+            BeebeebFillError(found_error, out_error);
+            return -1;
+        }
+        return 0;
+    }
+}
+
 // Task 1698 part 3: every registered identifier of THIS provider, newline-separated.
 // Returns the count, or -1 (out_error set).
 int beebeeb_fp_list_domains(char *ids_buffer, unsigned long ids_buffer_len, BeebeebFpError *out_error) {

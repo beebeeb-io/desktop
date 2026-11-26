@@ -35,6 +35,21 @@ fn previews_row_shown(shows: bool, previews: &KeptOnPc) -> bool {
     shows && !previews.used.is_empty() && previews.limit.max_gb > 0
 }
 
+/// "Change limit" is drawn only where a limit really exists. On a Mac the downloaded copies are the File Provider's
+/// and nothing evicts to a size, so a limit there would be a button that does nothing.
+fn change_limit_shown(mac: bool, which: Kept) -> bool {
+    !(mac && which == Kept::Downloaded)
+}
+
+/// What the row says under its title: "367 MB of 20 GB", or on a Mac just the size ("of 0 GB" is no limit).
+fn kept_sub(mac: bool, which: Kept, used: &str, gb: u32) -> String {
+    if mac && which == Kept::Downloaded {
+        used.to_string()
+    } else {
+        format!("{used} of {gb} GB")
+    }
+}
+
 /// Storage has no answer of its own: its usage arrives with the insights. Loading while that is out, Failed
 /// (with a retry that really asks again) when it did not come, never a blank " used of ".
 fn unanswered(ui: &SettingsUi, st: &super::drive::Storage, t: &Theme) -> Option<El> {
@@ -151,25 +166,20 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 s.settings.toast = Some("Thumbnails and previews cleared");
             }
         });
-        let change = controls::button(first + 1, "Change limit", None, Emphasis::Plain, t)
-            .on_press(move |s: &mut State| s.settings.open_limit(which));
-        let mut it = Item::new(Some(icon), which.title()).sub(format!("{} of {} GB", k.used, k.limit.gb));
+        let mac = cfg!(target_os = "macos");
+        let change = change_limit_shown(mac, which).then(|| {
+            controls::button(first + 1, "Change limit", None, Emphasis::Plain, t)
+                .on_press(move |s: &mut State| s.settings.open_limit(which))
+        });
+        let mut it = Item::new(Some(icon), which.title()).sub(kept_sub(mac, which, &k.used, k.limit.gb));
         if index > 0 {
             it = it.ruled();
         }
-        lists::item_with(
-            1,
-            index,
-            &it,
-            vec![
-                row()
-                    .key(format!("item-1-{index}-actions"))
-                    .gap(sp::S6)
-                    .child(clear)
-                    .child(change),
-            ],
-            t,
-        )
+        let mut actions = row().key(format!("item-1-{index}-actions")).gap(sp::S6).child(clear);
+        if let Some(change) = change {
+            actions = actions.child(change);
+        }
+        lists::item_with(1, index, &it, vec![actions], t)
     };
     let mut pc = vec![kept(0, 0, Kept::Downloaded, &ic::DOWNLOAD_TRAY, "Clear…")];
     if previews_row_shown(ui.drive.shows(Control::PreviewsRow), &st.previews) {
@@ -321,6 +331,30 @@ mod tests {
         let mut no_limit = board;
         no_limit.limit.max_gb = 0;
         assert!(!previews_row_shown(true, &no_limit));
+    }
+
+    #[test]
+    fn a_mac_has_no_change_limit_on_downloaded_files() {
+        assert!(!change_limit_shown(true, Kept::Downloaded));
+        assert!(change_limit_shown(true, Kept::Previews));
+        assert!(change_limit_shown(false, Kept::Downloaded));
+        assert_eq!(kept_sub(true, Kept::Downloaded, "367 MB", 0), "367 MB");
+        assert_eq!(kept_sub(false, Kept::Downloaded, "367 MB", 20), "367 MB of 20 GB");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn storage_on_a_mac_draws_clear_and_no_change_limit() {
+        let mut state = crate::init();
+        assert!(crate::frames::settings::scene("DW-0712", &mut state));
+        state.settings.drive = Box::new(BoardDrive::new());
+        let env = rune::Env { system_dark: false, scale: 2.0 };
+        let mut rt = rune::Runtime::new(state, crate::view, (958.0, 718.0), env);
+        rt.frame(0.0);
+        rt.frame(0.016);
+        let said: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+        assert!(said.iter().any(|t| t == "Clear…"), "{said:?}");
+        assert!(!said.iter().any(|t| t == "Change limit"), "{said:?}");
     }
 
     fn keys_with(insights: crate::frames::settings::drive::Insights) -> Vec<String> {
