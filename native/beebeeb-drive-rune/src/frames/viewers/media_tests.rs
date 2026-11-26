@@ -404,7 +404,8 @@ fn a_photos_actions_share_keep_offline_show_details_and_trash() {
     assert_eq!(words(&rt, "detail-lens-value"), "FE 35mm F1.4 GM");
     assert_eq!(words(&rt, "status-details"), "Space for Preview");
     assert!(!has(&rt, "gallery") && !has(&rt, "action-0"));
-    assert_eq!(info(&rt, "photo").target[2], 500.0);
+    // Task 67: the photo takes the room the panel leaves, no fixed 500 wide.
+    assert!(info(&rt, "photo").target[2] > 500.0);
     // Alt+Shift+P hides it again (DW-1501).
     press_with(
         &mut rt,

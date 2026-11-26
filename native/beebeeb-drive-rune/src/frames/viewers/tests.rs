@@ -1427,7 +1427,7 @@ fn the_viewer_more_menu_is_keyboard_reachable() {
     click(&mut rt, "more-btn");
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
-    assert_eq!(focused(&rt).as_deref(), Some("more-menu-item-1"), "Down moves the focus along the lines");
+    assert_eq!(viewer(&rt).more.and_then(|m| m.hot), Some(1), "Down walks along the lines");
     press(&mut rt, Key::Enter);
     assert!(!has(&rt, "more-menu"), "Enter picks and closes");
 }
