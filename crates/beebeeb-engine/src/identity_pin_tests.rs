@@ -185,7 +185,7 @@ const TEST_REAL_ALLOWED: [(&str, usize, &str); 19] = [
     ),
     (
         "crates/beebeeb-engine/src/backup/device.rs",
-        7,
+        8,
         "the device name and folder adoption differ by build: REAL's salt, suffix and legacy-folder adoption are asserted against TEST's",
     ),
     (
