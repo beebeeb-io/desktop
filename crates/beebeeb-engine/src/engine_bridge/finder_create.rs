@@ -457,9 +457,39 @@ impl EngineBridge {
         if copy_missing {
             return Err(anyhow::Error::new(QueuedCopyMissing));
         }
-        // Dm-68: a file kept on this Mac was fetched once already (the pin's own fetch, into the state folder). The
-        // system's fetch of it is served from that copy while it still is the current version's bytes, so a keep is
-        // ONE download. Anything else (no copy, another version, bytes that differ) goes to the server as before.
+        // Dm-71: one download in flight per file. A fetch that starts while another of the same file runs (the
+        // system's own fetch of a kept file, and Finder opening it meanwhile) waits for that one, says its progress
+        // and copies its finished file: it asks the server for nothing.
+        let lead = loop {
+            match FinderFetch::join(&self.db, &file_id) {
+                FinderFetch::Lead(lead) => break lead,
+                FinderFetch::Follow(follow) => {
+                    let so_far = || self.transfers.get(&file_id).map(|t| (t.done, t.total));
+                    // The leader failed or its caller went away: start over (as the next leader, or behind one).
+                    let Some((copy, done)) = follow.wait(so_far, progress).await else {
+                        continue;
+                    };
+                    // Gone since it was handed over: start over.
+                    let Ok(mut held) = std::fs::File::open(&copy) else {
+                        continue;
+                    };
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let bytes = write_hydrated_from_reader(dest, allowed_roots, &mut held)?;
+                    drop(done);
+                    if let Some(progress) = progress {
+                        progress(bytes, bytes);
+                    }
+                    log_hydrate_served(&file_id, HydrateSource::Copy);
+                    return Ok(HydrateSource::Copy);
+                }
+            }
+        };
+        // Dm-68: a copy of the current version's bytes this device already holds (a file the engine fetched into the
+        // state folder: before dm-71 every kept file on a Mac, still a kept file's new version) serves the system's
+        // fetch, so nothing is downloaded a second time. Anything else (no copy, another version, bytes that differ)
+        // goes to the server.
         if let Some(copy) = self.current_copy_on_this_device(&file_id, dest) {
             // Gone since it was looked at: the server has it.
             if let Ok(mut held) = std::fs::File::open(&copy) {
@@ -470,12 +500,16 @@ impl EngineBridge {
                 if let Some(progress) = progress {
                     progress(bytes, bytes);
                 }
+                lead.hand_over(dest).await;
                 log_hydrate_served(&file_id, HydrateSource::Copy);
                 return Ok(HydrateSource::Copy);
             }
         }
+        // The one download. Its progress goes to the caller and (inside the hydrate) to the transfer board, which the
+        // Available offline row and a fetch waiting behind this one read; its end makes the row `Local`.
         self.hydrate_file_with_progress(&file_id, dest, allowed_roots, progress)
             .await?;
+        lead.hand_over(dest).await;
         log_hydrate_served(&file_id, HydrateSource::Server);
         Ok(HydrateSource::Server)
     }

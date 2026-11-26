@@ -267,8 +267,10 @@ impl EngineBridge {
             }
         }
 
+        // Dm-71: on a Mac the system's own fetch brings a kept file's bytes down (the item's content policy), once:
+        // no fetch of the engine's own into the state folder is queued.
         #[cfg(not(target_os = "windows"))]
-        if toggle.is_pin() {
+        if toggle.is_pin() && !kept_bytes_come_by_the_systems_fetch() {
             for changed_id in &changed_item_ids {
                 let Some(entry) = self.db.get_file(changed_id)? else {
                     continue;

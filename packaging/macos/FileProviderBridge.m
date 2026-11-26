@@ -781,6 +781,41 @@ int beebeeb_fp_evict_item(const char *identifier, BeebeebFpError *out_error) {
     }
 }
 
+// dm-71: keep ONE item on this Mac through the system: ask it to download the item now
+// (requestDownloadForItemWithIdentifier:, the whole file). The extension's fetchContents is then the one download;
+// the item's content policy (downloadEagerlyAndKeepDownloaded while it is kept) keeps the copy.
+// Returns 0 = asked (or domain not registered), -1 (out_error set).
+int beebeeb_fp_request_download(const char *identifier, BeebeebFpError *out_error) {
+    @autoreleasepool {
+        if (identifier == NULL || identifier[0] == 0) {
+            BeebeebFillBridgeError(BeebeebBridgeNoIdentifier, @"no item identifier given", out_error);
+            return -1;
+        }
+        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+        if (manager == nil) {
+            return 0;
+        }
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block NSError *found_error = nil;
+        [manager requestDownloadForItemWithIdentifier:[NSString stringWithUTF8String:identifier]
+                                       requestedRange:NSMakeRange(NSNotFound, 0)
+                                    completionHandler:^(NSError *error) {
+            found_error = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        if (wait_result != 0) {
+            BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out asking for an item's download", out_error);
+            return -1;
+        }
+        if (found_error != nil) {
+            BeebeebFillError(found_error, out_error);
+            return -1;
+        }
+        return 0;
+    }
+}
+
 // Task 1698 part 3: every registered identifier of THIS provider, newline-separated.
 // Returns the count, or -1 (out_error set).
 int beebeeb_fp_list_domains(char *ids_buffer, unsigned long ids_buffer_len, BeebeebFpError *out_error) {
