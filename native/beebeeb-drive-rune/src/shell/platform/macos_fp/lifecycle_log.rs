@@ -334,8 +334,7 @@ mod tests {
         ] {
             assert!(!line.contains(leaked), "{leaked} leaked: {line}");
         }
-        assert!(line.contains("[path]"), "{line}");
-        assert!(line.contains("[name]"), "{line}");
+        assert!(line.contains('<'), "{line}");
 
         // The state DB's names must reach the redactor, and the assertions above cannot tell:
         // `redact_for_export` turns any unknown word into `[name]` by itself. `2025` is a bare
@@ -352,6 +351,31 @@ mod tests {
             !with_names.contains("2025"),
             "the known names did not reach the redactor: {with_names}"
         );
+    }
+
+    #[test]
+    fn the_rc6_timeout_line_reads_in_words() {
+        let line = format_line(
+            &transition("Timed out waiting for the Beebeeb File Provider domain to become available"),
+            &KnownNames::new(),
+            at(),
+        );
+        assert!(
+            line.ends_with("message=\"Timed out waiting for the Beebeeb File Provider domain to become available\""),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_file_name_that_is_also_an_ordinary_word_stays_redacted() {
+        let line = format_line(
+            &transition("Timed out waiting for the Photos domain"),
+            &names(&["Photos"]),
+            at(),
+        );
+        assert!(!line.contains("Photos"), "{line}");
+        let line = format_line(&transition("could not open Letter.docx"), &KnownNames::new(), at());
+        assert!(!line.contains("Letter") && !line.contains("docx"), "{line}");
     }
 
     #[test]

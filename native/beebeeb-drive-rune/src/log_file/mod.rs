@@ -26,7 +26,7 @@
 pub mod crash;
 #[cfg(test)]
 mod crash_tests;
-mod redact;
+pub(crate) mod redact;
 #[cfg(test)]
 mod tests;
 
