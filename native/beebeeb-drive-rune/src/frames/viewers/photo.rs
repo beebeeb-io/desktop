@@ -66,16 +66,27 @@ fn action(i: usize, name: &'static str, icon: &'static Icon) -> El {
         .child(kit::glyph(format!("action-{i}-icon"), icon, 18.0, Color::WHITE).absolute((width - 18.0) / 2.0, 0.0))
 }
 
-fn picture(ui: &Ui, file: &OpenFile, width: f32, height: f32) -> El {
-    let photo = el()
-        .key("photo")
-        .role("image")
-        .label(file.name.clone())
-        .size(width, height)
-        .radius(crate::theme::tokens::radius::SM);
+/// The size in points a picture of `pixels` is drawn at in an `area` of points (contain, aspect kept): the largest
+/// box at the picture's own ratio the area holds, so a large photo fills the width or the height and a small one is
+/// scaled up to the area, never past it. Rounded down to whole device pixels of `scale` (the window's real display
+/// scale factor). The layout does the same live with `aspect_fit`, so a resize or the details panel recomputes it.
+pub(crate) fn fit_size(pixels: (u32, u32), area: (f32, f32), scale: f32) -> (f32, f32) {
+    let (pw, ph) = (pixels.0.max(1) as f32, pixels.1.max(1) as f32);
+    let k = (area.0 / pw).min(area.1 / ph).max(0.0);
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let snap = |v: f32| (v * scale).floor() / scale;
+    (snap(pw * k), snap(ph * k))
+}
+
+/// The photo, drawn in whatever room its area has: it never has a fixed size of its own.
+fn picture(ui: &Ui, file: &OpenFile) -> El {
+    let photo = el().key("photo").role("image").label(file.name.clone()).radius(crate::theme::tokens::radius::SM);
     match ui.source.picture(&file.id, Picture::Photo) {
-        Some(pixels) => photo.pixels_fit(&pixels, SurfaceFit::Fit),
-        None => photo.fill(plain()),
+        Some(pixels) => {
+            let (w, h) = pixels.size();
+            photo.aspect_fit(w.max(1) as f32 / h.max(1) as f32).pixels_fit(&pixels, SurfaceFit::Fill)
+        }
+        None => photo.size(600.0, 400.0).fill(plain()),
     }
 }
 
@@ -87,8 +98,8 @@ pub fn body(ui: &Ui, doc: &PhotoDoc, t: &Theme) -> El {
         .h_full()
         .fill(stage_black(t));
     if ui.show_details {
-        // DW-1502: beside the panel the photo stands alone, smaller.
-        return stage.center().child(picture(ui, &ui.file, 500.0, 334.0));
+        // DW-1502: beside the panel the photo stands alone, in the room the panel leaves.
+        return stage.center().child(el().key("photo-area").grow(1.0).min_h(0.0).w_full().padding(20.0).center().child(picture(ui, &ui.file)));
     }
     let mut strip = row()
         .key("gallery")
@@ -164,9 +175,46 @@ pub fn body(ui: &Ui, doc: &PhotoDoc, t: &Theme) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
+                .padding(20.0)
                 .center()
-                .child(picture(ui, &ui.file, 600.0, 400.0)),
+                .child(picture(ui, &ui.file)),
         )
         .child(strip)
         .child(actions)
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::fit_size;
+
+    #[test]
+    fn six_thousand_by_four_thousand_fills_the_width_at_scale_two() {
+        let (w, h) = fit_size((6000, 4000), (1900.0, 1350.0), 2.0);
+        assert!((w - 1900.0).abs() < 0.51 && h <= 1350.0 && (w / h - 1.5).abs() < 0.01, "{w}x{h}");
+    }
+
+    #[test]
+    fn a_portrait_photo_fills_the_height() {
+        let (w, h) = fit_size((4000, 6000), (1900.0, 1350.0), 2.0);
+        assert!((h - 1350.0).abs() < 0.51 && w < 1900.0, "{w}x{h}");
+    }
+
+    #[test]
+    fn a_resize_recomputes_the_fit() {
+        let big = fit_size((6000, 4000), (1900.0, 1350.0), 2.0);
+        let small = fit_size((6000, 4000), (900.0, 700.0), 2.0);
+        assert!(small.0 < big.0 && (small.0 - 900.0).abs() < 0.51);
+    }
+
+    #[test]
+    fn a_small_image_is_not_blown_past_the_area() {
+        let (w, h) = fit_size((300, 200), (1900.0, 1350.0), 2.0);
+        assert!(w <= 1900.0 && h <= 1350.0, "{w}x{h}");
+    }
+
+    #[test]
+    fn it_snaps_to_whole_device_pixels() {
+        let (w, _) = fit_size((6000, 4000), (1001.0, 1350.0), 2.0);
+        assert_eq!(w * 2.0, (w * 2.0).round());
+    }
 }

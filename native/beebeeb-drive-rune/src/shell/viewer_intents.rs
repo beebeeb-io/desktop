@@ -46,6 +46,7 @@ pub fn take(s: &mut State, tx: &mut Tx, intent: Intent) -> bool {
             }
         }
         Intent::Trash => trash(s, tx, item),
+        Intent::Rename => rename(s, tx, item),
         Intent::Edit => {
             let why = why_not_edit(s, &item);
             say(s, why.into());
@@ -151,6 +152,17 @@ fn trash(s: &mut State, tx: &mut Tx, item: DriveItem) {
             say(s, Toast::failure(action, why));
         }
     }
+}
+
+/// Rename: Files' own, on the open file's row. The viewer closes and the row's name becomes a field. A file the
+/// folder shown does not hold has no row to rename: the viewer says so.
+fn rename(s: &mut State, tx: &mut Tx, item: DriveItem) {
+    let Some(row) = row_of(s, &item) else {
+        return say(s, "Open its folder in Files to rename it".into());
+    };
+    s.select_only(row);
+    viewers::close(s);
+    s.begin_rename(tx);
 }
 
 fn why_not_edit(s: &State, item: &DriveItem) -> &'static str {

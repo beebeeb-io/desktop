@@ -94,7 +94,13 @@ fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
 
 /// The toolbar of an open file. `tools` are the file's own controls, drawn before the "more" button.
 pub fn toolbar(_s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El {
-    let more = toolbar::tool("more-btn", "More actions", &icons::MORE, t);
+    let more = toolbar::tool("more-btn", "More actions", &icons::MORE, t)
+        .expanded(ui.more.is_some())
+        .on_press(|s: &mut State| {
+            if let Some(ui) = super::ui(s) {
+                ui.toggle_more();
+            }
+        });
     // The file's own controls and "more" sit 6 apart (`.flex.items-center.gap-1.5`).
     // One Tab stop (`ui::toolbar::roving`): Tab enters it once, Left/Right/Home/End move inside it.
     let file_tools = toolbar::roving(
@@ -311,6 +317,9 @@ pub fn window(
             );
             if let Some(words) = &ui.toast {
                 under = under.child(super::dialogs::toast(words, t));
+            }
+            if let Some(open) = ui.more {
+                under = under.child(super::more_menu::layer(ui, open, t));
             }
             match &ui.dialog {
                 Some(super::Dialog::Unsaved) => under = under.child(super::dialogs::unsaved(&ui.file.name, t)),

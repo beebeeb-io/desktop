@@ -1398,3 +1398,46 @@ fn focus_after_the_unsaved_question_goes_to_the_editor_or_else_the_toolbar() {
         "Discard: focus is in the toolbar, on {at}"
     );
 }
+
+/// Task 67: the toolbar's "…" opens the file row's actions as a menu under the button, in every kind of file the
+/// shared toolbar draws: a note, code, a photo, audio, a PDF, a table, an archive.
+#[test]
+fn the_more_button_opens_the_action_menu_for_every_viewer_kind() {
+    let words = |rt: &Runtime<State>, i: usize| info(rt, &format!("more-menu-item-{i}-label")).label.unwrap_or_default();
+    for frame in ["DW-1513", "DW-1512", "DW-1501", "DW-1503", "DW-1505", "DW-1514", "DW-1515"] {
+        let mut rt = runtime(frame);
+        assert!(!has(&rt, "more-menu"), "{frame}: closed at first");
+        click(&mut rt, "more-btn");
+        assert!(has(&rt, "more-menu"), "{frame}: the \u{22EF} opens a menu");
+        for (i, want) in ["Open with\u{2026}", "Show in Finder", "Share\u{2026}", "Version history\u{2026}"].iter().enumerate() {
+            if cfg!(target_os = "macos") {
+                assert_eq!(words(&rt, i), *want, "{frame}: line {i}");
+            }
+        }
+        assert!(has(&rt, "more-menu-item-5-label") || has(&rt, "more-menu-item-6-label"), "{frame}: Rename and Trash");
+        click(&mut rt, "more-btn");
+        assert!(!has(&rt, "more-menu"), "{frame}: pressing it again closes it");
+    }
+}
+
+/// The menu is reached by the keyboard: Down walks the lines, Enter picks, and the menu closes.
+#[test]
+fn the_viewer_more_menu_is_keyboard_reachable() {
+    let mut rt = runtime("DW-1512");
+    click(&mut rt, "more-btn");
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Down);
+    assert_eq!(focused(&rt).as_deref(), Some("more-menu-item-1"), "Down moves the focus along the lines");
+    press(&mut rt, Key::Enter);
+    assert!(!has(&rt, "more-menu"), "Enter picks and closes");
+}
+
+/// Escape closes the menu and gives the keyboard back to the button.
+#[test]
+fn the_viewer_more_menu_closes_on_escape() {
+    let mut rt = runtime("DW-1512");
+    click(&mut rt, "more-btn");
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Escape);
+    assert!(!has(&rt, "more-menu"));
+}

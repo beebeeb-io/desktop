@@ -44,6 +44,7 @@ mod office_icons;
 pub mod office_over;
 mod open_route;
 mod pdf;
+mod more_menu;
 mod photo;
 mod settle;
 pub mod source;
@@ -124,6 +125,8 @@ pub enum Intent {
     EditInSheets,
     /// Move this file to Trash (a photo's Trash; Undo is the toast's, in Files).
     Trash,
+    /// Rename this file: Files' own rename of its row.
+    Rename,
     /// A command of the office editor (its name, as the control says it): the editor takes it.
     Office(&'static str),
 }
@@ -171,6 +174,7 @@ impl Intent {
             Intent::KeepOffline => "Available offline from here",
             Intent::EditInSheets => "Edit in Sheets",
             Intent::VersionHistory => "Version history",
+            Intent::Rename => "Rename",
             Intent::Office(command) => command,
             _ => return None,
         })
@@ -246,6 +250,8 @@ pub struct Ui {
     pub office: office::OfficeUi,
     /// The element that takes keyboard focus once this change is on screen.
     focus: Option<&'static str>,
+    /// The toolbar's "…" menu, while it is open (`more_menu.rs`).
+    pub more: Option<more_menu::Open>,
     intents: Vec<Intent>,
 }
 
@@ -286,6 +292,7 @@ impl Ui {
             toast: None,
             saved_at: None,
             focus: None,
+            more: None,
             intents: Vec::new(),
         }
     }
