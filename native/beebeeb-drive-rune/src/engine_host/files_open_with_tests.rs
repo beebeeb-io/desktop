@@ -359,7 +359,9 @@ fn reading_open(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), 
 }
 
 /// DC-RD-e: double-clicking a file that is not on this PC (no file at its path) downloads it first and hands the app
-/// the downloaded copy; it never hands over the missing path ("<root>/x does not exist").
+/// the downloaded copy; it never hands over the missing path ("<root>/x does not exist"). Not on a Mac (dm-91: a Mac
+/// opens Finder's copy, and never writes a decrypted one).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn open_file_downloads_a_cloud_only_file_before_it_opens() {
     use std::time::{Duration, Instant};
@@ -394,4 +396,98 @@ fn open_file_downloads_a_cloud_only_file_before_it_opens() {
     assert!(!seen.0.starts_with(&root), "the copy is outside the Beebeeb folder");
     assert_eq!(seen.1, b"invented bytes of the notes", "the app sees the whole file");
     assert!(set.source.changes().is_empty(), "no failure was said");
+}
+
+/// Dm-91: a Mac's open of a cloud-only file with these Finder steps: what the app was handed (if anything), the
+/// failure said, and the stand-in. Nothing may appear in the temp folder's open copies for the file. One caller
+/// (`OPENED_COPY` is shared).
+#[cfg(target_os = "macos")]
+fn mac_open(tag: &str, steps: MacOpenStandIn) -> (Option<PathBuf>, Vec<String>, Arc<MacOpenStandIn>) {
+    use std::time::{Duration, Instant};
+    let mut set = set(tag, true, true);
+    let _running = hold_running(&set.engine);
+    set.account
+        .add_file_with_content(DOWNLOAD, None, "Invented download.txt", b"invented bytes of the notes");
+    let steps = Arc::new(steps);
+    set.source.mac_open = steps.clone();
+    set.source.starts = files_launch::Starts {
+        open: reading_open,
+        reveal: reveal_stand_in,
+        has_default_app: |_| true,
+        app: None,
+    };
+    OPENED_COPY.lock().unwrap().clear();
+    let copies = std::env::temp_dir().join(OPEN_COPIES).join(DOWNLOAD);
+    let _ = std::fs::remove_dir_all(&copies);
+    let notes = row(DOWNLOAD, "Invented download.txt", false);
+    assert_eq!(set.source.open(std::slice::from_ref(&notes)), Ok(()), "{tag}: the press is accepted");
+    let waited = Instant::now();
+    let (seen, said) = loop {
+        let said: Vec<String> = set.source.changes().iter().map(|change| format!("{change:?}")).collect();
+        let seen = OPENED_COPY.lock().unwrap().first().map(|(path, _)| path.clone());
+        if seen.is_some() || !said.is_empty() {
+            break (seen, said);
+        }
+        assert!(waited.elapsed() < Duration::from_secs(10), "{tag}: the open never ended");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(!copies.exists(), "{tag}: no decrypted copy is written for a Mac's open");
+    (seen, said, steps)
+}
+
+/// Dm-91 (RC20 review): on a Mac no open decrypts a copy to the temp folder. A file shared with the account (no place
+/// in Finder) is refused before Finder is asked; an open while Finder setup is not ready waits for setup and is refused
+/// when it is still not ready; once ready (also after the wait), the app is handed the path in the Beebeeb folder
+/// whatever Finder answers, and the start says what it finds.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_a_mac_no_open_writes_a_decrypted_copy() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let refused = "Failed(Open, NotOnThisSystem)";
+
+    let (seen, said, steps) = mac_open(
+        "dm91-shared",
+        MacOpenStandIn {
+            shared: true,
+            ready: true.into(),
+            ..MacOpenStandIn::default()
+        },
+    );
+    assert_eq!(seen, None, "shared: no app is started");
+    assert_eq!(said, [refused], "shared");
+    assert_eq!((steps.waits.load(SeqCst), steps.presents.load(SeqCst)), (0, 0), "shared");
+
+    let (seen, said, steps) = mac_open("dm91-setup", MacOpenStandIn::default());
+    assert_eq!(seen, None, "setup: no app is started");
+    assert_eq!(said, [refused], "setup");
+    assert_eq!((steps.waits.load(SeqCst), steps.presents.load(SeqCst)), (1, 0), "setup: waited, Finder not asked");
+
+    for (tag, absent) in [("dm91-ready", false), ("dm91-absent", true)] {
+        let (seen, said, steps) = mac_open(
+            tag,
+            MacOpenStandIn {
+                ready_after_wait: true,
+                absent,
+                ..MacOpenStandIn::default()
+            },
+        );
+        let seen = seen.expect("the app is started");
+        assert!(seen.ends_with("Invented download.txt"), "{tag}");
+        assert!(!seen.starts_with(std::env::temp_dir().join(OPEN_COPIES)), "{tag}");
+        assert!(said.is_empty(), "{tag}: {said:?}");
+        assert_eq!((steps.waits.load(SeqCst), steps.presents.load(SeqCst)), (1, 1), "{tag}");
+    }
+}
+
+/// Dm-91: the open copies an older build left in the temp folder are removed at the app's start on a Mac.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_a_mac_old_open_copies_are_removed_at_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = temp.path().join(OPEN_COPIES).join(DOWNLOAD);
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("Invented download.txt"), b"invented plain bytes").unwrap();
+    remove_open_copies(temp.path());
+    assert!(!temp.path().join(OPEN_COPIES).exists());
+    remove_open_copies(temp.path());
 }
