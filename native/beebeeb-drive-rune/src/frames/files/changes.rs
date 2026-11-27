@@ -34,6 +34,9 @@ impl State {
                     }
                     self.actions.made.push(*item);
                 }
+                // Dm-73: on a Mac an open another app did not take is said on the file's page.
+                Change::Failed(super::source::Action::Open, why)
+                    if cfg!(target_os = "macos") && crate::shell::viewer_intents::open_failed_later(self, why) => {}
                 Change::Failed(action, why) => failures.push((action, why)),
                 // A cancelled upload: its row leaves the folder now, and the message says where the copy is.
                 Change::Cancelled { id } => {

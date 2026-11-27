@@ -612,12 +612,21 @@ fn a_kind_with_no_preview_never_opens_the_viewer_from_a_list_and_its_route_says_
     // system's app, else the file manager): the route stays on the list. No sync runs here, so the file is not on
     // this PC and nothing is started; the window says so (and nothing was downloaded).
     w.open_row(PLAN_NAME);
-    assert_eq!(
-        w.route_item(),
-        None,
-        "a list's Open does not go to a file the viewer cannot show"
-    );
-    assert!(w.rt.state.viewer.ui.is_none());
+    if cfg!(target_os = "macos") {
+        // Dm-73: on a Mac the open that did not start is said on the file's own page (the reason, the other apps),
+        // never in a toast alone. Nothing was downloaded for it.
+        assert_eq!(w.route_item().as_deref(), Some(PLAN));
+        let drawn = w.drawn();
+        assert!(drawn.contains("Couldn't open.") && drawn.contains("Open with another app\u{2026}"), "{drawn}");
+        assert_eq!(w.rt.state.actions.toast, None);
+    } else {
+        assert_eq!(
+            w.route_item(),
+            None,
+            "a list's Open does not go to a file the viewer cannot show"
+        );
+        assert!(w.rt.state.viewer.ui.is_none());
+    }
     assert_eq!(w.chunk_requests(), 0);
 
     // A route that names it anyway (a link, Back and Forward): the viewer's honest state, and nothing downloaded.
@@ -1043,9 +1052,19 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
         quiet = if now == before { quiet + 1 } else { 0 };
         before = now;
     }
-    // The kind with no preview: not in the app, nothing downloaded, nothing started (no copy on this PC).
+    // The kind with no preview: not in the app, nothing downloaded, nothing started (no copy on this PC). On a Mac the
+    // open that did not start is said on the file's own page (dm-73); elsewhere the list stays and a toast says it.
+    let said = |w: &mut Window, id: &str| {
+        if cfg!(target_os = "macos") {
+            assert_eq!((w.route_item().as_deref(), w.rt.state.viewer.ui.is_some()), (Some(id), true));
+            assert!(w.drawn().contains("Couldn't open."), "{}", w.drawn());
+            leave(w);
+        } else {
+            assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
+        }
+    };
     w.open_row(PLAN_NAME);
-    assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
+    said(&mut w, PLAN);
     let mut opened = Opened::InApp;
     w.rt.update(|s, _| opened = open_file(s, Target::Item(&item_named(PLAN, PLAN_NAME))));
     assert_eq!(
@@ -1054,7 +1073,7 @@ fn four_kinds_open_in_the_app_from_files_and_from_search_and_a_kind_with_no_prev
     );
     // A video, in this window (no player here), is the same: step 2, never the viewer's frame.
     w.open_row(CLIP_NAME);
-    assert_eq!((w.route_item(), w.rt.state.viewer.ui.is_some()), (None, false));
+    said(&mut w, CLIP);
     assert_eq!(w.chunk_requests(), before, "nothing was downloaded for them");
 }
 

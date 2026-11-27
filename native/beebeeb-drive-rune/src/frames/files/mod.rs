@@ -835,17 +835,23 @@ impl State {
         if let Some(first) = files.first() {
             // Asked before the hand-over: once Windows has it, the copy may already be on its way.
             let fetch = crate::frames::open_file::fetch_toast(self, first);
+            use crate::frames::open_file::Opened;
             match crate::frames::open_file::open_file(self, crate::frames::open_file::Target::Item(first)) {
-                crate::frames::open_file::Opened::Failed(why) => {
-                    self.failed(Action::Open, why, tx);
+                // Dm-73: on a Mac a file that did not open gets its page with the reason, not a toast alone.
+                Opened::Failed(why) => {
+                    if !(cfg!(target_os = "macos") && crate::shell::viewer_intents::open_failed(self, first, why)) {
+                        self.failed(Action::Open, why, tx);
+                    }
                     return false;
                 }
-                crate::frames::open_file::Opened::DefaultApp if !several => {
-                    if let Some(toast) = fetch {
+                // Handed to another app: a start that fails later is this file's (`open_failed_later`).
+                opened @ (Opened::DefaultApp | Opened::Explorer) => {
+                    crate::shell::viewer_intents::handed_out(first);
+                    if let (Opened::DefaultApp, false, Some(toast)) = (opened, several, fetch) {
                         self.show_toast(toast, tx);
                     }
                 }
-                _ => {}
+                Opened::InApp => {}
             }
         }
         if several {

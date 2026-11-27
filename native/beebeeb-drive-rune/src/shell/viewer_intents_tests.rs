@@ -47,6 +47,119 @@ fn toast(rt: &mut Runtime<State>) -> Option<String> {
     out
 }
 
+/// A viewer source with no viewer for any kind: every file opens as the page with the other apps.
+struct NoViewer;
+
+impl crate::frames::viewers::source::ViewerSource for NoViewer {
+    fn open(
+        &mut self,
+        id: &str,
+    ) -> Result<crate::frames::viewers::source::OpenFile, crate::frames::viewers::source::OpenError> {
+        Ok(crate::frames::viewers::source::OpenFile {
+            id: id.to_string(),
+            path: vec!["Files".into()],
+            name: "IMG_0073.MOV".into(),
+            facts: "Video \u{b7} 366.9 MB".into(),
+            version: 1,
+            body: Body::NotPreviewable(crate::frames::viewers::source::NoPreview::NoViewer),
+            details: Default::default(),
+            newer: None,
+        })
+    }
+    fn poll(&mut self, _: &str) -> Option<Body> {
+        None
+    }
+    fn cancel(&mut self, _: &str) {}
+    fn retry(
+        &mut self,
+        id: &str,
+    ) -> Result<crate::frames::viewers::source::OpenFile, crate::frames::viewers::source::OpenError> {
+        self.open(id)
+    }
+    fn previews(&self, _: &str) -> bool {
+        false
+    }
+}
+
+/// Everything the window draws, as words.
+fn drawn(rt: &Runtime<State>) -> String {
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting)
+        .flat_map(|e| [e.text, e.label].into_iter().flatten())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Dm-73: a file a list could not open (here: no app took it, the source refused) lands on the viewers' unsupported
+/// page with the reason on it and the ways out, and no toast is left to say it alone.
+#[test]
+fn viewers_failed_open_lands_on_the_unsupported_page_with_the_reason_not_a_toast() {
+    let mut rt = runtime();
+    let item = crate::frames::open_file::item_named("f-73-failed-open", "IMG_0073.MOV");
+    rt.update(|s, _| {
+        viewers::wire(s, Box::new(|| Box::new(NoViewer)));
+        assert!(open_failed(s, &item, ActionError::Failed), "the page takes it");
+        let ui = viewers::ui(s).expect("the file's page is open");
+        assert_eq!(ui.file.id, "f-73-failed-open");
+        assert!(matches!(ui.file.body, Body::NotPreviewable(why) if UnsupportedReason::of(why).is_some()));
+        assert_eq!(ui.toast, None);
+        assert_eq!(s.actions.toast, None, "Files says nothing in a toast");
+    });
+    assert_eq!(
+        unsupported::note_of("f-73-failed-open"),
+        Some(Note::Failed("Couldn't open.".into()))
+    );
+    rt.frame(1.0);
+    let page = drawn(&rt);
+    assert!(page.contains("Couldn't open."), "{page}");
+    assert!(page.contains(unsupported::SENTENCE), "{page}");
+    assert!(page.contains("Open with another app\u{2026}"), "{page}");
+    assert!(page.contains(&unsupported::show_label()), "{page}");
+
+    // A start that answers later names no file: it is the one last handed out, once.
+    let later = crate::frames::open_file::item_named("f-73-failed-later", "IMG_0074.MOV");
+    rt.update(|s, _| {
+        viewers::close(s);
+        handed_out(&later);
+        assert!(open_failed_later(s, ActionError::NoRoom));
+        assert_eq!(viewers::ui(s).expect("its page").file.id, "f-73-failed-later");
+        assert!(!open_failed_later(s, ActionError::Failed), "nothing is handed out any more");
+    });
+    let words = match unsupported::note_of("f-73-failed-later") {
+        Some(Note::Failed(words)) => words,
+        other => panic!("{other:?}"),
+    };
+    assert!(words.starts_with("Couldn't open.") && words.contains("not enough space"), "{words}");
+
+    // A folder has no page: the caller keeps its own words.
+    let folder = DriveItem {
+        is_folder: true,
+        ..crate::frames::open_file::item_named("f-73-folder", "Folder")
+    };
+    rt.update(|s, _| assert!(!open_failed(s, &folder, ActionError::Failed)));
+}
+
+/// Dm-73, from the list itself, on a Mac: a double-click on a file nothing here opens goes to its page, not to a toast.
+#[cfg(target_os = "macos")]
+#[test]
+fn viewers_failed_open_from_files_own_open_shows_the_page() {
+    let mut rt = runtime();
+    rt.update(|s, tx| {
+        viewers::wire(s, Box::new(|| Box::new(NoViewer)));
+        // A source that opens nothing outside the app.
+        s.actions.source = Box::new(crate::frames::files::source::NoEngine);
+        let row = s.listing.items.iter().position(|item| !item.is_folder).expect("a file in the list");
+        let id = s.listing.items[row].id.clone();
+        s.select_only(row);
+        s.open_selection(tx);
+        assert_eq!(s.actions.toast, None, "no toast alone");
+        assert_eq!(viewers::ui(s).expect("the file's page").file.id, id);
+        assert!(matches!(unsupported::note_of(&id), Some(Note::Failed(_))));
+        unsupported::set_note(&id, None);
+    });
+}
+
 #[test]
 fn share_and_version_history_open_files_dialogs_for_the_open_file() {
     let mut rt = runtime();

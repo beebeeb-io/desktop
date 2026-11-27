@@ -348,31 +348,22 @@ impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
         }
     }
 
-    /// macOS: the chooser and the app picked (`reveal` false), or Finder with the file selected (`reveal` true), on a
-    /// thread of its own (the chooser waits for the person). Elsewhere: not here.
+    /// macOS: Finder with the file selected (`reveal` true) on a thread of its own, or the chooser and the app picked
+    /// (`reveal` false: [`Self::mac_open_with`]). Elsewhere: not here.
     fn mac_elsewhere(&self, file_id: &str, reveal: bool) -> Elsewhere {
-        let path = match self.elsewhere_path(file_id) {
-            Ok(path) => path,
-            Err(why) => return why,
-        };
         #[cfg(target_os = "macos")]
         {
-            use super::open_with_apps::mac;
-            let (engine, turn) = (self.engine.clone(), self.engine.session_turn());
+            if !reveal {
+                return self.mac_open_with(file_id, super::open_with_apps::mac::Pick::Choose);
+            }
+            let path = match self.elsewhere_path(file_id) {
+                Ok(path) => path,
+                Err(why) => return why,
+            };
+            let engine = self.engine.clone();
             let started = std::thread::Builder::new().name("viewer-elsewhere".into()).spawn(move || {
-                let done = if reveal {
-                    mac::reveal(&path)
-                } else if let Some(app) = mac::choose_app() {
-                    if engine.session_turn() == turn {
-                        mac::open_with(&app, &path)
-                    } else {
-                        Ok(())
-                    }
-                } else {
-                    Ok(())
-                };
-                if done.is_err() {
-                    log("viewer: the file did not open in another app");
+                if super::open_with_apps::mac::reveal(&path).is_err() {
+                    log("viewer: the file was not shown in Finder");
                 }
                 engine.wake_host();
             });
@@ -380,9 +371,50 @@ impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (path, reveal);
-            Elsewhere::NotBound
+            let _ = reveal;
+            match self.elsewhere_path(file_id) {
+                Ok(_) => Elsewhere::NotBound,
+                Err(why) => why,
+            }
         }
+    }
+
+    /// macOS (dm-73): Open with, on Finder's copy of the file (`open_with_apps::mac`): it is made present first, then
+    /// opened with the default app or the app picked. The checks every hand-over passes come first, under the
+    /// account-bound handle (`elsewhere_path`: sync is on, a file, a kind that may be opened), and a shared-with-me
+    /// row is never asked of the File Provider (ruling 1701). What happens after this returns is said on the file's
+    /// page (`unsupported::Note`) and logged.
+    #[cfg(target_os = "macos")]
+    fn mac_open_with(&self, file_id: &str, pick: super::open_with_apps::mac::Pick) -> Elsewhere {
+        use crate::shell::platform::macos::macos_fp::open as finder;
+        // Each refusal is logged by its kind (never a name or an id); the page says it in words.
+        if let Err(why) = self.elsewhere_path(file_id) {
+            match why {
+                Elsewhere::NeedsSync => tracing::warn!("open with: refused before it started, sync is not running"),
+                _ => tracing::warn!("open with: refused before it started, the file has no place to open from"),
+            }
+            return why;
+        }
+        let own = self
+            .engine
+            .local_state_for_changes()
+            .and_then(|state| state.with(|db| finder::refuse_shared(db, file_id).is_ok()));
+        if !matches!(own, Ok(true)) {
+            tracing::warn!("open with: refused before it started, not one of the account's own files");
+            return Elsewhere::Refused;
+        }
+        if finder::not_ready_line(&super::finder_setup::view()).is_some() {
+            tracing::warn!("open with: refused before it started, Beebeeb is not in Finder");
+            return Elsewhere::NeedsSync;
+        }
+        let (engine, waker, turn) = (self.engine.clone(), self.engine.clone(), self.engine.session_turn());
+        let started = super::open_with_apps::mac::start(
+            file_id,
+            pick,
+            move || engine.session_turn() == turn,
+            move || waker.wake_host(),
+        );
+        if started.is_ok() { Elsewhere::Opened } else { Elsewhere::Refused }
     }
 }
 
@@ -426,19 +458,29 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
     /// is not opened for safety is refused, and the system is asked without a shell, after the handle answered.
     /// "Sync is off" and "refused" are two answers.
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere {
-        let path = match self.elsewhere_path(file_id) {
-            Ok(path) => path,
-            Err(why) => return why,
-        };
-        let asked = self.launcher.open_for(
-            &self.engine,
-            self.open,
-            path,
-            "viewer: the file did not open in another app",
-        );
-        match asked {
-            Ok(()) => Elsewhere::Opened,
-            Err(()) => Elsewhere::Refused,
+        // A Mac opens Finder's copy, made present first (dm-73): the launch worker's start takes a path, and a path
+        // is not a place the File Provider gave.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&self.launcher, self.open);
+            self.mac_open_with(file_id, super::open_with_apps::mac::Pick::Default)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let path = match self.elsewhere_path(file_id) {
+                Ok(path) => path,
+                Err(why) => return why,
+            };
+            let asked = self.launcher.open_for(
+                &self.engine,
+                self.open,
+                path,
+                "viewer: the file did not open in another app",
+            );
+            match asked {
+                Ok(()) => Elsewhere::Opened,
+                Err(()) => Elsewhere::Refused,
+            }
         }
     }
 
