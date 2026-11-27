@@ -767,7 +767,8 @@ fn the_sidebar_foot_draws_the_account_and_the_storage_the_window_read() {
     // The board's scene: the fixture's account and split, as before.
     let rt = runtime(scenes::dw_1301, false);
     assert_eq!(text(&rt, "account-name"), "Anna Visser");
-    assert_eq!(text(&rt, "storage-files"), "Files 24 GB");
+    assert_eq!(text(&rt, "storage-files-name"), "Files");
+    assert_eq!(text(&rt, "storage-files-size"), "24 GB");
 
     // A window whose source names no account and has read no storage: no sample name, no figure, no breakdown.
     let rt = with_state(super::Section::SyncHistory, Box::new(NoLists(Standing::Ready)), |s| {
