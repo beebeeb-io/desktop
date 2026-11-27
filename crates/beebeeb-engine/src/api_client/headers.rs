@@ -161,7 +161,7 @@ pub(super) fn retries_after_429(request: &reqwest::Request) -> bool {
 /// The pause after the `streak`-th refusal in a row (0 for the first). `jitter` is in `0.0..=1.0`: the wait is
 /// `base * (1 + jitter)`, where `base` is the larger of the doubled floor and `Retry-After`, never above `cap`.
 pub(super) fn rate_limit_wait(
-    pub(super) streak: u32,
+    streak: u32,
     retry_after: Option<u64>,
     floor: Duration,
     cap: Duration,
