@@ -532,6 +532,51 @@ fn a_rows_tile_follows_the_files_kind() {
     }
 }
 
+/// 86: photo or video comes from the engine's one definition. Every extension the tray's own list had keeps
+/// its tile, and camera RAW (which that list lacked, bar dng) is now a photo.
+#[test]
+fn photo_and_video_tiles_follow_the_engines_definition() {
+    let old_images = [
+        "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "bmp", "tif", "tiff", "dng", "svg",
+    ];
+    let old_videos = ["mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp"];
+    for ext in old_images {
+        for name in [format!("a.{ext}"), format!("A.{}", ext.to_ascii_uppercase())] {
+            assert_eq!(live::tile_for(&name), Tile::Image, "{name}");
+        }
+    }
+    for ext in old_videos {
+        for name in [format!("a.{ext}"), format!("A.{}", ext.to_ascii_uppercase())] {
+            assert_eq!(live::tile_for(&name), Tile::Video, "{name}");
+        }
+    }
+    for name in [
+        "IMG_0001.CR3",
+        "DSC_0001.nef",
+        "DSC00001.ARW",
+        "IMG_0001.heic",
+        "x.cr2",
+        "x.raf",
+        "x.orf",
+        "x.rw2",
+    ] {
+        assert_eq!(live::tile_for(name), Tile::Image, "{name}");
+    }
+    // The other kinds are untouched by the change.
+    for (name, tile) in [
+        ("a.aac", Tile::Audio),
+        ("a.mp3", Tile::Audio),
+        ("a.csv", Tile::Sheet),
+        ("a.ppt", Tile::Deck),
+        ("a.zip", Tile::Archive),
+        ("a.pdf", Tile::Document),
+        (".jpg", Tile::Document),
+        ("a.", Tile::Document),
+    ] {
+        assert_eq!(live::tile_for(name), tile, "{name}");
+    }
+}
+
 /// 090b: the engine's `paused` report with reason `metered` is "This PC is on a metered connection" with Sync
 /// anyway; once the engine lifts its hold it reports a check again, and the flyout follows it.
 #[test]

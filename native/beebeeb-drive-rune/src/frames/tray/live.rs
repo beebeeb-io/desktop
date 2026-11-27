@@ -414,16 +414,21 @@ fn folder_of(path: &str) -> String {
 }
 
 /// The tile a file's name asks for. A photo is a glyph: the flyout has no thumbnail pixels.
+/// Photo or video is the engine's one definition (`is_photo_or_video` over `mime_for_name`), so camera RAW
+/// counts here exactly as it does in Photos.
 pub fn tile_for(name: &str) -> Tile {
+    use beebeeb_engine::drive_v2::model::{is_photo_or_video, mime_for_name};
+    if is_photo_or_video(name) {
+        return match mime_for_name(name) {
+            Some(mime) if mime.starts_with("video/") => Tile::Video,
+            _ => Tile::Image,
+        };
+    }
     let extension = name
         .rsplit_once('.')
         .filter(|(stem, ext)| !stem.is_empty() && !ext.is_empty())
         .map(|(_, ext)| ext.to_ascii_lowercase());
     match extension.as_deref() {
-        Some(
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "avif" | "bmp" | "tif" | "tiff" | "dng" | "svg",
-        ) => Tile::Image,
-        Some("mp4" | "m4v" | "mov" | "webm" | "mkv" | "avi" | "3gp") => Tile::Video,
         Some("mp3" | "m4a" | "wav" | "flac" | "aac" | "ogg" | "opus") => Tile::Audio,
         Some("xlsx" | "xls" | "ods" | "csv" | "numbers") => Tile::Sheet,
         Some("pptx" | "ppt" | "odp" | "key") => Tile::Deck,
