@@ -6,6 +6,7 @@ use crate::frames::files::source::Account;
 use crate::shell::app::{Event, Route, Screen, Section, SettingsPane};
 use crate::shell::host;
 use crate::theme::icons;
+use crate::theme::scale;
 use crate::theme::tokens::{radius, type_, Theme};
 use crate::State;
 use rune::{col, el, row, El};
@@ -312,7 +313,7 @@ pub(super) fn legend(files: i64, photos: i64, backups: i64, no_plan: bool, t: &T
             .key(key)
             .center_y()
             .gap(6.0)
-            .child(el().key(format!("{key}-dot")).size(6.0, 6.0).radius(3.0).fill(dot))
+            .child(el().key(format!("{key}-dot")).size(6.0, 6.0).radius(scale::radius::PILL).fill(dot))
             .child(
                 kit::label(format!("{key}-name"), name, type_::KBD, t.text_tertiary)
                     .grow(1.0)

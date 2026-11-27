@@ -99,7 +99,7 @@ pub fn body(ui: &Ui, doc: &PhotoDoc, t: &Theme) -> El {
         .fill(stage_black(t));
     if ui.show_details {
         // DW-1502: beside the panel the photo stands alone, in the room the panel leaves.
-        return stage.center().child(el().key("photo-area").grow(1.0).min_h(0.0).w_full().padding(20.0).center().child(picture(ui, &ui.file)));
+        return stage.center().child(el().key("photo-area").grow(1.0).min_h(0.0).w_full().padding(scale::space::S20).center().child(picture(ui, &ui.file)));
     }
     let mut strip = row()
         .key("gallery")
@@ -175,7 +175,7 @@ pub fn body(ui: &Ui, doc: &PhotoDoc, t: &Theme) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .padding(20.0)
+                .padding(scale::space::S20)
                 .center()
                 .child(picture(ui, &ui.file)),
         )

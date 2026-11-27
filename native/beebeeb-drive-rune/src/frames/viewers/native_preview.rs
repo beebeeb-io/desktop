@@ -25,6 +25,7 @@ use rune::{Align, Color, Cx, El, TextStyle, col, el};
 use super::chrome::{self, Dot, Status};
 use super::{Ui, details};
 use crate::State;
+use crate::theme::scale;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 
@@ -80,8 +81,8 @@ pub struct NativeDoc {
 /// What the body says while the file is in the Quick Look panel.
 pub const IN_PANEL: &str = "This file is open in the Quick Look window.";
 
-/// `.t-body`: 13px/400 on 20px.
-const BODY: TextStyle = TextStyle::new(13.0, 400.0).lh(20.0);
+/// `.t-body`: 13px/400 on 20px (the theme's 13/400 reading style on a taller line).
+const BODY: TextStyle = scale::text::READ.lh(20.0);
 
 /// Whether something the app draws is over the body now: the app-drawn "…" menu (only where there is no system
 /// menu: `more_menu`), the viewer's own dialog, or one of Files' dialogs for the open file (Share, Version history).

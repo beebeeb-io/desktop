@@ -3,6 +3,13 @@
 //! production-shaped rows, the listing, pause, resume, stop, a restart, and what is refused.
 //!
 //! One process, one fake server, invented accounts. `BB_API_BASE` is set once, before anything reads it.
+//!
+//! Every test here opens an Engine as `identity::TEST`, which `EngineIdentity::refusal_on` refuses on macOS (a test
+//! build would share the real app's data there; only this crate's unit tests and the native shell's dev-only
+//! `macos-test-engine` build may open one). So, as the engine's other Engine-opening integration tests do
+//! (`settings_api`, `trash_api`, `an_unfinished_sign_out`), this file builds on every OS but macOS; the contract
+//! runs on Linux and Windows. The guard itself is untouched.
+#![cfg(not(target_os = "macos"))]
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
