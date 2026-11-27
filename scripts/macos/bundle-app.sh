@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Assemble the native macOS app: <out>/<Product>.app from a built beebeeb-drive binary.
 # Spec: native/beebeeb-drive-rune/docs/macos/packaging-signing-update.md §1, §2, §6.
-#   scripts/macos/bundle-app.sh --identity real|test --binary <path> --out <dir> [--sign]
+#   scripts/macos/bundle-app.sh --identity real|test --binary <path> --out <dir> [--office-helper <path>] [--sign]
+# The Office helper (Contents/MacOS/beebeeb-office-render) is built here, from its own workspace, unless
+# --office-helper names one already built (the bundle test hands a stub).
 # Nothing here launches the app. Signing is scripts/macos/sign-app.sh (run with --sign, or by hand).
 # Provisioning: MACOS_APP_PROVISION_PROFILE / MACOS_FILE_PROVIDER_PROVISION_PROFILE (a path) or the
 # *_BASE64 twin; with neither, an empty placeholder is embedded and preflight.sh rejects it.
@@ -10,12 +12,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-IDENTITY="" BINARY="" OUT="" SIGN=0
+IDENTITY="" BINARY="" OUT="" OFFICE_HELPER="" SIGN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --identity) IDENTITY="${2:-}"; shift 2 ;;
     --binary) BINARY="${2:-}"; shift 2 ;;
     --out) OUT="${2:-}"; shift 2 ;;
+    --office-helper) OFFICE_HELPER="${2:-}"; shift 2 ;;
     --sign) SIGN=1; shift ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -25,7 +28,7 @@ done
 case "$IDENTITY" in
   real) BUNDLE_ID="io.beebeeb.app"; PRODUCT="Beebeeb"; SCHEME="beebeeb" ;;
   test) BUNDLE_ID="io.beebeeb.app.test"; PRODUCT="Beebeeb Test"; SCHEME="beebeeb-test" ;;
-  *) printf 'usage: bundle-app.sh --identity real|test --binary <path> --out <dir> [--sign]\n' >&2; exit 2 ;;
+  *) printf 'usage: bundle-app.sh --identity real|test --binary <path> --out <dir> [--office-helper <path>] [--sign]\n' >&2; exit 2 ;;
 esac
 [[ -f "$BINARY" ]] || { printf 'binary not found: %s\n' "${BINARY:-<unset>}" >&2; exit 1; }
 [[ -n "$OUT" ]] || { printf '--out is required\n' >&2; exit 2; }
@@ -45,6 +48,18 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$CONTENTS/PlugIns"
 
 cp "$BINARY" "$CONTENTS/MacOS/$EXE"
 chmod 755 "$CONTENTS/MacOS/$EXE"
+
+# The Office helper, beside the app's executable: where the host looks for it (office_host.rs helper_exe).
+OFFICE_EXE="beebeeb-office-render"
+if [[ -z "$OFFICE_HELPER" ]]; then
+  OFFICE_TARGET="aarch64-apple-darwin"
+  (cd native/beebeeb-office-render && cargo build --release --locked --target "$OFFICE_TARGET")
+  OFFICE_HELPER="$(cd native/beebeeb-office-render && cd "${CARGO_TARGET_DIR:-target}" && pwd)/$OFFICE_TARGET/release/$OFFICE_EXE"
+fi
+[[ -f "$OFFICE_HELPER" ]] || { printf 'office helper not found: %s\n' "$OFFICE_HELPER" >&2; exit 1; }
+cp "$OFFICE_HELPER" "$CONTENTS/MacOS/$OFFICE_EXE"
+chmod 755 "$CONTENTS/MacOS/$OFFICE_EXE"
+
 cp packaging/macos/icon.icns "$CONTENTS/Resources/icon.icns"
 cp packaging/macos/tray-template.png packaging/macos/tray-template@2x.png "$CONTENTS/Resources/"
 

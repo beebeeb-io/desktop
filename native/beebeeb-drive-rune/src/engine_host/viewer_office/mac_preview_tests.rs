@@ -14,6 +14,7 @@ use beebeeb_engine::app::viewer_api::{LocalCopy, OpenFileFacts, OpenedFile};
 use zeroize::Zeroizing;
 
 use super::*;
+use crate::engine_host::office_host::EditKind;
 use crate::engine_host::viewer::viewer_media::playback_ready_for;
 use crate::frames::viewers::source::{Elsewhere, ViewerSource};
 
@@ -36,6 +37,8 @@ struct World {
     /// The transfer board's row for Finder's download moves (a byte more at every look).
     moving: AtomicBool,
     looks: AtomicU64,
+    /// The account may change the files (dm-80's editor route). Off: no edit facts, as before.
+    writable: AtomicBool,
 }
 
 impl World {
@@ -46,6 +49,7 @@ impl World {
             in_finder: AtomicBool::new(false),
             moving: AtomicBool::new(true),
             looks: AtomicU64::new(0),
+            writable: AtomicBool::new(false),
         })
     }
 
@@ -120,6 +124,22 @@ impl ViewerEngine for World {
 
     fn in_finder(&self, _file_id: &str) -> bool {
         self.in_finder.load(Ordering::SeqCst)
+    }
+
+    fn edit_facts(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _opening: u64,
+    ) -> Option<beebeeb_engine::app::viewer_edit_api::EditFacts> {
+        self.writable
+            .load(Ordering::SeqCst)
+            .then_some(beebeeb_engine::app::viewer_edit_api::EditFacts {
+                version: 3,
+                kept: false,
+                can_write: true,
+                own: false,
+            })
     }
 
     fn download_progress(&self, _session: SessionGeneration, _file_id: &str) -> Option<(u64, u64)> {
@@ -580,10 +600,16 @@ fn a_download_that_stops_moving_lands_on_the_page_and_nothing_is_shown() {
     );
     assert_eq!(
         crate::frames::viewers::unsupported::note_of("v1"),
-        Some(crate::frames::viewers::unsupported::Note::Failed(NOT_MOVING.to_string()))
+        Some(crate::frames::viewers::unsupported::Note::Failed(
+            NOT_MOVING.to_string()
+        ))
     );
     assert!(asked.elapsed() < Duration::from_millis(60) * 3 + Duration::from_millis(100));
-    assert_eq!(rig.finder.requested(), ["v1"], "the system was asked, by the item's identifier");
+    assert_eq!(
+        rig.finder.requested(),
+        ["v1"],
+        "the system was asked, by the item's identifier"
+    );
     assert!(rig.seen().embedded.is_empty() && rig.seen().panel.is_empty());
     assert!(rig.world.fetched().is_empty(), "no second download by the app");
     assert!(rig.let_go(), "the thread left Finder's place");
@@ -604,7 +630,9 @@ fn a_download_the_system_refuses_lands_on_the_page() {
     );
     assert_eq!(
         crate::frames::viewers::unsupported::note_of("d1"),
-        Some(crate::frames::viewers::unsupported::Note::Failed(NOT_DOWNLOADED.to_string()))
+        Some(crate::frames::viewers::unsupported::Note::Failed(
+            NOT_DOWNLOADED.to_string()
+        ))
     );
     assert!(rig.seen().embedded.is_empty() && rig.world.fetched().is_empty());
     assert!(rig.let_go());
@@ -781,4 +809,91 @@ fn a_copy_a_crash_left_is_removed_when_the_next_is_made() {
         opened.join("invented.pdf").is_file(),
         "a copy Files' Open made is not this module's to remove"
     );
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// dm-80: the helper is in the bundle. The sandbox (a fake here; nothing is started) decides where a document goes.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// What the two renderer starts were asked: (editor, viewer).
+type Starts = (Arc<Mutex<Vec<EditKind>>>, Arc<AtomicUsize>);
+
+/// A rig with the helper beside the app, a sandbox that answers `says` and counts its asks, and fake renderers.
+fn rig_with_helper(says: Result<(), String>) -> (Rig, Arc<AtomicUsize>, Starts) {
+    use crate::engine_host::viewer::office_tests::Fake;
+    let mut rig = rig();
+    rig.world.writable.store(true, Ordering::SeqCst);
+    rig.source.office.helper = || {
+        Some(PathBuf::from(
+            "/invented/Beebeeb.app/Contents/MacOS/beebeeb-office-render",
+        ))
+    };
+    let asked = Arc::new(AtomicUsize::new(0));
+    let count = asked.clone();
+    rig.source.office.mac_sandbox = Box::new(move |helper| {
+        assert_eq!(helper.file_name().unwrap(), "beebeeb-office-render");
+        count.fetch_add(1, Ordering::SeqCst);
+        says.clone()
+    });
+    let (edits, views) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicUsize::new(0)));
+    let (fake, log) = (Fake::default(), edits.clone());
+    rig.source.office.edit_opener = Box::new(move |_, kind, _, _, _| {
+        log.lock().unwrap().push(kind);
+        fake.editor(kind)
+    });
+    let (fake, count) = (Fake::default(), views.clone());
+    rig.source.office.opener = Box::new(move |_, kind, _, _| {
+        count.fetch_add(1, Ordering::SeqCst);
+        fake.view(kind)
+    });
+    (rig, asked, (edits, views))
+}
+
+#[test]
+fn with_the_helper_and_a_sandbox_that_starts_it_a_docx_opens_in_the_editor() {
+    let (mut rig, asked, (edits, views)) = rig_with_helper(Ok(()));
+    let file = rig.source.open("d1").expect("opens");
+    assert!(
+        matches!(file.body, Body::OfficeState(_)),
+        "the helper's route: {:?}",
+        file.body
+    );
+    let until = Instant::now() + Duration::from_secs(10);
+    while edits.lock().unwrap().is_empty() && Instant::now() < until {
+        let _ = rig.source.poll("d1");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        *edits.lock().unwrap(),
+        [EditKind::Docx],
+        "an editing session, as on Windows"
+    );
+    assert_eq!(views.load(Ordering::SeqCst), 0, "not the viewer");
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert_eq!(rig.source.office.mac_refusals_logged, 0);
+    let seen = rig.seen();
+    assert!(
+        seen.embedded.is_empty() && seen.panel.is_empty(),
+        "Quick Look was not asked"
+    );
+}
+
+#[test]
+fn with_the_helper_and_a_sandbox_that_refuses_a_docx_goes_to_quick_look_and_the_log_says_so_once() {
+    let refusal = String::from("no sandbox on this operating system; the helper was not started");
+    let (mut rig, asked, (edits, views)) = rig_with_helper(Err(refusal));
+    for _ in 0..2 {
+        let file = rig.source.open("d1").expect("opens");
+        // Quick Look's own start, never the page that says the helper is missing.
+        assert!(matches!(file.body, Body::Decrypting { .. }), "{:?}", file.body);
+        let body = rig.settle("d1");
+        stage_of(&body, NativeKind::QuickLook);
+    }
+    assert_eq!(rig.seen().embedded.len(), 2, "Quick Look showed it both times");
+    assert!(
+        edits.lock().unwrap().is_empty() && views.load(Ordering::SeqCst) == 0,
+        "no helper was started"
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "the sandbox is asked once");
+    assert_eq!(rig.source.office.mac_refusals_logged, 1, "one line in the log");
 }

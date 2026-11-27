@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements of the Office helper, Contents/MacOS/beebeeb-office-render (scripts/macos/sign-app.sh).
+
+  Exactly these two keys, nothing else: a helper that inherits the app's sandbox may carry no other entitlement
+  (macOS ends it at its start if it does). It is started by the sandboxed app only, and is confined further by
+  crates/beebeeb-office-sandbox. scripts/tests/test-macos-bundle.sh checks the signed helper has these two alone.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.inherit</key>
+    <true/>
+</dict>
+</plist>
