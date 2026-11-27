@@ -124,6 +124,20 @@ pub struct BackupScheduler {
     /// fd-12, fd-18: the backups' folder digest caches (read back from the state DB on the first round of a run,
     /// written by every pass; a sign-out empties them).
     digests: super::digest_cache::SharedDigestCache,
+    /// fd-25: the last pass ended with work left (its budget cut it), so the next pass is due at once, not after
+    /// [`FULL_PASS_EVERY`]. Cleared when a pass ends with nothing left, and by a pause.
+    backlog: bool,
+}
+
+/// fd-25: whether the passes of one tick left work for the next pass: a pass that queued or moved something and
+/// deferred more (the budget). A pass that made no progress (a deferred move that never lands) does not chain, so
+/// it cannot spin; a failed check never chains.
+pub fn backlog_left(report: &TickReport) -> bool {
+    !report.check_failed
+        && report
+            .passes
+            .iter()
+            .any(|(_, pass)| pass.as_ref().is_ok_and(|p| p.deferred > 0 && p.queued + p.moved > 0))
 }
 
 impl Default for BackupScheduler {
@@ -148,7 +162,19 @@ impl BackupScheduler {
             watched: Vec::new(),
             reconciled: false,
             digests: Arc::default(),
+            backlog: false,
         }
+    }
+
+    /// fd-25: sync is paused (by the user, a metered or battery hold): the chain of back-to-back passes stops. The
+    /// next pass comes at the normal cadence.
+    pub fn pause(&mut self) {
+        self.backlog = false;
+    }
+
+    /// fd-25: record what a tick's passes left, so [`BackupScheduler::due`] chains the next pass at once.
+    pub fn note_passes(&mut self, report: &TickReport) {
+        self.backlog = backlog_left(report);
     }
 
     /// Watch exactly `sources` (a folder switched on or off changes the set). A source that cannot be watched is
@@ -205,7 +231,7 @@ impl BackupScheduler {
             .ok()
             .and_then(|at| *at)
             .is_some_and(|at| now.duration_since(at) >= self.debounce);
-        full || settled
+        full || settled || self.backlog
     }
 
     /// One runner tick: watch `sources`, and when a pass is due run one pass of each through `DesktopBackupHost`
@@ -240,6 +266,7 @@ impl BackupScheduler {
         // A layout that cannot be resolved now is tried again at the next 10-minute pass or after the next change,
         // never on every tick.
         self.last_full = Some(now);
+        self.backlog = false;
         // LD-0139: a pass that cannot start (no layout, no device name) attempts no check, so none is shown as failed.
         super::stop::set_check_failed(false);
         let layout = match bridge.db().backup_layout() {
@@ -267,6 +294,7 @@ impl BackupScheduler {
         let report = run_passes_with_digests(bridge, layout, sync_root, &sources, Some(&self.digests)).await;
         drop(running);
         super::stop::set_check_failed(report.check_failed);
+        self.note_passes(&report);
         Some(report)
     }
 }
@@ -554,6 +582,78 @@ pub async fn rebuild_records_if_empty(
         "backup: records rebuilt from the server"
     );
     Ok(stored)
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use super::*;
+
+    fn pass(queued: usize, deferred: usize) -> TickReport {
+        let done = PassReport {
+            queued,
+            deferred,
+            ..PassReport::default()
+        };
+        TickReport {
+            passes: vec![(Category::Documents, Ok(done))],
+            check_failed: false,
+        }
+    }
+
+    /// Runs the scheduler's own decision: a pass at `now`, then whether the next is due at `now` + 1 s.
+    fn run_pass(s: &mut BackupScheduler, now: Instant, report: &TickReport) {
+        s.last_full = Some(now);
+        s.backlog = false;
+        s.note_passes(report);
+    }
+
+    #[test]
+    fn a_backlog_of_1500_files_finishes_in_3_back_to_back_passes() {
+        let mut s = BackupScheduler::new();
+        let t0 = Instant::now();
+        let tick = Duration::from_secs(1);
+        let mut left = 1500usize;
+        let mut passes = 0;
+        let mut now = t0;
+        while s.due(now) && passes < 10 {
+            let queued = left.min(PASS_BUDGET.max_uploads);
+            left -= queued;
+            run_pass(&mut s, now, &pass(queued, left));
+            passes += 1;
+            now += tick;
+        }
+        assert_eq!((passes, left), (3, 0));
+        assert!(now.duration_since(t0) < FULL_PASS_EVERY, "no 10-minute wait between the passes");
+        assert!(!s.due(now), "nothing left: the idle pace returns");
+    }
+
+    #[test]
+    fn a_pass_with_no_backlog_waits_ten_minutes() {
+        let mut s = BackupScheduler::new();
+        let t0 = Instant::now();
+        run_pass(&mut s, t0, &pass(10, 0));
+        assert!(!s.due(t0 + Duration::from_secs(1)));
+        assert!(!s.due(t0 + FULL_PASS_EVERY - Duration::from_secs(1)));
+        assert!(s.due(t0 + FULL_PASS_EVERY));
+    }
+
+    #[test]
+    fn pause_stops_the_chain() {
+        let mut s = BackupScheduler::new();
+        let t0 = Instant::now();
+        run_pass(&mut s, t0, &pass(500, 1000));
+        assert!(s.due(t0 + Duration::from_secs(1)));
+        s.pause();
+        assert!(!s.due(t0 + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_pass_that_makes_no_progress_or_fails_the_check_does_not_chain() {
+        assert!(!backlog_left(&pass(0, 5)));
+        let mut failed = pass(500, 5);
+        failed.check_failed = true;
+        assert!(!backlog_left(&failed));
+    }
 }
 
 #[cfg(test)]
