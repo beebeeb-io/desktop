@@ -715,6 +715,12 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     if std::mem::replace(&mut s.shell.first_list_awaited, awaited) && !awaited {
         s.shell.check_finished = true;
     }
+    // Dm-78: Finder's state changed (its list was read once Finder setup was ready, a file landed or went online
+    // only): the lists are read as after a finished check, so the marks and the counts are Finder's state now.
+    #[cfg(target_os = "macos")]
+    if crate::engine_host::macos_downloaded::finder_state::take_changed() {
+        s.shell.check_finished = true;
+    }
     // Photos reads its library again once a check finished (`frames::photos::after_a_check`).
     if s.shell.check_finished {
         crate::frames::photos::after_a_check(s);
