@@ -649,7 +649,16 @@ fn a_kind_with_no_preview_never_opens_the_viewer_from_a_list_and_its_route_says_
     // Open in another app: asked of the engine. No sync runs here, so the file is not on this PC to open: the
     // refusal is said, in its own words, on screen.
     w.click("state-btn-0");
-    assert!(w.drawn().contains(viewers::NEEDS_SYNC_ELSEWHERE), "{}", w.drawn());
+    let drawn = w.drawn();
+    if cfg!(target_os = "macos") {
+        // Dm-78: on a Mac sync starts with Finder setup, which has not begun here, so the press goes on to wait for
+        // it and is never answered with the words of a sync folder (RC13). A test build has no Mac to ask: the open
+        // does not start, and the page says so.
+        assert!(drawn.contains(viewers::NOT_OPENED_ELSEWHERE), "{drawn}");
+        assert!(!drawn.contains(viewers::NEEDS_SYNC_ELSEWHERE), "{drawn}");
+    } else {
+        assert!(drawn.contains(viewers::NEEDS_SYNC_ELSEWHERE), "{drawn}");
+    }
     assert_eq!(w.chunk_requests(), 0);
 }
 

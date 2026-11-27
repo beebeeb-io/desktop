@@ -33,6 +33,14 @@ struct Fake {
     no_default: AtomicBool,
     open_refused: AtomicBool,
     picked: Mutex<Option<PathBuf>>,
+    /// Dm-78: how Finder setup stands at each look, in order; the last one stays. Empty: ready.
+    setup: Mutex<Vec<Setup>>,
+    setup_looks: AtomicUsize,
+    /// How long setup is waited for, in ms (0: 1500 ms).
+    setup_wait_ms: AtomicU64,
+    /// The hand-over's own checks do not pass once Finder is ready.
+    may_not_open: AtomicBool,
+    checked: AtomicUsize,
 }
 
 impl Fake {
@@ -49,6 +57,28 @@ impl Fake {
 }
 
 impl Platform for Fake {
+    fn setup(&self) -> Setup {
+        self.setup_looks.fetch_add(1, SeqCst);
+        let mut setup = self.setup.lock().unwrap();
+        match setup.len() {
+            0 => Setup::Ready,
+            1 => setup[0],
+            _ => setup.remove(0),
+        }
+    }
+    fn setup_wait(&self) -> Duration {
+        match self.setup_wait_ms.load(SeqCst) {
+            0 => Duration::from_millis(1500),
+            ms => Duration::from_millis(ms),
+        }
+    }
+    fn setup_grace(&self) -> Duration {
+        Duration::from_millis(250)
+    }
+    fn may_open(&self, _item_id: &str) -> bool {
+        self.checked.fetch_add(1, SeqCst);
+        !self.may_not_open.load(SeqCst)
+    }
     fn presence(&self, _file: &Path) -> Presence {
         self.note("dataless?");
         if self.here.load(SeqCst) {
@@ -240,7 +270,7 @@ fn open_with_says_every_failure_in_words_and_logs_its_reason() {
         breaks(&fake);
         let (done, _) = press(&fake, Pick::Default);
         assert_eq!(done, Err(failure.clone()));
-        assert_eq!(failure.words(), Some(words));
+        assert_eq!(failure.words().as_deref(), Some(words));
         // The log's own filter keeps every word of the line: the reason is readable there, domain and code included.
         let line = logged(|| failure.log());
         assert!(line.contains("open with: the file did not open"), "{line}");
@@ -475,5 +505,260 @@ fn open_with_start_puts_the_failure_on_the_files_page_and_takes_its_words_away_o
         Some(Note::Failed(NOT_STARTED.to_string()))
     );
     // And the test build's own platform is none: no test reaches the File Provider or NSWorkspace.
-    assert_eq!(start("f-73-test", Pick::Default, || true, || {}, |_| None), Err(()));
+    assert_eq!(
+        start("f-73-test", Pick::Default, || true, || {}, |_| None, |_| true),
+        Err(())
+    );
+}
+
+/// A fake whose Finder setup stands as `setup` says, look after look.
+fn setting_up_fake(setup: &[Setup]) -> Fake {
+    let fake = Fake::default();
+    *fake.setup.lock().unwrap() = setup.to_vec();
+    fake
+}
+
+const TIMED_OUT: &str = "macOS didn\u{2019}t finish adding Beebeeb to Finder.";
+
+/// Dm-78, RC13: Finder setup was slow to start ("adding", trying again), and "Open with default app" answered at once
+/// with the words of a sync folder. The press waits for setup while the page says so, then goes dm-77's way.
+#[test]
+fn open_with_while_finder_setup_is_adding_waits_and_opens_once_it_is_ready() {
+    assert_eq!(
+        setting_up().words(),
+        "Finder is still being set up \u{b7} opens when it is ready"
+    );
+    let fake = setting_up_fake(&[Setup::Adding, Setup::Adding, Setup::Adding, Setup::Adding, Setup::Ready]);
+    fake.arrives_after.store(1, SeqCst);
+    let said = Mutex::new(Vec::new());
+    let done = run(&fake, "f-eps", Pick::Default, &|| true, &|note| {
+        if note == setting_up() {
+            // Nothing is asked of Finder while it is not set up.
+            assert_eq!(fake.asked(), Vec::<String>::new());
+        }
+        said.lock().unwrap().push(note);
+    });
+    assert_eq!(done, Ok(()));
+    // The page said it once, then what every press says.
+    assert_eq!(
+        said.into_inner().unwrap(),
+        [setting_up(), Note::Downloading, Note::Opening]
+    );
+    assert!(
+        fake.setup_looks.load(SeqCst) >= 5,
+        "setup was looked at until it was ready"
+    );
+    assert_eq!(
+        fake.checked.load(SeqCst),
+        1,
+        "the hand-over's checks, once Finder was ready"
+    );
+    // Dm-77's path, whole: Finder's place, the read first, the file no longer dataless, then the app.
+    let steps = fake.steps();
+    assert_eq!(steps[0], "finder copy f-eps");
+    assert_eq!(steps[1], format!("read {FINDER}"));
+    assert_eq!(
+        steps.last().map(String::as_str),
+        Some(format!("NSWorkspace open {FINDER} with {PAGES}").as_str())
+    );
+    assert!(steps.contains(&"on this Mac f-eps".to_string()), "{steps:?}");
+
+    // Setup that is ready is not waited for, and nothing is said of it.
+    let fake = Fake::default();
+    fake.here.store(true, SeqCst);
+    let (done, said) = press(&fake, Pick::Default);
+    assert_eq!((done, said), (Ok(()), vec![Note::Opening]));
+
+    // Setup that had not begun yet at the press (the first moments of a run) and then does: the same wait.
+    let fake = setting_up_fake(&[Setup::NotBegun, Setup::Adding, Setup::Ready]);
+    fake.here.store(true, SeqCst);
+    let (done, said) = press(&fake, Pick::Default);
+    assert_eq!((done, said), (Ok(()), vec![setting_up(), Note::Opening]));
+}
+
+/// The viewer's "…" menu "Open with…" is `Pick::Choose` on the same call: dm-73's chooser first (never minutes after
+/// the press), then the wait for setup, then dm-77's materialise and the app picked.
+#[test]
+fn open_with_from_the_more_menu_is_the_same_path_the_chooser_first_then_the_wait_then_the_file() {
+    let fake = setting_up_fake(&[Setup::Adding, Setup::Adding, Setup::Adding, Setup::Ready]);
+    *fake.picked.lock().unwrap() = Some(PathBuf::from(WORD));
+    fake.arrives_after.store(1, SeqCst);
+    let said = Mutex::new(Vec::new());
+    let done = run(&fake, "f-md", Pick::Choose, &|| true, &|note| {
+        if note == setting_up() {
+            assert_eq!(fake.asked(), ["choose app"], "the chooser came before the wait");
+        }
+        said.lock().unwrap().push(note);
+    });
+    assert_eq!(done, Ok(()));
+    assert_eq!(
+        said.into_inner().unwrap(),
+        [setting_up(), Note::Downloading, Note::Opening]
+    );
+    let steps = fake.steps();
+    assert_eq!(
+        steps[..3],
+        [
+            "choose app".to_string(),
+            "finder copy f-md".into(),
+            format!("read {FINDER}")
+        ]
+    );
+    assert_eq!(
+        steps.last().map(String::as_str),
+        Some(format!("NSWorkspace open {FINDER} with {WORD}").as_str())
+    );
+    assert!(!steps.iter().any(|a| a.starts_with("default app")), "{steps:?}");
+}
+
+/// Setup that ended without Finder: the page says its reason in the words Settings uses, never a sync folder's.
+#[test]
+fn open_with_after_a_finder_setup_that_failed_says_its_reason_in_mac_words_and_asks_nothing() {
+    use beebeeb_engine::finder_setup::driver::FinderSetupView;
+    use beebeeb_engine::finder_setup::launch_location::LaunchLocation;
+    use beebeeb_engine::surfaces::phase::{FinderFailureReason, FinderSetup};
+    let view = |setup, reason| {
+        let mut view = FinderSetupView::initial(LaunchLocation::Applications);
+        (view.setup, view.reason) = (setup, reason);
+        view
+    };
+    // What `finder_setup_state` says, as the press reads it.
+    assert_eq!(setup_of(&view(FinderSetup::Ready, None)), Setup::Ready);
+    assert_eq!(setup_of(&view(FinderSetup::Adding, None)), Setup::Adding);
+    assert_eq!(setup_of(&view(FinderSetup::Missing, None)), Setup::NotBegun);
+    let failed = setup_of(&view(FinderSetup::Failed, Some(FinderFailureReason::Timeout)));
+    assert_eq!(failed, Setup::Ended(TIMED_OUT));
+    for (setup, reason) in [
+        (FinderSetup::Failed, None),
+        (FinderSetup::Failed, Some(FinderFailureReason::Signing)),
+        (FinderSetup::UserDisabled, Some(FinderFailureReason::UserDisabled)),
+        (FinderSetup::UserDisabled, None),
+        (FinderSetup::Missing, Some(FinderFailureReason::NotInApplications)),
+    ] {
+        let Setup::Ended(why) = setup_of(&view(setup, reason)) else {
+            panic!("{setup:?} {reason:?} is waited for");
+        };
+        assert!(!why.is_empty());
+    }
+
+    // It failed before the press: said at once, and neither the chooser nor Finder is asked anything.
+    for pick in [Pick::Default, Pick::Choose] {
+        let fake = setting_up_fake(&[failed]);
+        *fake.picked.lock().unwrap() = Some(PathBuf::from(WORD));
+        let (done, said) = press(&fake, pick);
+        assert_eq!(done, Err(Failure::Setup(TIMED_OUT)));
+        assert_eq!((fake.asked(), said), (Vec::<String>::new(), vec![]));
+    }
+    // It failed while the press waited: the wait ends with the reason.
+    let fake = setting_up_fake(&[Setup::Adding, Setup::Adding, Setup::Adding, failed]);
+    let (done, said) = press(&fake, Pick::Default);
+    assert_eq!(done, Err(Failure::Setup(TIMED_OUT)));
+    assert_eq!((fake.asked(), said), (Vec::<String>::new(), vec![setting_up()]));
+
+    // Setup still adding at the limit, and setup that never began (Beebeeb is turned off in Finder here).
+    let fake = setting_up_fake(&[Setup::Adding]);
+    fake.setup_wait_ms.store(300, SeqCst);
+    let pressed = std::time::Instant::now();
+    let (done, said) = press(&fake, Pick::Default);
+    assert_eq!((done, said), (Err(Failure::SetupSlow), vec![setting_up()]));
+    assert!(pressed.elapsed() >= Duration::from_millis(300) && fake.asked().is_empty());
+    let fake = setting_up_fake(&[Setup::NotBegun]);
+    let (done, _) = press(&fake, Pick::Default);
+    assert_eq!(done, Err(Failure::Setup(NOT_BEGUN)));
+    assert!(fake.asked().is_empty());
+
+    // The session of the press ends while it waits: nothing more is said, nothing opened.
+    let fake = setting_up_fake(&[Setup::Adding]);
+    let looks = AtomicUsize::new(0);
+    let done = run(
+        &fake,
+        "f-eps",
+        Pick::Default,
+        &|| looks.fetch_add(1, SeqCst) < 3,
+        &|_| {},
+    );
+    assert_eq!((done, fake.asked()), (Err(Failure::Moved), Vec::<String>::new()));
+
+    // Finder got ready, and the hand-over's own checks do not pass then (sync did not start): nothing is asked.
+    let fake = setting_up_fake(&[Setup::Adding, Setup::Ready]);
+    fake.may_not_open.store(true, SeqCst);
+    let (done, _) = press(&fake, Pick::Default);
+    assert_eq!((done, fake.asked()), (Err(Failure::Refused), Vec::<String>::new()));
+
+    // The words: a Mac's, with the reason; and each has its line in the log.
+    let words = Failure::Setup(TIMED_OUT).words().expect("said");
+    assert_eq!(
+        words,
+        "macOS didn\u{2019}t finish adding Beebeeb to Finder. This file opens from Finder, so it didn\u{2019}t open."
+    );
+    for failure in [
+        Failure::Setup(TIMED_OUT),
+        Failure::Setup(NOT_BEGUN),
+        Failure::SetupSlow,
+        Failure::Refused,
+    ] {
+        let words = failure.words().expect("said");
+        for old in ["sync", "folder", "PC", "Windows"] {
+            assert!(!words.contains(old), "{failure:?}: {words}");
+        }
+        let line = logged(|| failure.log());
+        assert!(line.contains("open with: the file did not open"), "{line}");
+    }
+    assert!(
+        Failure::Setup(NOT_BEGUN)
+            .words()
+            .unwrap()
+            .starts_with("Beebeeb isn\u{2019}t in Finder on ")
+    );
+}
+
+/// The whole press on its own thread: the page says Finder is still being set up, then the reason when setup failed;
+/// and after a wait that ended ready, nothing is left on the page.
+#[test]
+fn open_with_start_says_the_wait_for_finder_on_the_page_and_then_what_became_of_it() {
+    let _turn = PRESSES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let failed = Setup::Ended(TIMED_OUT);
+    let mut script = vec![Setup::Adding; 5];
+    script.push(failed);
+    let fake = Arc::new(setting_up_fake(&script));
+    fake.setup_wait_ms.store(60_000, SeqCst);
+    let woken = Arc::new(AtomicUsize::new(0));
+    let wake = {
+        let woken = woken.clone();
+        move || {
+            woken.fetch_add(1, SeqCst);
+        }
+    };
+    assert_eq!(
+        start_on(Some(fake.clone()), "f-78-failed", Pick::Default, || true, wake),
+        Ok(())
+    );
+    note_becomes("f-78-failed", Some(setting_up()));
+    note_becomes(
+        "f-78-failed",
+        Some(Note::Failed(Failure::Setup(TIMED_OUT).words().unwrap())),
+    );
+    assert!(woken.load(SeqCst) >= 2, "the window drew the wait, then the reason");
+    assert!(fake.asked().is_empty(), "{:?}", fake.asked());
+
+    let mut script = vec![Setup::Adding; 3];
+    script.push(Setup::Ready);
+    let fake = Arc::new(setting_up_fake(&script));
+    fake.here.store(true, SeqCst);
+    assert_eq!(
+        start_on(Some(fake.clone()), "f-78-ready", Pick::Default, || true, || {}),
+        Ok(())
+    );
+    for _ in 0..500 {
+        if fake.asked().iter().any(|a| a.starts_with("NSWorkspace open")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        fake.asked().iter().any(|a| a.starts_with("NSWorkspace open")),
+        "{:?}",
+        fake.asked()
+    );
+    note_becomes("f-78-ready", None);
 }

@@ -253,6 +253,8 @@ pub struct Ui {
     focus: Option<&'static str>,
     /// The toolbar's "…" menu, while it is open (`more_menu.rs`).
     pub more: Option<more_menu::Open>,
+    /// The "…" menu's Open with is under way, and the words the message last said of it (`more_menu.rs`).
+    more_open_with: Option<Option<String>>,
     intents: Vec<Intent>,
 }
 
@@ -294,6 +296,7 @@ impl Ui {
             saved_at: None,
             focus: None,
             more: None,
+            more_open_with: None,
             intents: Vec::new(),
         }
     }
@@ -1004,7 +1007,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             }
         }
     let Some(ui) = ui(s) else { return had || new_file };
-    let changed = ui.pump() | ui.refind();
+    let changed = ui.pump() | ui.refind() | ui.say_open_with();
     // An open text or note whose version is read: woken when the next read is due, not only by a press.
     if let Some(after) = ui.source.next_check() {
         tx.wake_after(after);
