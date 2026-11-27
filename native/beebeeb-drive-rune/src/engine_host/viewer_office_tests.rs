@@ -2211,7 +2211,7 @@ fn office_is_live_only_where_the_sandbox_exists() {
         &fake,
         Opened::default(),
     );
-    assert_eq!(source.office_live(), cfg!(windows));
+    assert_eq!(source.office_live(), cfg!(any(windows, target_os = "macos")));
 }
 
 // ---------------------------------------------------------------------------------------------------------------

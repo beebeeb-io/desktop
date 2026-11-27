@@ -991,10 +991,10 @@ fn no_sandbox_no_helper() {
     let registry = Registry::new();
     let mut host = OfficeHost::open_in(&registry, &exe, DocKind::Docx, Zeroizing::new(doc()), noop_wake());
     let mut events = Vec::new();
-    let ended = |host: &OfficeHost, _: &[Event]| host.worker_ended() && !matches!(host.state(), OfficeState::Opening);
-    assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());
-    assert_eq!(&host.state(), &OfficeState::NoPreview(NoPreview::NoSandbox));
-    assert_eq!(host.helper_pid(), None);
+    let answered = |host: &OfficeHost, _: &[Event]| start_was_answered(host);
+    assert!(pump(&mut host, &mut events, answered), "{:?}", host.state());
+    assert_not_started_unconfined(&host, "a file that is not a confined helper");
+    assert_eq!(pages_of(&events), 0, "nothing of the document was drawn");
     remove_runnable_helper(&exe);
 }
 

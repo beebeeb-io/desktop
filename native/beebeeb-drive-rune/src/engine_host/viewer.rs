@@ -786,10 +786,10 @@ pub(super) fn shows(name: &str) -> Shows {
     }
 }
 
-/// Whether the Office renderer's sandbox exists on this platform: `beebeeb-office-sandbox` has a module only on
-/// Windows today. Elsewhere a list's Open of an Office file goes to its own app.
+/// Whether the Office renderer's sandbox exists on this platform: `beebeeb-office-sandbox` has a module on Windows
+/// and on macOS (dm-79). Elsewhere a list's Open of an Office file goes to its own app.
 pub(super) const fn office_sandbox_here() -> bool {
-    cfg!(windows)
+    cfg!(any(windows, target_os = "macos"))
 }
 
 /// "Markdown" of "Markdown · 1.4 KB": the kind in a word, by the name.

@@ -96,9 +96,9 @@ impl Default for Office {
         Office {
             on: OFFICE_VIEWER_ON,
             ships: OFFICE_SHIPS,
-            // On a Mac too (dm-80): the helper's route is reached there only after the sandbox started it
+            // On a Mac too (dm-79, dm-80): the helper's route is reached there only after the sandbox started it
             // (`office_begin`'s macOS arm), so a writable document then opens in the editor, as on Windows.
-            edit_on: super::super::office_sandbox_here() || cfg!(target_os = "macos"),
+            edit_on: super::super::office_sandbox_here(),
             edits: EditShips::SHIPPED,
             helper: office_host::helper_exe,
             // The tests' sources never start a process: theirs says yes, and a test of the route sets its own.
