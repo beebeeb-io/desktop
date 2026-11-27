@@ -7,7 +7,11 @@
 //!
 //! Assertion messages carry codes and counts only: no path, no address, no name.
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+#[path = "macos/confinement.rs"]
+mod macos;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 #[test]
 fn without_a_sandbox_module_the_probe_is_not_started() {
     use beebeeb_office_sandbox::{Limits, Sandbox, SandboxError};

@@ -22,9 +22,18 @@
 //! by name, and every profile keeps the four promises above. The Office helper never names a profile.
 //!
 //! **Fail closed.** There is no unconfined way to start the helper through this crate. On an operating system
-//! without a sandbox module here (everything but Windows today) [`Sandbox::spawn`] returns
+//! without a sandbox module here (everything but Windows and macOS today) [`Sandbox::spawn`] returns
 //! [`SandboxError::Unsupported`] and starts nothing. On Windows the helper is created suspended, the confinement is
 //! read back from the new process, and only then does it run; any failure on the way ends the process.
+//!
+//! **macOS.** The system cannot create a process inside a sandbox of the creator's choosing, so the helper confines
+//! itself: [`helper::confine`], the first call in its `main`, applies a deny-default profile to the process or ends
+//! it. The app does not take the helper's word: before [`Sandbox::spawn`] returns, it asks the kernel what the new
+//! process may do, and ends a helper the kernel does not report as confined. Until then the helper has been sent
+//! its memory limit and nothing else. Every [`Profile`] gets the same, tightest confinement there. An app that is
+//! itself sandboxed (App Sandbox) cannot start a helper this way: its child inherits the app's sandbox and cannot
+//! apply its own, so `spawn` starts nothing and says so ([`SandboxError::NotConfined`]). The macOS module's
+//! documentation has the layers, the measurements and the sources.
 //!
 //! **Mitigations.** Each profile also has a closed table of process mitigations ([`Profile::mitigations`]). The
 //! helper is created under them, and each one is read back from the new process before it runs, together with the
@@ -58,9 +67,14 @@ mod windows;
 #[cfg(windows)]
 use windows as platform;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as platform;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod unsupported;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 use unsupported as platform;
 
 /// The viewer contract's cap on the helper's committed memory: 1 GiB.
@@ -475,9 +489,13 @@ impl Mode {
 }
 
 /// The names of the environment variables a helper gets (the values come from the system, not from the parent's
-/// environment). Nothing else is passed on.
+/// environment). Nothing else is passed on. On macOS a helper gets no variable at all.
 pub fn helper_environment_names() -> &'static [&'static str] {
-    block::ENVIRONMENT_NAMES
+    if cfg!(target_os = "macos") {
+        &[]
+    } else {
+        block::ENVIRONMENT_NAMES
+    }
 }
 
 /// A running (or ended) confined helper. Dropping it kills the helper.
@@ -534,10 +552,10 @@ impl Child {
         Ok(granted)
     }
 
-    /// How many handles the helper process has open now. A helper that keeps every handle it is given grows this
-    /// number; its caller decides the bound and calls [`Child::kill`].
+    /// How many handles the helper process has open now (on macOS: descriptors). A helper that keeps every handle
+    /// it is given grows this number; its caller decides the bound and calls [`Child::kill`].
     ///
-    /// Off Windows no `Child` exists (every start is [`SandboxError::Unsupported`]).
+    /// Where there is no sandbox module no `Child` exists (every start is [`SandboxError::Unsupported`]).
     pub fn handle_count(&self) -> Result<u32, SandboxError> {
         self.inner.handle_count()
     }
@@ -592,7 +610,7 @@ impl GrantedTo {
 impl Section {
     /// A section of `len` bytes, all zero. Refuses 0 bytes and more than [`MAX_SECTION_BYTES`].
     ///
-    /// Off Windows: [`SandboxError::Unsupported`].
+    /// Where there is no sandbox module: [`SandboxError::Unsupported`].
     pub fn new(len: usize) -> Result<Self, SandboxError> {
         let len = section_length(len as u64)?;
         Ok(Self {
@@ -615,7 +633,7 @@ impl Section {
     /// this is the way to read a section a helper holds read-write: a helper writing at the same moment can leave a
     /// torn value in `out`, never a reference to memory that changes under it.
     ///
-    /// Off Windows: no `Section` exists ([`Section::new`] is [`SandboxError::Unsupported`]).
+    /// Where there is no sandbox module no `Section` exists ([`Section::new`] is [`SandboxError::Unsupported`]).
     pub fn copy_to(&self, out: &mut [u8]) -> Result<(), SandboxError> {
         copy_exactly(self.len(), out, |out| self.inner.copy_into(out))
     }
@@ -687,7 +705,8 @@ pub enum Access {
 /// A section handed to a helper: what the caller sends to the helper over the pipe, for [`helper::map`] there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Granted {
-    /// The handle's value as the helper sees it. It means nothing in the app.
+    /// The handle's value as the helper sees it (on macOS: the grant's number on the helper's control socket). It
+    /// means nothing in the app.
     pub wire: u64,
     /// The section's length in bytes.
     pub len: u64,
@@ -698,6 +717,27 @@ pub mod helper {
     use std::fmt;
 
     use crate::{Access, Granted, SandboxError, platform, section_length};
+
+    /// The exit code of a helper that could not confine itself (macOS, [`confine`]).
+    pub const UNCONFINED_EXIT_CODE: u8 = 78;
+
+    /// The first call in a helper's `main`, before it reads anything: on macOS it confines THIS process (a
+    /// deny-default profile: no network, no file but the system's fonts, no write, no new process) and returns
+    /// only if that took effect. Otherwise the process ends with [`UNCONFINED_EXIT_CODE`], having read no input. It
+    /// cannot be undone, so it is for a helper's `main` only, never for the app.
+    ///
+    /// A helper started through [`crate::Sandbox::spawn`] also tells the app, which then asks the kernel itself. One
+    /// started any other way (by hand, by a test) is confined all the same and is handed no section.
+    ///
+    /// On Windows the confinement is put on the helper from outside before it runs, and on the other systems no
+    /// helper is started: there this does nothing.
+    pub fn confine() {
+        #[cfg(target_os = "macos")]
+        {
+            const _: () = assert!(UNCONFINED_EXIT_CODE == platform::UNCONFINED_EXIT_CODE);
+            platform::confine_or_exit();
+        }
+    }
 
     /// A granted section, mapped into the helper. Unmapped, and the grant's handle closed, when dropped.
     pub struct Mapped {
@@ -726,11 +766,11 @@ pub mod helper {
     }
 
     /// Maps a section the app granted to this process. `access` is what this side wants; asking for more than the
-    /// grant carries is refused by the system ([`SandboxError::Os`] with code 5). The grant's handle belongs to
-    /// this call: it is closed when the returned value is dropped, or at once when mapping fails, so a grant maps
-    /// once.
+    /// grant carries is refused by the system ([`SandboxError::Os`] with code 5; on macOS code 1). The grant's handle
+    /// belongs to this call: it is closed when the returned value is dropped (on macOS as soon as it is mapped), or
+    /// at once when mapping fails, so a grant maps once.
     ///
-    /// Off Windows: [`SandboxError::Unsupported`].
+    /// Where there is no sandbox module: [`SandboxError::Unsupported`].
     pub fn map(granted: Granted, access: Access) -> Result<Mapped, SandboxError> {
         let len = section_length(granted.len)?;
         Ok(Mapped {
@@ -784,6 +824,7 @@ mod tests {
             ("block", include_str!("block.rs")),
             ("windows", include_str!("windows.rs")),
             ("watch", include_str!("watch.rs")),
+            ("macos", include_str!("macos.rs")),
             ("unsupported", include_str!("unsupported.rs")),
         ];
         // Built from pieces so this test's own text does not match.
@@ -808,7 +849,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 40);
+        assert_eq!(checked, 48);
     }
 
     /// Both lengths are refused before any system call, on every operating system.
@@ -831,7 +872,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn without_a_sandbox_module_nothing_is_started() {
         let sandbox = Sandbox::new(Limits::default()).unwrap();
@@ -914,7 +955,7 @@ mod tests {
         use std::time::Instant;
 
         let sandbox = Sandbox::new(Limits::default()).unwrap();
-        // Refused at once on every system once the lock is free: relative (Windows) or no sandbox module (others).
+        // Refused at once on every system once the lock is free: relative (Windows, macOS) or no sandbox module.
         let refused = Path::new("not-absolute.exe");
         let started = Instant::now();
         assert!(sandbox.spawn(refused).is_err());
@@ -968,7 +1009,7 @@ mod tests {
         }
         assert_eq!(copied, 3);
 
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         assert_eq!(Section::new(8).unwrap_err(), SandboxError::Unsupported);
     }
 
@@ -1198,7 +1239,7 @@ mod tests {
         assert_eq!(first.load(Ordering::SeqCst), 0);
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn without_a_sandbox_module_no_profile_starts_anything() {
         let exe = std::env::current_exe().unwrap();

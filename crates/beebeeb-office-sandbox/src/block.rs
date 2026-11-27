@@ -226,6 +226,12 @@ mod tests {
             "two entries, then the end of the block"
         );
         assert_eq!(ENVIRONMENT_NAMES, ["LOCALAPPDATA", "SystemRoot", "TEMP", "TMP"]);
+        if cfg!(target_os = "macos") {
+            assert!(
+                crate::helper_environment_names().is_empty(),
+                "no variable at all on macOS"
+            );
+        }
     }
 
     #[test]
