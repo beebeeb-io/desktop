@@ -77,7 +77,7 @@ struct System;
 #[cfg(all(target_os = "macos", not(test)))]
 mod bridge {
     use crate::shell::platform::macos::macos_fp::bridge::BeebeebFpErrorC;
-    use std::ffi::{c_char, CString};
+    use std::ffi::{CString, c_char};
 
     unsafe extern "C" {
         fn beebeeb_fp_materialised(buffer: *mut c_char, buffer_len: usize, out_error: *mut BeebeebFpErrorC) -> i32;
@@ -144,8 +144,14 @@ fn parse(text: &str) -> Vec<Item> {
 /// its file in Finder is dataless. The engine's own record is not asked: the system makes a file online only again
 /// without telling the engine, and the engine may hold a copy Finder does not.
 ///
-/// The list is read on a thread of its own, never by the caller: an answer is the last list read. Until the system
-/// has answered once nothing is known ([`finder_state::here`] is `None`) and the engine's word stands.
+/// The list is read on a thread of its own, never by the caller: an answer is the last list read.
+///
+/// Dm-78: the mark comes from Finder's state alone. Until the system has answered once, the engine's word stood
+/// (RC13: Finder setup was slow to start, the list could not be read, and two files the engine held a copy of from
+/// an earlier build showed "on this Mac" while Finder's copies were dataless). Now a file is on this Mac only when
+/// the system's list names it, or a materialise saw it land moments ago ([`finder_state::Held::answer`]): before
+/// the first list, and while the list cannot be read at all, no engine copy makes a file "on this Mac". Only where
+/// there is no system to ask (not a Mac, a test) does the engine's word stand ([`finder_state::here`] is `None`).
 ///
 /// Dm-77: when the list is read again. A row's mark is taken when its list is read, so a mark is only as new as the
 /// list was then (RC12: a video landed and its row kept the cloud mark, "0 on this Mac"). So:
@@ -200,6 +206,19 @@ pub(crate) mod finder_state {
             self.here.as_ref().map(|here| here.contains(id))
         }
 
+        /// What a file's row is told on a Mac (dm-78): Finder holds the bytes of `id` only when the system's list
+        /// names it, or, while no list names it yet, a materialise saw it land within [`LANDED_FOR`]. Never
+        /// "not known": a file the system has not said is here is not marked as here, whatever the engine holds.
+        pub(crate) fn answer(&self, id: &str) -> Option<bool> {
+            Some(match self.here(id) {
+                Some(here) => here,
+                None => self
+                    .landed
+                    .iter()
+                    .any(|(held, at)| held == id && at.elapsed() < LANDED_FOR),
+            })
+        }
+
         /// Takes one read of the system's list. `true`: what is held changed.
         #[cfg_attr(not(test), allow(dead_code))]
         pub(in crate::engine_host) fn take(&mut self, source: &dyn Materialisation) -> bool {
@@ -228,18 +247,20 @@ pub(crate) mod finder_state {
         }
 
         /// A materialise saw the file `id` on this Mac, by its own attributes. `true`: what is held changed. Before
-        /// the system has answered once nothing is made up from one file: the first list read is given it.
+        /// the system has answered once no list is made up from one file (the first list read is given it), but the
+        /// file itself is here from now ([`Self::answer`]).
         pub(in crate::engine_host) fn land(&mut self, id: &str) -> bool {
+            let was = self.answer(id);
             self.forget(id);
             self.landed.push((id.to_string(), Instant::now()));
-            match &mut self.here {
-                Some(here) if !here.contains(id) => {
-                    Arc::make_mut(here).insert(id.to_string());
-                    self.changed = true;
-                    true
-                }
-                _ => false,
+            if let Some(here) = &mut self.here
+                && !here.contains(id)
+            {
+                Arc::make_mut(here).insert(id.to_string());
             }
+            let changed = was != self.answer(id);
+            self.changed |= changed;
+            changed
         }
 
         /// The file `id` is no longer held as landed (this app made it online only, or it lands anew).
@@ -315,13 +336,14 @@ pub(crate) mod finder_state {
         }
     }
 
-    /// Whether Finder holds the bytes of the file `id`, by the last list read; a read that begins after this ask
-    /// follows. `None`: not a Mac, or the system has not said yet. Never waits.
+    /// Whether Finder holds the bytes of the file `id`, by the last list read ([`Held::answer`]: `false` while the
+    /// system has not said it is here); a read that begins after this ask follows. `None`: there is no system to
+    /// ask (not a Mac, a test), and only then does the engine's word stand. Never waits.
     pub(crate) fn here(id: &str) -> Option<bool> {
         let source = super::system()?;
         let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
         ask(&mut held, source);
-        held.here(id)
+        held.answer(id)
     }
 
     /// Dm-77: a materialise saw the file `id` land on this Mac (`macos_fp::materialise`). It is held as here at
@@ -365,9 +387,10 @@ pub(crate) mod finder_state {
         HELD.lock().unwrap_or_else(PoisonError::into_inner).forget(id);
     }
 
-    /// The mark a file's row gets (`pc_status`), from the engine's `mark` and Finder's state: a file Finder holds
-    /// no bytes of is online only whatever the engine holds, and one Finder holds is on this Mac. A kept file keeps
-    /// its own mark, and so does a row the engine marks another way (a shared place, nothing yet).
+    /// The mark a file's row gets (`pc_status`), from the engine's `mark` and Finder's state ([`here`]): a file
+    /// Finder holds no bytes of is online only whatever the engine holds, and one Finder holds is on this Mac. A
+    /// kept file keeps its own mark, and so does a row the engine marks another way (a shared place, nothing yet).
+    /// `here` is `None` only where there is no system to ask: the engine's mark stands there.
     pub(crate) fn mark(mark: Option<String>, here: Option<bool>) -> Option<String> {
         match (mark.as_deref(), here) {
             (Some("on_this_pc"), Some(false)) => Some("online_only".to_string()),
@@ -470,7 +493,7 @@ mod tests {
 
     #[test]
     fn a_dataless_item_shows_the_cloud_mark_even_when_the_engine_holds_a_copy() {
-        use super::finder_state::{mark, Held};
+        use super::finder_state::{Held, mark};
         // Finder holds "a" and "kept"; "mov" is dataless there, though the engine records a copy of it.
         let mut held = Held::default();
         assert_eq!(held.here("mov"), None, "nothing is known before the system answered");
@@ -484,8 +507,52 @@ mod tests {
         assert_eq!(mark(on("available_offline"), held.here("mov")), on("available_offline"));
         assert_eq!(mark(on("name_shared"), held.here("mov")), on("name_shared"));
         assert_eq!(mark(None, held.here("mov")), None);
-        // Until the system has answered, the engine's word stands.
+        // Where there is no system to ask (not a Mac), the engine's word stands.
         assert_eq!(mark(on("on_this_pc"), None), on("on_this_pc"));
+    }
+
+    /// Dm-78, RC13: Finder setup was slow to start and the system's list could not be read. Two files the engine
+    /// held a copy of from an earlier build showed the on-this-Mac mark while `ls -lO` said `dataless`.
+    #[test]
+    fn an_engine_copy_never_marks_a_file_as_on_this_mac_before_or_without_the_systems_list() {
+        use super::finder_state::{Held, mark};
+        struct Broken;
+        impl Materialisation for Broken {
+            fn items(&self) -> Result<Vec<Item>, String> {
+                Err("the domain is not there yet".into())
+            }
+            fn evict(&self, _id: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let on = |m: &str| Some(m.to_string());
+        // What the row of a file gets: the engine's mark, and what a Mac's row is told of Finder's state.
+        let row = |held: &Held, engine: &str, id: &str| mark(on(engine), held.answer(id));
+
+        // The system has not answered yet: the engine holds a copy of "zip", Finder's copy is dataless.
+        let mut held = Held::default();
+        assert_eq!(held.answer("zip"), Some(false), "never \"not known\" on a Mac");
+        assert_eq!(row(&held, "on_this_pc", "zip"), on("online_only"));
+        assert_eq!(row(&held, "online_only", "eps"), on("online_only"));
+        // The list cannot be read (setup is still adding): the engine's copy still makes no mark.
+        assert!(!held.take(&Broken));
+        assert!(!held.take(&Broken));
+        assert_eq!(row(&held, "on_this_pc", "zip"), on("online_only"));
+        // A kept file's own mark is not this one.
+        assert_eq!(row(&held, "available_offline", "zip"), on("available_offline"));
+
+        // A materialise saw "mov" land meanwhile, by its own attributes: that is Finder's state, so it is marked,
+        // and the window is told. Nothing else is.
+        assert!(held.land("mov"));
+        assert!(held.take_changed());
+        assert_eq!(row(&held, "online_only", "mov"), on("on_this_pc"));
+        assert_eq!(row(&held, "on_this_pc", "zip"), on("online_only"));
+
+        // The system answers: its list is the mark, for the engine's copy too.
+        assert!(held.take(&Fake::new(&[("mov", 384), ("docx", 12)])));
+        assert_eq!(row(&held, "on_this_pc", "zip"), on("online_only"));
+        assert_eq!(row(&held, "online_only", "docx"), on("on_this_pc"));
+        assert_eq!(row(&held, "online_only", "mov"), on("on_this_pc"));
     }
 
     #[test]
@@ -513,7 +580,7 @@ mod tests {
     /// Dm-77, RC12: a video landed in Finder and its row kept the cloud mark and "0 on this Mac" until a relaunch.
     #[test]
     fn a_completed_materialise_flips_the_mark_at_once_and_tells_the_window_to_read_its_lists_again() {
-        use super::finder_state::{mark, Held};
+        use super::finder_state::{Held, mark};
         let on = |m: &str| Some(m.to_string());
         let mut held = Held::default();
         assert!(held.take(&Fake::new(&[("a", 10)])));
@@ -546,9 +613,10 @@ mod tests {
     fn a_file_that_landed_before_the_system_answered_is_in_the_first_list_and_one_this_app_evicted_is_not_held() {
         use super::finder_state::Held;
         let mut held = Held::default();
-        // Nothing is known yet: one file is not a list (every other row would read as online only).
-        assert!(!held.land("mov"));
+        // No list is known yet, and one file is not a list; the file itself is here from now (dm-78).
+        assert!(held.land("mov"));
         assert_eq!((held.here("mov"), held.here("a")), (None, None));
+        assert_eq!((held.answer("mov"), held.answer("a")), (Some(true), Some(false)));
         assert!(held.take(&Fake::new(&[("a", 10)])));
         assert_eq!((held.here("mov"), held.here("a")), (Some(true), Some(true)));
 

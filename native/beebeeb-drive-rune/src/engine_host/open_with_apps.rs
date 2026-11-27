@@ -103,13 +103,21 @@ pub(crate) fn default_app_name(ext: &str, wake: impl FnOnce() + Send + 'static) 
         }
     }
     let asked = ext.clone();
-    let started = std::thread::Builder::new().name("default-app-name".into()).spawn(move || {
-        let name = default_name(ask_default(&asked), &own_exe());
-        known.lock().unwrap_or_else(PoisonError::into_inner).insert(asked, Some(name));
-        wake();
-    });
+    let started = std::thread::Builder::new()
+        .name("default-app-name".into())
+        .spawn(move || {
+            let name = default_name(ask_default(&asked), &own_exe());
+            known
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(asked, Some(name));
+            wake();
+        });
     if started.is_err() {
-        known.lock().unwrap_or_else(PoisonError::into_inner).insert(ext, Some(None));
+        known
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(ext, Some(None));
     }
     None
 }
@@ -151,18 +159,60 @@ fn ask_default(_ext: &str) -> Option<(String, String)> {
 /// even when the wait itself stands still (RC12: 80 s, nothing opened, nothing said): the page then says the
 /// download stopped, the log says why, and that press opens nothing any more ([`start_on`]).
 ///
+/// Dm-78: a press while Finder is still being set up is not refused (RC13: setup was slow, and the press answered at
+/// once with the words of a sync folder). The page says Finder is still being set up, the press waits for it
+/// ([`Platform::setup`], [`Platform::setup_wait`]: 60 s), and then the file is made present and opened as above. A
+/// setup that ended without Finder is said with its reason, in the words Settings uses ([`Failure::Setup`]).
+///
 /// Never: a shell, a child process, a temporary copy, a path made from a name. Must not log a path or a name.
 #[cfg(target_os = "macos")]
 pub(crate) mod mac {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
+    use beebeeb_engine::finder_setup::driver::FinderSetupView;
     use beebeeb_engine::finder_setup::error::BRIDGE_DOMAIN;
 
     use crate::frames::viewers::unsupported::{self, Note};
     use crate::shell::platform::macos::macos_fp::materialise::{self, Finder};
     pub(crate) use crate::shell::platform::macos::macos_fp::materialise::{Presence, STALL};
+
+    /// How long a Finder setup that has not begun is given to begin (the first moments of a run), before the press
+    /// says Beebeeb is not in Finder.
+    pub(crate) const SETUP_GRACE: Duration = Duration::from_secs(5);
+
+    /// How Finder setup stands at one look.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Setup {
+        /// Beebeeb is in Finder.
+        Ready,
+        /// Beebeeb is being added to Finder, or setup is trying again: waited for.
+        Adding,
+        /// Setup has not begun: the first moments of a run, or Beebeeb is turned off in Finder on this Mac. Given
+        /// [`SETUP_GRACE`] to begin.
+        NotBegun,
+        /// Setup ended without Finder: why, in the words Settings says it with.
+        Ended(&'static str),
+    }
+
+    /// [`Setup`] of what `finder_setup_state` says.
+    pub(crate) fn setup_of(view: &FinderSetupView) -> Setup {
+        use beebeeb_engine::surfaces::phase::{FinderFailureReason, FinderSetup};
+
+        use crate::frames::settings::finder::failure_sentence;
+        match view.setup {
+            FinderSetup::Ready => Setup::Ready,
+            FinderSetup::Adding => Setup::Adding,
+            // Opened from the disk image: no setup follows.
+            FinderSetup::Missing if view.reason == Some(FinderFailureReason::NotInApplications) => {
+                Setup::Ended(failure_sentence(view.reason))
+            }
+            FinderSetup::Missing => Setup::NotBegun,
+            FinderSetup::UserDisabled => Setup::Ended(failure_sentence(Some(FinderFailureReason::UserDisabled))),
+            FinderSetup::Failed => Setup::Ended(failure_sentence(view.reason)),
+        }
+    }
 
     /// `(app path, app name)` of the default app for files ending in `ext` (no dot).
     pub(crate) fn default_app(ext: &str) -> Option<(String, String)> {
@@ -259,6 +309,32 @@ pub(crate) mod mac {
         NoApp,
         /// `NSWorkspace` refused the open.
         Open(SystemError),
+        /// Finder setup ended without Finder (dm-78): why, in the words Settings says it with.
+        Setup(&'static str),
+        /// Finder setup was not ready within [`Platform::setup_wait`].
+        SetupSlow,
+        /// Once Finder was ready, the hand-over's own checks did not pass ([`Platform::may_open`]).
+        Refused,
+    }
+
+    /// What the page says while the press waits for Finder setup. The brief's own words.
+    pub(crate) const SETTING_UP: &str = "Finder is still being set up \u{b7} opens when it is ready";
+    /// What follows the reason of a setup that ended without Finder.
+    pub(crate) const OPENS_FROM_FINDER: &str = "This file opens from Finder, so it didn\u{2019}t open.";
+    /// What the page says when setup was not ready in time.
+    pub(crate) const SETUP_SLOW: &str =
+        "Finder is still being set up, so this file didn\u{2019}t open. Try again in a moment.";
+    /// Why, when setup did not begin: Beebeeb is turned off in Finder on this Mac.
+    pub(crate) const NOT_BEGUN: &str = concat!(
+        "Beebeeb isn\u{2019}t in Finder on ",
+        beebeeb_engine::device_word!(),
+        ". Turn it on in Settings."
+    );
+
+    /// The page's note while the press waits for Finder setup. The page's [`Note`] has no kind of its own for a
+    /// wait that is not a download, so the words go as they are.
+    pub(crate) fn setting_up() -> Note {
+        Note::Failed(SETTING_UP.to_string())
     }
 
     /// What the page says when the download was refused.
@@ -274,8 +350,7 @@ pub(crate) mod mac {
         " stopped, so this file didn\u{2019}t open. Check your connection and try again."
     );
     /// What the page says when the item has no place in Finder.
-    pub(crate) const NOT_IN_FINDER: &str =
-        "Beebeeb couldn\u{2019}t find this file in Finder, so it didn\u{2019}t open. Check that Beebeeb is turned on in Finder.";
+    pub(crate) const NOT_IN_FINDER: &str = "Beebeeb couldn\u{2019}t find this file in Finder, so it didn\u{2019}t open. Check that Beebeeb is turned on in Finder.";
     /// What the page says when no app opens the kind.
     pub(crate) const NO_APP: &str = concat!(
         "No app on ",
@@ -289,15 +364,21 @@ pub(crate) mod mac {
 
     impl Failure {
         /// The sentence for the page. `None`: nothing is said (the person cancelled, or the press is over).
-        pub(crate) fn words(&self) -> Option<&'static str> {
-            Some(match self {
-                Failure::Cancelled | Failure::Moved => return None,
-                Failure::Download(_) => NOT_DOWNLOADED,
-                Failure::DownloadStalled => NOT_MOVING,
-                Failure::NotInFinder => NOT_IN_FINDER,
-                Failure::NoApp => NO_APP,
-                Failure::Open(_) => APP_REFUSED,
-            })
+        pub(crate) fn words(&self) -> Option<String> {
+            Some(
+                match self {
+                    Failure::Cancelled | Failure::Moved => return None,
+                    Failure::Download(_) => NOT_DOWNLOADED,
+                    Failure::DownloadStalled => NOT_MOVING,
+                    Failure::NotInFinder => NOT_IN_FINDER,
+                    Failure::NoApp => NO_APP,
+                    Failure::Open(_) => APP_REFUSED,
+                    Failure::Setup(why) => return Some(format!("{why} {OPENS_FROM_FINDER}")),
+                    Failure::SetupSlow => SETUP_SLOW,
+                    Failure::Refused => NOT_STARTED,
+                }
+                .to_string(),
+            )
         }
 
         /// What failed, in the log, and the system's domain and code where it gave one. Never a path, a name or the
@@ -318,6 +399,15 @@ pub(crate) mod mac {
                     tracing::warn!("open with: the file did not open, NSWorkspace refused");
                     why.log();
                 }
+                Failure::Setup(_) => {
+                    tracing::warn!("open with: the file did not open, Finder setup ended without Finder")
+                }
+                Failure::SetupSlow => {
+                    tracing::warn!("open with: the file did not open, Finder setup was not ready in time")
+                }
+                Failure::Refused => {
+                    tracing::warn!("open with: the file did not open, its checks did not pass once Finder was ready")
+                }
             }
         }
     }
@@ -325,6 +415,23 @@ pub(crate) mod mac {
     /// What is asked of the Mac. The app's is the File Provider bridge and `NSWorkspace` ([`system`]); a test's
     /// remembers what it was asked.
     pub(crate) trait Platform: Send + Sync {
+        /// How Finder setup stands now (`finder_setup_state`). Default: ready.
+        fn setup(&self) -> Setup {
+            Setup::Ready
+        }
+        /// How long a press waits for Finder setup to be ready ([`STALL`]: 60 s).
+        fn setup_wait(&self) -> Duration {
+            STALL
+        }
+        /// How long a setup that has not begun is given to begin ([`SETUP_GRACE`]).
+        fn setup_grace(&self) -> Duration {
+            SETUP_GRACE
+        }
+        /// The checks every hand-over passes (sync is on, a file, one of the account's own), asked once Finder is
+        /// ready: sync starts with Finder setup, so a press that waited is checked then. Default: they pass.
+        fn may_open(&self, _item_id: &str) -> bool {
+            true
+        }
         /// What is at Finder's place for the item now: its bytes, or a file without them (`SF_DATALESS`). Finder's
         /// real state, never the engine's own copy.
         fn presence(&self, file: &Path) -> Presence;
@@ -400,8 +507,47 @@ pub(crate) mod mac {
         run_watched(platform, item_id, pick, still, say, None)
     }
 
+    /// Dm-78: waits until Finder setup is ready, for [`Platform::setup_wait`] at most. A setup that is adding (or
+    /// trying again) is waited for, and the page says so (`say`, once); one that has not begun is given
+    /// [`Platform::setup_grace`] to begin; one that ended without Finder ends the press with its reason.
+    fn wait_for_setup(platform: &dyn Platform, still: &dyn Fn() -> bool, say: &dyn Fn(Note)) -> Result<(), Failure> {
+        let (asked, mut said) = (Instant::now(), false);
+        loop {
+            match platform.setup() {
+                Setup::Ready => {
+                    if said {
+                        tracing::info!(
+                            ms = asked.elapsed().as_millis() as u64,
+                            "open with: Finder is ready; the press goes on"
+                        );
+                    }
+                    return Ok(());
+                }
+                Setup::Ended(why) => return Err(Failure::Setup(why)),
+                Setup::NotBegun if asked.elapsed() >= platform.setup_grace() => {
+                    return Err(Failure::Setup(NOT_BEGUN));
+                }
+                Setup::Adding | Setup::NotBegun => {}
+            }
+            if asked.elapsed() >= platform.setup_wait() {
+                return Err(Failure::SetupSlow);
+            }
+            if !still() {
+                return Err(Failure::Moved);
+            }
+            if !said {
+                said = true;
+                tracing::info!("open with: Finder is still being set up; the press waits for it");
+                say(setting_up());
+            }
+            std::thread::sleep(materialise::LOOK_EVERY.min(platform.setup_wait()));
+        }
+    }
+
     /// One Open with press, start to end, on the thread of its own that [`start`] makes: the app (asked first, so the
-    /// chooser is not shown minutes after the press), then, at Finder's place for the item, its copy made present
+    /// chooser is not shown minutes after the press), then Finder setup waited for when it is not ready yet
+    /// ([`wait_for_setup`]; a setup that ended without Finder is said before the chooser is shown), then, at Finder's
+    /// place for the item, its copy made present
     /// (dm-75's one call: a file that is online only is read and asked of the system, and it is waited for until it
     /// is no longer dataless) and the open. `still` is asked before every step that acts: `false` (the session of the
     /// press ended, a newer press took over) ends it with nothing opened. `say` gets what the page shows meanwhile.
@@ -416,12 +562,20 @@ pub(crate) mod mac {
         stuck: Option<materialise::Stuck>,
     ) -> Result<(), Failure> {
         let mut stuck = stuck;
+        // A setup that ended without Finder is said before the person is asked to pick an app.
+        if let Setup::Ended(why) = platform.setup() {
+            return Err(Failure::Setup(why));
+        }
         let picked = match pick {
             Pick::Default => None,
             Pick::Choose => Some(platform.choose_app().ok_or(Failure::Cancelled)?),
         };
         if !still() {
             return Err(Failure::Moved);
+        }
+        wait_for_setup(platform, still, say)?;
+        if !platform.may_open(item_id) {
+            return Err(Failure::Refused);
         }
         let finder = AsFinder {
             platform,
@@ -468,11 +622,7 @@ pub(crate) mod mac {
                 }
             })();
         });
-        if found {
-            opened
-        } else {
-            Err(Failure::NotInFinder)
-        }
+        if found { opened } else { Err(Failure::NotInFinder) }
     }
 
     /// The number of the newest press: an older press's thread stops when it sees a newer one, and says nothing more.
@@ -486,14 +636,22 @@ pub(crate) mod mac {
     /// Open with for the item `item_id`, on a thread of its own with the Mac's own platform. `still`: the session of
     /// the press is still the one. `wake`: the window draws again (the page reads its note). `Err`: nothing started;
     /// the page says so (its note is set here too). `progress`: how far the item's download is, from the transfer board.
+    /// `may_open`: the hand-over's own checks, asked once Finder is ready ([`Platform::may_open`]).
     pub(crate) fn start(
         item_id: &str,
         pick: Pick,
         still: impl Fn() -> bool + Send + 'static,
         wake: impl Fn() + Send + 'static,
         progress: impl Fn(&str) -> Option<(u64, u64)> + Send + Sync + 'static,
+        may_open: impl Fn(&str) -> bool + Send + Sync + 'static,
     ) -> Result<(), ()> {
-        start_on(system(Box::new(progress)), item_id, pick, still, wake)
+        start_on(
+            system(Box::new(progress), Box::new(may_open)),
+            item_id,
+            pick,
+            still,
+            wake,
+        )
     }
 
     /// [`start`] on `platform` (`None`: this build has none, a test's).
@@ -551,10 +709,7 @@ pub(crate) mod mac {
                 }
                 // A newer press owns the page's words now.
                 if newest() {
-                    let note = done
-                        .err()
-                        .and_then(|why| why.words())
-                        .map(|words| Note::Failed(words.to_string()));
+                    let note = done.err().and_then(|why| why.words()).map(Note::Failed);
                     unsupported::set_note(&id, note);
                     woken(&wake);
                 }
@@ -568,15 +723,18 @@ pub(crate) mod mac {
     /// How far an item's download is, asked of the engine's transfer board.
     pub(crate) type Progress = Box<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>;
 
+    /// The hand-over's own checks for an item, asked of the engine.
+    pub(crate) type MayOpen = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
     /// The Mac's own platform. A test never reaches the File Provider, the chooser or `NSWorkspace`: none.
-    fn system(progress: Progress) -> Option<std::sync::Arc<dyn Platform>> {
+    fn system(progress: Progress, may_open: MayOpen) -> Option<std::sync::Arc<dyn Platform>> {
         #[cfg(not(test))]
         {
-            Some(std::sync::Arc::new(real::System { progress }))
+            Some(std::sync::Arc::new(real::System { progress, may_open }))
         }
         #[cfg(test)]
         {
-            let _ = progress;
+            let _ = (progress, may_open);
             None
         }
     }
@@ -586,7 +744,7 @@ pub(crate) mod mac {
         use std::path::{Path, PathBuf};
         use std::time::Duration;
 
-        use super::{own_domain, Presence, SystemError};
+        use super::{Presence, SystemError, own_domain};
         use crate::shell::platform::macos::macos_fp::bridge;
         use crate::shell::platform::macos::macos_fp::materialise::{self, Finder};
 
@@ -606,9 +764,18 @@ pub(crate) mod mac {
 
         pub(super) struct System {
             pub(super) progress: super::Progress,
+            pub(super) may_open: super::MayOpen,
         }
 
         impl super::Platform for System {
+            fn setup(&self) -> super::Setup {
+                super::setup_of(&crate::engine_host::finder_setup::view())
+            }
+
+            fn may_open(&self, item_id: &str) -> bool {
+                (self.may_open)(item_id)
+            }
+
             fn presence(&self, file: &Path) -> Presence {
                 materialise::presence_on_disk(file)
             }
@@ -951,7 +1118,10 @@ mod tests {
     fn default_app_name_leaves_out_this_app_and_empty_names() {
         let own = r"C:\Program Files\Beebeeb\beebeeb-drive.exe";
         let ppt = r"C:\Program Files\Microsoft Office\root\Office16\POWERPNT.EXE";
-        assert_eq!(default_name(Some((ppt.into(), "PowerPoint".into())), own), Some("PowerPoint".into()));
+        assert_eq!(
+            default_name(Some((ppt.into(), "PowerPoint".into())), own),
+            Some("PowerPoint".into())
+        );
         assert_eq!(default_name(Some((own.into(), "Beebeeb".into())), own), None);
         assert_eq!(default_name(Some((ppt.into(), "  ".into())), own), None);
         assert_eq!(default_name(None, own), None);

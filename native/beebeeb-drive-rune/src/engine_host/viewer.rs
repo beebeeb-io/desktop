@@ -329,13 +329,18 @@ impl<C: CredentialStores> LiveViewerEngine<C> {
 impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
     /// The path the system opens the file from, or why not.
     fn elsewhere_path(&self, file_id: &str) -> Result<std::path::PathBuf, Elsewhere> {
-        if !self.engine.is_syncing() {
+        Self::elsewhere_path_of(&self.engine, file_id)
+    }
+
+    /// [`Self::elsewhere_path`] on the engine's handle alone (a Mac's Open with asks it again on its own thread).
+    fn elsewhere_path_of(engine: &Engine<C>, file_id: &str) -> Result<std::path::PathBuf, Elsewhere> {
+        if !engine.is_syncing() {
             return Err(Elsewhere::NeedsSync);
         }
-        let Ok(sync_root) = self.engine.sync_root() else {
+        let Ok(sync_root) = engine.sync_root() else {
             return Err(Elsewhere::NeedsSync);
         };
-        let path = self.engine.local_state_for_changes().and_then(|state| {
+        let path = engine.local_state_for_changes().and_then(|state| {
             state.with(|db| {
                 // A folder is not a file to open from a viewer.
                 file_ops::resolve(db, file_id).ok().filter(|entry| !entry.is_dir())?;
@@ -381,35 +386,29 @@ impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
 
     /// macOS (dm-73): Open with, on Finder's copy of the file (`open_with_apps::mac`): it is made present first, then
     /// opened with the default app or the app picked. The checks every hand-over passes come first, under the
-    /// account-bound handle (`elsewhere_path`: sync is on, a file, a kind that may be opened), and a shared-with-me
-    /// row is never asked of the File Provider (ruling 1701). What happens after this returns is said on the file's
-    /// page (`unsupported::Note`) and logged.
+    /// account-bound handle ([`Self::mac_open_with_checks`]: sync is on, a file, a kind that may be opened, and never
+    /// a shared-with-me row, which is not asked of the File Provider: ruling 1701). What happens after this returns
+    /// is said on the file's page (`unsupported::Note`) and logged.
+    ///
+    /// Dm-78: Finder setup that is not ready is no refusal here (RC13: setup was slow to start, and the press answered
+    /// at once with the words of a sync folder). The press's own thread waits for setup while the page says so, and
+    /// says a setup that ended without Finder with its reason, in a Mac's words. Sync starts with Finder setup, so
+    /// "sync is not running" while Finder is not ready goes there too; the checks are made again once Finder is.
     #[cfg(target_os = "macos")]
     fn mac_open_with(&self, file_id: &str, pick: super::open_with_apps::mac::Pick) -> Elsewhere {
-        use crate::shell::platform::macos::macos_fp::open as finder;
+        use super::open_with_apps::mac;
         // Each refusal is logged by its kind (never a name or an id); the page says it in words.
-        if let Err(why) = self.elsewhere_path(file_id) {
-            match why {
-                Elsewhere::NeedsSync => tracing::warn!("open with: refused before it started, sync is not running"),
-                _ => tracing::warn!("open with: refused before it started, the file has no place to open from"),
+        match Self::mac_open_with_checks(&self.engine, file_id) {
+            Ok(()) => {}
+            // Sync runs only once Beebeeb is in Finder: the press's thread waits for setup, or says why it ended.
+            Err(Elsewhere::NeedsSync) if mac::setup_of(&super::finder_setup::view()) != mac::Setup::Ready => {
+                tracing::info!("open with: Finder is not set up yet; the press goes on to wait for it");
             }
-            return why;
-        }
-        let own = self
-            .engine
-            .local_state_for_changes()
-            .and_then(|state| state.with(|db| finder::refuse_shared(db, file_id).is_ok()));
-        if !matches!(own, Ok(true)) {
-            tracing::warn!("open with: refused before it started, not one of the account's own files");
-            return Elsewhere::Refused;
-        }
-        if finder::not_ready_line(&super::finder_setup::view()).is_some() {
-            tracing::warn!("open with: refused before it started, Beebeeb is not in Finder");
-            return Elsewhere::NeedsSync;
+            Err(why) => return why,
         }
         let (engine, waker, turn) = (self.engine.clone(), self.engine.clone(), self.engine.session_turn());
-        let board = self.engine.clone();
-        let started = super::open_with_apps::mac::start(
+        let (board, checked) = (self.engine.clone(), self.engine.clone());
+        let started = mac::start(
             file_id,
             pick,
             move || engine.session_turn() == turn,
@@ -419,8 +418,32 @@ impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
                 let rows = board.downloads_for(turn).ok()?;
                 rows.into_iter().find(|row| row.file_id == id).map(|row| (row.done, row.total))
             },
+            // The same checks once Finder is ready, on the press's own thread.
+            move |id| Self::mac_open_with_checks(&checked, id).is_ok(),
         );
         if started.is_ok() { Elsewhere::Opened } else { Elsewhere::Refused }
+    }
+
+    /// The checks a Mac's Open with passes before anything is asked of Finder: [`Self::elsewhere_path_of`]'s, and the
+    /// file is one of the account's own. Each refusal is logged by its kind.
+    #[cfg(target_os = "macos")]
+    fn mac_open_with_checks(engine: &Engine<C>, file_id: &str) -> Result<(), Elsewhere> {
+        use crate::shell::platform::macos::macos_fp::open as finder;
+        if let Err(why) = Self::elsewhere_path_of(engine, file_id) {
+            match why {
+                Elsewhere::NeedsSync => tracing::warn!("open with: refused, sync is not running"),
+                _ => tracing::warn!("open with: refused, the file has no place to open from"),
+            }
+            return Err(why);
+        }
+        let own = engine
+            .local_state_for_changes()
+            .and_then(|state| state.with(|db| finder::refuse_shared(db, file_id).is_ok()));
+        if !matches!(own, Ok(true)) {
+            tracing::warn!("open with: refused, not one of the account's own files");
+            return Err(Elsewhere::Refused);
+        }
+        Ok(())
     }
 }
 
