@@ -416,16 +416,38 @@ static const int64_t BeebeebScopeSafetySeconds = 60;
 //
 // `promptsUserIfNeeded = NO`: the completion handler "will not be invoked until the user dismisses any
 // such UI" (NSWorkspace.h:155-158), and a wait that a dialog can hold back is not a wait this bridge can bound.
+//
+// dm-84 (83's rule for the page's buttons, now for the Files list's double-click too): RC15's double-click on an .eps
+// started Illustrator and the list said "Couldn't open", because a big app answers after the 5 s. An app the system
+// handed the file to opened it, whatever error it also answered, and so did the file's app when it was not running
+// before this open and runs when the wait ends (it is still starting with the file). Only an error with no app, or a
+// silence with nothing started, is a refusal. A swallowed error is logged with its domain and code.
+// The rule above as a pure function, so a test holds it (`engine_host/mod.rs`): 0 = opened, -1 = refused.
+// `answered`: the completion handler came within the wait; `handed`: it named an app; `has_error`: it carried an
+// error; `ran_before`/`runs_now`: the file's app ran before the open / runs when the wait ended.
+int beebeeb_open_outcome(int answered, int handed, int has_error, int ran_before, int runs_now) {
+    if (!answered) {
+        return (!ran_before && runs_now) ? 0 : -1;
+    }
+    return (!has_error || handed) ? 0 : -1;
+}
+
 static int BeebeebOpenURLAndWait(NSURL *url, BeebeebFpError *out_error) {
     BeebeebScope *scope = [[BeebeebScope alloc] initWithURL:url];
     NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
     configuration.promptsUserIfNeeded = NO;
     configuration.addsToRecentItems = NO;
+    // The app that opens this kind of file, and whether it ran before this open (a file URL only).
+    NSURL *app_url = url.isFileURL ? [[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:url] : nil;
+    NSString *app_id = app_url == nil ? nil : [NSBundle bundleWithURL:app_url].bundleIdentifier;
+    BOOL ran_before = app_id != nil && [NSRunningApplication runningApplicationsWithBundleIdentifier:app_id].count > 0;
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     __block NSError *found_error = nil;
+    __block BOOL handed = NO;
     [[NSWorkspace sharedWorkspace] openURL:url configuration:configuration
                          completionHandler:^(NSRunningApplication *application, NSError *error) {
         found_error = error;
+        handed = application != nil;
         [scope stop];
         dispatch_semaphore_signal(semaphore);
     }];
@@ -435,10 +457,21 @@ static int BeebeebOpenURLAndWait(NSURL *url, BeebeebFpError *out_error) {
     });
     long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, BeebeebOpenTimeoutSeconds * NSEC_PER_SEC));
     if (wait_result != 0) {
+        BOOL runs_now = app_id != nil && [NSRunningApplication runningApplicationsWithBundleIdentifier:app_id].count > 0;
+        if (beebeeb_open_outcome(0, 0, 0, ran_before, runs_now) == 0) {
+            NSLog(@"open: no answer within %llds; the file's app was started with it and is still starting: opened",
+                  (long long)BeebeebOpenTimeoutSeconds);
+            return 0;
+        }
         BeebeebFillBridgeError(BeebeebBridgeOpenTimeout, @"Timed out waiting for LaunchServices to open the URL", out_error);
         return -1;
     }
     if (found_error != nil) {
+        if (beebeeb_open_outcome(1, handed, 1, ran_before, 0) == 0) {
+            NSLog(@"open: the app was handed the file; the system also answered %@ %ld: opened",
+                  found_error.domain, (long)found_error.code);
+            return 0;
+        }
         BeebeebFillError(found_error, out_error);
         return -1;
     }

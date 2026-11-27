@@ -158,7 +158,31 @@ fn mac_service_helper(exe: &std::path::Path) -> Option<PathBuf> {
         return None;
     }
     tracing::info!("office helper: the service is used");
+    log_service_lines();
     Some(path)
+}
+
+/// Dm-84: the sandbox's lines about the service (how long its start took, the check that refused it, "office helper:
+/// confined (app sandbox, 19/19 checks)") go to the app's own log too, not only to the system log. Set once.
+#[cfg(target_os = "macos")]
+fn log_service_lines() {
+    use std::ffi::{CStr, c_char};
+    unsafe extern "C" {
+        /// The sandbox crate's macOS module (`macos_xpc.rs`), exported by name.
+        fn beebeeb_office_sandbox_set_note_hook(hook: extern "C" fn(*const c_char));
+    }
+    /// One line of the sandbox: fixed text and numbers, never a path or a byte of a document.
+    extern "C" fn note(line: *const c_char) {
+        if line.is_null() {
+            return;
+        }
+        // SAFETY: the sandbox hands a terminated string that lives for this call.
+        let line = unsafe { CStr::from_ptr(line) }.to_string_lossy();
+        tracing::info!("{line}");
+    }
+    static SET: std::sync::Once = std::sync::Once::new();
+    // SAFETY: the function takes a plain function pointer and keeps it for the process.
+    SET.call_once(|| unsafe { beebeeb_office_sandbox_set_note_hook(note) });
 }
 
 #[cfg(all(test, target_os = "macos"))]

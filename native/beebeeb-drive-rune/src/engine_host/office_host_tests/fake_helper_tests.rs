@@ -276,6 +276,8 @@ impl Gate {
 #[derive(Default)]
 pub(super) struct Log {
     starts: AtomicUsize,
+    /// Every call of the starter's `start`, refused ones too (dm-84).
+    pub(super) start_calls: AtomicUsize,
     /// Helpers ended by an explicit kill, each counted once. Dropping a helper's handle ends it too (as the sandbox's
     /// `Child` does), but is not counted: a test that asks "killed?" sees only a kill somebody made.
     kills: AtomicUsize,
@@ -336,6 +338,8 @@ pub(super) struct Fake {
     failing_copy: bool,
     /// Every start fails with this sandbox error.
     start_error: Option<SandboxError>,
+    /// The first this many starts fail with the second (dm-84: the sandbox refused a start once).
+    refused_first: (usize, Option<SandboxError>),
 }
 
 impl Fake {
@@ -353,7 +357,14 @@ impl Fake {
             sections_asked: 0,
             failing_copy: false,
             start_error: None,
+            refused_first: (0, None),
         }
+    }
+
+    /// The first `n` starts fail with `error`; the ones after start as usual.
+    pub(super) fn refusing_first(mut self, n: usize, error: SandboxError) -> Fake {
+        self.refused_first = (n, Some(error));
+        self
     }
 
     /// Every start fails with `error`, as the sandbox's refusal does.
@@ -475,7 +486,13 @@ impl Starter for Fake {
     }
 
     fn start(&mut self) -> Result<Link<FakeHelper>, SandboxError> {
+        let call = self.log.start_calls.fetch_add(1, SeqCst);
         if let Some(error) = self.start_error {
+            return Err(error);
+        }
+        if let (n, Some(error)) = self.refused_first
+            && call < n
+        {
             return Err(error);
         }
         if !self.start_delay.is_zero() {
