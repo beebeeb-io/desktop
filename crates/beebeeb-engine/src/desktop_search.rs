@@ -445,6 +445,26 @@ async fn sync_local_index_to_store(
     })
 }
 
+/// TEMP red stub: the runner's old behaviour (sync on a new generation, retry on every tick after an error).
+pub struct SearchSyncState {
+    synced: Option<u64>,
+}
+impl SearchSyncState {
+    pub fn new() -> Self {
+        Self { synced: None }
+    }
+    pub async fn sync_if_due(&mut self, db: &StateDb, index: &IncrementalLocalIndex, store: &impl SearchShardStore) {
+        if self.synced == Some(index.generation()) {
+            return;
+        }
+        if let Some(local) = index.local()
+            && sync_local_index_to_store(db, local, store).await.is_ok()
+        {
+            self.synced = Some(index.generation());
+        }
+    }
+}
+
 fn to_core_shard_ref(r: &SearchShardRef) -> ShardRef {
     ShardRef {
         bucket: r.bucket,
@@ -816,6 +836,95 @@ mod tests {
                 && r.path != "/api/v1/search-index/shards"),
             "remote round-trip must fetch raw shard bytes by bucket/page"
         );
+    }
+
+    /// RS-g: two devices of one account, one file change. Each syncs; afterwards a long idle (many ticks
+    /// with nothing changed) must make no search-index request at all.
+    #[test]
+    fn two_engines_settle_and_make_no_requests_when_idle() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let master_key = [9u8; 32];
+        let store = FixtureSearchStore::new(master_key, "tok");
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let dbs: Vec<StateDb> = dirs
+            .iter()
+            .map(|d| {
+                let db = StateDb::open(d.path().join("state.db")).unwrap();
+                seed_file(&db, "a", "Docs/alpha.txt", ItemKind::File);
+                seed_file(&db, "b", "Docs/bravo.txt", ItemKind::File);
+                db
+            })
+            .collect();
+        let mut engines: Vec<(super::IncrementalLocalIndex, super::SearchSyncState)> = dbs
+            .iter()
+            .map(|_| (super::IncrementalLocalIndex::new(), super::SearchSyncState::new()))
+            .collect();
+        // One file change on both devices (the other device's change arrives through normal sync).
+        for db in &dbs {
+            seed_file(db, "c", "Docs/charlie.txt", ItemKind::File);
+        }
+        for _pass in 0..2 {
+            for (i, (index, state)) in engines.iter_mut().enumerate() {
+                index.refresh(&dbs[i]).unwrap();
+                rt.block_on(state.sync_if_due(&dbs[i], index, &store));
+            }
+        }
+        let settled = store.requests().len();
+        assert!(settled > 0, "the first pass must push the index");
+        // Ten idle minutes: a tick every 2 s on each device.
+        for _tick in 0..300 {
+            for (i, (index, state)) in engines.iter_mut().enumerate() {
+                index.refresh(&dbs[i]).unwrap();
+                rt.block_on(state.sync_if_due(&dbs[i], index, &store));
+            }
+        }
+        assert_eq!(
+            store.requests().len() - settled,
+            0,
+            "idle devices must make no search-index requests"
+        );
+        eprintln!(
+            "RS-g idle requests: {}, settle requests: {settled}",
+            store.requests().len() - settled
+        );
+        // Merged result is complete.
+        let restored = rt
+            .block_on(super::load_remote_index_from_store(&store))
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.file_count(), 3);
+    }
+
+    /// RS-g: a sync that keeps failing (here: an unreadable remote shard on a partial listing) must back off,
+    /// not retry on every tick.
+    #[test]
+    fn a_failing_sync_backs_off_instead_of_retrying_every_tick() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let store = FixtureSearchStore::new([9u8; 32], "tok");
+        store.insert_shard(3, 0, 5, vec![1, 2, 3]); // not decryptable
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_file(&db, "a", "Docs/alpha.txt", ItemKind::File);
+        // A blocked owner key makes the listing partial, so an unreadable shard defers the rebuild with an error.
+        let mut record = crate::owner_keys::OwnedKeyRecord {
+            file_id: "z".into(),
+            ..Default::default()
+        };
+        record.blocked_fingerprint = Some(record.fingerprint());
+        db.put_owned_key_record(&record).unwrap();
+        let mut index = super::IncrementalLocalIndex::new();
+        let mut state = super::SearchSyncState::new();
+        for _ in 0..200 {
+            index.refresh(&db).unwrap();
+            rt.block_on(state.sync_if_due(&db, &index, &store));
+        }
+        assert!(store.requests().len() <= 4, "got {} requests", store.requests().len());
     }
 
     #[derive(Clone, Debug)]
