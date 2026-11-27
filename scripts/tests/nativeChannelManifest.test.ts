@@ -111,9 +111,19 @@ describe('native channel manifest', () => {
     }
     // A re-publish of one platform replaces its own entry and keeps the other's.
     expect(buildManifest({ ...honest, existing: macOverWindows }).platforms['darwin-aarch64']).toEqual(macOnly.platforms['darwin-aarch64'])
-    // Another channel's manifest is never merged; another version's entries are not carried over.
+    // A Mac re-publish of the same version replaces the old Mac entry and keeps the Windows ones.
+    const OLD_MAC = Buffer.alloc(1_000, 5)
+    const staleMac = buildDarwinManifest({ ...mac, installerBytes: OLD_MAC, signature: key.sigFor(OLD_MAC, MAC_NAME), existing: windowsOnly })
+    const republished = buildDarwinManifest({ ...mac, existing: staleMac })
+    expect(Object.keys(republished.platforms).sort()).toEqual(['darwin-aarch64', 'windows-x86_64', 'windows-x86_64-nsis'])
+    expect(republished.platforms['darwin-aarch64']).toEqual(macOnly.platforms['darwin-aarch64'])
+    expect(republished.platforms['windows-x86_64']).toEqual(windowsOnly.platforms['windows-x86_64'])
+    expect(republished.platforms['windows-x86_64-nsis']).toEqual(windowsOnly.platforms['windows-x86_64-nsis'])
+    // Another channel's manifest is never merged; the channel never rolls back, and a Mac publish never strands Windows.
     expect(() => buildDarwinManifest({ ...mac, existing: { ...windowsOnly, channel: 'stable' } })).toThrow('desktop/beta')
-    expect(Object.keys(buildDarwinManifest({ ...mac, existing: { ...windowsOnly, version: '0.9.1' } }).platforms)).toEqual(['darwin-aarch64'])
+    expect(() => buildDarwinManifest({ ...mac, existing: { ...windowsOnly, version: '0.9.1' } })).toThrow('refusing to publish the lower 0.9.0')
+    expect(() => buildManifest({ ...honest, existing: { ...macOnly, version: '0.9.1' } })).toThrow('refusing to publish the lower 0.9.0')
+    expect(() => buildDarwinManifest({ ...mac, existing: { ...windowsOnly, version: '0.8.30' } })).toThrow('publish the Windows build of 0.9.0 first')
     // The Mac artefact has its own name and signature rules.
     expect(() => buildDarwinManifest({ ...mac, installerName: NAME })).toThrow('must be named Beebeeb_0.9.0_aarch64.app.tar.gz')
     expect(() => buildDarwinManifest({ ...mac, signature: key.sigFor(MAC, NAME) })).toThrow('the signature signs')
