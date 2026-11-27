@@ -305,7 +305,7 @@ pub(super) fn legend(files: i64, photos: i64, backups: i64, no_plan: bool, t: &T
             .key(key)
             .center_y()
             .gap(6.0)
-            .child(el().key(format!("{key}-dot")).size(6.0, 6.0).radius(radius::PILL).fill(dot))
+            .child(el().key(format!("{key}-dot")).size(6.0, 6.0).radius(crate::theme::scale::radius::PILL).fill(dot))
             .child(
                 kit::label(format!("{key}-name"), name, type_::KBD, t.text_tertiary)
                     .grow(1.0)
