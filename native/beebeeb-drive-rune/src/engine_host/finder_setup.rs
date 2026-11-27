@@ -12,7 +12,7 @@
 
 #![allow(dead_code)] // Settings (dm-18), the popover and the shell (dm-19) call the rest.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
@@ -82,22 +82,59 @@ static LAST_FACTS: Mutex<SessionFacts> = Mutex::new(SessionFacts {
     auth: false,
 });
 static CURRENT: OnceLock<Running> = OnceLock::new();
-/// Rule 6's debt, as far as this run knows: a sign-out whose Finder removal was not confirmed owes it; a confirmed
-/// removal (or the driver's removal-first step) releases it. The engine keeps no reader for it outside tests, so a
-/// restart forgets it (reported).
+/// Rule 6's debt for this run: a sign-out whose Finder removal was not confirmed owes it; a confirmed removal (or
+/// the driver's removal-first step) releases it. Mirrored in `DesktopConfig::finder_removal_owed` (dm-90), and read
+/// back from there at launch before the driver's first check ([`restore_removal_owed`]), so a quit between a failed
+/// removal and the next sign-in never lets that sign-in reuse the old domain.
 static REMOVAL_OWED: AtomicBool = AtomicBool::new(false);
 
 fn removal_owed_now() -> bool {
     REMOVAL_OWED.load(Ordering::SeqCst)
 }
 
-fn set_removal_owed(owed: bool) {
-    REMOVAL_OWED.store(owed, Ordering::SeqCst);
+/// Marks or releases the debt, in memory and in the settings file at `config`. Marking sets memory first, so this
+/// run refuses an engine start even when the write fails; releasing writes the file first. A release whose write
+/// fails leaves the file owing, and the next launch only checks again (the domain is gone, so the check releases it);
+/// the reverse would forget a removal that never happened.
+fn set_removal_owed(config: Option<&Path>, owed: bool) {
+    if owed {
+        REMOVAL_OWED.store(true, Ordering::SeqCst);
+    }
+    persist_removal_owed(config, owed);
+    if !owed {
+        REMOVAL_OWED.store(false, Ordering::SeqCst);
+    }
+}
+
+/// One merge-only write of `finder_removal_owed`; a repeat writes nothing. Logs no path and no OS text.
+fn persist_removal_owed(config: Option<&Path>, owed: bool) {
+    let Some(path) = config else {
+        tracing::warn!("finder setup: could not find the settings file for the removal debt");
+        return;
+    };
+    let saved = beebeeb_engine::config::DesktopConfig::try_update_at(path, |cfg| {
+        let changed = cfg.finder_removal_owed != owed;
+        cfg.finder_removal_owed = owed;
+        (changed, ())
+    });
+    if saved.is_err() {
+        tracing::warn!("finder setup: could not save the removal debt");
+    }
+}
+
+/// Launch: a debt a previous run saved is owed again, before the driver's first check reads it. Never releases one
+/// (an unreadable file or a missing key leaves this run's memory as it is).
+fn restore_removal_owed(config: Option<&beebeeb_engine::config::DesktopConfig>) {
+    if config.is_some_and(|cfg| cfg.finder_removal_owed) {
+        REMOVAL_OWED.store(true, Ordering::SeqCst);
+    }
 }
 
 struct Running {
     handle: beebeeb_engine::finder_setup::driver::FinderSetupHandle,
     facts: Arc<dyn Fn() -> SessionFacts + Send + Sync>,
+    /// The settings file the removal debt is saved in.
+    config_path: Option<PathBuf>,
 }
 
 /// Waits for a future on a throwaway runtime: the callers are the app's worker threads, never the driver's.
@@ -180,16 +217,25 @@ fn remove(trigger: Trigger) -> Result<(), String> {
     let Some(running) = current() else {
         return Err(beebeeb_engine::finder_setup::driver::NOT_RUNNING.to_string());
     };
-    match wait(running.handle.remove(trigger, REMOVE_WAIT)) {
+    remove_on(&running.handle, running.config_path.as_deref(), trigger)
+}
+
+/// [`remove`] on one driver, the debt saved in the settings file at `config`. Blocking: never on the driver's thread.
+fn remove_on(
+    handle: &beebeeb_engine::finder_setup::driver::FinderSetupHandle,
+    config: Option<&Path>,
+    trigger: Trigger,
+) -> Result<(), String> {
+    match wait(handle.remove(trigger, REMOVE_WAIT)) {
         Ok(removal) => {
-            set_removal_owed(false);
+            set_removal_owed(config, false);
             note_kept(removal.kept_location("finder setup removal"));
             Ok(())
         }
         Err(failure) => {
             let message = failure.message.clone();
             if matches!(trigger, Trigger::SignOut) {
-                set_removal_owed(true);
+                set_removal_owed(config, true);
             }
             note_kept(failure.kept_location("finder setup removal"));
             Err(message)
@@ -392,10 +438,13 @@ mod macos {
             macos_version: macos_version(),
             launch_location: launch,
         });
-        let persisted = session
-            .config_path()
-            .and_then(|path| beebeeb_engine::config::DesktopConfig::load_from(&path).ok())
-            .and_then(|cfg| cfg.finder_last_failure);
+        let config_path = session.config_path();
+        let config = config_path
+            .as_deref()
+            .and_then(|path| beebeeb_engine::config::DesktopConfig::load_from(path).ok());
+        // Before the driver exists: its `Launch` check must already see a debt a previous run saved (dm-90).
+        restore_removal_owed(config.as_ref());
+        let persisted = config.and_then(|cfg| cfg.finder_last_failure);
         *LAST_FACTS.lock().unwrap_or_else(PoisonError::into_inner) = session.facts();
         let (sent, received) = std::sync::mpsc::channel();
         let for_thread = session.clone();
@@ -414,7 +463,11 @@ mod macos {
         }
         if let Ok(handle) = received.recv() {
             let facts: Arc<dyn Fn() -> SessionFacts + Send + Sync> = Arc::new(move || session.facts());
-            let _ = CURRENT.set(Running { handle, facts });
+            let _ = CURRENT.set(Running {
+                handle,
+                facts,
+                config_path,
+            });
         }
     }
 
@@ -487,8 +540,8 @@ impl<C: beebeeb_engine::app::CredentialStores + 'static> Session for LiveSession
             auth: !matches!(gate, GateState::SignedOut),
         }
     }
-    /// The debt this run knows (`REMOVAL_OWED`); the engine's reader is test-only, so a restart does not remember it
-    /// yet (reported). The driver's removal-first step and `start_engine`'s refusal work from what this says.
+    /// The debt (`REMOVAL_OWED`, restored from the settings file at launch). The driver's removal-first step and
+    /// `start_engine`'s refusal work from what this says.
     fn removal_owed(&self) -> bool {
         removal_owed_now()
     }
@@ -523,10 +576,10 @@ impl<C: beebeeb_engine::app::CredentialStores + 'static> Session for LiveSession
             _ => Ok(()),
         }
     }
-    /// The engine hands the shell no writer for the debt on disk (`OwnedState` has none; reported): the run's own
-    /// mark is released.
+    /// The driver confirmed the removal (`Effect::DomainRemovalConfirmed`, only on a removal that worked or a check
+    /// that found the domain gone): the debt is released, in the settings file and in memory.
     fn clear_removal_owed(&self) {
-        set_removal_owed(false);
+        set_removal_owed(self.config_path().as_deref(), false);
     }
     fn clear_domain_gone(&self) {}
     fn changed(&self) {

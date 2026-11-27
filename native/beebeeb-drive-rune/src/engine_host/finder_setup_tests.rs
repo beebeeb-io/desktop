@@ -128,19 +128,86 @@ fn copy_details_reads_the_lifecycle_tail_and_names_no_path() {
     assert!(!text.contains("/Users/"), "{text}");
 }
 
+/// The tests that touch the process-wide debt (`REMOVAL_OWED`) take turns.
+static DEBT: Mutex<()> = Mutex::new(());
+
+fn debt_turn() -> std::sync::MutexGuard<'static, ()> {
+    DEBT.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn owed_on_disk(path: &Path) -> bool {
+    beebeeb_engine::config::DesktopConfig::load_from(path)
+        .expect("the settings file loads")
+        .finder_removal_owed
+}
+
+/// A quit: this run's memory is gone, the settings file stays; the next start restores from the file.
+fn restart(path: &Path) {
+    REMOVAL_OWED.store(false, Ordering::SeqCst);
+    restore_removal_owed(beebeeb_engine::config::DesktopConfig::load_from(path).ok().as_ref());
+}
+
 #[test]
 fn a_sign_out_removal_that_failed_is_owed_until_a_removal_is_confirmed() {
-    set_removal_owed(false);
-    assert!(!removal_owed_now());
-    set_removal_owed(true);
+    let _turn = debt_turn();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("desktop.toml");
+    set_removal_owed(Some(&path), false);
+    assert!(!removal_owed_now() && !owed_on_disk(&path));
+    set_removal_owed(Some(&path), true);
     assert!(removal_owed_now(), "the live session reads the run's debt");
-    set_removal_owed(false);
-    assert!(!removal_owed_now());
+    assert!(owed_on_disk(&path), "and the settings file keeps it");
+    set_removal_owed(Some(&path), false);
+    assert!(!removal_owed_now() && !owed_on_disk(&path));
+    // No settings file: this run still owes it.
+    set_removal_owed(None, true);
+    assert!(removal_owed_now());
+    set_removal_owed(None, false);
     let src = include_str!("finder_setup.rs");
     assert!(
         src.contains("fn removal_owed(&self) -> bool {\n        removal_owed_now()"),
         "wired to the debt"
     );
+    assert!(
+        src.contains("fn clear_removal_owed(&self) {\n        set_removal_owed(self.config_path().as_deref(), false);"),
+        "a confirmed removal releases the saved debt"
+    );
+    assert!(
+        src.contains("restore_removal_owed(config.as_ref());\n        let persisted"),
+        "the launch restores the debt before the driver is spawned"
+    );
+}
+
+/// dm-90: a quit between a failed sign-out removal and the next sign-in keeps the debt, and the sign-in that clears
+/// `finder_signed_out_by_choice` does not clear it.
+#[test]
+fn a_failed_removal_survives_a_restart_and_a_sign_in() {
+    let _turn = debt_turn();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("desktop.toml");
+    beebeeb_engine::config::DesktopConfig::try_update_at(&path, |cfg| {
+        cfg.finder_signed_out_by_choice = true;
+        (true, ())
+    })
+    .unwrap();
+    set_removal_owed(Some(&path), true);
+    restart(&path);
+    assert!(removal_owed_now(), "the next start owes it again");
+    // The sign-in's reset (`on_observed` → `PersistSignedOutByChoice(false)`) leaves the debt alone.
+    beebeeb_engine::config::DesktopConfig::try_update_at(&path, |cfg| {
+        cfg.finder_signed_out_by_choice = false;
+        (true, ())
+    })
+    .unwrap();
+    restart(&path);
+    assert!(removal_owed_now() && owed_on_disk(&path));
+    // A launch never releases one: not on a file without the key, not on an unreadable file.
+    restore_removal_owed(Some(&beebeeb_engine::config::DesktopConfig::default()));
+    restore_removal_owed(None);
+    assert!(removal_owed_now());
+    set_removal_owed(Some(&path), false);
+    restart(&path);
+    assert!(!removal_owed_now(), "released for good once confirmed");
 }
 
 #[cfg(target_os = "macos")]
@@ -162,6 +229,8 @@ mod on_ports {
         /// `start_engine` waits for this before answering (a check in flight).
         hold_start: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
         changes: AtomicUsize,
+        /// Set: the debt is the live session's (`REMOVAL_OWED`, saved in this settings file), not `owed`.
+        config: Option<PathBuf>,
     }
 
     impl Session for FakeSession {
@@ -169,10 +238,13 @@ mod on_ports {
             *self.facts.lock().unwrap()
         }
         fn removal_owed(&self) -> bool {
-            self.owed.load(Ordering::SeqCst)
+            match self.config {
+                Some(_) => removal_owed_now(),
+                None => self.owed.load(Ordering::SeqCst),
+            }
         }
         fn config_path(&self) -> Option<PathBuf> {
-            None
+            self.config.clone()
         }
         fn start_engine(&self) -> Result<bool, FpError> {
             self.log.lock().unwrap().push("start_engine");
@@ -189,7 +261,10 @@ mod on_ports {
             Ok(())
         }
         fn clear_removal_owed(&self) {
-            self.owed.store(false, Ordering::SeqCst);
+            match &self.config {
+                Some(path) => set_removal_owed(Some(path), false),
+                None => self.owed.store(false, Ordering::SeqCst),
+            }
             self.log.lock().unwrap().push("owed_cleared");
         }
         fn clear_domain_gone(&self) {}
@@ -201,6 +276,7 @@ mod on_ports {
     struct FakeBridge {
         state: Mutex<DomainState>,
         log: Log,
+        fail_remove: AtomicBool,
     }
 
     impl FpBridge for FakeBridge {
@@ -217,6 +293,9 @@ mod on_ports {
         }
         fn remove(&self) -> Result<DomainRemoval, RemovalFailure> {
             self.log.lock().unwrap().push("remove");
+            if self.fail_remove.load(Ordering::SeqCst) {
+                return Err("the removal failed".to_string().into());
+            }
             *self.state.lock().unwrap() = DomainState::NotRegistered;
             Ok(DomainRemoval::default())
         }
@@ -237,10 +316,12 @@ mod on_ports {
                 log: log.clone(),
                 hold_start: Mutex::new(None),
                 changes: AtomicUsize::new(0),
+                config: None,
             }),
             bridge: Arc::new(FakeBridge {
                 state: Mutex::new(domain),
                 log: log.clone(),
+                fail_remove: AtomicBool::new(false),
             }),
             log,
         }
@@ -390,6 +471,80 @@ mod on_ports {
         };
         assert!(at("remove") < at("owed_cleared"), "{log:?}");
         assert!(at("owed_cleared") < at("start_engine"), "{log:?}");
+    }
+
+    /// A run of the app over the settings file at `path`, with the old account's domain `domain`.
+    fn world_on_disk(facts: SessionFacts, domain: DomainState, path: &Path, fail_remove: bool) -> World {
+        let mut w = world(facts, domain, false);
+        Arc::get_mut(&mut w.session).unwrap().config = Some(path.to_path_buf());
+        w.bridge.fail_remove.store(fail_remove, Ordering::SeqCst);
+        w
+    }
+
+    /// dm-90, the review blocker: a sign-out removal fails and the person quits. The next start (and its sign-in,
+    /// possibly another account) removes the old domain before any engine starts, and the debt is released only once
+    /// a removal worked.
+    #[test]
+    fn a_failed_sign_out_removal_is_paid_after_a_restart_before_the_domain_is_reused() {
+        let _turn = debt_turn();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("desktop.toml");
+        REMOVAL_OWED.store(false, Ordering::SeqCst);
+
+        // Run 1: signed in and Ready, then a sign-out whose removal fails.
+        let first = world_on_disk(SIGNED_IN, DomainState::NotRegistered, &path, true);
+        run(async {
+            let handle = start(&first);
+            ready(&handle).await;
+            *first.session.facts.lock().unwrap() = SessionFacts::default();
+            let config = path.clone();
+            let removing = handle.clone();
+            let removed = tokio::task::spawn_blocking(move || remove_on(&removing, Some(&config), Trigger::SignOut))
+                .await
+                .unwrap();
+            assert!(removed.is_err(), "the removal failed");
+        });
+        assert!(
+            removal_owed_now() && owed_on_disk(&path),
+            "a failed sign-out removal is owed"
+        );
+
+        // Run 2, after a quit: signed in again, the old domain still there, the removal fails again.
+        restart(&path);
+        let second = world_on_disk(SIGNED_IN, DomainState::Enabled, &path, true);
+        run(async {
+            let _handle = start(&second);
+            until("the owed removal is tried", || {
+                second.log.lock().unwrap().contains(&"remove")
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+        let log = second.log.lock().unwrap().clone();
+        assert!(!log.contains(&"start_engine"), "no engine on the old domain: {log:?}");
+        assert!(!log.contains(&"owed_cleared"), "{log:?}");
+        assert!(owed_on_disk(&path), "still owed: the removal did not work");
+
+        // Run 3, after another quit: the removal works, first; the debt clears; then the engine starts.
+        restart(&path);
+        assert!(removal_owed_now());
+        let third = world_on_disk(SIGNED_IN, DomainState::Enabled, &path, false);
+        run(async {
+            let handle = start(&third);
+            ready(&handle).await;
+        });
+        let log = third.log.lock().unwrap().clone();
+        let at = |name| {
+            log.iter()
+                .position(|l| *l == name)
+                .unwrap_or_else(|| panic!("no {name} in {log:?}"))
+        };
+        assert!(at("remove") < at("owed_cleared"), "{log:?}");
+        assert!(at("owed_cleared") < at("start_engine"), "{log:?}");
+        assert!(
+            !removal_owed_now() && !owed_on_disk(&path),
+            "released once the removal worked"
+        );
     }
 }
 
