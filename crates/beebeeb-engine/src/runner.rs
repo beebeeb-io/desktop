@@ -566,7 +566,7 @@ async fn run(
     let mut first_tick_logged = false;
     let mut owed_working_set_signal = OwedWorkingSetSignal::owing(reset_item_ids);
     let mut search_index = crate::desktop_search::IncrementalLocalIndex::new();
-    let mut last_synced_search_generation: Option<u64> = None;
+    let mut search_sync = crate::desktop_search::SearchSyncState::new();
 
     // LD-0113: the backup passes (they replaced the known-folder mirror of task 0797). The scheduler keeps its own
     // cadence (a full pass every 10 minutes, a debounced one after a change in a backed-up folder).
@@ -1036,29 +1036,25 @@ async fn run(
                         refresh_status_ui_snapshot(&db, RunMode::Running, false);
 
                         match search_index.refresh(&db) {
-                            Ok(_) if last_synced_search_generation != Some(search_index.generation()) => {
-                                let generation = search_index.generation();
-                                if let Some(local) = search_index.local() {
-                                    match crate::desktop_search::sync_local_index_to_remote(&db, local, &api).await {
-                                        Ok(summary) => {
-                                            last_synced_search_generation = Some(generation);
-                                            tracing::debug!(
-                                                indexed_file_count = summary.indexed_file_count,
-                                                put_count = summary.put_count,
-                                                delete_count = summary.delete_count,
-                                                "desktop search index shards synced"
-                                            );
-                                        }
-                                        Err(error) => {
-                                            tracing::warn!(
-                                                error = %error,
-                                                "desktop search index shard sync failed; will retry after the next local mirror change"
-                                            );
-                                        }
-                                    }
+                            // RS-g: sync_if_due makes no request unless names changed since the last successful
+                            // push, pauses after a failure and caps the requests per window.
+                            Ok(_) => match search_sync.sync_if_due(&db, &search_index, &api).await {
+                                Some(Ok(summary)) => {
+                                    tracing::debug!(
+                                        indexed_file_count = summary.indexed_file_count,
+                                        put_count = summary.put_count,
+                                        delete_count = summary.delete_count,
+                                        "desktop search index shards synced"
+                                    );
                                 }
-                            }
-                            Ok(_) => {}
+                                Some(Err(error)) => {
+                                    tracing::warn!(
+                                        error = %error,
+                                        "desktop search index shard sync failed; retrying after a pause"
+                                    );
+                                }
+                                None => {}
+                            },
                             Err(error) => {
                                 tracing::warn!(error = %error, "desktop search index refresh failed");
                             }
