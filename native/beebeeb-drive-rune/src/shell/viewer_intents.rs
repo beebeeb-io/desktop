@@ -197,7 +197,7 @@ pub fn open_failed_later(s: &mut State, why: ActionError) -> bool {
     match HANDED_OUT.with(|held| held.borrow_mut().take()) {
         Some((item, Some(to))) if cfg!(target_os = "macos") && !to.running && apps::running(&to.path) => {
             tracing::info!(
-                "open: the system answered that a file did not open ({}), but its app was started with it; said as opened",
+                "open: the system answered that a file did not open ({}), but its app was started with it; it is shown as opened",
                 why_words(why)
             );
             unsupported::set_note(&item.id, Some(Note::Opened(to.name)));

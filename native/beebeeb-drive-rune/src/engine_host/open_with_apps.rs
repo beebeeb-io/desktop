@@ -662,7 +662,9 @@ pub(crate) mod mac {
         match answer {
             Answer::Answered { launched: true, error } => {
                 if let Some(error) = error {
-                    tracing::info!("open with: the app was started with the file; the system also answered an error");
+                    tracing::info!(
+                        "open with: the app was started with the file; the system answered an error after it"
+                    );
                     error.log();
                 }
                 Ok(())
