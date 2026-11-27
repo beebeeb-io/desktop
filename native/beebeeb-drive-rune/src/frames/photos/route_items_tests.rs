@@ -259,7 +259,24 @@ fn photos_says_heic_and_raw_cannot_be_shown_only_when_the_view_holds_such_files(
     let (mut rt, _) = window_with(false, false);
     assert!(!has(&mut rt, "ph-heic-notice"));
     let (mut rt, _) = window_with(false, true);
-    assert!(has(&mut rt, "ph-heic-notice"));
+    // Dm-87: a Mac decodes HEIC and RAW (dm-81), so the notice is never said there.
+    assert_eq!(has(&mut rt, "ph-heic-notice"), !cfg!(target_os = "macos"));
+}
+
+/// Dm-87 (RC16): the notice is absent on macOS, also when the view holds HEIC and RAW photos; elsewhere it stays
+/// until those systems decode them.
+#[test]
+fn the_heic_and_raw_notice_is_absent_on_macos() {
+    use super::super::grid::{DECODES_HEIC_AND_RAW, says_unshowable};
+    assert_eq!(DECODES_HEIC_AND_RAW, cfg!(target_os = "macos"));
+    assert!(!says_unshowable(true, true), "a system that decodes them says nothing");
+    assert!(says_unshowable(false, true));
+    assert!(!says_unshowable(false, false));
+    #[cfg(target_os = "macos")]
+    {
+        let (mut rt, _) = window_with(false, true);
+        assert!(!has(&mut rt, "ph-heic-notice"));
+    }
 }
 
 #[test]

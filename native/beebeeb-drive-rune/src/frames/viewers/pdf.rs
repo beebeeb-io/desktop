@@ -322,15 +322,44 @@ fn thumbs(doc: &PdfDoc, t: &Theme) -> El {
         )
 }
 
+/// What a page's thumbnail shows (dm-87).
+#[derive(Clone)]
+pub(crate) enum ThumbFace {
+    /// The page's own picture, the one this PC rendered for the page itself (the same confined helper).
+    Picture(rune::Pixels),
+    /// A plain page: this source renders no pictures at all (the board's fixture), so there is none to wait for.
+    Plain,
+    /// The page is not rendered yet, or could not be: no page is drawn, only its outline. RC16: every thumbnail was a
+    /// blank white page while the page itself rendered.
+    NotYet,
+}
+
+/// The face of page `n`'s thumbnail. The picture is asked for only once the source holds the page (`Ready`): a
+/// thumbnail never sends the renderer a page of its own, which would take the turn of the page being read (the
+/// worker serves only the newest page asked).
+pub(crate) fn thumb_face(state: super::source::PageState, picture: impl FnOnce() -> Option<rune::Pixels>) -> ThumbFace {
+    use super::source::PageState;
+    match state {
+        PageState::Ready | PageState::LacksText => picture().map_or(ThumbFace::Plain, ThumbFace::Picture),
+        PageState::Rendering | PageState::Failed => ThumbFace::NotYet,
+    }
+}
+
 /// One thumbnail of the column: row `i` is page `i + 1`.
 fn thumb(s: &State, i: usize, t: &Theme) -> El {
     let n = u32::try_from(i).map_or(u32::MAX, |i| i.saturating_add(1));
     let current = s.viewer.ui.as_ref().is_some_and(|ui| ui.media.page == n);
-    let page = el()
-        .key(format!("thumb-{i}-page"))
-        .size(64.0, 84.0)
-        .radius(2.0)
-        .fill(Color::WHITE);
+    let face = s.viewer.ui.as_ref().map_or(ThumbFace::Plain, |ui| {
+        thumb_face(ui.page_state(n), || ui.source.picture(&ui.file.id, Picture::Page(n)))
+    });
+    let page = el().key(format!("thumb-{i}-page")).size(64.0, 84.0).radius(2.0);
+    let page = match face {
+        ThumbFace::Picture(pixels) => page.fill(Color::WHITE).clip_rounded(2.0).pixels_fit(&pixels, SurfaceFit::Fill),
+        ThumbFace::Plain => page.fill(Color::WHITE),
+        ThumbFace::NotYet => page
+            .border(kit::HAIR, t.separator)
+            .child(el().key(format!("thumb-{i}-not-yet")).size(1.0, 1.0).opacity(0.0)),
+    };
     let page = if current {
         page.box_shadow(kit::ring(2.0, t.text))
     } else {

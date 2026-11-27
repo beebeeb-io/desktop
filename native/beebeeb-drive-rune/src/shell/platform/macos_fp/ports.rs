@@ -18,7 +18,7 @@ use beebeeb_engine::surfaces::phase::FinderFailureReason;
 use tokio::sync::oneshot;
 
 use super::bridge::{self, Gate};
-use super::lifecycle_log;
+use super::lifecycle_log::{self, WaitEnd, WaitSteps};
 use super::removal::{self, DomainRemoval, KeptFolder, RemovalFailure};
 
 /// How long the removal and the launch read wait for a busy gate: long enough for a call that is merely in flight
@@ -36,6 +36,13 @@ pub(crate) trait FpBridge: Send + Sync + 'static {
     fn extension_connected(&self) -> bool {
         false
     }
+    /// Dm-87: macOS gives the domain's root a place on disk (`bridge::root_in_place`). The caller holds the gate.
+    fn root_in_place(&self) -> bool {
+        false
+    }
+    /// Dm-87: one working-set signal, which makes the system ask the extension for changes and so launches it.
+    /// Takes the gate itself; best effort.
+    fn nudge(&self) {}
     /// Removes the domain, keeping what never reached the server (`removal::remove_keeping_unsynced`, never a plain
     /// remove).
     fn remove(&self) -> Result<DomainRemoval, RemovalFailure>;
@@ -56,6 +63,18 @@ impl FpBridge for SystemBridge {
     }
     fn extension_connected(&self) -> bool {
         bridge::extension_connected()
+    }
+    fn root_in_place(&self) -> bool {
+        bridge::root_in_place().unwrap_or(false)
+    }
+    fn nudge(&self) {
+        if let Err(error) = bridge::signal_working_set() {
+            tracing::info!(
+                domain = %error.domain,
+                status = error.code,
+                "finder setup: the working-set nudge did not go"
+            );
+        }
     }
     fn remove(&self) -> Result<DomainRemoval, RemovalFailure> {
         removal::remove_keeping_unsynced_gated()
@@ -132,9 +151,48 @@ async fn gated<T: Send + 'static>(
 /// How long one stabilization wait runs before readiness is looked at again.
 const STABILIZE_SLICE: Duration = Duration::from_secs(2);
 
-/// Ready = `getDomains` lists the domain Enabled AND the extension has connected to the IPC socket; that is Ready without
-/// waiting for stabilization. Otherwise stabilization runs in slices, off the gate, and the check repeats between them;
-/// a stabilization timeout on an Enabled domain with a connected extension is Ready too. Windows does not use this.
+fn ms(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// One look at readiness (dm-87). Ready = `getDomains` lists the domain Enabled AND either the extension has connected
+/// to the IPC socket, or macOS gives the domain's root a place on disk (an existing domain the system serves: RC13's
+/// shell read worked while the old check, which wanted the extension's connection only, waited out 60 s three times).
+/// An Enabled domain that is neither gets one working-set signal per wait, which launches a slow extension.
+fn look<B: FpBridge>(bridge: &B, gate_wait: Duration, steps: &mut WaitSteps) -> Option<WaitEnd> {
+    steps.looks += 1;
+    let asked = Instant::now();
+    let state = Gate::enter_waiting(gate_wait).and_then(|_gate| bridge.domain_state());
+    steps.domain_ms = steps.domain_ms.max(ms(asked.elapsed()));
+    steps.enabled = state == Ok(DomainState::Enabled);
+    if !steps.enabled {
+        return None;
+    }
+    steps.extension = bridge.extension_connected();
+    if steps.extension {
+        return Some(WaitEnd::Extension);
+    }
+    let asked = Instant::now();
+    steps.root_in_place = Gate::enter_waiting(gate_wait).is_ok_and(|_gate| bridge.root_in_place());
+    steps.root_ms = steps.root_ms.max(ms(asked.elapsed()));
+    if steps.root_in_place {
+        return Some(WaitEnd::RootInPlace);
+    }
+    if !steps.nudged {
+        steps.nudged = true;
+        bridge.nudge();
+    }
+    None
+}
+
+/// The wait for the domain (`WaitStable`): [`look`] first and between slices of `waitForStabilization`, which run off
+/// the gate (under it every working-set signal met a busy gate, RC5). The wait ends ready at the first look that says
+/// so, or when stabilization answers; a stabilization timeout is looked at once more at the deadline. Every wait
+/// writes one `wait ...` line with each step's time to the lifecycle log ([`WaitSteps`]). Windows does not use this.
+///
+/// What "become available" waited for (RC16): `waitForStabilization` answers once the system has caught up with
+/// every pending change of the domain, which on a loaded Mac with a big tree takes longer than one attempt's 60 s;
+/// the extension's connection comes only with its first request. Neither is needed to serve a read.
 async fn wait_ready<B: FpBridge>(
     bridge: Arc<B>,
     timeout: Duration,
@@ -142,31 +200,39 @@ async fn wait_ready<B: FpBridge>(
     slice: Duration,
 ) -> Result<(), FpError> {
     tokio::task::spawn_blocking(move || {
-        let ready = |bridge: &B| {
-            bridge.extension_connected()
-                && match Gate::enter_waiting(gate_wait).and_then(|_gate| bridge.domain_state()) {
-                    Ok(state) => state == DomainState::Enabled,
-                    Err(_) => false,
-                }
-        };
-        let deadline = Instant::now() + timeout;
-        loop {
-            if ready(&bridge) {
-                return Ok(());
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut steps = WaitSteps::default();
+        let answer = loop {
+            if let Some(end) = look(&*bridge, gate_wait, &mut steps) {
+                break Ok(end);
             }
             let left = deadline.saturating_duration_since(Instant::now());
-            match bridge.wait_for_domain_ready(left.min(slice)) {
-                Ok(()) => return Ok(()),
+            let asked = Instant::now();
+            let stabilized = bridge.wait_for_domain_ready(left.min(slice));
+            steps.slices += 1;
+            steps.stabilize_ms += ms(asked.elapsed());
+            match stabilized {
+                Ok(()) => break Ok(WaitEnd::Stabilized),
                 Err(error) => {
                     if beebeeb_engine::finder_setup::policy::classify(&error) != FinderFailureReason::Timeout {
-                        return Err(error);
+                        break Err((WaitEnd::Failed, error));
                     }
                     if Instant::now() >= deadline {
-                        return if ready(&bridge) { Ok(()) } else { Err(error) };
+                        break match look(&*bridge, gate_wait, &mut steps) {
+                            Some(end) => Ok(end),
+                            None => Err((WaitEnd::TimedOut, error)),
+                        };
                     }
                 }
             }
-        }
+        };
+        steps.total_ms = ms(started.elapsed());
+        steps.end = Some(match &answer {
+            Ok(end) | Err((end, _)) => *end,
+        });
+        lifecycle_log::wait(&steps);
+        answer.map(|_| ()).map_err(|(_, error)| error)
     })
     .await
     .unwrap_or_else(|_| Err(FpError::app(app_code::UNEXPECTED_BRIDGE_RETURN, "bridge task failed")))

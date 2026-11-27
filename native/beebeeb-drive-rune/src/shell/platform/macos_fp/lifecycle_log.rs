@@ -234,6 +234,87 @@ fn event_in(slot: &Slot, event: LifecycleEvent, at: SystemTime) {
     }
 }
 
+/// Dm-87: how one wait for the domain went, step by step, in its own closed shape (`wait ...`: fixed words and
+/// numbers only, see [`WaitSteps::line`]). No OS text, so no names are read.
+pub fn wait(steps: &WaitSteps) {
+    let guard = lock(&GLOBAL);
+    let Some((log, _)) = guard.as_ref() else { return };
+    let stamp = chrono::DateTime::<chrono::Utc>::from(SystemTime::now()).format("%Y-%m-%dT%H:%M:%SZ");
+    if let Err(error) = log.append_line(&format!("{stamp} {}", steps.line())) {
+        tracing::warn!(%error, "could not write the lifecycle log");
+    }
+}
+
+/// What made a wait for the domain end (dm-87).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitEnd {
+    /// The domain is enabled and the extension connected to the IPC socket.
+    Extension,
+    /// The domain is enabled and macOS gives its root a place on disk: it serves reads.
+    RootInPlace,
+    /// `waitForStabilization` answered.
+    Stabilized,
+    /// None of these within the wait.
+    TimedOut,
+    /// The system answered an error that is not a timeout.
+    Failed,
+}
+
+impl WaitEnd {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WaitEnd::Extension => "ready_extension",
+            WaitEnd::RootInPlace => "ready_root_in_place",
+            WaitEnd::Stabilized => "ready_stabilized",
+            WaitEnd::TimedOut => "timeout",
+            WaitEnd::Failed => "failed",
+        }
+    }
+}
+
+/// How long each step of one wait for the domain took, in ms (dm-87: RC16 timed out three times and said nothing
+/// of where the 60 s went).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WaitSteps {
+    pub end: Option<WaitEnd>,
+    pub total_ms: u64,
+    /// How many times readiness was looked at.
+    pub looks: u32,
+    /// The slowest `getDomains` read (with its wait for the gate), and whether the last one said Enabled.
+    pub domain_ms: u64,
+    pub enabled: bool,
+    pub extension: bool,
+    /// The slowest root place read (with its wait for the gate), and whether it had one.
+    pub root_ms: u64,
+    pub root_in_place: bool,
+    /// The `waitForStabilization` slices run, and their time together.
+    pub slices: u32,
+    pub stabilize_ms: u64,
+    /// The working set was signalled once, to wake the extension.
+    pub nudged: bool,
+}
+
+impl WaitSteps {
+    pub fn line(&self) -> String {
+        let yes = |b: bool| if b { "yes" } else { "no" };
+        format!(
+            "wait end={} total_ms={} looks={} domain_ms={} enabled={} extension={} root_ms={} root_in_place={} \
+             slices={} stabilize_ms={} nudged={}",
+            self.end.map_or("none", WaitEnd::as_str),
+            self.total_ms,
+            self.looks,
+            self.domain_ms,
+            yes(self.enabled),
+            yes(self.extension),
+            self.root_ms,
+            yes(self.root_in_place),
+            self.slices,
+            self.stabilize_ms,
+            yes(self.nudged),
+        )
+    }
+}
+
 pub fn tail(n: usize) -> Vec<String> {
     lock(&GLOBAL).as_ref().map(|(log, _)| log.tail(n)).unwrap_or_default()
 }

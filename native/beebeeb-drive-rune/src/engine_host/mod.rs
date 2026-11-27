@@ -255,7 +255,9 @@ fn open_path(path: &std::path::Path, still: &dyn Fn() -> bool) -> Result<(), fil
     #[cfg(target_os = "macos")]
     {
         // No child `open` on a Mac (a child loses the URL's scope): the bridge's NSWorkspace opens the Finder
-        // location the press registered for this path (`macos_fp::open`).
+        // location the press registered for this path (`macos_fp::open`). Dm-87: Finder setup is waited for first,
+        // outside the launch lock.
+        macos_wait_for_setup(still)?;
         launch::locked(|| still().then(|| macos_start(path))).ok_or(files_source::ActionError::Unavailable)??;
     }
     #[cfg(target_os = "linux")]
@@ -381,6 +383,23 @@ fn macos_start(path: &std::path::Path) -> Result<(), files_source::ActionError> 
     })
 }
 
+/// Dm-87: a Files-list open or reveal waits for Finder setup as a whole (every attempt), on the launch worker and
+/// outside the launch lock, before macOS is asked for the item's place. RC16: a double-click during setup logged
+/// "macOS reports no location". The press being over starts nothing; a setup that ended or stayed slow lets the open
+/// go on and say what it finds.
+#[cfg(target_os = "macos")]
+fn macos_wait_for_setup(still: &dyn Fn() -> bool) -> Result<(), files_source::ActionError> {
+    use open_with_apps::mac::{Failure, wait_for_finder};
+    match wait_for_finder(still) {
+        Err(Failure::Moved) => Err(files_source::ActionError::Unavailable),
+        Err(Failure::SetupSlow) => {
+            tracing::warn!("files: Finder was not set up in time; the open goes on");
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The log line of a failed Finder open or reveal: which refusal it was, and for the system's its domain and code
 /// (with the underlying one). Never the system's text, a path or an id.
 #[cfg(target_os = "macos")]
@@ -463,6 +482,7 @@ fn reveal_in_file_explorer(path: &std::path::Path, still: &dyn Fn() -> bool) -> 
     }
     #[cfg(target_os = "macos")]
     {
+        macos_wait_for_setup(still)?;
         launch::locked(|| still().then(|| macos_start(path))).ok_or(files_source::ActionError::Unavailable)??;
     }
     #[cfg(target_os = "linux")]

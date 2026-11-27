@@ -2,3 +2,4 @@
 //! (the tag's `tests/gate.rs`, on fakes behind the port traits: no test here makes an FFI call).
 mod config;
 mod gate;
+mod wait;

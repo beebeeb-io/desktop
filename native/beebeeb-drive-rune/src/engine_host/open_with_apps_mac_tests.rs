@@ -818,3 +818,37 @@ fn an_open_whose_answer_brings_an_error_after_the_app_started_is_opened_in_that_
         "Opened in Adobe Illustrator 2026."
     );
 }
+
+/// Dm-87 (RC16): setup's first three attempts each timed out after 60 s, and Open with gave up with the first one
+/// ("Finder was not set up in time"). The press waits for the whole setup: it stays "adding" across attempts and the
+/// file opens once setup is ready.
+#[test]
+fn open_with_during_a_slow_setup_opens_once_it_is_ready() {
+    // The press's limit is the whole setup: more than four attempts of 60 s, not one.
+    assert!(SETUP_WHOLE > STALL * 4, "{SETUP_WHOLE:?}");
+    // Scaled: adding for 12 looks (about 2.4 s, longer than the 1.5 s the fake's single attempt would be), then ready.
+    let mut script = vec![Setup::Adding; 12];
+    script.push(Setup::Ready);
+    let fake = setting_up_fake(&script);
+    fake.here.store(true, SeqCst);
+    fake.setup_wait_ms.store(10_000, SeqCst);
+    let (done, said) = press(&fake, Pick::Default);
+    assert_eq!(done, Ok(()));
+    assert_eq!(said.first(), Some(&setting_up()), "{said:?}");
+    assert!(fake.asked().iter().any(|a| a.starts_with("NSWorkspace open")), "{:?}", fake.asked());
+
+    // The Files list's open waits the same way: through "adding" to ready; a press that is over starts nothing.
+    let looks = std::cell::Cell::new(0);
+    let look = || {
+        looks.set(looks.get() + 1);
+        if looks.get() < 6 { Setup::Adding } else { Setup::Ready }
+    };
+    let wait = Duration::from_secs(10);
+    let grace = Duration::from_millis(250);
+    assert_eq!(wait_until_set_up(&look, wait, grace, &|| true, &|| {}, "files"), Ok(()));
+    let adding = || Setup::Adding;
+    assert_eq!(
+        wait_until_set_up(&adding, wait, grace, &|| false, &|| {}, "files"),
+        Err(Failure::Moved)
+    );
+}

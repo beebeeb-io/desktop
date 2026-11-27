@@ -172,30 +172,49 @@ pub const ON_THIS_DEVICE: &str = concat!("On ", beebeeb_engine::device_word!(), 
 /// What the page says of a file whose bytes are only in the cloud.
 pub const IN_THE_CLOUD: &str = "In the cloud, safe in Beebeeb.";
 
-/// Where the file is, in the page's words. `here` (dm-83): Finder's own state of the file on a Mac, the one the rows'
-/// marks show (`engine_host::macos_downloaded::finder_state`); `None` where there is none (not a Mac, not read yet).
-fn local_state(origin: Origin, here: Option<bool>) -> &'static str {
-    match (origin, here) {
-        (_, Some(true)) => ON_THIS_DEVICE,
-        (_, Some(false)) => IN_THE_CLOUD,
-        (Origin::ThisPc { .. } | Origin::ThisPcSyncOff, None) => {
-            concat!("Downloaded to ", beebeeb_engine::device_word!(), ".")
+/// What Finder says of the file's bytes (dm-83's badge source, the one the rows' marks show).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InFinder {
+    /// On this Mac.
+    Here,
+    /// Only in the cloud (`SF_DATALESS`).
+    Cloud,
+    /// A Mac, and Finder has not said yet (setup still running, not read yet). Dm-87, RC16: the .eps page said
+    /// "In the cloud" for a local file while Finder setup ran.
+    Unknown,
+    /// Not a Mac: there is no Finder state, only where the viewer opened the file from.
+    NotTracked,
+}
+
+/// Where the file is, in the page's words. `None`: nothing is said, because Finder has not said (dm-87): neither "In
+/// the cloud" nor "On this Mac" is known then.
+fn local_state(origin: Origin, finder: InFinder) -> Option<&'static str> {
+    match (origin, finder) {
+        (_, InFinder::Here) => Some(ON_THIS_DEVICE),
+        (_, InFinder::Cloud) => Some(IN_THE_CLOUD),
+        (_, InFinder::Unknown) => None,
+        (Origin::ThisPc { .. } | Origin::ThisPcSyncOff, InFinder::NotTracked) => {
+            Some(concat!("Downloaded to ", beebeeb_engine::device_word!(), "."))
         }
-        _ => IN_THE_CLOUD,
+        (_, InFinder::NotTracked) => Some(IN_THE_CLOUD),
     }
 }
 
 /// Finder's state of the file `id` on a Mac (dm-83: the rows' marks), so the page says "On this Mac" for a file that
-/// is there. `None` elsewhere, and while Finder has not said.
-fn here_in_finder(id: &str) -> Option<bool> {
+/// is there. [`InFinder::Unknown`] while Finder has not said; [`InFinder::NotTracked`] on other systems.
+fn here_in_finder(id: &str) -> InFinder {
     #[cfg(target_os = "macos")]
     {
-        crate::engine_host::macos_downloaded::finder_state::here(id)
+        match crate::engine_host::macos_downloaded::finder_state::here(id) {
+            Some(true) => InFinder::Here,
+            Some(false) => InFinder::Cloud,
+            None => InFinder::Unknown,
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = id;
-        None
+        InFinder::NotTracked
     }
 }
 
@@ -209,15 +228,17 @@ fn body_words(
     facts: &str,
     reason: UnsupportedReason,
     origin: Origin,
-    here: Option<bool>,
+    finder: InFinder,
     note: Option<&Note>,
 ) -> String {
-    let mut body = format!("{facts} {} {}", reason.sentence(), local_state(origin, here));
-    if let Some(note) = note {
-        body.push(' ');
-        body.push_str(&note.words());
-    }
-    body.trim().to_string()
+    let note = note.map(Note::words);
+    [Some(facts), Some(reason.sentence()), local_state(origin, finder), note.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A press of one of the page's ways out. A refusal the viewer would only say in a toast is said on the page.
@@ -317,8 +338,9 @@ mod tests {
     fn labels_and_local_state() {
         assert_eq!(open_label(Some("Preview")), "Open with Preview");
         assert_eq!(open_label(None), "Open with default app");
-        assert!(local_state(Origin::ThisPc { unsent: false }, None).starts_with("Downloaded to "));
-        assert!(local_state(Origin::Beebeeb, None).starts_with("In the cloud"));
+        let not_tracked = |origin| local_state(origin, InFinder::NotTracked).unwrap();
+        assert!(not_tracked(Origin::ThisPc { unsent: false }).starts_with("Downloaded to "));
+        assert!(not_tracked(Origin::Beebeeb).starts_with("In the cloud"));
         assert_eq!(ext_of("a.eps"), Some("eps"));
         assert_eq!(ext_of("noext"), None);
     }
@@ -339,7 +361,7 @@ mod tests {
             "Video \u{b7} 366.9 MB",
             UnsupportedReason::PlayerRefused,
             Origin::Beebeeb,
-            None,
+            InFinder::NotTracked,
             None,
         );
         assert!(
@@ -353,7 +375,13 @@ mod tests {
             Note::Opening,
             Note::Failed("The app didn\u{2019}t open this file.".into()),
         ] {
-            let with = body_words("", UnsupportedReason::UnknownType, Origin::Beebeeb, None, Some(&note));
+            let with = body_words(
+                "",
+                UnsupportedReason::UnknownType,
+                Origin::Beebeeb,
+                InFinder::NotTracked,
+                Some(&note),
+            );
             assert!(with.starts_with(SENTENCE) && with.ends_with(&note.words()), "{with}");
         }
         assert!(Note::Downloading.words().starts_with("Downloading it to "));
@@ -372,20 +400,20 @@ mod tests {
                 None,
             )
         };
-        let local = eps(Some(true));
+        let local = eps(InFinder::Here);
         assert!(local.ends_with(ON_THIS_DEVICE) && !local.contains("cloud"), "{local}");
         assert_eq!(ON_THIS_DEVICE, concat!("On ", beebeeb_engine::device_word!(), "."));
-        assert!(eps(Some(false)).ends_with(IN_THE_CLOUD));
-        // While Finder has not said (not read yet, not a Mac): where the viewer opened it from.
-        assert!(eps(None).ends_with(IN_THE_CLOUD));
-        assert_eq!(local_state(Origin::ThisPc { unsent: false }, Some(false)), IN_THE_CLOUD);
+        assert!(eps(InFinder::Cloud).ends_with(IN_THE_CLOUD));
+        // Not a Mac: where the viewer opened it from.
+        assert!(eps(InFinder::NotTracked).ends_with(IN_THE_CLOUD));
+        assert_eq!(local_state(Origin::ThisPc { unsent: false }, InFinder::Cloud), Some(IN_THE_CLOUD));
         // What the last press came to still follows it.
         let opened = Note::Opened("Adobe Illustrator 2026".into());
         let with = body_words(
             "",
             UnsupportedReason::UnknownType,
             Origin::Beebeeb,
-            Some(true),
+            InFinder::Here,
             Some(&opened),
         );
         assert!(
@@ -393,6 +421,24 @@ mod tests {
             "{with}"
         );
         assert_eq!(opened.words(), "Opened in Adobe Illustrator 2026.");
+    }
+
+    /// Dm-87 (RC16): during Finder setup the badge state of the .eps was unknown and the page said "In the cloud,
+    /// safe in Beebeeb." for a local file. Unknown says neither the cloud nor this Mac, whatever it was opened from.
+    #[test]
+    fn an_unknown_finder_state_says_neither_the_cloud_nor_this_mac() {
+        let facts = "EPS \u{b7} 2.1 MB";
+        for origin in [Origin::Beebeeb, Origin::ThisPc { unsent: false }, Origin::ThisPcSyncOff] {
+            assert_eq!(local_state(origin, InFinder::Unknown), None, "{origin:?}");
+            let words = body_words(facts, UnsupportedReason::UnknownType, origin, InFinder::Unknown, None);
+            for claim in [IN_THE_CLOUD, ON_THIS_DEVICE, "cloud", "Downloaded to "] {
+                assert!(!words.contains(claim), "{origin:?}: {words}");
+            }
+            assert_eq!(words, format!("{facts} {SENTENCE}"));
+            let opened = Note::Opened("Adobe Illustrator 2026".into());
+            let with = body_words("", UnsupportedReason::UnknownType, origin, InFinder::Unknown, Some(&opened));
+            assert_eq!(with, format!("{SENTENCE} Opened in Adobe Illustrator 2026."), "one space, no gap");
+        }
     }
 
     #[test]

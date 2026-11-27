@@ -161,8 +161,9 @@ fn ask_default(_ext: &str) -> Option<(String, String)> {
 ///
 /// Dm-78: a press while Finder is still being set up is not refused (RC13: setup was slow, and the press answered at
 /// once with the words of a sync folder). The page says Finder is still being set up, the press waits for it
-/// ([`Platform::setup`], [`Platform::setup_wait`]: 60 s), and then the file is made present and opened as above. A
-/// setup that ended without Finder is said with its reason, in the words Settings uses ([`Failure::Setup`]).
+/// ([`Platform::setup`], [`Platform::setup_wait`]: the whole setup, dm-87), and then the file is made present and
+/// opened as above. A setup that ended without Finder is said with its reason, in the words Settings uses
+/// ([`Failure::Setup`]).
 ///
 /// Never: a shell, a child process, a temporary copy, a path made from a name. Must not log a path or a name.
 #[cfg(target_os = "macos")]
@@ -181,6 +182,11 @@ pub(crate) mod mac {
     /// How long a Finder setup that has not begun is given to begin (the first moments of a run), before the press
     /// says Beebeeb is not in Finder.
     pub(crate) const SETUP_GRACE: Duration = Duration::from_secs(5);
+
+    /// Dm-87: how long a press waits for Finder setup as a whole, every attempt of it. RC16: setup's first three
+    /// attempts each timed out after 60 s, and the press gave up with the first one (it waited 60 s, one attempt).
+    /// An existing domain's confirm is tried again after 5, 10, 20, 40 s, each try up to 60 s: four tries fit.
+    pub(crate) const SETUP_WHOLE: Duration = Duration::from_secs(5 * 60);
 
     /// How Finder setup stands at one look.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -419,9 +425,9 @@ pub(crate) mod mac {
         fn setup(&self) -> Setup {
             Setup::Ready
         }
-        /// How long a press waits for Finder setup to be ready ([`STALL`]: 60 s).
+        /// How long a press waits for Finder setup to be ready: the whole setup ([`SETUP_WHOLE`]), not one attempt.
         fn setup_wait(&self) -> Duration {
-            STALL
+            SETUP_WHOLE
         }
         /// How long a setup that has not begun is given to begin ([`SETUP_GRACE`]).
         fn setup_grace(&self) -> Duration {
@@ -511,25 +517,47 @@ pub(crate) mod mac {
     /// trying again) is waited for, and the page says so (`say`, once); one that has not begun is given
     /// [`Platform::setup_grace`] to begin; one that ended without Finder ends the press with its reason.
     fn wait_for_setup(platform: &dyn Platform, still: &dyn Fn() -> bool, say: &dyn Fn(Note)) -> Result<(), Failure> {
+        wait_until_set_up(
+            &|| platform.setup(),
+            platform.setup_wait(),
+            platform.setup_grace(),
+            still,
+            &|| say(setting_up()),
+            "open with",
+        )
+    }
+
+    /// Dm-87: the one wait for Finder setup, Open with's and the Files list's open alike. `look` is how setup stands;
+    /// a setup that is adding, or trying again, is waited for across all its attempts (`wait`: [`SETUP_WHOLE`]), one
+    /// that has not begun gets `grace`, one that ended ends the wait with its reason. `waiting` is called once, when
+    /// the wait begins. `who` starts the log lines.
+    pub(crate) fn wait_until_set_up(
+        look: &dyn Fn() -> Setup,
+        wait: Duration,
+        grace: Duration,
+        still: &dyn Fn() -> bool,
+        waiting: &dyn Fn(),
+        who: &'static str,
+    ) -> Result<(), Failure> {
         let (asked, mut said) = (Instant::now(), false);
         loop {
-            match platform.setup() {
+            match look() {
                 Setup::Ready => {
                     if said {
                         tracing::info!(
                             ms = asked.elapsed().as_millis() as u64,
-                            "open with: Finder is set up; the open goes on"
+                            "{who}: Finder is set up; the open goes on"
                         );
                     }
                     return Ok(());
                 }
                 Setup::Ended(why) => return Err(Failure::Setup(why)),
-                Setup::NotBegun if asked.elapsed() >= platform.setup_grace() => {
+                Setup::NotBegun if asked.elapsed() >= grace => {
                     return Err(Failure::Setup(NOT_BEGUN));
                 }
                 Setup::Adding | Setup::NotBegun => {}
             }
-            if asked.elapsed() >= platform.setup_wait() {
+            if asked.elapsed() >= wait {
                 return Err(Failure::SetupSlow);
             }
             if !still() {
@@ -537,11 +565,25 @@ pub(crate) mod mac {
             }
             if !said {
                 said = true;
-                tracing::info!("open with: Finder is still being set up; the open waits for it");
-                say(setting_up());
+                tracing::info!("{who}: Finder is still being set up; the open waits for it");
+                waiting();
             }
-            std::thread::sleep(materialise::LOOK_EVERY.min(platform.setup_wait()));
+            std::thread::sleep(materialise::LOOK_EVERY.min(wait));
         }
+    }
+
+    /// Dm-87: the Files list's open (a double-click, Show in Finder) waits for Finder setup the same way before it
+    /// asks macOS for the item's place (RC16: a double-click during setup logged "macOS reports no location"). The
+    /// app's setup state; `Err(Moved)`: the press is over. Any other end lets the open go on and say what it finds.
+    pub(crate) fn wait_for_finder(still: &dyn Fn() -> bool) -> Result<(), Failure> {
+        wait_until_set_up(
+            &|| setup_of(&crate::engine_host::finder_setup::view()),
+            SETUP_WHOLE,
+            SETUP_GRACE,
+            still,
+            &|| {},
+            "files",
+        )
     }
 
     /// One Open with press, start to end, on the thread of its own that [`start`] makes: the app (asked first, so the

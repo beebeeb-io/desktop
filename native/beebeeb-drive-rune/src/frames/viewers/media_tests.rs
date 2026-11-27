@@ -937,3 +937,67 @@ fn media_look_zoom_group_gap_is_one_pixel() {
         "padding 2 each side, gap 1 twice"
     );
 }
+
+/// Dm-87: an engine-like source that has rendered page 2 only (the board's picture of it); every other page is still
+/// being rendered.
+struct RenderedTwo(FixtureViewerSource, Calls);
+
+impl ViewerSource for RenderedTwo {
+    fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+        self.0.open(id)
+    }
+    fn poll(&mut self, id: &str) -> Option<Body> {
+        self.0.poll(id)
+    }
+    fn cancel(&mut self, _: &str) {}
+    fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+        self.0.retry(id)
+    }
+    fn picture(&self, id: &str, which: Picture) -> Option<rune::Pixels> {
+        self.1.borrow_mut().push(format!("picture {which:?}"));
+        self.0.picture(id, which)
+    }
+    fn page_state(&self, _: &str, page: u32) -> super::source::PageState {
+        if page == 2 {
+            super::source::PageState::Ready
+        } else {
+            super::source::PageState::Rendering
+        }
+    }
+}
+
+/// Dm-87 (RC16): the page strip showed blank white pages 1 and 2 while the page itself rendered. A thumbnail now
+/// shows the page's own picture once it is rendered, and a page still on its way is no white page; a thumbnail never
+/// asks the renderer for a page of its own.
+#[test]
+fn the_pdf_strip_shows_no_blank_thumbnails() {
+    use super::pdf::{ThumbFace, thumb_face};
+    use super::source::PageState;
+    let asked = std::cell::Cell::new(0);
+    let picture = || {
+        asked.set(asked.get() + 1);
+        Some(rune::Pixels::new())
+    };
+    assert!(matches!(thumb_face(PageState::Rendering, picture), ThumbFace::NotYet));
+    assert!(matches!(thumb_face(PageState::Failed, picture), ThumbFace::NotYet));
+    assert_eq!(asked.get(), 0, "a page that is not here is never asked for by its thumbnail");
+    assert!(matches!(thumb_face(PageState::Ready, picture), ThumbFace::Picture(_)));
+    assert!(matches!(thumb_face(PageState::LacksText, picture), ThumbFace::Picture(_)));
+    assert!(matches!(thumb_face(PageState::Ready, || None), ThumbFace::Plain));
+
+    let calls = Calls::default();
+    let mut state = init();
+    let source = RenderedTwo(FixtureViewerSource::new(), calls.clone());
+    assert!(open_from(&mut state, Box::new(source), board::PDF));
+    let mut rt = runtime_of(state, false);
+    rt.settle_all();
+    rt.frame(0.0);
+    assert!(has(&rt, "thumb-sidebar"));
+    assert!(has(&rt, "thumb-0-not-yet"), "page 1 is on its way: no white page");
+    assert!(has(&rt, "thumb-1-page") && !has(&rt, "thumb-1-not-yet"), "page 2 shows its picture");
+    let asked: Vec<String> = calls.borrow().clone();
+    assert!(
+        asked.iter().all(|call| call != "picture Page(3)" && call != "picture Page(4)"),
+        "thumbnails of pages not rendered ask nothing: {asked:?}"
+    );
+}

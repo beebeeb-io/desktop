@@ -305,6 +305,24 @@ pub(crate) fn domain_state() -> Result<DomainState, FpError> {
     decode_domain_state(call(beebeeb_fp_domain_user_enabled))
 }
 
+/// Dm-87: macOS gives the domain's root a place, and that folder is on disk: the domain exists and the system serves
+/// it (RC13: a shell read of a dataless file worked while setup waited for stabilization). `getUserVisibleURL` on the
+/// root, then a `stat` of its path while the URL's scope is held; it lists nothing and opens nothing. The caller
+/// holds the gate. Never logs the path.
+pub(crate) fn root_in_place() -> Result<bool, FpError> {
+    let mut handle: *mut c_void = std::ptr::null_mut();
+    let mut out = BeebeebFpErrorC::zeroed();
+    let code = unsafe { beebeeb_fp_resolve_location(&mut handle, &mut out) };
+    let Some(url) = decode_resolve("beebeeb_fp_resolve_location", code, UrlHandle::from_raw(handle), out)? else {
+        return Ok(false);
+    };
+    let mut there = false;
+    read_at_url(&url, &mut |path| {
+        there = std::fs::metadata(path).is_ok_and(|meta| meta.is_dir());
+    });
+    Ok(there)
+}
+
 /// The bridge's `1` / `0` / `2` as a state; any other answer is an app error, never a guess.
 fn decode_domain_state(answer: Result<i32, FpError>) -> Result<DomainState, FpError> {
     match answer? {
