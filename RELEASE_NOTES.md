@@ -31,6 +31,13 @@
 - **Dates:** file dates show correctly.
 - **System files:** system files are hidden from your lists.
 - **Search, Trash and folders:** fixes to search, to Trash and to folders.
+- **Settings:** Settings fills wide windows.
+- **Trash:** the Trash row opens Trash.
+- **Sidebar:** the sidebar sizes include Backups.
+- **Thumbnails:** missing thumbnails are made when you open a folder, and Settings > Previews can repair them.
+- **Search:** search no longer floods the server after an error.
+- **Retry:** Beebeeb waits more gently before retrying after "too many requests".
+- **Photos:** RAW photo types are recognised.
 
 ### Verification
 
