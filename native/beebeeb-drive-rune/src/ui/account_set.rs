@@ -58,10 +58,7 @@ pub fn selection(t: &Theme) -> Color {
 /// A pane (`.au-set-main` > `.au-set-col`): 22 pt above and 30 pt beside a 520 pt column whose
 /// children sit 14 pt apart. A pane taller than the window scrolls.
 pub fn pane(children: Vec<El>, t: &Theme) -> El {
-    let mut column = col().key("set-col").w(COLUMN_W).gap(14.0);
-    for child in children {
-        column = column.child(child);
-    }
+    let column = super::settings_shell::flow(children, COLUMN_W);
     col()
         .key("set-main")
         .role("main")
@@ -93,6 +90,7 @@ pub fn heading(title: &str, sub: Option<&str>, trailing: Option<El>, t: &Theme) 
             .child(trailing),
         None => title_el.w_full(),
     };
+    super::settings_shell::mark_lead();
     let mut h = col().key("set-h").w_full().items_start().gap(6.0).child(first);
     if let Some(sub) = sub {
         h = h.child(kit::label("set-sub", sub, SUB, t.text_secondary).wrap().w_full());

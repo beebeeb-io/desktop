@@ -166,15 +166,16 @@ pub(crate) fn insights<E: DriveEngine>(engine: &E, account: &str) -> (Insights, 
     // Task 2488: another account's local state reads as nothing for insights.
     // The page needs each file's size and name, never its contract row: the walk reads none.
     let read = engine.local_state(|db| {
+        let roots = model::backups_root_paths(db).map_err(|_| "roots")?;
         live_entries(db).map(|entries| {
             let files: Vec<&FileEntry> = entries.iter().filter(|e| !e.is_dir()).collect();
-            insights_of(&files, usage)
+            insights_of(&files, &roots, usage)
         })
     });
     match read {
         Ok(Ok(insights)) => (insights, Some(usage)),
         // Not this account's state: show usage only, no breakdown.
-        Err(refused) if refused.not_this_accounts() => (insights_of(&[], usage), Some(usage)),
+        Err(refused) if refused.not_this_accounts() => (insights_of(&[], &[], usage), Some(usage)),
         Ok(Err(_)) | Err(_) => {
             log("drive settings: the file list could not be read for insights");
             (Insights::Failed(INSIGHTS_FAILED.into()), Some(usage))
@@ -182,16 +183,20 @@ pub(crate) fn insights<E: DriveEngine>(engine: &E, account: &str) -> (Insights, 
     }
 }
 
-/// What a file counts as on the page.
-pub(crate) fn kind_name(path: &str) -> &'static str {
+/// What a file counts as on the page. The sidebar's split and this page share `model::storage_category`:
+/// Backups, then photos and videos ("Media"), then the rest by its type.
+pub(crate) fn kind_name(path: &str, backups: &[String]) -> &'static str {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match model::storage_category(path, name, backups) {
+        model::StorageCategory::Backups => return "Backups",
+        model::StorageCategory::Photos => return "Media",
+        model::StorageCategory::Files => {}
+    }
     let ext = path
         .rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
-        "jpg" | "jpeg" | "png" | "gif" | "heic" | "heif" | "webp" | "tif" | "tiff" | "bmp" | "raw" | "dng" | "cr2"
-        | "cr3" | "nef" | "arw" | "raf" | "orf" | "braw" | "mov" | "mp4" | "m4v" | "avi" | "mkv" | "webm" | "wmv"
-        | "mts" | "mp3" | "m4a" | "wav" | "flac" | "aac" | "ogg" | "opus" | "aiff" => "Media",
         "pdf" | "doc" | "docx" | "odt" | "rtf" | "txt" | "md" | "pages" | "xls" | "xlsx" | "xlsm" | "csv" | "ods"
         | "numbers" | "ppt" | "pptx" | "key" | "odp" | "epub" => "Documents",
         _ => "Other",
@@ -199,13 +204,13 @@ pub(crate) fn kind_name(path: &str) -> &'static str {
 }
 
 /// The page for these files and this use. No files and nothing used: the empty state.
-pub(crate) fn insights_of(files: &[&FileEntry], (used, quota): (i64, i64)) -> Insights {
+pub(crate) fn insights_of(files: &[&FileEntry], backups: &[String], (used, quota): (i64, i64)) -> Insights {
     if files.is_empty() && used == 0 {
         return Insights::Empty;
     }
     let mut kinds: Vec<(&'static str, i64, usize)> = Vec::new();
     for file in files {
-        let name = kind_name(&file.path);
+        let name = kind_name(&file.path, backups);
         match kinds.iter_mut().find(|(k, _, _)| *k == name) {
             Some(kind) => {
                 kind.1 += file.size_bytes.max(0);
@@ -260,7 +265,7 @@ pub(crate) fn insights_of(files: &[&FileEntry], (used, quota): (i64, i64)) -> In
                 LargeFile {
                     id: f.file_id.clone(),
                     shown: cut_middle(&path),
-                    kind: kind_name(&path).to_string(),
+                    kind: kind_name(&path, backups).to_string(),
                     size: size_words(f.size_bytes),
                     path,
                 }
@@ -378,3 +383,7 @@ pub(crate) fn keep_of(rows: &[(FileEntry, bool, DriveItem)]) -> Keep {
 #[cfg(test)]
 #[path = "drive_settings_reads_ids_tests.rs"]
 mod ids_tests;
+
+#[cfg(test)]
+#[path = "drive_settings_storage_split_tests.rs"]
+mod storage_split_tests;
