@@ -142,10 +142,14 @@ fn ask_default(_ext: &str) -> Option<(String, String)> {
 }
 
 /// macOS (dm-73): Open with, on Finder's copy of the file. The copy is made present first (a cloud-only file is
-/// asked of the File Provider, as Finder's own download does, and waited for while the page says so), then the URL
-/// the File Provider gives for the item is opened through `NSWorkspace openURLs:withApplicationAtURL:` with the
+/// read, so the system fetches it as it does for Finder's own open, and waited for while the page says so), then the
+/// URL the File Provider gives for the item is opened through `NSWorkspace openURLs:withApplicationAtURL:` with the
 /// default app of its kind, or with the app picked in the chooser (`NSOpenPanel` on `/Applications`). Every failure
 /// is words on the page ([`Failure::words`]) and a line in the log ([`Failure::log`]: the system's domain and code).
+///
+/// Dm-77: `NSWorkspace` is called only after the wait saw the file no longer dataless, and the no-byte limit holds
+/// even when the wait itself stands still (RC12: 80 s, nothing opened, nothing said): the page then says the
+/// download stopped, the log says why, and that press opens nothing any more ([`start_on`]).
 ///
 /// Never: a shell, a child process, a temporary copy, a path made from a name. Must not log a path or a name.
 #[cfg(target_os = "macos")]
@@ -212,7 +216,10 @@ pub(crate) mod mac {
 
     impl SystemError {
         pub(crate) fn new(domain: impl Into<String>, code: i64) -> Self {
-            SystemError { domain: domain.into(), code }
+            SystemError {
+                domain: domain.into(),
+                code,
+            }
         }
 
         /// One line in the log: the domain, when it is one this app knows the name of, and the code (as `status`:
@@ -302,7 +309,9 @@ pub(crate) mod mac {
                     tracing::warn!("open with: the file did not open, the download was refused");
                     why.log();
                 }
-                Failure::DownloadStalled => tracing::warn!("open with: the file did not open, the download stopped moving"),
+                Failure::DownloadStalled => {
+                    tracing::warn!("open with: the file did not open, the download stopped moving")
+                }
                 Failure::NotInFinder => tracing::warn!("open with: the file did not open, it has no place in Finder"),
                 Failure::NoApp => tracing::warn!("open with: the file did not open, no app for its kind"),
                 Failure::Open(why) => {
@@ -324,6 +333,13 @@ pub(crate) mod mac {
         fn materialise(&self, item_id: &str) -> Result<(), SystemError>;
         /// Starts a read of Finder's copy, so the system fetches it now (`materialise::Finder::pull`).
         fn pull(&self, file: &Path);
+        /// How long that read is given alone before the system is also asked ([`materialise::READ_FIRST`]).
+        fn read_first(&self) -> Duration {
+            materialise::READ_FIRST
+        }
+        /// The item is on this Mac now: the marks and the counts read Finder's state again
+        /// (`materialise::Finder::landed`). Default: nothing.
+        fn landed(&self, _item_id: &str) {}
         /// How far the item's download is (done, total), from the transfer board.
         fn progress(&self, item_id: &str) -> Option<(u64, u64)>;
         /// The app the person picks (`NSOpenPanel` on `/Applications`). `None`: closed without one.
@@ -364,13 +380,16 @@ pub(crate) mod mac {
         fn pull(&self, file: &Path) {
             self.platform.pull(file);
         }
+        fn read_first(&self) -> Duration {
+            self.platform.read_first()
+        }
+        fn landed(&self, file_id: &str) {
+            self.platform.landed(file_id);
+        }
     }
 
-    /// One Open with press, start to end, on the thread of its own that [`start`] makes: the app (asked first, so the
-    /// chooser is not shown minutes after the press), then, at Finder's place for the item, its copy made present
-    /// (dm-75's one call: the system is asked for a file that is online only, and it is waited for until it is no
-    /// longer dataless) and the open. `still` is asked before every step that acts: `false` (the session of the press
-    /// ended, a newer press took over) ends it with nothing opened. `say` gets what the page shows meanwhile.
+    /// [`run_watched`] with nobody to tell when the wait stands still.
+    #[cfg(test)]
     pub(crate) fn run(
         platform: &dyn Platform,
         item_id: &str,
@@ -378,6 +397,25 @@ pub(crate) mod mac {
         still: &dyn Fn() -> bool,
         say: &dyn Fn(Note),
     ) -> Result<(), Failure> {
+        run_watched(platform, item_id, pick, still, say, None)
+    }
+
+    /// One Open with press, start to end, on the thread of its own that [`start`] makes: the app (asked first, so the
+    /// chooser is not shown minutes after the press), then, at Finder's place for the item, its copy made present
+    /// (dm-75's one call: a file that is online only is read and asked of the system, and it is waited for until it
+    /// is no longer dataless) and the open. `still` is asked before every step that acts: `false` (the session of the
+    /// press ended, a newer press took over) ends it with nothing opened. `say` gets what the page shows meanwhile.
+    /// `stuck` is told when the wait for the file stood still for the limit inside one of its own asks (dm-77): this
+    /// call cannot return then.
+    pub(crate) fn run_watched(
+        platform: &dyn Platform,
+        item_id: &str,
+        pick: Pick,
+        still: &dyn Fn() -> bool,
+        say: &dyn Fn(Note),
+        stuck: Option<materialise::Stuck>,
+    ) -> Result<(), Failure> {
+        let mut stuck = stuck;
         let picked = match pick {
             Pick::Default => None,
             Pick::Choose => Some(platform.choose_app().ok_or(Failure::Cancelled)?),
@@ -402,14 +440,20 @@ pub(crate) mod mac {
                     progress: &|| platform.progress(item_id),
                     report: &|_, _| {},
                 };
-                match materialise::arrive(&finder, item_id, file, &wait) {
+                match materialise::arrive_watched(&finder, item_id, file, &wait, stuck.take()) {
                     Ok(true) => {}
                     Ok(false) => return Err(Failure::NotInFinder),
                     Err(materialise::Stop::Left) => return Err(Failure::Moved),
                     Err(materialise::Stop::Stalled { .. }) => return Err(Failure::DownloadStalled),
                     Err(materialise::Stop::Refused(_)) => {
-                        let why = finder.refused.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-                        return Err(Failure::Download(why.unwrap_or_else(|| SystemError::new(own_domain(), 0))));
+                        let why = finder
+                            .refused
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take();
+                        return Err(Failure::Download(
+                            why.unwrap_or_else(|| SystemError::new(own_domain(), 0)),
+                        ));
                     }
                 }
                 if !still() {
@@ -424,11 +468,20 @@ pub(crate) mod mac {
                 }
             })();
         });
-        if found { opened } else { Err(Failure::NotInFinder) }
+        if found {
+            opened
+        } else {
+            Err(Failure::NotInFinder)
+        }
     }
 
     /// The number of the newest press: an older press's thread stops when it sees a newer one, and says nothing more.
     static NEWEST: AtomicU64 = AtomicU64::new(0);
+
+    /// Wakes the window through the waker a press's thread and the watch over its wait share.
+    fn woken<W: Fn()>(wake: &std::sync::Mutex<W>) {
+        (*wake.lock().unwrap_or_else(std::sync::PoisonError::into_inner))()
+    }
 
     /// Open with for the item `item_id`, on a thread of its own with the Mac's own platform. `still`: the session of
     /// the press is still the one. `wake`: the window draws again (the page reads its note). `Err`: nothing started;
@@ -461,26 +514,51 @@ pub(crate) mod mac {
         };
         let press = NEWEST.fetch_add(1, Ordering::SeqCst) + 1;
         let id = item_id.to_string();
-        let started = std::thread::Builder::new().name("viewer-open-with".into()).spawn(move || {
-            let newest = || NEWEST.load(Ordering::SeqCst) == press;
-            let still = || newest() && still();
-            let say = |note: Note| {
-                if newest() {
-                    unsupported::set_note(&id, Some(note));
-                    wake();
+        // The watch over the wait wakes the window from a thread of its own.
+        let wake = std::sync::Arc::new(std::sync::Mutex::new(wake));
+        let started = std::thread::Builder::new()
+            .name("viewer-open-with".into())
+            .spawn(move || {
+                let newest = || NEWEST.load(Ordering::SeqCst) == press;
+                let still = || newest() && still();
+                let say = |note: Note| {
+                    if newest() {
+                        unsupported::set_note(&id, Some(note));
+                        woken(&wake);
+                    }
+                };
+                // Dm-77: the wait for the file stood still for the limit inside one of its own asks, so this press
+                // cannot say so itself. The page says the download stopped and the log says why; the press is over
+                // (a newer number is the newest), so its thread, should that ask ever return, opens nothing and says
+                // nothing more.
+                let stuck: materialise::Stuck = {
+                    let (id, wake) = (id.clone(), wake.clone());
+                    Box::new(move || {
+                        if NEWEST
+                            .compare_exchange(press, press + 1, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_err()
+                        {
+                            return;
+                        }
+                        Failure::DownloadStalled.log();
+                        unsupported::set_note(&id, Some(Note::Failed(NOT_MOVING.to_string())));
+                        woken(&wake);
+                    })
+                };
+                let done = run_watched(platform.as_ref(), &id, pick, &still, &say, Some(stuck));
+                if let Err(why) = &done {
+                    why.log();
                 }
-            };
-            let done = run(platform.as_ref(), &id, pick, &still, &say);
-            if let Err(why) = &done {
-                why.log();
-            }
-            // A newer press owns the page's words now.
-            if newest() {
-                let note = done.err().and_then(|why| why.words()).map(|words| Note::Failed(words.to_string()));
-                unsupported::set_note(&id, note);
-                wake();
-            }
-        });
+                // A newer press owns the page's words now.
+                if newest() {
+                    let note = done
+                        .err()
+                        .and_then(|why| why.words())
+                        .map(|words| Note::Failed(words.to_string()));
+                    unsupported::set_note(&id, note);
+                    woken(&wake);
+                }
+            });
         match started {
             Ok(_) => Ok(()),
             Err(_) => refuse(item_id),
@@ -541,6 +619,10 @@ pub(crate) mod mac {
 
             fn pull(&self, file: &Path) {
                 materialise::SystemFinder.pull(file);
+            }
+
+            fn landed(&self, item_id: &str) {
+                materialise::SystemFinder.landed(item_id);
             }
 
             fn progress(&self, item_id: &str) -> Option<(u64, u64)> {
@@ -606,7 +688,6 @@ pub(crate) mod mac {
                     Err(_) => Err(own(OWN_NO_ANSWER)),
                 }
             }
-
         }
     }
 }
