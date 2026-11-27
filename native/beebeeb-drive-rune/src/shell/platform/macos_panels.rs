@@ -86,27 +86,87 @@ fn forget_at(file: &Path, key: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Resolves every stored `folder:` bookmark with `resolve` (which opens the scope). A bookmark that no longer
-/// resolves to a folder is dropped from the store; its key is returned, so the caller can log why. Never touches
-/// the folder's contents or anything remote.
+/// What became of one remembered backup folder at start.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum FolderAtStart {
+    /// Resolved to a folder; its scope is open.
+    Open(PathBuf),
+    /// Not reachable this run (the bookmark did not resolve, its volume is not mounted, or the folder could not
+    /// be read): the bookmark is kept, so it opens again once the drive or share is back.
+    NotAvailable,
+    /// Resolved to a path on a mounted volume where no folder is any more: the bookmark is dropped.
+    Gone,
+}
+
+/// Sorts one resolve result. Only a path that is missing (or no longer a folder) on a mounted volume counts as
+/// gone; every other failure keeps the bookmark (an unplugged drive, an unmounted share, a one-off resolve error).
+pub(super) fn folder_at_start(resolved: Option<PathBuf>, volume_mounted: impl Fn(&Path) -> bool) -> FolderAtStart {
+    let Some(path) = resolved else {
+        return FolderAtStart::NotAvailable;
+    };
+    match std::fs::metadata(&path) {
+        Ok(m) if m.is_dir() => FolderAtStart::Open(path),
+        // Something else now sits where the folder was.
+        Ok(_) => FolderAtStart::Gone,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && volume_mounted(&path) => FolderAtStart::Gone,
+        Err(_) => FolderAtStart::NotAvailable,
+    }
+}
+
+/// Whether the volume that holds `path` is mounted. Drives and network shares mount under `/Volumes/<name>`;
+/// that volume counts as mounted only when `/Volumes/<name>` is a mount point (a leftover empty folder there is
+/// not). Any other path lives on the start-up volume, which is always mounted.
+pub(super) fn volume_mounted(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let mut parts = path.components();
+    let (Some(std::path::Component::RootDir), Some(first)) = (parts.next(), parts.next()) else {
+        return true;
+    };
+    if first.as_os_str() != "Volumes" {
+        return true;
+    }
+    let Some(name) = parts.next() else {
+        return true;
+    };
+    let volumes = Path::new("/Volumes");
+    let root = volumes.join(name.as_os_str());
+    match (std::fs::metadata(volumes), std::fs::metadata(&root)) {
+        (Ok(v), Ok(r)) => v.dev() != r.dev(),
+        _ => false,
+    }
+}
+
+/// The keys of the remembered backup folders at start, sorted by what became of them.
+#[derive(Debug, Default)]
+pub(super) struct ResolvedFolders {
+    pub ok: Vec<PathBuf>,
+    pub not_available: Vec<String>,
+    pub dropped: Vec<String>,
+}
+
+/// Resolves every stored `folder:` bookmark with `resolve` (which opens the scope; `None` is a resolve failure).
+/// Only a bookmark whose folder is gone from a mounted volume is dropped from the store; one that cannot be reached
+/// this run is kept and reported as not available. Never touches the folder's contents or anything remote.
 pub(super) fn resolve_all_at(
     file: &Path,
     mut resolve: impl FnMut(&[u8]) -> Option<PathBuf>,
-) -> (Vec<PathBuf>, Vec<String>) {
+    volume_mounted: impl Fn(&Path) -> bool,
+) -> ResolvedFolders {
     let map = std::fs::read_to_string(file)
         .map(|t| decode_bookmarks(&t))
         .unwrap_or_default();
-    let (mut ok, mut stale) = (Vec::new(), Vec::new());
+    let mut out = ResolvedFolders::default();
     for (key, data) in map.iter().filter(|(k, _)| k.starts_with(FOLDER_PREFIX)) {
-        match resolve(data).filter(|p| p.is_dir()) {
-            Some(path) => ok.push(path),
-            None => stale.push(key.clone()),
+        match folder_at_start(resolve(data), &volume_mounted) {
+            FolderAtStart::Open(path) => out.ok.push(path),
+            FolderAtStart::NotAvailable => out.not_available.push(key.clone()),
+            FolderAtStart::Gone => out.dropped.push(key.clone()),
         }
     }
-    for key in &stale {
+    for key in &out.dropped {
         let _ = forget_at(file, key);
     }
-    (ok, stale)
+    out
 }
 
 fn recall_at(file: &Path, key: &str) -> Option<Vec<u8>> {
@@ -251,15 +311,17 @@ fn remember(key: &str, url: Id) {
 }
 
 /// At start, before the engine reads any backup folder: reopens the security scope of every folder picked for
-/// Backups. A stale one is dropped and logged (no path), so the folder shows as unreadable rather than silently
-/// missing.
+/// Backups. One that cannot be reached this run (an unplugged drive, an unmounted share) keeps its bookmark and is
+/// logged as not available (no path), so the folder shows as unreadable and backs up again once it is back; only one
+/// gone from a mounted volume is dropped.
 pub fn resolve_backup_folders() {
     let Some(file) = store_file() else { return };
-    let (ok, stale) = resolve_all_at(&file, resolve_bookmark);
+    let r = resolve_all_at(&file, resolve_bookmark, volume_mounted);
     tracing::info!(
-        "backup folder bookmarks: {} reopened, {} stale and dropped",
-        ok.len(),
-        stale.len()
+        "backup folder bookmarks: {} reopened, {} not available (kept), {} gone and dropped",
+        r.ok.len(),
+        r.not_available.len(),
+        r.dropped.len()
     );
 }
 
@@ -379,34 +441,100 @@ mod tests {
     }
 
     #[test]
-    fn resolve_at_start_opens_each_and_drops_stale() {
+    fn resolve_at_start_keeps_unreachable_and_drops_only_gone() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("b.txt");
         let real = dir.path().join("real");
         std::fs::create_dir(&real).unwrap();
-        let (k1, k2, k3) = (
+        let deleted = dir.path().join("deleted");
+        let on_drive = PathBuf::from("/Volumes/bb-test-unplugged/Photos");
+        let (k_real, k_err, k_unmounted, k_gone) = (
             folder_key(&real),
-            folder_key(Path::new("/gone")),
-            folder_key(Path::new("/gone2")),
+            folder_key(Path::new("/err")),
+            folder_key(&on_drive),
+            folder_key(&deleted),
         );
-        remember_at(&file, &k1, vec![1]).unwrap();
-        remember_at(&file, &k2, vec![2]).unwrap();
-        remember_at(&file, &k3, vec![3]).unwrap();
+        remember_at(&file, &k_real, vec![1]).unwrap();
+        remember_at(&file, &k_err, vec![2]).unwrap();
+        remember_at(&file, &k_unmounted, vec![3]).unwrap();
+        remember_at(&file, &k_gone, vec![4]).unwrap();
         remember_at(&file, "save_folder", vec![9]).unwrap();
         let mut calls = Vec::new();
-        let (ok, stale) = resolve_all_at(&file, |d| {
-            calls.push(d.to_vec());
-            (d == [1]).then(|| real.clone())
-        });
+        let r = resolve_all_at(
+            &file,
+            |d| {
+                calls.push(d.to_vec());
+                match d {
+                    [1] => Some(real.clone()),
+                    [2] => None, // a resolve error
+                    [3] => Some(on_drive.clone()),
+                    _ => Some(deleted.clone()),
+                }
+            },
+            |p| !p.starts_with("/Volumes"),
+        );
         assert_eq!(
             calls.len(),
-            3,
+            4,
             "each folder bookmark is resolved, the save folder is not"
         );
-        assert_eq!(ok, vec![real]);
-        assert_eq!(stale.len(), 2);
-        assert_eq!(recall_at(&file, &k2), None);
-        assert_eq!(recall_at(&file, &k1), Some(vec![1]));
+        assert_eq!(r.ok, vec![real]);
+        let mut kept = r.not_available.clone();
+        kept.sort();
+        let mut want = vec![k_err.clone(), k_unmounted.clone()];
+        want.sort();
+        assert_eq!(kept, want);
+        assert_eq!(r.dropped, vec![k_gone.clone()]);
+        // Only the folder gone from a mounted volume loses its bookmark.
+        assert_eq!(recall_at(&file, &k_gone), None);
+        assert_eq!(recall_at(&file, &k_real), Some(vec![1]));
+        assert_eq!(recall_at(&file, &k_err), Some(vec![2]));
+        assert_eq!(recall_at(&file, &k_unmounted), Some(vec![3]));
         assert_eq!(recall_at(&file, "save_folder"), Some(vec![9]));
+        // A second start with the drive still away keeps it again.
+        let r = resolve_all_at(&file, |_| None, |_| true);
+        assert_eq!(r.not_available.len(), 3, "the three kept bookmarks, still kept");
+        assert!(r.dropped.is_empty());
+    }
+
+    #[test]
+    fn a_missing_path_counts_as_gone_only_on_a_mounted_volume() {
+        let dir = tempfile::tempdir().unwrap();
+        let deleted = dir.path().join("deleted");
+        assert_eq!(folder_at_start(None, |_| true), FolderAtStart::NotAvailable);
+        assert_eq!(
+            folder_at_start(Some(deleted.clone()), |_| false),
+            FolderAtStart::NotAvailable
+        );
+        assert_eq!(folder_at_start(Some(deleted.clone()), |_| true), FolderAtStart::Gone);
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(folder_at_start(Some(file), |_| true), FolderAtStart::Gone);
+        assert_eq!(
+            folder_at_start(Some(dir.path().to_path_buf()), |_| false),
+            FolderAtStart::Open(dir.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn the_real_volume_probe() {
+        // A drive that is not plugged in: its /Volumes entry is missing.
+        assert!(!volume_mounted(Path::new("/Volumes/bb-test-unplugged-7f3a/Photos")));
+        // The start-up volume is always mounted.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(volume_mounted(&dir.path().join("deleted")));
+        assert!(volume_mounted(Path::new("/Users/nobody/Pictures")));
+        // Resolved end to end: an unplugged drive is kept, a folder deleted from the start-up volume is gone.
+        assert_eq!(
+            folder_at_start(
+                Some(PathBuf::from("/Volumes/bb-test-unplugged-7f3a/Photos")),
+                volume_mounted
+            ),
+            FolderAtStart::NotAvailable
+        );
+        assert_eq!(
+            folder_at_start(Some(dir.path().join("deleted")), volume_mounted),
+            FolderAtStart::Gone
+        );
     }
 }
