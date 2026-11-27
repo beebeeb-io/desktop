@@ -11,7 +11,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use beebeeb_engine::diagnostic_redaction::KnownNames;
-use beebeeb_engine::finder_setup::driver::{token, LifecycleEvent, TAIL_LINES};
+use beebeeb_engine::finder_setup::driver::{token, LifecycleEvent};
 use beebeeb_engine::surfaces::phase::FinderFailureReason;
 
 use crate::log_file::redact;
@@ -332,6 +332,7 @@ pub fn write_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use beebeeb_engine::finder_setup::driver::TAIL_LINES;
     use beebeeb_engine::finder_setup::core::Trigger;
     use beebeeb_engine::finder_setup::error::{FpError, COCOA_DOMAIN};
     use beebeeb_engine::finder_setup::launch_location::LaunchLocation;

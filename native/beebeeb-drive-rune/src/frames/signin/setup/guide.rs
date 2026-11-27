@@ -41,10 +41,12 @@ use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use crate::ui::kit;
 
 /// DW-0380's heading.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // not used on macOS
 pub const TRAY_TITLE: &str = "Beebeeb lives in the notification area";
 /// DW-0380's words, as the board DRAWS them. The frame's note in `frames.json` has other words
 /// ("Click the b to see what's syncing. Closing this window keeps Beebeeb running."): the
 /// contradiction is with the owner (decision 2478); a ruling changes this one line.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // not used on macOS
 pub const TRAY_TEXT: &str = "Windows puts a new icon under ^ at first. Drag the b next to the clock to keep it in view, or turn Beebeeb on in Windows Settings \u{203A} Personalization \u{203A} Taskbar \u{203A} Other system tray icons.";
 
 /// The words of the five tips (DW-0301 to DW-0305).

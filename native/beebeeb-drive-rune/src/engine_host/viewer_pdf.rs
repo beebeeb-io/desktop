@@ -130,9 +130,9 @@ fn writes_in_a_numbered_font_not_in_the_file(page: &Page<'_>) -> bool {
 }
 
 fn is_numbered_and_not_in_the_file(font: &Dict<'_>) -> bool {
-    if !font
+    if font
         .get::<Name<'_>>("Subtype")
-        .is_some_and(|kind| kind.as_str() == "Type0")
+        .is_none_or(|kind| kind.as_str() != "Type0")
     {
         return false;
     }

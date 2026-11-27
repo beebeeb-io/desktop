@@ -196,7 +196,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             list,
             0,
             &Item::new(Some(&ic::SHIELD), "New sign-ins and security changes")
-                .trailing(Trailing::Value(security.into())),
+                .trailing(Trailing::Value(security)),
             t,
         )],
         Some("These can't be turned off here, so you always hear if someone else gets in."),

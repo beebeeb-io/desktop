@@ -193,10 +193,10 @@ impl FinderUi {
 
 /// The page opened: the folder macOS kept is read once (`take_kept_folder`).
 pub fn open(ui: &mut SettingsUi) {
-    if ui.finder.page.is_none() {
-        if let Some(folder) = crate::engine_host::finder_setup::take_kept_folder() {
-            ui.finder.kept = Some(folder);
-        }
+    if ui.finder.page.is_none()
+        && let Some(folder) = crate::engine_host::finder_setup::take_kept_folder()
+    {
+        ui.finder.kept = Some(folder);
     }
 }
 

@@ -75,7 +75,7 @@ fn a_centre_exactly_on_the_shared_edge_belongs_to_the_right_display() {
     let main = main_display();
     let ext = disp(1440.0, 0.0, 1920.0, 1080.0, 25.0, false);
     let icon = Frame::new(1429.0, 0.0, 22.0, 24.0); // centre 1440
-    assert_eq!(icon_display(icon, &[main, ext]).unwrap().primary, false);
+    assert!(!icon_display(icon, &[main, ext]).unwrap().primary);
 }
 #[test]
 fn an_icon_straddling_two_displays_goes_with_its_centre() {

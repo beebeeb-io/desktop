@@ -113,7 +113,7 @@ fn paste(s: &mut State, content: &ClipboardContent, tx: &mut Tx) {
     // One paragraph break is one `\n` (Windows copies `\r\n`, old Mac apps `\r`).
     let text = content.text().replace("\r\n", "\n").replace('\r', "\n");
     let Some(ui) = viewers::ui(s) else { return };
-    if !ui.office.edit.as_ref().is_some_and(|e| !e.stopped) {
+    if ui.office.edit.as_ref().is_none_or(|e| e.stopped) {
         return;
     }
     if text.len() > MAX_OP_TEXT_BYTES {

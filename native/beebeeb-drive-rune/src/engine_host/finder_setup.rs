@@ -168,10 +168,10 @@ fn note_kept(location: Option<String>) {
 
 /// Sends one trigger. Quietly nothing when the reconciler is not running (another OS, a test build).
 pub fn trigger(trigger: Trigger) {
-    if let Some(running) = current() {
-        if let Err(sentence) = running.handle.trigger(trigger) {
-            tracing::warn!("finder setup: trigger {} not delivered: {sentence}", trigger.as_str());
-        }
+    if let Some(running) = current()
+        && let Err(sentence) = running.handle.trigger(trigger)
+    {
+        tracing::warn!("finder setup: trigger {} not delivered: {sentence}", trigger.as_str());
     }
 }
 
@@ -205,10 +205,10 @@ fn remember(change: impl FnOnce(SessionFacts) -> SessionFacts) {
 /// the next `session_changed` after an unlock sees keys arriving (same on the Windows Explorer setup).
 pub fn lock() {
     remember(after_lock);
-    if let Some(running) = current() {
-        if let Err(sentence) = wait(running.handle.lock(LOCK_WAIT)) {
-            tracing::warn!("finder setup: lock not acknowledged: {sentence}");
-        }
+    if let Some(running) = current()
+        && let Err(sentence) = wait(running.handle.lock(LOCK_WAIT))
+    {
+        tracing::warn!("finder setup: lock not acknowledged: {sentence}");
     }
 }
 

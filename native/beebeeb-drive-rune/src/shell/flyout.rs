@@ -13,6 +13,7 @@ pub mod macos_anchor;
 pub const SIZE: (f32, f32) = (340.0, 520.0);
 #[cfg(target_os = "macos")]
 pub const SIZE: (f32, f32) = (macos_anchor::POPOVER_WIDTH as f32, macos_anchor::POPOVER_HEIGHT as f32);
+#[cfg_attr(target_os = "macos", allow(dead_code))] // not used on macOS
 pub const MARGIN: f32 = 12.0;
 /// A click on the b first takes the focus from the flyout, which hides it; the click itself
 /// arrives after. Within this long, that click is the one that closed it, not a new open.
@@ -41,6 +42,7 @@ pub struct Anchor {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(target_os = "macos", allow(dead_code))] // not used on macOS
 pub enum TaskbarEdge {
     Bottom,
     Top,
@@ -51,6 +53,7 @@ pub enum TaskbarEdge {
 }
 
 /// Which edge the taskbar takes, read from what it leaves of the display.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // not used on macOS
 pub fn taskbar_edge(a: &Anchor) -> TaskbarEdge {
     let (m, w) = (a.monitor, a.work);
     if w.y + w.h < m.y + m.h {
@@ -67,6 +70,7 @@ pub fn taskbar_edge(a: &Anchor) -> TaskbarEdge {
 }
 
 /// The flyout's size on this display, in physical pixels.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // not used on macOS
 pub fn physical_size(a: &Anchor) -> (u32, u32) {
     let scale = if a.scale.is_finite() && a.scale > 0.0 {
         a.scale

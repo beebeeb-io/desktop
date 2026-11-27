@@ -5,6 +5,9 @@
 //! row is never asked of the File Provider (ruling 1701). Must not decide what Finder shows. Never logs a path, a name
 //! or the OS's error text.
 
+// Open in Finder and Show in Finder are not wired to a press in every build yet; kept with their tests.
+#![allow(dead_code)]
+
 use std::ffi::{c_void, CString};
 use std::ptr::NonNull;
 

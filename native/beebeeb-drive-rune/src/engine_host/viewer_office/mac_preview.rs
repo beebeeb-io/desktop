@@ -507,11 +507,7 @@ impl<E: ViewerEngine> Job<E> {
             move |done: u64, total: u64| {
                 progress.0.store(done, Ordering::SeqCst);
                 progress.1.store(total, Ordering::SeqCst);
-                let percent = if total == 0 {
-                    0
-                } else {
-                    done.saturating_mul(100) / total
-                };
+                let percent = done.saturating_mul(100).checked_div(total).unwrap_or(0);
                 if woken.swap(percent, Ordering::SeqCst) != percent {
                     engine.wake();
                 }

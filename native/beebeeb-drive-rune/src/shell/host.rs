@@ -1327,10 +1327,11 @@ const QUIT_HELLO_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 pub fn on_close(s: &mut State, tx: &mut Tx) {
     s.shell.save_window_place();
     // A Mac: the window is gone, so the Dock icon goes with it and the b stays (`macos_lifecycle::dock_icon_wanted`).
-    if cfg!(target_os = "macos") && !macos_lifecycle::dock_icon_wanted(false) {
-        if let Some(main) = &s.shell.wiring.main {
-            main.set_dock_icon(false);
-        }
+    if cfg!(target_os = "macos")
+        && !macos_lifecycle::dock_icon_wanted(false)
+        && let Some(main) = &s.shell.wiring.main
+    {
+        main.set_dock_icon(false);
     }
     if s.shell.close_quits() {
         // Unsaved changes in an open editor: the window stays and asks first.

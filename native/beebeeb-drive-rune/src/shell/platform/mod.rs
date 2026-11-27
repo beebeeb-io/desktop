@@ -190,6 +190,7 @@ pub trait Platform: Send + Sync {
     /// Opens the OS's own folder picker (DW-0738: Windows draws it) with `title`, showing where `start` is.
     /// BLOCKS until the person closed it: a worker's call, never the window's thread. `Ok(None)`: closed
     /// without a folder. The folder is the person's own: shown to them, never logged.
+    #[allow(clippy::needless_return)] // the return ends the macOS branch; the other OSes have the tail below
     fn pick_folder(&self, _title: &str, _start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
         #[cfg(target_os = "macos")]
         {
@@ -207,6 +208,7 @@ pub trait Platform: Send + Sync {
     /// that folder exists. BLOCKS until the person closed it: a worker's call, never the window's thread; asked
     /// modeless like `pick_folder`, and its answer is handed over only for the session of the press
     /// ([`SaveAnswer::for_session`]). The path is shown to the person, never logged.
+    #[allow(clippy::needless_return)] // the return ends the macOS branch; the other OSes have the tail below
     fn pick_save_path(&self, _suggested_name: &str, _start: std::path::PathBuf) -> SaveAnswer {
         #[cfg(target_os = "macos")]
         {

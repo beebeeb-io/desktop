@@ -258,7 +258,7 @@ pub(crate) static GATE_TESTS: Mutex<()> = Mutex::new(());
 /// The one File Provider call in flight per process. A call that finds it taken is told so at once
 /// ([`beebeeb_engine::file_provider_port::is_gate_busy`]) and owes its work to the next tick; it never queues behind
 /// a call that waits on the system.
-pub(crate) struct Gate(MutexGuard<'static, ()>);
+pub(crate) struct Gate(#[allow(dead_code)] MutexGuard<'static, ()>); // the guard is held for its drop
 
 impl Gate {
     pub fn try_enter() -> Result<Self, FpError> {

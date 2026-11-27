@@ -20,6 +20,7 @@ fn page(setup: FinderSetup, reason: Option<FinderFailureReason>) -> Page {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
 fn runtime(scene: &str) -> Runtime<State> {
     let mut state = init();
     assert!(super::super::scene(scene, &mut state), "{scene} is built");
@@ -39,6 +40,7 @@ fn runtime(scene: &str) -> Runtime<State> {
     rt
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
 fn has(rt: &Runtime<State>, key: &str) -> bool {
     rt.elements()
         .iter()

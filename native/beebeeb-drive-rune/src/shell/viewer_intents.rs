@@ -154,6 +154,7 @@ mod apps {
 
     /// The test's apps, for the window's thread.
     #[cfg(test)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
     pub(super) fn fake(apps: &[(&str, &str, &str, bool)]) {
         FAKE.with(|held| {
             *held.borrow_mut() = apps

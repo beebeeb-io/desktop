@@ -72,11 +72,9 @@ pub fn parse(source: &str) -> Vec<Block> {
             Event::End(TagEnd::Heading(_)) => {
                 blocks.push(Block::Heading(heading.take().unwrap_or(1), std::mem::take(&mut line)));
             }
-            Event::End(TagEnd::Paragraph) => {
-                // A paragraph inside a list item is that item's words.
-                if items.is_empty() && !line.is_empty() {
-                    blocks.push(Block::Para(std::mem::take(&mut line)));
-                }
+            // A paragraph inside a list item is that item's words.
+            Event::End(TagEnd::Paragraph) if items.is_empty() && !line.is_empty() => {
+                blocks.push(Block::Para(std::mem::take(&mut line)));
             }
             Event::Start(Tag::List(_)) => {
                 // A nested list: what the parent item said so far stays its own line.

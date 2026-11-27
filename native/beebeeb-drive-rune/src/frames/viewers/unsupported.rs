@@ -65,8 +65,10 @@ impl UnsupportedReason {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Note {
     /// The file is coming down to this Mac before it opens.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // made only on macOS
     Downloading,
     /// It is here, and the app was asked to open it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // made only on macOS
     Opening,
     /// Dm-83: the app (its name) was started with the file: it opened there, whatever the system said after.
     Opened(String),
@@ -176,13 +178,17 @@ pub const IN_THE_CLOUD: &str = "In the cloud, safe in Beebeeb.";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InFinder {
     /// On this Mac.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // made only on macOS
     Here,
     /// Only in the cloud (`SF_DATALESS`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // made only on macOS
     Cloud,
     /// A Mac, and Finder has not said yet (setup still running, not read yet). Dm-87, RC16: the .eps page said
     /// "In the cloud" for a local file while Finder setup ran.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // made only on macOS
     Unknown,
     /// Not a Mac: there is no Finder state, only where the viewer opened the file from.
+    #[cfg_attr(target_os = "macos", allow(dead_code))] // made only off macOS
     NotTracked,
 }
 

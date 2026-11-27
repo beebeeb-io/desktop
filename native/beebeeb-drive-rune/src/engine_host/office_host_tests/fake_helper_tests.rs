@@ -362,6 +362,7 @@ impl Fake {
     }
 
     /// The first `n` starts fail with `error`; the ones after start as usual.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
     pub(super) fn refusing_first(mut self, n: usize, error: SandboxError) -> Fake {
         self.refused_first = (n, Some(error));
         self

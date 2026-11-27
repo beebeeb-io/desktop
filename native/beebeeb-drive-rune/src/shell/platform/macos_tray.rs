@@ -120,6 +120,7 @@ unsafe extern "C" {
     fn class_addMethod(class: Id, sel: Sel, imp: *const c_void, types: *const c_char) -> bool;
 }
 #[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {}
 #[link(name = "Foundation", kind = "framework")]
 unsafe extern "C" {}
 unsafe extern "C" {
@@ -227,6 +228,7 @@ fn shared() -> Option<Arc<Shared>> {
 }
 
 /// The object that receives the button's action and the menu's: a class made once.
+#[allow(unused_unsafe)] // a send! nested in another expands inside its unsafe block
 fn target() -> Id {
     *TARGET.get_or_init(|| {
         let name = CString::new("BBMenuBarTarget").expect("name");
@@ -297,6 +299,7 @@ fn current_anchor(button: Id) -> Option<Anchor> {
 
 /// The popover's native look, once its window exists and is still hidden: transparent window with a system
 /// shadow, content rounded like a macOS popover, above other windows, off Mission Control and the window list.
+#[allow(unused_unsafe)] // a send! nested in another expands inside its unsafe block
 pub fn adopt_popover(ns_view: *mut c_void) {
     if ns_view.is_null() {
         return;
@@ -362,6 +365,7 @@ extern "C" fn picked(_this: Id, _cmd: Sel, sender: Id) {
 }
 
 /// Opens the menu under the item: assigned for one click, then taken off again so a left click still reaches the action.
+#[allow(unused_unsafe)] // a send! nested in another expands inside its unsafe block
 fn show_menu(shared: &Shared, button: Id) {
     let spec = shared.menu.lock().map(|m| m.clone()).unwrap_or_default();
     let menu = send!(Id; send!(Id; class("NSMenu"), "alloc"), "init");
@@ -398,6 +402,7 @@ fn show_menu(shared: &Shared, button: Id) {
     send!((); item, "setMenu:", std::ptr::null_mut::<c_void>() => Id);
 }
 
+#[allow(unused_unsafe)] // a send! nested in another expands inside its unsafe block
 fn template_image() -> Id {
     let data = |bytes: &[u8]| send!(Id; class("NSData"), "dataWithBytes:length:", bytes.as_ptr() as *const c_void => *const c_void, bytes.len() as c_ulong => c_ulong);
     let image = send!(Id; send!(Id; class("NSImage"), "alloc"), "initWithData:", data(TEMPLATE_1X) => Id);
