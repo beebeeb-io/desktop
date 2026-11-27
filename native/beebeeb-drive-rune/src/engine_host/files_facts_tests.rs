@@ -94,6 +94,8 @@ fn world(tag: &str) -> World {
     row(&db, "f-shot", "Trip/Invented shot.jpg", 30_000, false);
     row(&db, "f-plan", "Invented plan.pdf", 500, false);
     row(&db, "f-clip", "Invented clip.mov", 200_000, false);
+    row(&db, "d-backups", "Backups", 0, true);
+    db.mark_backups_root_for_test("d-backups").unwrap();
     row(&db, "f-back", "Backups/Invented phone/Invented backed.jpg", 9_000_000, false);
     db.set_recursive_pin("d-trip", true, 1).unwrap();
     db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email)))
