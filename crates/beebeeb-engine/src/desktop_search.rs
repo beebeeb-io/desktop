@@ -2,9 +2,11 @@
 //! query, and push/pull the encrypted shards. Must not touch the UI or decide Finder revealability.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use beebeeb_core::kdf::MasterKey;
 use beebeeb_core::search_index::{DEFAULT_NUM_SHARDS, EncryptedShard, SearchIndex, tokenize};
@@ -340,18 +342,189 @@ async fn load_remote_index_from_store(store: &impl SearchShardStore) -> anyhow::
     )?))
 }
 
+/// Hard cap on search-index requests one device may make in [`REQUEST_WINDOW`]. A full first push of a large
+/// account is two requests per shard page (about 130 for 64 buckets), so the cap leaves room for that once and
+/// for a few incremental passes, but stops any loop long before it can hold the account's rate tier at its ceiling.
+pub const MAX_REQUESTS_PER_WINDOW: usize = 400;
+pub const REQUEST_WINDOW: Duration = Duration::from_secs(600);
+const RETRY_BACKOFF_FIRST: Duration = Duration::from_secs(60);
+const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// A sliding-window request budget shared by every call a device makes to the search-index endpoints.
+#[derive(Debug)]
+pub struct RequestBudget {
+    cap: usize,
+    window: Duration,
+    stamps: Mutex<VecDeque<Instant>>,
+}
+
+impl RequestBudget {
+    pub fn new(cap: usize, window: Duration) -> Self {
+        Self {
+            cap,
+            window,
+            stamps: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// Count one request, or refuse it (and log) when the window is full.
+    fn take(&self) -> anyhow::Result<()> {
+        let now = Instant::now();
+        let mut stamps = self.stamps.lock().unwrap_or_else(|e| e.into_inner());
+        while stamps.front().is_some_and(|t| now.duration_since(*t) >= self.window) {
+            stamps.pop_front();
+        }
+        if stamps.len() >= self.cap {
+            tracing::warn!(
+                cap = self.cap,
+                window_secs = self.window.as_secs(),
+                "search-index request cap reached; no further shard requests until the window slides"
+            );
+            anyhow::bail!("search-index request cap reached");
+        }
+        stamps.push_back(now);
+        Ok(())
+    }
+}
+
+/// A store that counts every request against a [`RequestBudget`] before it is made.
+struct BudgetedStore<'a, S> {
+    inner: &'a S,
+    budget: &'a RequestBudget,
+}
+
+impl<S: SearchShardStore> SearchShardStore for BudgetedStore<'_, S> {
+    fn master_key_bytes(&self) -> [u8; 32] {
+        self.inner.master_key_bytes()
+    }
+    fn fetch_manifest<'a>(&'a self) -> StoreFuture<'a, Vec<SearchShardRef>> {
+        Box::pin(async move {
+            self.budget.take()?;
+            self.inner.fetch_manifest().await
+        })
+    }
+    fn get_shard<'a>(&'a self, bucket: u32, page: u32) -> StoreFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move {
+            self.budget.take()?;
+            self.inner.get_shard(bucket, page).await
+        })
+    }
+    fn put_shard<'a>(&'a self, shard: EncryptedShard) -> StoreFuture<'a, SearchShardRef> {
+        Box::pin(async move {
+            self.budget.take()?;
+            self.inner.put_shard(shard).await
+        })
+    }
+    fn delete_shard<'a>(&'a self, bucket: u32, page: u32) -> StoreFuture<'a, ()> {
+        Box::pin(async move {
+            self.budget.take()?;
+            self.inner.delete_shard(bucket, page).await
+        })
+    }
+}
+
+/// What one device keeps between ticks to decide whether the shard sync has anything to do.
+///
+/// A sync runs only when the local names changed since the last SUCCESSFUL push (`pushed`), and only the buckets
+/// those names touch are written. A failed sync is retried after a growing pause, never on the next tick, and
+/// every request counts against a per-device budget.
+pub struct SearchSyncState {
+    /// id -> name as last pushed; `None` until the first successful push.
+    pushed: Option<BTreeMap<String, String>>,
+    failures: u32,
+    retry_after: Option<Instant>,
+    budget: RequestBudget,
+}
+
+impl Default for SearchSyncState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SearchSyncState {
+    pub fn new() -> Self {
+        Self::with_budget(RequestBudget::new(MAX_REQUESTS_PER_WINDOW, REQUEST_WINDOW))
+    }
+
+    pub fn with_budget(budget: RequestBudget) -> Self {
+        Self {
+            pushed: None,
+            failures: 0,
+            retry_after: None,
+            budget,
+        }
+    }
+
+    fn up_to_date(&self, local: &LocalSearchIndex) -> bool {
+        self.pushed.as_ref().is_some_and(|pushed| {
+            pushed.len() == local.records.len()
+                && local
+                    .records
+                    .iter()
+                    .all(|(id, r)| pushed.get(id).is_some_and(|name| *name == r.name))
+        })
+    }
+
+    /// Sync the local index to the server if names changed since the last successful push and no backoff is
+    /// running. Makes no request at all otherwise.
+    pub async fn sync_if_due(
+        &mut self,
+        db: &StateDb,
+        index: &IncrementalLocalIndex,
+        store: &impl SearchShardStore,
+    ) -> Option<anyhow::Result<SearchIndexSyncSummary>> {
+        let local = index.local()?;
+        if self.up_to_date(local) {
+            return None;
+        }
+        if self.retry_after.is_some_and(|t| Instant::now() < t) {
+            return None;
+        }
+        let budgeted = BudgetedStore {
+            inner: store,
+            budget: &self.budget,
+        };
+        let result = sync_local_index_to_store(db, local, &budgeted, self.pushed.as_ref()).await;
+        match &result {
+            Ok(_) => {
+                self.pushed = Some(
+                    local
+                        .records
+                        .iter()
+                        .map(|(id, r)| (id.clone(), r.name.clone()))
+                        .collect(),
+                );
+                self.failures = 0;
+                self.retry_after = None;
+            }
+            Err(_) => {
+                self.failures = self.failures.saturating_add(1);
+                let pause = RETRY_BACKOFF_FIRST
+                    .saturating_mul(1u32 << self.failures.saturating_sub(1).min(10))
+                    .min(RETRY_BACKOFF_MAX);
+                self.retry_after = Some(Instant::now() + pause);
+            }
+        }
+        Some(result)
+    }
+}
+
 pub async fn sync_local_index_to_remote(
     db: &StateDb,
     local: &LocalSearchIndex,
     api: &ApiClient,
 ) -> anyhow::Result<SearchIndexSyncSummary> {
-    sync_local_index_to_store(db, local, api).await
+    sync_local_index_to_store(db, local, api, None).await
 }
 
+/// Push the local names. `pushed` is what this device last pushed: with it only the names that differ are applied
+/// and only the buckets they touch are written (first push: every bucket, remote-only stale pages deleted).
 async fn sync_local_index_to_store(
     db: &StateDb,
     local: &LocalSearchIndex,
     store: &impl SearchShardStore,
+    pushed: Option<&BTreeMap<String, String>>,
 ) -> anyhow::Result<SearchIndexSyncSummary> {
     let master_key = MasterKey::from_bytes(store.master_key_bytes());
     let remote_manifest = store.fetch_manifest().await?;
@@ -378,17 +551,33 @@ async fn sync_local_index_to_store(
         }
     }
     let mut index = SearchIndex::from_encrypted_shards(&master_key, &remote_shards, DEFAULT_NUM_SHARDS)?;
+    // Buckets whose content really changes. A name this device already pushed is not applied again.
+    let mut dirty: BTreeSet<u32> = BTreeSet::new();
     // Preserve readable entries from concurrent devices, and replay only known
     // local names/removals. Unavailable rows are not deletion instructions.
     for entry in db.list_owned_key_records()? {
         if !partial && db.get_file(&entry.file_id)?.is_none() {
-            index.remove(&entry.file_id);
+            dirty.extend(index.remove(&entry.file_id));
         }
     }
-    for (id, entry) in &local.records {
-        index.upsert(id, &entry.name);
+    if let Some(pushed) = pushed {
+        if !partial {
+            for id in pushed.keys().filter(|id| !local.records.contains_key(*id)) {
+                dirty.extend(index.remove(id));
+            }
+        }
+        for (id, entry) in &local.records {
+            if pushed.get(id) != Some(&entry.name) {
+                dirty.extend(index.upsert(id, &entry.name));
+            }
+        }
+    } else {
+        for (id, entry) in &local.records {
+            dirty.extend(index.upsert(id, &entry.name));
+        }
+        dirty.extend(remote_manifest.iter().map(|r| r.bucket));
     }
-    let encrypted = index.encrypt_shards(&master_key)?;
+    let encrypted = index.encrypt_buckets(&master_key, &dirty)?;
 
     let remote_versions: BTreeMap<(u32, u32), i64> = remote_manifest
         .iter()
@@ -406,7 +595,12 @@ async fn sync_local_index_to_store(
                 .saturating_add(1),
         })
         .collect();
-    let remote_refs: Vec<ShardRef> = remote_manifest.iter().map(to_core_shard_ref).collect();
+    // Only the dirty buckets are authoritative: remote pages of other buckets are not ours to delete.
+    let remote_refs: Vec<ShardRef> = remote_manifest
+        .iter()
+        .filter(|r| dirty.contains(&r.bucket))
+        .map(to_core_shard_ref)
+        .collect();
     let plan = search_sync::diff_manifest(&local_refs, &remote_refs, true);
 
     let shard_map: BTreeMap<ShardCoord, EncryptedShard> = encrypted
@@ -776,6 +970,7 @@ mod tests {
                 &db,
                 &super::build_local_index(&db).unwrap(),
                 &store,
+                None,
             ))
             .expect("sync local index");
 
@@ -816,6 +1011,141 @@ mod tests {
                 && r.path != "/api/v1/search-index/shards"),
             "remote round-trip must fetch raw shard bytes by bucket/page"
         );
+    }
+
+    /// RS-g: two devices of one account, one file change. Each syncs; afterwards a long idle (many ticks
+    /// with nothing changed) must make no search-index request at all.
+    #[test]
+    fn two_engines_settle_and_make_no_requests_when_idle() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let master_key = [9u8; 32];
+        let store = FixtureSearchStore::new(master_key, "tok");
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let dbs: Vec<StateDb> = dirs
+            .iter()
+            .map(|d| {
+                let db = StateDb::open(d.path().join("state.db")).unwrap();
+                seed_file(&db, "a", "Docs/alpha.txt", ItemKind::File);
+                seed_file(&db, "b", "Docs/bravo.txt", ItemKind::File);
+                db
+            })
+            .collect();
+        let mut engines: Vec<(super::IncrementalLocalIndex, super::SearchSyncState)> = dbs
+            .iter()
+            .map(|_| (super::IncrementalLocalIndex::new(), super::SearchSyncState::new()))
+            .collect();
+        // One file change on both devices (the other device's change arrives through normal sync).
+        for db in &dbs {
+            seed_file(db, "c", "Docs/charlie.txt", ItemKind::File);
+        }
+        for _pass in 0..2 {
+            for (i, (index, state)) in engines.iter_mut().enumerate() {
+                index.refresh(&dbs[i]).unwrap();
+                let _ = rt.block_on(state.sync_if_due(&dbs[i], index, &store));
+            }
+        }
+        let settled = store.requests().len();
+        assert!(settled > 0, "the first pass must push the index");
+        // Ten idle minutes: a tick every 2 s on each device.
+        for _tick in 0..300 {
+            for (i, (index, state)) in engines.iter_mut().enumerate() {
+                index.refresh(&dbs[i]).unwrap();
+                let _ = rt.block_on(state.sync_if_due(&dbs[i], index, &store));
+            }
+        }
+        assert_eq!(
+            store.requests().len() - settled,
+            0,
+            "idle devices must make no search-index requests"
+        );
+        eprintln!(
+            "RS-g idle requests: {}, settle requests: {settled}",
+            store.requests().len() - settled
+        );
+        // Merged result is complete.
+        let restored = rt
+            .block_on(super::load_remote_index_from_store(&store))
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.file_count(), 3);
+    }
+
+    /// RS-g: a sync that keeps failing (here: an unreadable remote shard on a partial listing) must back off,
+    /// not retry on every tick.
+    #[test]
+    fn a_failing_sync_backs_off_instead_of_retrying_every_tick() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let store = FixtureSearchStore::new([9u8; 32], "tok");
+        store.insert_shard(3, 0, 5, vec![1, 2, 3]); // not decryptable
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        seed_file(&db, "a", "Docs/alpha.txt", ItemKind::File);
+        // A blocked owner key makes the listing partial, so an unreadable shard defers the rebuild with an error.
+        let mut record = crate::owner_keys::OwnedKeyRecord {
+            file_id: "z".into(),
+            ..Default::default()
+        };
+        record.blocked_fingerprint = Some(record.fingerprint());
+        db.put_owned_key_record(&record).unwrap();
+        let mut index = super::IncrementalLocalIndex::new();
+        let mut state = super::SearchSyncState::new();
+        for _ in 0..200 {
+            index.refresh(&db).unwrap();
+            let _ = rt.block_on(state.sync_if_due(&db, &index, &store));
+        }
+        assert!(store.requests().len() <= 4, "got {} requests", store.requests().len());
+    }
+
+    /// RS-g: a rename after settling writes only the buckets it touches, and the hard cap stops a device.
+    #[test]
+    fn a_rename_writes_only_its_buckets_and_the_cap_holds() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let store = FixtureSearchStore::new([9u8; 32], "tok");
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        for i in 0..40 {
+            seed_file(
+                &db,
+                &format!("f{i}"),
+                &format!("Docs/file number {i}.txt"),
+                ItemKind::File,
+            );
+        }
+        let mut index = super::IncrementalLocalIndex::new();
+        let mut state = super::SearchSyncState::new();
+        index.refresh(&db).unwrap();
+        let first = rt.block_on(state.sync_if_due(&db, &index, &store)).unwrap().unwrap();
+        assert!(first.put_count > 3);
+        seed_file(&db, "f1", "Docs/renamed zzz.txt", ItemKind::File);
+        index.refresh(&db).unwrap();
+        let second = rt.block_on(state.sync_if_due(&db, &index, &store)).unwrap().unwrap();
+        assert!(
+            second.put_count >= 1 && second.put_count < first.put_count,
+            "{second:?} vs {first:?}"
+        );
+        let restored = rt
+            .block_on(super::load_remote_index_from_store(&store))
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.query("zzz"), BTreeSet::from(["f1".to_string()]));
+        assert_eq!(restored.file_count(), 40);
+
+        // A budget of 5 requests per window: the next change cannot get through.
+        let before = store.requests().len();
+        let mut capped =
+            super::SearchSyncState::with_budget(super::RequestBudget::new(5, std::time::Duration::from_secs(600)));
+        let result = rt.block_on(capped.sync_if_due(&db, &index, &store)).unwrap();
+        assert!(result.is_err());
+        assert_eq!(store.requests().len() - before, 5);
     }
 
     #[derive(Clone, Debug)]
