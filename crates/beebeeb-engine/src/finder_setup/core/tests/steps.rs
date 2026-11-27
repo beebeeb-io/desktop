@@ -324,7 +324,8 @@ use super::*;
             "six triggers during one check → exactly one follow-up"
         );
         assert_eq!(sim.s.setup, Ready);
-    
+    }
+
     /// dm-43 (also Windows: the core is shared). The shell's `start_sync` races the check's `StartEngine`, so the
     /// check may "own" an engine the shell wanted. A confirm that times out then must neither fail the check nor
     /// stop that engine: it stays pending and retries with backoff.
@@ -372,4 +373,3 @@ use super::*;
         });
         assert_eq!(sim.count(Op::StopEngine), 1);
     }
-}

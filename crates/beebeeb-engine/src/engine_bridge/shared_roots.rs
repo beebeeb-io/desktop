@@ -74,14 +74,14 @@ impl EngineBridge {
                     )?;
                     Zeroizing::new(*key.as_bytes())
                 };
-                if !(*custody_key == *folder_key) {
+                if *custody_key != *folder_key {
                     return Err(anyhow::anyhow!("custody and invite keys differ").into());
                 };
                 scope.remember_custody(&root.file_id)?;
                 true
             }
             Err(error) if crate::owner_keys::custody_absent(&error) => {
-                if !(!self.db.has_seen_folder_custody(&root.file_id)?) {
+                if self.db.has_seen_folder_custody(&root.file_id)? {
                     return Err(anyhow::anyhow!("This folder's keys are unavailable").into());
                 };
                 false

@@ -2,6 +2,9 @@
 //! (`backup_folders::retag_at_start`). On the fake API, settings written to the test's sandboxed file. One test
 //! per file: the state folder is resolved once per process. Every name is invented.
 
+// The one test is not run on macOS; its helpers are left unused there.
+#![cfg_attr(target_os = "macos", allow(dead_code, unused_imports))]
+
 mod common;
 
 use beebeeb_engine::app::bindings::backup_folders::owner_tag;
@@ -52,4 +55,10 @@ fn the_sync_start_retags_an_address_tagged_chosen_folder_by_the_accounts_id() {
         "the start marks the folder with the account's id"
     );
     s.engine.stop();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_test_build_is_refused_on_macos() {
+    common::assert_the_test_build_is_refused();
 }

@@ -117,7 +117,7 @@ pub fn set_autostart(enabled: bool) -> Result<(), PlatformError> {
     set_with(&MainAppService, enabled)
 }
 
-/// A 0.8.x LaunchAgent is Guus's call: it is left alone and named in the log. Never rewrites, so
+/// A 0.8.x LaunchAgent is the owner's call: it is left alone and named in the log. Never rewrites, so
 /// always false.
 pub fn adopt_autostart() -> Result<bool, PlatformError> {
     if let Some(home) = std::env::var_os("HOME") {

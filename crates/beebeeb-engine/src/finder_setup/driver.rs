@@ -8,6 +8,9 @@
 //! `check` (the loop, the retry schedule and the removal waiters), `details` (the "Copy details"
 //! text). The tests under `tests/` are split by area; their fakes stay in `mod tests` below.
 
+// The loop, its timer and its ports run only on macOS (and in the tests); elsewhere the handle and the view stay.
+#![cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;

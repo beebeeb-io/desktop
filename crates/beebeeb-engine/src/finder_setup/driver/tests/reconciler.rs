@@ -844,6 +844,7 @@ use super::*;
     struct HangingWait;
 
     impl Ports for HangingWait {
+        #[allow(clippy::manual_async_fn)]
         fn run(&mut self, op: Op) -> impl Future<Output = OpResult> + Send {
             async move {
                 match op {
