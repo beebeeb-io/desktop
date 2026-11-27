@@ -561,6 +561,8 @@ impl StateDb {
         ensure_column(conn, "files", "minted_format", "TEXT")?;
         ensure_column(conn, "files", "minted_version_id", "TEXT")?;
         Self::migrate_backup_schema(conn)?;
+        super::folder_digests::create_table(conn)?;
+        super::backup_digest_cache::create_table(conn)?;
         // Upgrade inventory: old one-shot Keep Mine rows may have no queue
         // owner. Preserve their plaintext reference before any resume purge.
         conn.execute(
