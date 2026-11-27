@@ -21,8 +21,8 @@ struct Fake {
     downloads: AtomicU32,
     /// Medium uploads, by file id, with the 404 the send was given.
     sent: Mutex<Vec<(String, bool)>>,
-    /// While set, a download waits for a word on it (taken by the first download only).
-    gate: Mutex<Option<mpsc::Receiver<()>>>,
+    /// While set, every download waits until it is cleared.
+    gate: AtomicBool,
     began: Mutex<Option<mpsc::Sender<()>>>,
 }
 
@@ -104,9 +104,9 @@ impl RepairEngine for Fake {
         if let Some(began) = self.began.lock().unwrap().as_ref() {
             let _ = began.send(());
         }
-        let gate = self.gate.lock().unwrap().take();
-        if let Some(gate) = gate {
-            let _ = gate.recv_timeout(Duration::from_secs(10));
+        let began = Instant::now();
+        while self.gate.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(2));
         }
         Some(zeroize::Zeroizing::new(b"invented picture bytes".to_vec()))
     }
@@ -216,18 +216,18 @@ fn thumb_repair_never_repeats_a_file_in_one_run() {
 #[test]
 fn thumb_repair_stops_cleanly_on_stop() {
     let fake = Fake::with(&[(IDS[0], Some(false)), (IDS[1], Some(false)), (IDS[2], Some(false))]);
-    let (open, gate) = mpsc::channel();
     let (began, has_begun) = mpsc::channel();
-    *fake.gate.lock().unwrap() = Some(gate);
+    fake.gate.store(true, Ordering::SeqCst);
     *fake.began.lock().unwrap() = Some(began);
     let repair = ThumbRepair::with_generate(fake.clone(), picture);
     assert!(repair.start());
-    // The first download is in hand (and held), the second worker may have begun one too: Stop.
+    // Every download is held: both workers have a file in hand (or one has, the other is about to). Stop.
     has_begun
         .recv_timeout(Duration::from_secs(10))
         .expect("a download began");
+    std::thread::sleep(Duration::from_millis(50));
     repair.stop();
-    open.send(()).unwrap();
+    fake.gate.store(false, Ordering::SeqCst);
     let status = ended(&repair);
     assert_eq!(status.phase, Phase::Stopped);
     // At most the files in hand when Stop was pressed (one per worker) were sent; never all three.
