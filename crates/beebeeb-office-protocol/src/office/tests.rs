@@ -593,7 +593,7 @@ fn office_decode_refuses_numbers_that_are_not_finite() {
 #[test]
 fn office_decode_refuses_tags_off_their_list() {
     // DocKind.
-    for tag in [0u8, 7, 0xFF] {
+    for tag in [0u8, 7, 0x1F, 0x2A, 0xFF] {
         let mut p = vec![tag];
         p.extend_from_slice(&[0; 16]);
         assert_eq!(Open::decode(&p), Err(DecodeError::BadTag), "doc kind {tag}");
@@ -1564,4 +1564,20 @@ fn pdf_kind_is_tag_six_and_round_trips() {
     let payload = open.encode().expect("one frame");
     assert_eq!(payload[0], 6);
     assert_eq!(Open::decode(&payload), Ok(open));
+}
+
+/// Drive-macos-92: every picture kind round-trips on its own tag, clear of the documents' tags.
+#[test]
+fn every_picture_kind_round_trips() {
+    let mut tags = std::collections::BTreeSet::new();
+    for kind in PictureKind::ALL {
+        let open = Open {
+            kind: DocKind::Picture(kind),
+            doc: GRANT,
+        };
+        let payload = open.encode().unwrap();
+        assert!((0x20..0x2A).contains(&payload[0]), "{kind:?}");
+        assert!(tags.insert(payload[0]), "{kind:?} shares a tag");
+        assert_eq!(Open::decode(&payload), Ok(open));
+    }
 }

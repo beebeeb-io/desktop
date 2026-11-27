@@ -131,7 +131,45 @@ pub enum DocKind {
     Xls,
     Pptx,
     Pdf,
+    /// Drive-macos-92: a photo the app's own decoders do not read (a HEIC, a camera's RAW), decoded by the helper
+    /// into one page whose size in points is its size in pixels (at most the thumbnails' source size), so page 0 at
+    /// scale 1 is the picture itself. Only the macOS helper decodes it; elsewhere it is `Unsupported`.
+    Picture(PictureKind),
 }
+
+/// The kinds of photo [`DocKind::Picture`] names: the helper hands the kind to the system's decoder as its hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PictureKind {
+    Heic,
+    Heif,
+    Dng,
+    Cr2,
+    Cr3,
+    Nef,
+    Arw,
+    Raf,
+    Orf,
+    Rw2,
+}
+
+impl PictureKind {
+    /// Every kind, in tag order.
+    pub const ALL: [PictureKind; 10] = [
+        PictureKind::Heic,
+        PictureKind::Heif,
+        PictureKind::Dng,
+        PictureKind::Cr2,
+        PictureKind::Cr3,
+        PictureKind::Nef,
+        PictureKind::Arw,
+        PictureKind::Raf,
+        PictureKind::Orf,
+        PictureKind::Rw2,
+    ];
+}
+
+/// A picture's tag on the wire: this plus its place in [`PictureKind::ALL`] (32 to 41), clear of the documents'.
+const PICTURE_TAG: u8 = 0x20;
 
 impl DocKind {
     fn tag(self) -> u8 {
@@ -142,6 +180,9 @@ impl DocKind {
             DocKind::Xls => 4,
             DocKind::Pptx => 5,
             DocKind::Pdf => 6,
+            DocKind::Picture(kind) => {
+                PICTURE_TAG + PictureKind::ALL.iter().position(|k| *k == kind).unwrap_or(0) as u8
+            }
         }
     }
 
@@ -153,7 +194,11 @@ impl DocKind {
             4 => Ok(DocKind::Xls),
             5 => Ok(DocKind::Pptx),
             6 => Ok(DocKind::Pdf),
-            _ => Err(DecodeError::BadTag),
+            tag => tag
+                .checked_sub(PICTURE_TAG)
+                .and_then(|at| PictureKind::ALL.get(usize::from(at)))
+                .map(|kind| DocKind::Picture(*kind))
+                .ok_or(DecodeError::BadTag),
         }
     }
 }
