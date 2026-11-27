@@ -36,7 +36,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::folder_digest::{FolderDigests, RequestCount, WalkError, digest_now, read_folder};
+use crate::folder_digest::{digest_now, read_folder, FolderDigests, RequestCount, WalkError};
 use crate::state_db::folder_digests::DriftChild;
 
 /// How often the check runs at most.
@@ -363,14 +363,15 @@ async fn check(
         let stored =
             frame.whole && verdict == Verdict::Agrees && after_read_holds(bridge, &frame.folder, &count).await?;
         if stored {
-            bridge
-                .db()
-                .update_remote_folder_digests(&[(frame.folder.id.clone(), frame.folder.digest.clone())], &[])?;
+            bridge.db().update_remote_folder_digests(
+                std::slice::from_ref(&(frame.folder.id.clone(), frame.folder.digest.clone())),
+                &[],
+            )?;
             report.stored += 1;
         } else if known.contains_key(&frame.folder.id) {
             bridge
                 .db()
-                .update_remote_folder_digests(&[], &[frame.folder.id.clone()])?;
+                .update_remote_folder_digests(&[], std::slice::from_ref(&frame.folder.id))?;
         }
         if let Some(parent) = stack.last_mut() {
             parent.whole &= stored;
@@ -597,7 +598,7 @@ mod tests {
             state.last_started = Instant::now().checked_sub(CHECK_EVERY);
         });
     }
-    use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
+    use crate::test_api::fake_account::{account_handler, FakeAccount, TEST_PHRASE};
     use crate::test_api::{FakeApi, Handler, Reply, Request};
 
     fn uid(kind: u32, n: u32) -> String {
@@ -839,11 +840,9 @@ mod tests {
         assert_eq!(report.requests, 0);
         fx.tick().await;
         assert_eq!(fx.digest_requests(), 1);
-        assert!(
-            !fx.fake.routes()[before..]
-                .iter()
-                .any(|route| route.contains("/api/v1/files"))
-        );
+        assert!(!fx.fake.routes()[before..]
+            .iter()
+            .any(|route| route.contains("/api/v1/files")));
         assert!(!fx.resnapshot_asked());
     }
 
