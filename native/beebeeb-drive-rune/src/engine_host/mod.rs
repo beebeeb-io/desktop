@@ -374,7 +374,77 @@ mod explorer_select_tests {
 /// path). The launch lock is held, the bridge gate is not.
 #[cfg(target_os = "macos")]
 fn macos_start(path: &std::path::Path) -> Result<(), files_source::ActionError> {
-    crate::shell::platform::macos::macos_fp::open::start_registered(path).map_err(|_| files_source::ActionError::Failed)
+    crate::shell::platform::macos::macos_fp::open::start_registered(path).map_err(|failure| {
+        // Dm-84: the system's domain and code go to the log (RC15 dropped them: "Couldn't open" with nothing to read).
+        tracing::warn!("{}", macos_start_failure_line(&failure));
+        files_source::ActionError::Failed
+    })
+}
+
+/// The log line of a failed Finder open or reveal: which refusal it was, and for the system's its domain and code
+/// (with the underlying one). Never the system's text, a path or an id.
+#[cfg(target_os = "macos")]
+fn macos_start_failure_line(failure: &crate::shell::platform::macos::macos_fp::open::OpenFailure) -> String {
+    use crate::shell::platform::macos::macos_fp::open::OpenFailure;
+    match failure {
+        OpenFailure::Shared => "files: the open failed: a shared item opens in the web app".into(),
+        OpenFailure::NotKnown => "files: the open failed: no row for the item on this Mac".into(),
+        OpenFailure::NoLocation => "files: the open failed: macOS reports no location".into(),
+        OpenFailure::Bridge(error) => match &error.underlying {
+            Some(under) => format!(
+                "files: the open failed: domain={} code={} (underlying domain={} code={})",
+                error.domain, error.code, under.domain, under.code
+            ),
+            None => format!("files: the open failed: domain={} code={}", error.domain, error.code),
+        },
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_start_tests {
+    use super::*;
+    use crate::shell::platform::macos::macos_fp::open::OpenFailure;
+    use beebeeb_engine::finder_setup::error::{FpError, FpErrorCode};
+
+    /// Dm-84: a failed open keeps the system's domain and code for the log, not only "Couldn't open".
+    #[test]
+    fn macos_start_keeps_the_error_code() {
+        let mut error = FpError::new("NSCocoaErrorDomain", 256, "text that is never logged");
+        assert_eq!(
+            macos_start_failure_line(&OpenFailure::Bridge(error.clone())),
+            "files: the open failed: domain=NSCocoaErrorDomain code=256"
+        );
+        error.underlying = Some(FpErrorCode {
+            domain: "NSOSStatusErrorDomain".into(),
+            code: -10673,
+        });
+        let line = macos_start_failure_line(&OpenFailure::Bridge(error));
+        assert!(line.ends_with("(underlying domain=NSOSStatusErrorDomain code=-10673)"));
+        assert!(!line.contains("never logged"), "{line}");
+        assert!(macos_start_failure_line(&OpenFailure::NoLocation).contains("no location"));
+    }
+
+    unsafe extern "C" {
+        /// `packaging/macos/FileProviderBridge.m`: the rule of the Files list's open (0 = opened, -1 = refused).
+        fn beebeeb_open_outcome(answered: i32, handed: i32, has_error: i32, ran_before: i32, runs_now: i32) -> i32;
+    }
+
+    /// Dm-84 (83's rule, RC15's .eps): an app that is launched with the file opens it, also when its launch takes
+    /// longer than the bridge's 5 s; only an error with no app, or a silence with nothing started, is "Couldn't open".
+    #[test]
+    fn a_launch_that_completes_after_five_seconds_is_opened() {
+        // SAFETY: a pure function of five integers.
+        let outcome = |a, h, e, before, now| unsafe { beebeeb_open_outcome(a, h, e, before, now) };
+        // No answer in 5 s, the app was started with the file: opened.
+        assert_eq!(outcome(0, 0, 0, 0, 1), 0);
+        // No answer and the app ran before: nothing shows it opened.
+        assert_eq!(outcome(0, 0, 0, 1, 1), -1);
+        assert_eq!(outcome(0, 0, 0, 0, 0), -1, "no answer, nothing started");
+        // The app was handed the file and the system also answered an error.
+        assert_eq!(outcome(1, 1, 1, 0, 0), 0);
+        assert_eq!(outcome(1, 0, 1, 0, 0), -1, "an error and no app");
+        assert_eq!(outcome(1, 1, 0, 1, 0), 0, "a plain answer");
+    }
 }
 
 /// Reveal a file or folder in File Explorer / Finder / Files. Never passes the

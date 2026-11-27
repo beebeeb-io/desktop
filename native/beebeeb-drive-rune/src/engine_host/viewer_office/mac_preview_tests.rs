@@ -18,8 +18,14 @@ use crate::engine_host::office_host::EditKind;
 use crate::engine_host::viewer::viewer_media::playback_ready_for;
 use crate::frames::viewers::source::{Elsewhere, ViewerSource};
 
-const FILES: [(&str, &str, &[u8]); 5] = [
+const FILES: [(&str, &str, &[u8]); 6] = [
     ("p1", "invented-pricelist.pdf", b"invented pdf bytes"),
+    // Dm-84: a PDF whose helper cannot start (the stand-in's marker).
+    (
+        "p2",
+        "invented-unstarted.pdf",
+        b"invented pdf bytes\n%the-stand-in-cannot-start\n",
+    ),
     ("v1", "invented-clip.mov", b"invented video bytes"),
     ("d1", "invented-letter.docx", b"invented document bytes"),
     ("x1", "invented-thing.xyz", b"invented unknown bytes"),
@@ -952,4 +958,112 @@ fn without_the_helper_a_pdf_goes_to_quick_look_too() {
     assert!(matches!(file.body, Body::Decrypting { .. }), "{:?}", file.body);
     let body = rig.settle("p1");
     stage_of(&body, NativeKind::QuickLook);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// dm-84 (RC15): the sandbox is asked without a start; a start that fails for the document itself goes to Quick Look.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Polls until `done` holds or 10 s passed.
+fn poll_until(rig: &mut Rig, file_id: &str, done: impl Fn() -> bool) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !done() && Instant::now() < until {
+        let _ = rig.source.poll(file_id);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The editor's helper could not start (refused, and refused again): Quick Look shows the .docx, never the page that
+/// says the viewer stopped; opening it again (Try again's way) tries the editor again.
+#[test]
+fn a_docx_whose_helper_cannot_start_goes_to_quick_look_and_opening_again_tries_the_editor() {
+    use crate::engine_host::office_host::{OfficeState as HostState, Stop};
+    use crate::engine_host::viewer::office_tests::Fake;
+    let (mut rig, asked, _) = rig_with_helper(Ok(()));
+    let fake = Fake::default();
+    let edits = Arc::new(AtomicUsize::new(0));
+    let (editor, count) = (fake.clone(), edits.clone());
+    rig.source.office.edit_opener = Box::new(move |_, kind, _, _, _| {
+        count.fetch_add(1, Ordering::SeqCst);
+        editor.editor(kind)
+    });
+    let file = rig.source.open("d1").expect("opens");
+    assert!(
+        matches!(file.body, Body::OfficeState(_)),
+        "the helper's route: {:?}",
+        file.body
+    );
+    poll_until(&mut rig, "d1", || edits.load(Ordering::SeqCst) == 1);
+    assert_eq!(edits.load(Ordering::SeqCst), 1, "the editor was started");
+    fake.set(HostState::Stopped {
+        why: Stop::Failed,
+        can_retry: false,
+    });
+    let body = rig.settle("d1");
+    stage_of(&body, NativeKind::QuickLook);
+    assert_eq!(rig.seen().embedded.len(), 1, "Quick Look was handed the document");
+    assert_eq!(rig.seen().embedded[0].1.file_name().unwrap(), "invented-letter.docx");
+
+    // Opened again: the editor is tried again, not Quick Look straight away.
+    let again = rig.source.open("d1").expect("opens");
+    assert!(matches!(again.body, Body::OfficeState(_)), "{:?}", again.body);
+    poll_until(&mut rig, "d1", || edits.load(Ordering::SeqCst) == 2);
+    assert_eq!(edits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        1,
+        "the sandbox is asked once, and starts nothing"
+    );
+}
+
+/// A document that opened and whose helper stopped later keeps the stopped page (Try again): only a start goes to
+/// Quick Look.
+#[test]
+fn a_helper_that_stops_after_the_docx_opened_is_not_sent_to_quick_look() {
+    use crate::engine_host::office_host::{OfficeState as HostState, PageSize, Stop};
+    use crate::engine_host::viewer::office_tests::Fake;
+    let (mut rig, _, _) = rig_with_helper(Ok(()));
+    let fake = Fake::default();
+    let edits = Arc::new(AtomicUsize::new(0));
+    let (editor, count) = (fake.clone(), edits.clone());
+    rig.source.office.edit_opener = Box::new(move |_, kind, _, _, _| {
+        count.fetch_add(1, Ordering::SeqCst);
+        editor.editor(kind)
+    });
+    rig.source.open("d1").expect("opens");
+    poll_until(&mut rig, "d1", || edits.load(Ordering::SeqCst) == 1);
+    fake.set(HostState::Pages {
+        pages: 1,
+        sizes: vec![PageSize {
+            w_pt: 612.0,
+            h_pt: 792.0,
+        }],
+    });
+    let opened = rig.settle("d1");
+    assert!(
+        !matches!(opened, Some(Body::OfficeState(_)) | Some(Body::Native(_))),
+        "{opened:?}"
+    );
+    fake.set(HostState::Stopped {
+        why: Stop::Exited,
+        can_retry: false,
+    });
+    let body = rig.settle("d1");
+    assert!(matches!(body, Some(Body::OfficeState(_))), "the stopped page: {body:?}");
+    assert!(rig.seen().embedded.is_empty(), "Quick Look was not asked");
+}
+
+/// The PDF's helper could not start (RC15: "The viewer stopped while showing this file"): Quick Look shows it.
+#[test]
+fn a_pdf_whose_helper_cannot_start_goes_to_quick_look() {
+    let (mut rig, asked, _) = rig_with_helper(Ok(()));
+    let file = rig.source.open("p2").expect("opens");
+    assert!(matches!(file.body, Body::Decrypting { .. }), "{:?}", file.body);
+    assert!(rig.source.media.mac.on.is_none(), "the helper's route first");
+    let body = rig.settle("p2");
+    stage_of(&body, NativeKind::QuickLook);
+    let seen = rig.seen();
+    assert_eq!(seen.embedded.len(), 1);
+    assert_eq!(seen.embedded[0].1.file_name().unwrap(), "invented-unstarted.pdf");
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
 }

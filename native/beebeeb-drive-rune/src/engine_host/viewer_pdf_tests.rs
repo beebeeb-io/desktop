@@ -135,9 +135,13 @@ fn open(bytes: Vec<u8>) -> Result<Document, NotOpened> {
 /// made to break it.
 pub(crate) const STOPS_AT_A_PAGE: &[u8] = b"\n%the-stand-in-stops-at-a-page\n";
 
+/// Put at the end of a PDF's bytes: the stand-in's helper could not start (dm-84: the sandbox refused it twice).
+pub(crate) const CANNOT_START: &[u8] = b"\n%the-stand-in-cannot-start\n";
+
 /// The helper's stand-in: the same answers the host gives for a PDF, drawn in this process (tests only).
 struct StandIn {
     document: Result<Document, NotOpened>,
+    cannot_start: bool,
     stops: bool,
     stopped: bool,
     came: Vec<Came>,
@@ -145,7 +149,9 @@ struct StandIn {
 
 pub(crate) fn stand_in(bytes: Zeroizing<Vec<u8>>) -> Box<dyn Renderer> {
     let stops = bytes.ends_with(STOPS_AT_A_PAGE);
+    let cannot_start = bytes.ends_with(CANNOT_START);
     Box::new(StandIn {
+        cannot_start,
         document: Document::open(bytes),
         stops,
         stopped: false,
@@ -155,6 +161,12 @@ pub(crate) fn stand_in(bytes: Zeroizing<Vec<u8>>) -> Box<dyn Renderer> {
 
 impl Renderer for StandIn {
     fn state(&self) -> OfficeState {
+        if self.cannot_start {
+            return OfficeState::Stopped {
+                why: Stop::Failed,
+                can_retry: true,
+            };
+        }
         if self.stopped {
             return OfficeState::Stopped {
                 why: Stop::Exited,

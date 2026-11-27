@@ -37,7 +37,13 @@
 //!   first to be closed and is then refused with system code 16; the file falls back to Quick Look. Dropping a
 //!   `Child` ends the service's process (`xpc_connection_kill`, then the connection is cancelled) and waits for the
 //!   kernel's notice of its exit before the next start, so every document gets a process of its own. The service
-//!   also ends itself when its connection is gone (the app closed it, or died).
+//!   also ends itself when its connection is gone (the app closed it, or died). A process not seen to end within that
+//!   wait is waited for again by the next start, before it connects ([`Slot::wait_for_previous`]).
+//! - **The start's wait** (dm-84, RC15): the system starts the process, so the wait for the service's answer holds
+//!   that start: [`SERVICE_HANDSHAKE_BOUND`], 30 s. launchd holds back the start of a service whose last process ran
+//!   for less than 10 s, and a cold first launch checks a large executable; RC15 waited 10 s and refused exactly
+//!   then. Every start says in the log how long the answer took, or why none came (timed out, interrupted, invalid),
+//!   and a refusal names the check that failed.
 //! - **Checked before any grant** ([`judge_service`]): the kernel's own answers for the service's process, asked by
 //!   the app, and the entitlements of its signature, exactly the one. The kernel denies an App Sandbox 13 of the 22
 //!   operations the deny-default profile denies, plus the user's home; the other nine are named at
@@ -64,8 +70,8 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::{
-    Check, Facts, HANDSHAKE_BOUND, MUST_BE_ALLOWED, MUST_BE_DENIED, PROFILE_VERSION, REAP_BOUND, STATE_CONFINED,
-    STATE_REFUSED, Status, UNKNOWN_EXIT_CODE, denied, errno, lock, owned, pipe, read_facts, sys,
+    Check, Facts, MUST_BE_ALLOWED, MUST_BE_DENIED, PROFILE_VERSION, REAP_BOUND, STATE_CONFINED, STATE_REFUSED, Status,
+    UNKNOWN_EXIT_CODE, denied, errno, lock, owned, pipe, read_facts, sys,
 };
 use crate::{ExitStatus, KILLED_EXIT_CODE, Limits, Mode, Pipes, SandboxError};
 
@@ -74,6 +80,38 @@ pub(super) const STATE_APP_SANDBOX: u32 = 3;
 
 /// How long a second start waits for the one running helper to be closed.
 pub(super) const SERVICE_WAIT: Duration = Duration::from_secs(3);
+
+/// How long the app waits for its service's answer (dm-84). The system starts the service's process, so the wait
+/// holds that start too: a cold first launch checks the code of a large executable, and launchd holds back the next
+/// start of a service whose last process ran for less than 10 s ("pushing respawn out by 10 seconds"). RC15 waited
+/// 10 s (the bound for a helper the app starts itself, `HANDSHAKE_BOUND`) and refused both first starts exactly
+/// then. The answer is still checked in full before anything is handed over.
+pub(super) const SERVICE_HANDSHAKE_BOUND: Duration = Duration::from_secs(30);
+
+/// How long a start waits for the process of the document before it (killed, or ending itself) to be gone: the
+/// system runs one process per service, so a connection made while that one still runs reaches it, and it serves one
+/// document only.
+pub(super) const PREVIOUS_EXIT_BOUND: Duration = Duration::from_secs(10);
+
+/// A service the checks refuse while it says it is confined is asked once more after this long: the kernel's view of
+/// a process that has just confined itself can lag its own report.
+pub(super) const RECHECK_AFTER: Duration = Duration::from_millis(250);
+
+/// The waits of one service start ([`start_service`]); the tests shorten them.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Bounds {
+    pub(super) handshake: Duration,
+    pub(super) reap: Duration,
+    pub(super) recheck: Duration,
+}
+
+impl Bounds {
+    pub(super) const SERVICE: Bounds = Bounds {
+        handshake: SERVICE_HANDSHAKE_BOUND,
+        reap: REAP_BOUND,
+        recheck: RECHECK_AFTER,
+    };
+}
 
 /// System code 16: the one service process is taken by another document.
 const EBUSY: u32 = 16;
@@ -126,6 +164,9 @@ unsafe extern "C" {
     static _NSConcreteGlobalBlock: [*const c_void; 32];
     pub(super) static _xpc_type_dictionary: c_void;
     static _xpc_type_shmem: c_void;
+    static _xpc_type_error: c_void;
+    static _xpc_error_connection_interrupted: c_void;
+    static _xpc_error_connection_invalid: c_void;
 
     fn xpc_connection_create(name: *const c_char, queue: *mut c_void) -> XpcObject;
     pub(super) fn xpc_connection_set_event_handler(connection: XpcObject, handler: *const Block);
@@ -335,6 +376,9 @@ pub(super) struct ServiceFacts {
     pub(super) app_denied: usize,
     /// How many were asked (`0` when the user's home could not be named: nothing is taken for denied then).
     pub(super) app_asked: usize,
+    /// The first of those the kernel did not report as denied: its place in [`APP_SANDBOX_DENIES`] followed by
+    /// [`HOME_CHECKS`] ([`app_check_name`] names it in the log).
+    pub(super) first_allowed: Option<usize>,
     /// The running code is valid against its signature.
     pub(super) signature_valid: bool,
     /// The entitlements of the signature: how many, and whether `com.apple.security.app-sandbox` is true.
@@ -401,20 +445,45 @@ fn home() -> Option<Vec<u8>> {
     }
 }
 
+/// The name of one of the App Sandbox checks in the log: its operation and its place (`~` is the user's home).
+pub(super) fn app_check_name(index: usize) -> String {
+    let text = |value: &CStr| value.to_string_lossy().into_owned();
+    if let Some(check) = APP_SANDBOX_DENIES.get(index) {
+        return match *check {
+            Check::Plain(operation) => text(operation),
+            Check::Path(operation, place) | Check::Service(operation, place) => {
+                format!("{} {}", text(operation), text(place))
+            }
+        };
+    }
+    match HOME_CHECKS.get(index - APP_SANDBOX_DENIES.len().min(index)) {
+        Some((operation, below)) => format!("{} ~{below}", text(operation)),
+        None => String::from("unknown"),
+    }
+}
+
 /// Reads what [`judge_service`] judges about the process `pid`.
 pub(super) fn read_service_facts(pid: c_int, status: Option<Status>) -> ServiceFacts {
-    let mut app_denied = APP_SANDBOX_DENIES
-        .iter()
-        .filter(|check| denied(pid, **check) == Some(true))
-        .count();
+    let mut first_allowed = None;
+    let mut app_denied = 0;
+    for (index, check) in APP_SANDBOX_DENIES.iter().enumerate() {
+        if denied(pid, *check) == Some(true) {
+            app_denied += 1;
+        } else {
+            first_allowed.get_or_insert(index);
+        }
+    }
     let mut app_asked = 0;
     if let Some(home) = home() {
         app_asked = APP_SANDBOX_DENIES.len() + HOME_CHECKS.len();
-        for (operation, below) in HOME_CHECKS {
+        for (index, (operation, below)) in HOME_CHECKS.iter().enumerate() {
             let mut path = home.clone();
             path.extend_from_slice(below.as_bytes());
-            if let Ok(path) = CString::new(path) {
-                app_denied += usize::from(super::denied_path(pid, operation, &path) == Some(true));
+            let refused = CString::new(path).is_ok_and(|path| super::denied_path(pid, operation, &path) == Some(true));
+            if refused {
+                app_denied += 1;
+            } else {
+                first_allowed.get_or_insert(APP_SANDBOX_DENIES.len() + index);
             }
         }
     }
@@ -423,6 +492,7 @@ pub(super) fn read_service_facts(pid: c_int, status: Option<Status>) -> ServiceF
         facts: read_facts(pid, status),
         app_denied,
         app_asked,
+        first_allowed,
         signature_valid: signature.is_some_and(|signature| signature.valid),
         entitlements: signature.and_then(|signature| signature.entitlements),
     }
@@ -615,6 +685,9 @@ fn signature(pid: c_int) -> Option<Signature> {
 pub(super) struct Slot {
     taken: Mutex<bool>,
     freed: Condvar,
+    /// The link of the document before, when its process was not seen to end within its close's wait: the next start
+    /// waits for it first ([`Slot::wait_for_previous`]).
+    lingering: Mutex<Option<Box<dyn Link>>>,
 }
 
 /// Proof that the service is this helper's; dropping it lets the next start in.
@@ -626,6 +699,7 @@ impl Slot {
         Self {
             taken: Mutex::new(false),
             freed: Condvar::new(),
+            lingering: Mutex::new(None),
         }
     }
 
@@ -647,6 +721,28 @@ impl Slot {
         *taken = true;
         Some(SlotGuard(self))
     }
+
+    /// Before a new connection: waits at most `bound` for the process of the document before to be gone, when its
+    /// close could not see it end. `true` when there is no such process (any more). Logged with how long it took.
+    pub(super) fn wait_for_previous(&self, bound: Duration) -> bool {
+        let Some(previous) = lock(&self.lingering).take() else {
+            return true;
+        };
+        let since = Instant::now();
+        let gone = previous.ended_within(bound);
+        if gone {
+            note(&format!(
+                "office helper: waited {} ms for the previous document's service process to end",
+                since.elapsed().as_millis()
+            ));
+        } else {
+            note(&format!(
+                "office helper: the previous document's service process still runs after {} s; this start may reach it",
+                bound.as_secs()
+            ));
+        }
+        gone
+    }
 }
 
 impl Drop for SlotGuard {
@@ -663,6 +759,8 @@ static SLOT: Slot = Slot::new();
 pub(crate) struct ServiceChild {
     link: Box<dyn Link>,
     pid: c_int,
+    /// How long dropping it waits for its process to be gone before the next start waits for that instead.
+    reap: Duration,
     ended: Mutex<Option<ExitStatus>>,
     /// Set before the app's own kill, so the end it causes is told apart from any other.
     killed: AtomicBool,
@@ -728,8 +826,33 @@ impl ServiceChild {
 impl Drop for ServiceChild {
     fn drop(&mut self) {
         let _ = self.kill();
-        // Gone before the service is free again: the next document's connection reaches a new process.
-        let _ = self.wait(REAP_BOUND);
+        // Gone before the service is free again: the next document's connection reaches a new process. One that is
+        // not seen to end in time is handed to the slot (before the guard below frees it), and the next start waits
+        // for it before it connects.
+        if matches!(self.wait(self.reap), Ok(None)) {
+            let link = std::mem::replace(&mut self.link, Box::new(Ended));
+            *lock(&self._slot.0.lingering) = Some(link);
+        }
+    }
+}
+
+/// What a [`ServiceChild`] holds once its link went to the slot: a process that is already let go.
+#[derive(Debug)]
+struct Ended;
+
+impl Link for Ended {
+    fn start(&self, _: &OwnedFd, _: &OwnedFd, _: u64, _: Duration) -> Option<(Status, c_int)> {
+        None
+    }
+    fn facts(&self, pid: c_int, status: Option<Status>) -> ServiceFacts {
+        read_service_facts(pid, status)
+    }
+    fn grant(&self, _: u64, _: u64, _: bool, _: *mut u8, _: usize) -> Result<(), i32> {
+        Err(sys::EBADMSG)
+    }
+    fn kill(&self) {}
+    fn ended_within(&self, _: Duration) -> bool {
+        true
     }
 }
 
@@ -739,18 +862,35 @@ pub(super) fn start_service(
     link: Box<dyn Link>,
     slot: SlotGuard,
     limits: Limits,
+    bounds: Bounds,
 ) -> Result<(ServiceChild, Pipes), SandboxError> {
     // The app's launch lock, for as long as the helper's ends of the pipes exist in the app.
     let launch = crate::launch_lock();
     let (helper_stdin, to_helper) = pipe()?;
     let (from_helper, helper_stdout) = pipe()?;
-    let answer = link.start(&helper_stdin, &helper_stdout, limits.memory_bytes, HANDSHAKE_BOUND);
+    let asked = Instant::now();
+    let answer = link.start(&helper_stdin, &helper_stdout, limits.memory_bytes, bounds.handshake);
+    let waited = asked.elapsed();
     drop(helper_stdin);
     drop(helper_stdout);
     drop(launch);
+    // How long the system took to start the service and the service to answer: what tells a slow start from a
+    // refusal in the next report (dm-84).
+    note(&match answer {
+        Some((_, pid)) => format!(
+            "office helper: XPC service pid {pid} answered in {:.1} s",
+            waited.as_secs_f32()
+        ),
+        None => format!(
+            "office helper: no handshake from the XPC service after {:.1} s (the bound is {} s)",
+            waited.as_secs_f32(),
+            bounds.handshake.as_secs()
+        ),
+    });
     let child = ServiceChild {
         link,
         pid: answer.map_or(0, |(_, pid)| pid),
+        reap: bounds.reap,
         ended: Mutex::new(None),
         killed: AtomicBool::new(false),
         next_wire: AtomicU64::new(1),
@@ -759,9 +899,23 @@ pub(super) fn start_service(
     };
     // The service has been sent its two pipe ends and its memory limit, and nothing on them. What it says is checked
     // against what the kernel and its signature say; only then does the caller get the pipes.
-    let facts = child.link.facts(child.pid, answer.map(|(status, _)| status));
-    let judged = judge_service(&facts);
+    let status = answer.map(|(status, _)| status);
+    let mut facts = child.link.facts(child.pid, status);
+    let mut judged = judge_service(&facts);
+    // A service that says it is confined and is refused on what the kernel or its signature say is asked once more,
+    // a moment later, with every check again: never fewer.
+    if judged.is_err()
+        && status.is_some_and(|status| status.state == STATE_APP_SANDBOX || status.state == STATE_CONFINED)
+    {
+        note(&confinement_line(child.pid, &facts, judged));
+        std::thread::sleep(bounds.recheck);
+        facts = child.link.facts(child.pid, status);
+        judged = judge_service(&facts);
+    }
     note(&confinement_line(child.pid, &facts, judged));
+    if judged.is_ok() {
+        note(&confined_line(&facts));
+    }
     judged?;
     Ok((
         child,
@@ -797,15 +951,72 @@ pub(super) fn confinement_line(pid: c_int, service: &ServiceFacts, judged: Resul
     );
     match judged {
         Ok(()) => format!("office helper: XPC service pid {pid} accepted, confined by {confinement}; {checked}"),
-        Err(error) => format!("office helper: XPC service pid {pid} refused ({error}), it is ended; {checked}"),
+        Err(error) => format!(
+            "office helper: XPC service pid {pid} refused, failed check: {} ({error}), it is ended; {checked}",
+            failed_check(service, error)
+        ),
     }
 }
 
-/// Writes `line` to the system log (and standard error): what the app's own log shows of a service's confinement.
+/// The name of the check that refused a service, as the log says it: the judge's reason, and for the App Sandbox's
+/// own list the first operation the kernel did not deny.
+pub(super) fn failed_check(service: &ServiceFacts, error: SandboxError) -> String {
+    let reason = match error {
+        SandboxError::NotConfined(reason) => reason,
+        _ => "not a refusal",
+    };
+    match (reason, service.first_allowed) {
+        ("the kernel allows what the App Sandbox denies", Some(index)) => {
+            format!("app-sandbox {}", app_check_name(index))
+        }
+        ("the kernel allows what the App Sandbox denies", None) => {
+            String::from("app-sandbox (the user's home unnamed)")
+        }
+        ("no handshake", _) => String::from("handshake (no answer)"),
+        _ => reason.to_string(),
+    }
+}
+
+/// The one line that says a service runs confined, in the words the app's log is searched for (dm-84):
+/// "office helper: confined (app sandbox, 19/19 checks)".
+pub(super) fn confined_line(service: &ServiceFacts) -> String {
+    match service.facts.status.map(|status| status.state) {
+        Some(STATE_CONFINED) => format!(
+            "office helper: confined (app sandbox and profile, {}/{} checks)",
+            service.facts.denied,
+            MUST_BE_DENIED.len()
+        ),
+        _ => format!(
+            "office helper: confined (app sandbox, {}/{} checks)",
+            service.app_denied, service.app_asked
+        ),
+    }
+}
+
+/// Where the app's own log takes a line of this module (dm-84): set once by the app
+/// ([`beebeeb_office_sandbox_set_note_hook`]). Without it a line goes to the system log and standard error only.
+static NOTE_HOOK: OnceLock<extern "C" fn(*const c_char)> = OnceLock::new();
+
+/// The app hands this module the function that writes a line to its own log. Exported by name because the crate's
+/// public surface is the same on every system and this is a Mac's alone. The line is a terminated string of fixed
+/// text and numbers, alive for the call only. The first hook stays.
+#[unsafe(no_mangle)]
+pub extern "C" fn beebeeb_office_sandbox_set_note_hook(hook: extern "C" fn(*const c_char)) {
+    let _ = NOTE_HOOK.set(hook);
+}
+
+/// Writes `line` to the system log, standard error and the app's own log: what the log shows of a service's start
+/// and confinement.
 fn note(line: &str) {
     eprintln!("{line}");
+    let Ok(line) = CString::new(line) else {
+        return;
+    };
+    if let Some(hook) = NOTE_HOOK.get() {
+        hook(line.as_ptr());
+    }
     #[cfg(not(test))]
-    if let Ok(line) = CString::new(line) {
+    {
         unsafe extern "C" {
             fn syslog(priority: c_int, format: *const c_char, ...);
         }
@@ -834,7 +1045,9 @@ pub(super) fn spawn_service(
             code: EBUSY,
         });
     };
-    start_service(Box::new(XpcLink::connect(name)?), slot, limits)
+    // The process of the document before is gone first, so this connection reaches a new one.
+    SLOT.wait_for_previous(PREVIOUS_EXIT_BOUND);
+    start_service(Box::new(XpcLink::connect(name)?), slot, limits, Bounds::SERVICE)
 }
 
 unsafe extern "C" fn ignore_event(_block: *const Block, _event: XpcObject) {}
@@ -951,18 +1164,42 @@ impl Link for XpcLink {
             .spawn(move || {
                 // The two holders themselves move to this thread, not the addresses inside them.
                 let (connection, message) = (connection, message);
-                // SAFETY: both objects are held by this thread until it ends; the answer is released once.
+                // SAFETY: both objects are held by this thread until it ends; the answer is released once. The two
+                // error objects are the system's constants, compared by address only.
                 let status = unsafe {
                     let reply = Held(xpc_connection_send_message_with_reply_sync(connection.0, message.0));
-                    (!reply.0.is_null() && xpc_get_type(reply.0) == &raw const _xpc_type_dictionary).then(|| Status {
-                        state: xpc_dictionary_get_uint64(reply.0, KEY_STATE.as_ptr()) as u32,
-                        profile_version: xpc_dictionary_get_uint64(reply.0, KEY_PROFILE.as_ptr()) as u32,
-                    })
+                    if reply.0.is_null() {
+                        Err("no reply object")
+                    } else if xpc_get_type(reply.0) == &raw const _xpc_type_dictionary {
+                        Ok(Status {
+                            state: xpc_dictionary_get_uint64(reply.0, KEY_STATE.as_ptr()) as u32,
+                            profile_version: xpc_dictionary_get_uint64(reply.0, KEY_PROFILE.as_ptr()) as u32,
+                        })
+                    } else if reply.0.cast_const() == &raw const _xpc_error_connection_interrupted {
+                        Err("the connection was interrupted (the service's process ended before it answered)")
+                    } else if reply.0.cast_const() == &raw const _xpc_error_connection_invalid {
+                        Err("the connection is invalid (the system did not start the service, or the service turned it away)")
+                    } else if xpc_get_type(reply.0) == &raw const _xpc_type_error {
+                        Err("another connection error")
+                    } else {
+                        Err("a reply that is no dictionary")
+                    }
                 };
                 let _ = answered.send(status);
             });
-        let status = match asked {
-            Ok(_) => answer.recv_timeout(bound).ok().flatten(),
+        let status = match asked.map(|_| answer.recv_timeout(bound)) {
+            Ok(Ok(Ok(status))) => Some(status),
+            Ok(Ok(Err(why))) => {
+                note(&format!("office helper: the XPC service gave no handshake: {why}"));
+                None
+            }
+            Ok(Err(_)) => {
+                note(&format!(
+                    "office helper: the XPC service gave no handshake within {} s (the handshake timed out)",
+                    bound.as_secs()
+                ));
+                None
+            }
             Err(_) => None,
         };
         // SAFETY: the connection is alive until `drop`. Zero until the service has answered once.

@@ -20,25 +20,37 @@ struct Script {
     /// Gone without the app's kill (its own memory watch, a crash).
     ended_itself: AtomicBool,
     grants: Mutex<Vec<(u64, u64, bool, usize, usize)>>,
+    /// How long the system takes to start the service and the service to answer (dm-84): past the app's bound, no
+    /// answer comes in time.
+    answer_after: Duration,
+    /// The bound the app gave the start.
+    bound: Mutex<Option<Duration>>,
+    /// What the first look at the process says, when it differs from `facts` (a kernel that lags the self-report).
+    first_facts: Mutex<Option<ServiceFacts>>,
+    /// How many times the facts were read.
+    looks: AtomicUsize,
 }
 
 #[derive(Debug)]
 struct Fake(Arc<Script>);
 
 impl Link for Fake {
-    fn start(&self, stdin: &OwnedFd, stdout: &OwnedFd, memory_bytes: u64, _: Duration) -> Option<(Status, c_int)> {
+    fn start(&self, stdin: &OwnedFd, stdout: &OwnedFd, memory_bytes: u64, bound: Duration) -> Option<(Status, c_int)> {
         assert!(stdin.as_raw_fd() > 2 && stdout.as_raw_fd() > 2);
         self.0.memory_bytes.store(memory_bytes, Ordering::SeqCst);
+        *lock(&self.0.bound) = Some(bound);
+        if self.0.answer_after > bound {
+            return None;
+        }
         self.0.answer
     }
 
     fn facts(&self, _pid: c_int, status: Option<Status>) -> ServiceFacts {
+        self.0.looks.fetch_add(1, Ordering::SeqCst);
+        let facts = lock(&self.0.first_facts).take().unwrap_or(self.0.facts);
         ServiceFacts {
-            facts: Facts {
-                status,
-                ..self.0.facts.facts
-            },
-            ..self.0.facts
+            facts: Facts { status, ..facts.facts },
+            ..facts
         }
     }
 
@@ -84,6 +96,7 @@ fn vouched() -> ServiceFacts {
         },
         app_denied: asked,
         app_asked: asked,
+        first_allowed: None,
         signature_valid: true,
         entitlements: Some((1, true)),
     }
@@ -99,8 +112,19 @@ fn script(facts: ServiceFacts) -> Arc<Script> {
         killed_at: Mutex::new(None),
         ended_itself: AtomicBool::new(false),
         grants: Mutex::new(Vec::new()),
+        answer_after: Duration::ZERO,
+        bound: Mutex::new(None),
+        first_facts: Mutex::new(None),
+        looks: AtomicUsize::new(0),
     })
 }
+
+/// The service start's waits, with a short reap and recheck so no test waits seconds for them.
+const QUICK: Bounds = Bounds {
+    handshake: SERVICE_HANDSHAKE_BOUND,
+    reap: Duration::from_millis(40),
+    recheck: Duration::from_millis(5),
+};
 
 /// A service slot of the test's own, so no test waits for another's.
 fn slot() -> &'static Slot {
@@ -113,6 +137,7 @@ fn started(script: &Arc<Script>, slot: &'static Slot) -> Result<(ServiceChild, P
         Box::new(Fake(Arc::clone(script))),
         guard,
         Limits { memory_bytes: 3 << 20 },
+        QUICK,
     )
 }
 
@@ -152,6 +177,8 @@ fn a_second_document_waits_until_the_first_is_closed_and_its_process_is_gone() {
     let second = slot
         .take(Duration::from_secs(5))
         .expect("free once the first is closed");
+    // Its close waited a short while only (`QUICK`): the next start waits for the process itself before it connects.
+    assert!(slot.wait_for_previous(Duration::from_secs(5)));
     let killed_at = lock(&first.killed_at).expect("closing the document ended its process");
     assert!(
         killed_at.elapsed() >= first.dies_after,
@@ -580,5 +607,150 @@ fn the_confinement_line_names_the_confinement_and_the_checks() {
     assert!(
         !refused.contains("/Users") && !refused.contains(".xpc"),
         "no path in the line"
+    );
+}
+
+/// Dm-84 (RC15): the first start was refused exactly 10 s after the service was asked, the app's old bound. A system
+/// that takes 12 s to start the service (a cold launch, launchd holding back a restart) now gets its answer in, and
+/// the answer is checked as before; under the old bound the same start is refused for want of a handshake.
+#[test]
+fn a_slow_cold_start_of_twelve_seconds_is_accepted_and_still_checked() {
+    let slow = Arc::new(Script {
+        answer_after: Duration::from_secs(12),
+        ..Arc::into_inner(script(vouched())).unwrap()
+    });
+    let (child, _pipes) = started(&slow, slot()).expect("a 12 s start is in time");
+    assert_eq!(child.id(), 4242);
+    assert_eq!(*lock(&slow.bound), Some(SERVICE_HANDSHAKE_BOUND));
+    assert!(
+        slow.looks.load(Ordering::SeqCst) >= 1,
+        "the kernel and the signature were read"
+    );
+    drop(child);
+
+    let old = Arc::new(Script {
+        answer_after: Duration::from_secs(12),
+        ..Arc::into_inner(script(vouched())).unwrap()
+    });
+    let guard = slot().take(Duration::ZERO).unwrap();
+    let rc15 = Bounds {
+        handshake: Duration::from_secs(10),
+        ..QUICK
+    };
+    let refused = start_service(
+        Box::new(Fake(Arc::clone(&old))),
+        guard,
+        Limits { memory_bytes: 3 << 20 },
+        rc15,
+    );
+    assert_eq!(
+        refused.err(),
+        Some(SandboxError::NotConfined("no handshake")),
+        "RC15's 10 s"
+    );
+    assert_eq!(old.kills.load(Ordering::SeqCst), 1, "a start with no answer is ended");
+}
+
+/// Dm-84: the second document while the first one's process is still exiting. The close waits its own short while;
+/// the next start then waits for that process before it connects, so its connection reaches a new process.
+#[test]
+fn a_second_document_while_the_first_process_still_exits_waits_for_it_then_connects() {
+    let slot = slot();
+    let first = Arc::new(Script {
+        dies_after: Duration::from_millis(300),
+        ..Arc::into_inner(script(vouched())).unwrap()
+    });
+    let (child, _pipes) = started(&first, slot).unwrap();
+    let closed = Instant::now();
+    drop(child);
+    assert!(
+        closed.elapsed() < Duration::from_millis(250),
+        "the close itself did not wait for the whole exit"
+    );
+    let guard = slot
+        .take(Duration::ZERO)
+        .expect("the slot is free once the document is closed");
+    assert!(
+        slot.wait_for_previous(Duration::from_secs(5)),
+        "the first process ended"
+    );
+    let killed_at = lock(&first.killed_at).expect("closing ended the first process");
+    assert!(
+        killed_at.elapsed() >= first.dies_after,
+        "the new connection comes only after the first process is gone"
+    );
+    let second = script(vouched());
+    let started_second = start_service(
+        Box::new(Fake(Arc::clone(&second))),
+        guard,
+        Limits { memory_bytes: 3 << 20 },
+        QUICK,
+    );
+    assert!(started_second.is_ok(), "then it connects");
+    assert!(slot.wait_for_previous(Duration::ZERO), "nothing is left to wait for");
+}
+
+/// Dm-84: a service that says it is confined while the kernel does not yet show it is looked at once more, with
+/// every check; the second look accepts it. One that stays unconfined is refused after the second look.
+#[test]
+fn a_kernel_that_lags_the_self_report_is_asked_once_more_with_every_check() {
+    let lagging = script(vouched());
+    *lock(&lagging.first_facts) = Some(ServiceFacts {
+        facts: Facts {
+            sandboxed: false,
+            ..vouched().facts
+        },
+        ..vouched()
+    });
+    assert!(started(&lagging, slot()).is_ok());
+    assert_eq!(lagging.looks.load(Ordering::SeqCst), 2);
+
+    let unconfined = script(ServiceFacts {
+        facts: Facts {
+            sandboxed: false,
+            ..vouched().facts
+        },
+        ..vouched()
+    });
+    assert_eq!(
+        started(&unconfined, slot()).err(),
+        Some(SandboxError::NotConfined("the kernel reports no sandbox"))
+    );
+    assert_eq!(
+        unconfined.looks.load(Ordering::SeqCst),
+        2,
+        "looked at twice, never skipped"
+    );
+    assert_eq!(unconfined.kills.load(Ordering::SeqCst), 1);
+}
+
+/// Dm-84: the log names the check that failed, and says a confined service in the words it is searched for.
+#[test]
+fn the_log_names_the_failed_check_and_the_confinement() {
+    let full = vouched();
+    assert_eq!(
+        confined_line(&full),
+        "office helper: confined (app sandbox, 19/19 checks)"
+    );
+    let home_library = APP_SANDBOX_DENIES.len() + 1;
+    assert_eq!(app_check_name(home_library), "file-read-data ~/Library");
+    assert_eq!(app_check_name(0), "file-read-data /Users");
+    assert_eq!(app_check_name(10), "network-outbound");
+    let leaky = ServiceFacts {
+        app_denied: full.app_asked - 1,
+        first_allowed: Some(home_library),
+        ..full
+    };
+    let why = judge_service(&leaky).unwrap_err();
+    assert_eq!(failed_check(&leaky, why), "app-sandbox file-read-data ~/Library");
+    let line = confinement_line(9, &leaky, Err(why));
+    assert!(
+        line.contains("failed check: app-sandbox file-read-data ~/Library"),
+        "{line}"
+    );
+    assert!(line.contains("18/19 App Sandbox checks denied"), "{line}");
+    assert_eq!(
+        failed_check(&full, SandboxError::NotConfined("no handshake")),
+        "handshake (no answer)"
     );
 }

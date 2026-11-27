@@ -983,6 +983,46 @@ fn a_too_old_windows_needs_a_windows_update() {
     assert_eq!(host.helper_pid(), None);
 }
 
+/// Dm-84 (RC15): a start the sandbox refused is tried once more at once on a Mac, and the document opens on that
+/// second start; nothing else waits for a Try again.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refused_start_is_tried_once_more_and_the_document_opens() {
+    let registry = Registry::new();
+    let refusal = SandboxError::NotConfined("no handshake");
+    let fake = Fake::new(|link| serve(link, &[LETTER])).refusing_first(1, refusal);
+    let (mut host, log, _) = open_fake(fake, &registry, DocKind::Docx);
+    let mut events = Vec::new();
+    assert!(until_open(&mut host, &mut events));
+    assert!(matches!(host.state(), OfficeState::Pages { .. }), "{:?}", host.state());
+    // Refused once, started once more.
+    assert_eq!(log.start_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(log.starts(), 1, "one helper runs");
+}
+
+/// Dm-84: a start refused twice is not tried a third time: the window hears "could not start" (and a Mac shows the
+/// file in Quick Look, `viewer_office/glue.rs`), with the one Try again left.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_start_refused_twice_stops_with_failed() {
+    let registry = Registry::new();
+    let refusal = SandboxError::NotConfined("the kernel reports no sandbox");
+    let fake = Fake::new(|link| serve(link, &[LETTER])).failing_start(refusal);
+    let (mut host, log, _) = open_fake(fake, &registry, DocKind::Docx);
+    let mut events = Vec::new();
+    let ended = |host: &OfficeHost, _: &[Event]| !matches!(host.state(), OfficeState::Opening);
+    assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());
+    assert_eq!(
+        &host.state(),
+        &OfficeState::Stopped {
+            why: Stop::Failed,
+            can_retry: true
+        }
+    );
+    assert_eq!(log.start_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(log.starts(), 0);
+}
+
 #[cfg(not(windows))]
 #[test]
 fn no_sandbox_no_helper() {

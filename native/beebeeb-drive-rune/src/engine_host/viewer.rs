@@ -1369,6 +1369,14 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                         opening.origin = content.origin;
                         opening.holds = true;
                         let body = content.body.take();
+                        // Dm-84: on a Mac a PDF whose helper could not start is Quick Look's (`viewer_pdf`'s macOS arm).
+                        #[cfg(target_os = "macos")]
+                        if matches!(body, Some(Body::Stopped(Stopped::HelperStopped))) && opening.pages.is_some() {
+                            opening.pages = None;
+                            let (session, account) = (opening.session, opening.account.clone());
+                            let name = opening.name.clone();
+                            return self.pdf_mac_start_failed(session, account, file_id, &name).or(body);
+                        }
                         if let (Some(pages), Some(Body::Pdf(doc))) = (&opening.pages, &body) {
                             *pages.doc.borrow_mut() = Some(doc.clone());
                         }
