@@ -146,6 +146,7 @@ candidate
 candidates
 cannot
 cap
+capped
 category
 cf
 cf_callback_info
@@ -1111,7 +1112,6 @@ tree
 tried
 tries
 true_size_bytes
-trusted
 trying
 ttl
 turned
