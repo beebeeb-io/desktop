@@ -72,7 +72,7 @@ impl FpBridge for SystemBridge {
             tracing::info!(
                 domain = %error.domain,
                 status = error.code,
-                "finder setup: the working-set nudge did not go"
+                "finder setup: the working-set signal did not go"
             );
         }
     }
