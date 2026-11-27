@@ -70,6 +70,7 @@ fn action(i: usize, name: &'static str, icon: &'static Icon) -> El {
 /// box at the picture's own ratio the area holds, so a large photo fills the width or the height and a small one is
 /// scaled up to the area, never past it. Rounded down to whole device pixels of `scale` (the window's real display
 /// scale factor). The layout does the same live with `aspect_fit`, so a resize or the details panel recomputes it.
+#[allow(dead_code)] // no caller yet in every build; kept with its tests
 pub(crate) fn fit_size(pixels: (u32, u32), area: (f32, f32), scale: f32) -> (f32, f32) {
     let (pw, ph) = (pixels.0.max(1) as f32, pixels.1.max(1) as f32);
     let k = (area.0 / pw).min(area.1 / ph).max(0.0);

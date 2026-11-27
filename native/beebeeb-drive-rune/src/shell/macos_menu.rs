@@ -128,6 +128,7 @@ pub fn pause_label(paused: bool) -> &'static str {
 }
 
 /// The entry of the table the item `id` is (a separator has none).
+#[allow(dead_code)] // no caller yet in every build; kept with its tests
 pub fn row(id: &str) -> Option<&'static Row> {
     TABLE.iter().find(|row| !row.id.is_empty() && row.id == id)
 }

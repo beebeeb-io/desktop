@@ -257,6 +257,7 @@ pub enum Body {
     /// DW-1556, DW-1563, DW-1564: the Office viewer's state (a failure, opening, content missing).
     OfficeState(super::super::office::states::StateBody),
     /// macOS (dm-74): the system's own view of the file (a player, Quick Look) inside the window.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // made only on macOS
     Native(super::native_preview::NativeDoc),
 }
 

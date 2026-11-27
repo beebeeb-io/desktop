@@ -185,6 +185,7 @@ unsafe extern "C" {
     fn objc_msgSend();
 }
 #[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {}
 #[link(name = "Foundation", kind = "framework")]
 unsafe extern "C" {}
 unsafe extern "C" {
@@ -357,6 +358,7 @@ pub fn pick_folder(title: &str, start: &Path, key: &str) -> Result<Option<PathBu
 
 /// The app chooser: NSOpenPanel on `/Applications`, application bundles only (dm-63, "Open with another app").
 /// BLOCKS until closed. `None`: cancelled.
+#[allow(dead_code)] // no caller yet in every build; kept with its tests
 pub fn pick_app() -> Option<PathBuf> {
     on_main(move || {
         let panel = send!(Id; class("NSOpenPanel"), "openPanel");

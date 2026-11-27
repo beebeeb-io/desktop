@@ -222,6 +222,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool, api_base: 
 
 /// Menu-bar only, no window, only when the launch event SAYS it was a login item. Not readable
 /// (no event yet, no such field) is a manual launch: until it is known, every launch is manual.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
 pub fn login_launch(flag: Option<bool>) -> bool {
     flag == Some(true)
 }

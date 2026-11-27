@@ -721,20 +721,23 @@ mod tests {
     fn no_byte_for_the_limit_stops_the_wait_and_nothing_is_handed_over() {
         let finder = FakeFinder::new(Some(Path::new("/finder/IMG.MOV")), Presence::Cloud, None);
         let mut opened = 0;
-        let asked = Instant::now();
+        // Every look at the download asks how far it is: counted, so the check holds on a busy machine too.
+        let looks = std::cell::Cell::new(0_u32);
+        let progress = || -> Option<(u64, u64)> {
+            looks.set(looks.get() + 1);
+            None
+        };
         let got = make_present(
             &finder,
             "item-7",
-            &wait(Duration::from_millis(60), &|| true, &|| None, &|_, _| {}),
+            &wait(Duration::from_millis(60), &|| true, &progress, &|_, _| {}),
             &mut |_| opened += 1,
         );
         assert_eq!(got, Err(Stop::Stalled { done: 0, total: 384 }));
         assert_eq!(opened, 0);
-        // The limit is the limit, also while nothing says how far the download is (RC11 waited three times as long).
-        assert!(
-            asked.elapsed() < Duration::from_millis(60) * 3,
-            "the limit fired at the limit"
-        );
+        // The limit is the limit, also while nothing says how far the download is (RC11 waited three times as long):
+        // it ends at the first look after the limit (a look every 60 ms here), not at the fourth.
+        assert!(looks.get() <= 2, "the limit fired at the limit: {} looks", looks.get());
     }
 
     #[test]

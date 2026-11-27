@@ -277,6 +277,7 @@ fn the_engine_handle_opens_for_this_identity_only() {
 
 /// Credential stores that write down which app each store was asked for.
 #[derive(Default)]
+#[cfg_attr(target_os = "macos", allow(dead_code))] // used only off macOS (the test below)
 struct AskedFor {
     inner: MemoryCredentials,
     identities: std::sync::Arc<std::sync::Mutex<Vec<&'static EngineIdentity>>>,

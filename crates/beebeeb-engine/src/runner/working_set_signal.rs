@@ -63,7 +63,7 @@ pub(super) fn signal_file_provider_working_set(db: &StateDb, reason: &str, item_
     // Fail-open on empty/unknown (see working_set_signal_needed).
     let parents: Vec<Option<String>> = item_ids
         .iter()
-        .map(|id| db.get_file(id).ok().flatten().map(|entry| entry.parent_id).flatten())
+        .map(|id| db.get_file(id).ok().flatten().and_then(|entry| entry.parent_id))
         .collect();
     let materialized = db.materialized_containers().unwrap_or_default();
     if !working_set_signal_needed(&parents, &materialized) {

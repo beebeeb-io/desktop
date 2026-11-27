@@ -1,6 +1,8 @@
 //! How the windows behave on a Mac (docs/macos/menu-bar-and-windows.md §3 rules 2-6, §7). Pure: every decision is a
 //! function of its inputs, compiled on every OS so its tests run everywhere; `host.rs` and `mod.rs` call it and do
 //! what it says.
+// Pure rules kept with their tests: some have no caller off macOS, or none yet.
+#![allow(dead_code)]
 
 /// How the app was started (§7): the launch table's rows that matter to the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

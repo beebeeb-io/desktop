@@ -114,6 +114,7 @@ pub(crate) struct MacosPorts<H: FpHost, B: FpBridge> {
 }
 
 impl<H: FpHost> MacosPorts<H, SystemBridge> {
+    #[allow(dead_code)] // no caller yet in every build; kept with its tests
     pub(crate) fn new(host: Arc<H>) -> Self {
         Self::with_bridge(host, Arc::new(SystemBridge), BRIDGE_GATE_WAIT)
     }

@@ -124,7 +124,7 @@ mod mac {
         }
     }
 
-    /// The computer name ("Guus's MacBook Pro"), as System Settings > Sharing shows it.
+    /// The computer name ("Anna's MacBook Pro"), as System Settings > Sharing shows it.
     pub fn computer_name() -> Option<String> {
         // SAFETY: a null store asks for the current user's; the returned name is owned and released in `take_string`.
         unsafe { take_string(SCDynamicStoreCopyComputerName(std::ptr::null(), std::ptr::null_mut())) }

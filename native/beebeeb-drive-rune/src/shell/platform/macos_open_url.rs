@@ -11,6 +11,7 @@ pub(crate) trait Workspace {
 }
 
 /// `NSWorkspace.sharedWorkspace.openURL`.
+#[allow(dead_code)] // no caller yet in every build; kept with its tests
 pub(crate) struct NsWorkspace;
 
 impl Workspace for NsWorkspace {
@@ -48,6 +49,7 @@ pub(crate) fn open_with(workspace: &dyn Workspace, url: &str) -> Result<(), ()> 
 }
 
 /// Opens `url` in the default browser (or mail app).
+#[allow(dead_code)] // no caller yet in every build; kept with its tests
 pub(crate) fn open_url(url: &str) -> Result<(), ()> {
     open_with(&NsWorkspace, url)
 }

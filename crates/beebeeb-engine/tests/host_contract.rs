@@ -7,9 +7,9 @@
 //! Every test here opens an Engine as `identity::TEST`, which `EngineIdentity::refusal_on` refuses on macOS (a test
 //! build would share the real app's data there; only this crate's unit tests and the native shell's dev-only
 //! `macos-test-engine` build may open one). So, as the engine's other Engine-opening integration tests do
-//! (`settings_api`, `trash_api`, `an_unfinished_sign_out`), this file builds on every OS but macOS; the contract
-//! runs on Linux and Windows. The guard itself is untouched.
-#![cfg(not(target_os = "macos"))]
+//! (`settings_api`, `trash_api`, `an_unfinished_sign_out`), its tests run on every OS but macOS; the contract
+//! runs on Linux and Windows (on macOS only the refusal itself is checked). The guard itself is untouched.
+#![cfg_attr(target_os = "macos", allow(unused_imports, dead_code))]
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -313,6 +313,7 @@ fn engine_threads() -> usize {
         .count()
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     let _serial = serial();
@@ -610,6 +611,7 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn wrong_inputs_map_to_the_gates_words_and_change_nothing() {
     let _serial = serial();
@@ -661,6 +663,7 @@ fn wrong_inputs_map_to_the_gates_words_and_change_nothing() {
 
 /// Task 2447 through the handle's entry points: a vault key that is another account's is never loaded next to
 /// this account's session; a sign-in leaves it, tagged with the other account's id, for the account switch (dc-014).
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn another_accounts_stored_key_is_refused_and_removed() {
     let _serial = serial();
@@ -761,6 +764,7 @@ fn flag(credentials: &MemoryCredentials, flag: LockFlag) -> Option<Vec<u8>> {
         .unwrap()
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_closed_vault_opens_with_the_accounts_password_proven_in_a_new_sign_in() {
     let _serial = serial();
@@ -813,6 +817,7 @@ fn a_closed_vault_opens_with_the_accounts_password_proven_in_a_new_sign_in() {
     assert!(credentials.is_empty(), "the lock's flags leave with the session");
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn the_strong_unlock_asks_the_authenticator_code_and_opens_a_locked_screen_too() {
     let _serial = serial();
@@ -857,6 +862,7 @@ fn the_strong_unlock_asks_the_authenticator_code_and_opens_a_locked_screen_too()
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_password_unlocks_only_the_account_whose_session_is_stored() {
     let _serial = serial();
@@ -897,6 +903,7 @@ fn a_password_unlocks_only_the_account_whose_session_is_stored() {
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_start_is_closed_by_the_setting_the_mark_or_a_flag_that_cannot_be_read_and_reads_no_key() {
     let _serial = serial();
@@ -954,6 +961,7 @@ fn a_start_is_closed_by_the_setting_the_mark_or_a_flag_that_cannot_be_read_and_r
     assert!(credentials.is_empty());
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn leaving_a_half_done_sign_in_forgets_the_code_step_and_signs_a_keyless_session_out() {
     let _serial = serial();
@@ -1029,6 +1037,7 @@ fn assert_closed_by_an_ended_session(host: &Host, credentials: &MemoryCredential
     );
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_session_the_server_ended_closes_the_vault_and_keeps_the_stored_session() {
     let _serial = serial();
@@ -1054,6 +1063,7 @@ fn a_session_the_server_ended_closes_the_vault_and_keeps_the_stored_session() {
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn windows_hello_opens_nothing_after_the_server_ended_the_session() {
     let _serial = serial();
@@ -1076,6 +1086,7 @@ fn windows_hello_opens_nothing_after_the_server_ended_the_session() {
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn the_next_start_after_an_ended_session_reads_no_key() {
     let _serial = serial();
@@ -1096,6 +1107,7 @@ fn the_next_start_after_an_ended_session_reads_no_key() {
     assert_eq!(next.engine.sign_out_keeping_local_data(), Ok(()));
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn nothing_closes_while_the_session_is_accepted_or_already_closed() {
     let _serial = serial();
@@ -1125,6 +1137,7 @@ fn nothing_closes_while_the_session_is_accepted_or_already_closed() {
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn the_strong_unlock_after_an_ended_session_opens_and_stays_open() {
     let _serial = serial();
@@ -1158,6 +1171,7 @@ fn session_watch_threads() -> usize {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn the_watcher_closes_an_ended_session_and_ends_with_its_handle() {
     let _serial = serial();
@@ -1200,6 +1214,7 @@ fn the_watcher_closes_an_ended_session_and_ends_with_its_handle() {
     wait_for("the watcher ending with its handle", || session_watch_threads() == 0);
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_locked_screen_refuses_the_guide_mark_read_and_write() {
     let _serial = serial();
@@ -1239,6 +1254,7 @@ fn a_locked_screen_refuses_the_guide_mark_read_and_write() {
 }
 
 /// App lock (core #117): off, the next start opens directly, the window included; on, it is screen-locked.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn app_lock_off_opens_the_next_start_directly_and_on_opens_it_screen_locked() {
     let _serial = serial();
@@ -1286,6 +1302,7 @@ fn app_lock_off_opens_the_next_start_directly_and_on_opens_it_screen_locked() {
 
 /// A sign-out cut short may leave `lock.app_lock = 0` behind; an account's first sign-in on this computer carries
 /// nothing of a lock setting, so the next start is screen-locked again.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_leftover_app_lock_off_never_reaches_the_next_accounts_first_sign_in() {
     let _serial = serial();
@@ -1308,4 +1325,10 @@ fn a_leftover_app_lock_off_never_reaches_the_next_accounts_first_sign_in() {
     assert_eq!(again.engine.unlock_screen_platform_verified(asked), Ok(()));
     assert_eq!(again.engine.sign_out_keeping_local_data(), Ok(()));
     assert!(credentials.is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_test_identity_is_refused_on_macos() {
+    assert!(beebeeb_engine::identity::TEST.refusal_on("macos").is_some());
 }

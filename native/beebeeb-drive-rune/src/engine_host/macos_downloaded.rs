@@ -575,6 +575,7 @@ pub(crate) mod finder_state {
     }
 
     /// The window is woken when the list changed, so a row drawn from the last list is drawn again.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the Mac shell calls it
     pub(crate) fn set_wake(wake: impl Fn() + Send + Sync + 'static) {
         HELD.lock().unwrap_or_else(PoisonError::into_inner).wake = Some(Arc::new(wake));
     }
@@ -638,6 +639,7 @@ pub(crate) mod finder_state {
     /// Whether Finder holds the bytes of the file `id`, by the last list read ([`Held::answer`]); a read that
     /// begins after this ask follows. `None`: not known: there is no system to ask (not a Mac, a test), or no list
     /// was read yet (Finder setup is not ready, the system has not answered). Never waits.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the Mac shell calls it
     pub(crate) fn here(id: &str) -> Option<bool> {
         let source = super::system()?;
         let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
@@ -700,6 +702,7 @@ pub(crate) mod finder_state {
 
     /// The mark a file's row gets (`pc_status`), from the engine's `mark` and Finder's state ([`here`]): see
     /// [`mark_on`]. Where there is a system to ask (a Mac), a file it has not said anything of yet has no mark.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the Mac shell calls it
     pub(crate) fn mark(mark: Option<String>, here: Option<bool>) -> Option<String> {
         mark_on(mark, here, super::system().is_some())
     }
@@ -709,6 +712,7 @@ pub(crate) mod finder_state {
     /// on a Mac: setup is not ready, no list was read yet) the file has NO mark: not the engine's own record of a
     /// copy, and not "online only" for everything either. Without a system to ask, the engine's mark stands. A kept
     /// file keeps its own mark, and so does a row the engine marks another way (a shared place, nothing yet).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the Mac shell calls it
     pub(in crate::engine_host) fn mark_on(mark: Option<String>, here: Option<bool>, finder: bool) -> Option<String> {
         match (mark.as_deref(), here) {
             (Some("on_this_pc"), Some(false)) => Some("online_only".to_string()),

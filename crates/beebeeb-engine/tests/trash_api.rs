@@ -96,7 +96,7 @@ fn account(email: &str) -> Account {
             };
         }
         let restoring = is_restore(req) || is_trash(req);
-        if !restoring && !(req.route() == "GET /api/v1/files" && req.query("trashed") == Some("true")) {
+        if !(restoring || (req.route() == "GET /api/v1/files" && req.query("trashed") == Some("true"))) {
             return rest(req);
         }
         match mode_in.load(Ordering::SeqCst) {

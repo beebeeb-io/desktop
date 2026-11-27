@@ -188,11 +188,13 @@ pub trait ViewerEngine: Send + Sync + 'static {
     }
     /// macOS (dm-74): whether the file's copy is Finder's to show: the account's own file (never one shared with it,
     /// ruling 1701) while Beebeeb is set up in Finder. Reads the local state: a worker's. Default: no.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
     fn in_finder(&self, _file_id: &str) -> bool {
         false
     }
     /// How far a download of the whole file to this computer has come (done, total; a total of 0 is not known yet),
     /// from the transfer board ([`Engine::downloads_for`]). A worker's. Default: not known.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
     fn download_progress(&self, _session: SessionGeneration, _file_id: &str) -> Option<(u64, u64)> {
         None
     }

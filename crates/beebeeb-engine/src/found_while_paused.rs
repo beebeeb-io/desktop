@@ -94,6 +94,7 @@ pub fn synced_by(dir: &Path, roots: &[(PathBuf, &'static str)]) -> Option<&'stat
 }
 
 /// The folders Dropbox syncs, from its `info.json` (`{"personal": {"path": …}, "business": {"path": …}}`).
+#[cfg(any(target_os = "windows", test))]
 fn dropbox_roots(info_json: &str) -> Vec<PathBuf> {
     let Ok(serde_json::Value::Object(accounts)) = serde_json::from_str::<serde_json::Value>(info_json) else {
         return Vec::new();

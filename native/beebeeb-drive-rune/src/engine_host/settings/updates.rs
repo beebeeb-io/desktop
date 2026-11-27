@@ -111,6 +111,7 @@ pub const SYNC_UNCONFIRMED: &str =
     "Beebeeb could not confirm that sync stopped, so the update was not started. Restart Beebeeb, then update.";
 /// A Mac's button, and what it says when it cannot do its one thing. A Mac never installs in place and never offers
 /// "Restart to update" (`beebeeb_updater::INSTALL_UNSUPPORTED`).
+#[cfg_attr(windows, allow(dead_code))] // a Mac's button; not used on Windows
 pub const DOWNLOAD_UPDATE: &str = "Download update";
 pub const PAGE_NOT_OPENED: &str = "The download page did not open. Nothing was downloaded.";
 pub const INSTALLER_DID_NOT_START: &str = "The installer did not start. Nothing was installed.";
@@ -550,6 +551,7 @@ impl UpdatesPart {
     }
 
     /// The words of the update's button now: a Mac's is always "Download update"; elsewhere the press's own.
+    #[cfg_attr(windows, allow(dead_code))] // a Mac's button; not used on Windows
     pub(crate) fn button(&self) -> &'static str {
         if self.download_only { DOWNLOAD_UPDATE } else { self.press().label() }
     }
@@ -557,6 +559,7 @@ impl UpdatesPart {
     /// A Mac's "Download update": opens the download page of the newer version on offer, in the browser, and nothing
     /// else (the app stays as it is; no sync stops, nothing is downloaded here). Not while an order or a channel is
     /// out, and never for an older version.
+    #[cfg_attr(windows, allow(dead_code))] // a Mac's button; not used on Windows
     pub(crate) fn download_update(&mut self) {
         if !self.download_only || self.asked.is_some() || self.saving.is_some() || self.upgrade().is_none() {
             return;
@@ -1094,6 +1097,7 @@ pub(crate) fn release_config(
 
 /// A Mac's release config: the same key, host and floor, the `darwin-aarch64` target.
 #[cfg(any(target_os = "macos", test))]
+#[allow(dead_code)] // no caller yet in every build; kept with its tests
 pub(crate) fn mac_release_config(
     build_time: Option<u64>,
     version: Option<&str>,
@@ -1112,6 +1116,7 @@ pub(crate) fn mac_release_config(
 
 /// [`release_setup`] for a Mac.
 #[cfg(any(target_os = "macos", test))]
+#[allow(dead_code)] // no caller yet in every build; kept with its tests
 pub(crate) fn mac_release_setup(build_time: Option<u64>, version: Option<&str>, folder: Option<PathBuf>) -> ReleaseSetup {
     if build_time.is_none() || version.is_none() {
         return ReleaseSetup::NotARelease;

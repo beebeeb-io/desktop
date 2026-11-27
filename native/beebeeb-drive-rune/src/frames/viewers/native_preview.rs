@@ -42,6 +42,7 @@ pub trait StagePort: Send + Sync {
 pub struct Stage(Arc<dyn StagePort>);
 
 impl Stage {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
     pub fn new(port: Arc<dyn StagePort>) -> Self {
         Stage(port)
     }
@@ -63,6 +64,7 @@ impl PartialEq for Stage {
 
 /// Which of the system's views shows the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
 pub enum NativeKind {
     /// The player view: a recording or a video.
     Player,

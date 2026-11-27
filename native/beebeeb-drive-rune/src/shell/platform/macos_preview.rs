@@ -32,8 +32,11 @@ use objc2_foundation::{NSArray, NSInteger, NSPoint, NSRect, NSSize, NSString, NS
 // AVURLAsset and AVPlayer, AVPlayerView (AVKit), QLPreviewPanel and QLPreviewView (QuickLookUI is part of Quartz)
 // and UTType: system frameworks, no crate of their own.
 #[link(name = "AVFoundation", kind = "framework")]
+unsafe extern "C" {}
 #[link(name = "AVKit", kind = "framework")]
+unsafe extern "C" {}
 #[link(name = "Quartz", kind = "framework")]
+unsafe extern "C" {}
 #[link(name = "UniformTypeIdentifiers", kind = "framework")]
 unsafe extern "C" {}
 

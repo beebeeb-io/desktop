@@ -3,6 +3,8 @@
 //! everywhere; `flyout.rs` uses it on macOS.
 //!
 //! Settings anchoring (§4.5) is not carried: the Mac's Settings is a page of the main window.
+// Pure rules kept with their tests: some have no caller off macOS, or none yet.
+#![allow(dead_code)]
 
 pub const POPOVER_WIDTH: f64 = 372.0;
 pub const POPOVER_HEIGHT: f64 = 488.0;
@@ -69,7 +71,7 @@ pub fn icon_display(icon: Frame, displays: &[Display]) -> Option<&Display> {
     let mut best: Option<(&Display, f64)> = None;
     for d in displays {
         let o = icon.overlap(&d.frame);
-        if o > 0.0 && best.map_or(true, |(_, b)| o > b) {
+        if o > 0.0 && best.is_none_or(|(_, b)| o > b) {
             best = Some((d, o));
         }
     }

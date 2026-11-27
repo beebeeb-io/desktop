@@ -117,13 +117,13 @@ pub fn set_autostart(enabled: bool) -> Result<(), PlatformError> {
     set_with(&MainAppService, enabled)
 }
 
-/// A 0.8.x LaunchAgent is Guus's call: it is left alone and named in the log. Never rewrites, so
+/// A 0.8.x LaunchAgent is the owner's call: it is left alone and named in the log. Never rewrites, so
 /// always false.
 pub fn adopt_autostart() -> Result<bool, PlatformError> {
-    if let Some(home) = std::env::var_os("HOME") {
-        if legacy_agent_in(&Path::new(&home).join("Library/LaunchAgents")).is_some() {
-            crate::shell::host::log("start at login: an earlier 0.8.x LaunchAgent is still there; left alone");
-        }
+    if let Some(home) = std::env::var_os("HOME")
+        && legacy_agent_in(&Path::new(&home).join("Library/LaunchAgents")).is_some()
+    {
+        crate::shell::host::log("start at login: an earlier 0.8.x LaunchAgent is still there; left alone");
     }
     Ok(false)
 }

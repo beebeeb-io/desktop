@@ -234,7 +234,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             attempt.cancel();
             engine.wake_host();
         });
-        if !self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok()) {
+        if self.jobs.as_ref().is_none_or(|jobs| jobs.send(job).is_err()) {
             // No worker to wipe in: wipe here, waiting for a step that holds the flow.
             self.signup.cancel();
         }
