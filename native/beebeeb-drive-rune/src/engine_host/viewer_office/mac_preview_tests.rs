@@ -570,8 +570,20 @@ fn a_download_that_stops_moving_lands_on_the_page_and_nothing_is_shown() {
     rig.world.moving.store(false, Ordering::SeqCst);
     rig.source.media.mac.stall = Duration::from_millis(60);
     rig.source.open("v1").expect("opens");
+    let asked = std::time::Instant::now();
     let body = rig.settle("v1");
-    assert!(matches!(body, Some(Body::Stopped(Stopped::Offline))), "{body:?}");
+    // Dm-75: the file's page (dm-73's), with the reason on it; and the limit fired at the limit, also though nothing
+    // said how far the download was (RC11 waited three times as long, in silence).
+    assert!(
+        matches!(body, Some(Body::NotPreviewable(NoPreview::NoViewer))),
+        "{body:?}"
+    );
+    assert_eq!(
+        crate::frames::viewers::unsupported::note_of("v1"),
+        Some(crate::frames::viewers::unsupported::Note::Failed(NOT_MOVING.to_string()))
+    );
+    assert!(asked.elapsed() < Duration::from_millis(60) * 3 + Duration::from_millis(100));
+    assert_eq!(rig.finder.requested(), ["v1"], "the system was asked, by the item's identifier");
     assert!(rig.seen().embedded.is_empty() && rig.seen().panel.is_empty());
     assert!(rig.world.fetched().is_empty(), "no second download by the app");
     assert!(rig.let_go(), "the thread left Finder's place");
@@ -586,7 +598,14 @@ fn a_download_the_system_refuses_lands_on_the_page() {
     rig.finder.refuses.store(true, Ordering::SeqCst);
     rig.source.open("d1").expect("opens");
     let body = rig.settle("d1");
-    assert!(matches!(body, Some(Body::Stopped(Stopped::NotNow))), "{body:?}");
+    assert!(
+        matches!(body, Some(Body::NotPreviewable(NoPreview::NoViewer))),
+        "{body:?}"
+    );
+    assert_eq!(
+        crate::frames::viewers::unsupported::note_of("d1"),
+        Some(crate::frames::viewers::unsupported::Note::Failed(NOT_DOWNLOADED.to_string()))
+    );
     assert!(rig.seen().embedded.is_empty() && rig.world.fetched().is_empty());
     assert!(rig.let_go());
 }

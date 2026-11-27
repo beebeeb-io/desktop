@@ -96,8 +96,31 @@ pub const NAME_SHARED: &str = "name_shared";
 /// `pc_status` of a row whose place on this PC is another item's whose name differs only by capital letters.
 pub const NAME_SHARED_BUT_CASE: &str = "name_shared_but_case";
 
+/// Dm-75: on a Mac a file's mark is Finder's real state (dataless or not, by the system's list of materialised
+/// items: `engine_host::macos_downloaded::finder_state`), not the engine's own record of a copy. Elsewhere, for a
+/// folder and until the system has answered, the engine's mark stands.
+fn finder_truth(id: &str, is_folder: bool, mark: Option<String>) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    if !is_folder {
+        use crate::engine_host::macos_downloaded::finder_state;
+        return finder_state::mark(mark, finder_state::here(id));
+    }
+    let _ = (id, is_folder);
+    mark
+}
+
 /// The engine's row as the UI's row. One place, so a field the UI adds is mapped once.
 pub(crate) fn item(item: dto::DriveItem) -> DriveItem {
+    let pc_status = finder_truth(&item.id, item.is_folder, item.local.as_ref().and_then(|local| match local {
+        dto::LocalState::Downloaded => Some("on_this_pc".to_string()),
+        dto::LocalState::OnlineOnly => Some("online_only".to_string()),
+        dto::LocalState::AvailableOffline => Some("available_offline".to_string()),
+        // Its place on this PC is another item's (`case_place`): marked, its presses on disk refused.
+        dto::LocalState::NameShared => Some(NAME_SHARED.to_string()),
+        dto::LocalState::NameSharedButCase => Some(NAME_SHARED_BUT_CASE.to_string()),
+        // Syncing and failed have no mark in this column yet.
+        dto::LocalState::Syncing | dto::LocalState::Failed => None,
+    }));
     DriveItem {
         id: item.id,
         parent_id: item.parent_id,
@@ -111,16 +134,7 @@ pub(crate) fn item(item: dto::DriveItem) -> DriveItem {
         // The state database holds no share links or people for a row of the person's own: none shown.
         shared_type: None,
         shared_badges: Vec::new(),
-        pc_status: item.local.as_ref().and_then(|local| match local {
-            dto::LocalState::Downloaded => Some("on_this_pc".to_string()),
-            dto::LocalState::OnlineOnly => Some("online_only".to_string()),
-            dto::LocalState::AvailableOffline => Some("available_offline".to_string()),
-            // Its place on this PC is another item's (`case_place`): marked, its presses on disk refused.
-            dto::LocalState::NameShared => Some(NAME_SHARED.to_string()),
-            dto::LocalState::NameSharedButCase => Some(NAME_SHARED_BUT_CASE.to_string()),
-            // Syncing and failed have no mark in this column yet.
-            dto::LocalState::Syncing | dto::LocalState::Failed => None,
-        }),
+        pc_status,
         // The Backups root (LD-0113): the engine's listing marks it, hides the manifest and puts the root first.
         is_protected: item.backup.is_protected,
     }

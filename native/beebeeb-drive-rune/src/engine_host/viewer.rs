@@ -408,11 +408,17 @@ impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
             return Elsewhere::NeedsSync;
         }
         let (engine, waker, turn) = (self.engine.clone(), self.engine.clone(), self.engine.session_turn());
+        let board = self.engine.clone();
         let started = super::open_with_apps::mac::start(
             file_id,
             pick,
             move || engine.session_turn() == turn,
             move || waker.wake_host(),
+            // How far Finder's download is, from the transfer board (dm-75: the no-byte limit reads it).
+            move |id| {
+                let rows = board.downloads_for(turn).ok()?;
+                rows.into_iter().find(|row| row.file_id == id).map(|row| (row.done, row.total))
+            },
         );
         if started.is_ok() { Elsewhere::Opened } else { Elsewhere::Refused }
     }

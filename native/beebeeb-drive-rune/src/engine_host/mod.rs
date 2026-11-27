@@ -55,7 +55,7 @@ pub mod backups_devices;
 mod binding_tests;
 pub mod drive_previews;
 pub mod drive_settings;
-mod macos_downloaded;
+pub(crate) mod macos_downloaded;
 pub mod files;
 #[cfg(any(target_os = "windows", test))]
 #[cfg_attr(not(test), allow(dead_code))] // the card is not wired into the Windows app yet
@@ -454,6 +454,12 @@ impl<C: CredentialStores> LiveEngine<C> {
     /// first run: `shell::run` calls it on its own, once, for the instance that is the app.
     pub fn start_finder_setup(&self) {
         finder_setup::start(self.engine.clone(), self.identity);
+        // Dm-75: the rows' marks are Finder's real state; a list that changed draws them again.
+        #[cfg(target_os = "macos")]
+        {
+            let engine = self.engine.clone();
+            macos_downloaded::finder_state::set_wake(move || engine.wake_host());
+        }
     }
 
     /// What the first-run source asks of the shell: the one start path, the folder opener, the start-at-login
@@ -965,6 +971,61 @@ fn fetch_for_open<C: CredentialStores>(
     Ok(dest)
 }
 
+/// Dm-75: Finder's copy of the file `id` is on this Mac when this answers `Ok(true)`: the one call every open on a
+/// Mac makes (`macos_fp::materialise`), which asks the system for a file that is online only and waits until it is
+/// no longer dataless. `Ok(false)`: Finder has no file for it (Beebeeb is not in Finder, a folder, a file shared
+/// with the account, which is never asked of the File Provider: ruling 1701), or this is not a Mac. `Err`: the
+/// download was refused or brought no byte for the limit; the file's page says so. Blocks: the launch worker's.
+#[cfg(all(target_os = "macos", not(test)))]
+fn finder_copy_present<C: CredentialStores>(
+    engine: &Engine<C>,
+    turn: beebeeb_engine::account::SessionGeneration,
+    id: &str,
+    still: &dyn Fn() -> bool,
+) -> Result<bool, ActionError> {
+    use crate::shell::platform::macos::macos_fp::materialise::{self, Stop, SystemFinder, Wait, STALL};
+    use crate::shell::platform::macos::macos_fp::open as finder;
+    let own = engine
+        .local_state_for_changes()
+        .and_then(|state| state.with(|db| finder::refuse_shared(db, id).is_ok()));
+    if !matches!(own, Ok(true)) || finder::not_ready_line(&finder_setup::view()).is_some() {
+        return Ok(false);
+    }
+    let wait = Wait {
+        size: 0,
+        stall: STALL,
+        still,
+        progress: &|| {
+            let rows = engine.downloads_for(turn).ok()?;
+            rows.into_iter().find(|row| row.file_id == id).map(|row| (row.done, row.total))
+        },
+        report: &|_, _| {},
+    };
+    match materialise::make_present(&SystemFinder, id, &wait, &mut |_| {}) {
+        Ok(found) => Ok(found),
+        Err(Stop::Left) => Err(ActionError::Unavailable),
+        Err(Stop::Stalled { .. }) => {
+            tracing::warn!("open: Finder\u{2019}s download of a file stopped moving; the page says so");
+            Err(ActionError::Offline)
+        }
+        Err(Stop::Refused(_)) => {
+            tracing::warn!("open: the system refused to download a file to Finder; the page says so");
+            Err(ActionError::Failed)
+        }
+    }
+}
+
+/// Elsewhere, and in a test: the engine's own copy is the one an app opens.
+#[cfg(not(all(target_os = "macos", not(test))))]
+fn finder_copy_present<C: CredentialStores>(
+    _engine: &Engine<C>,
+    _turn: beebeeb_engine::account::SessionGeneration,
+    _id: &str,
+    _still: &dyn Fn() -> bool,
+) -> Result<bool, ActionError> {
+    Ok(false)
+}
+
 impl<C: CredentialStores> EngineFilesSource<C> {
     /// A local file operation, on the signed-in account's local state (the account-bound handle, task 2488) and
     /// the sync root: both are required. Refused when sync is not running for this handle, as the published view
@@ -1026,6 +1087,9 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             let still = || engine.session_turn() == turn;
             let started = paths.iter().try_for_each(|(path, id)| {
                 let path = match id {
+                    // Dm-75: on a Mac the copy an app opens is Finder's, made present by the system. Never a copy the
+                    // engine downloads itself: the place the press registered is Finder's, not that copy's.
+                    Some(id) if finder_copy_present(&engine, turn, id, &still)? => path.clone(),
                     Some(id) if !path.exists() => fetch_for_open(&engine, turn, id, path)?,
                     _ => path.clone(),
                 };

@@ -814,7 +814,12 @@ int beebeeb_fp_evict_item(const char *identifier, BeebeebFpError *out_error) {
 // dm-71: keep ONE item on this Mac through the system: ask it to download the item now
 // (requestDownloadForItemWithIdentifier:, the whole file). The extension's fetchContents is then the one download;
 // the item's content policy (downloadEagerlyAndKeepDownloaded while it is kept) keeps the copy.
-// Returns 0 = asked (or domain not registered), -1 (out_error set).
+// dm-75: this is the ONE request every open makes too (the viewer, Open with, the list's Open; Rust's
+// `macos_fp::materialise`). The request is a scheduling hint ("at the earliest convenient time",
+// NSFileProviderManager.h, macOS 13.0+), so the Rust side also reads the file and waits until it is no longer
+// dataless. A domain with no manager is an error now, never "asked": nothing was asked, and a caller that waits for
+// the file must hear that.
+// Returns 0 = the system took the request, -1 (out_error set).
 int beebeeb_fp_request_download(const char *identifier, BeebeebFpError *out_error) {
     @autoreleasepool {
         if (identifier == NULL || identifier[0] == 0) {
@@ -823,7 +828,9 @@ int beebeeb_fp_request_download(const char *identifier, BeebeebFpError *out_erro
         }
         NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
         if (manager == nil) {
-            return 0;
+            BeebeebFillBridgeError(BeebeebBridgeManagerUnavailable,
+                                   @"File Provider manager is unavailable for the Beebeeb domain", out_error);
+            return -1;
         }
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
         __block NSError *found_error = nil;
