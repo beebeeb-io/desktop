@@ -110,12 +110,14 @@ fn storage_rows_go_where_they_point() {
     press(&mut rt, "crumb-row");
     assert_eq!(ui(&rt).pane, Pane::Storage, "the way back leads to Storage");
     press(&mut rt, "item-0-4");
-    assert!(
-        ui(&rt).intents.contains(&Intent::Show("DW-0747")),
-        "Trash is asked of the shell"
-    );
+    assert!(!matches!(rt.state.shell.app.screen(), Screen::Settings(_)), "Trash closes Settings");
+    assert_eq!(rt.state.shell.app.route().section, crate::shell::app::Section::Trash);
+    assert!(!ui(&rt).intents.contains(&Intent::Show("DW-0747")));
+
+    let mut rt = runtime("DW-0712");
     press(&mut rt, "item-1-2");
-    assert!(ui(&rt).intents.contains(&Intent::Show("DW-0715")));
+    assert!(!matches!(rt.state.shell.app.screen(), Screen::Settings(_)));
+    assert_eq!(rt.state.shell.app.route().section, crate::shell::app::Section::AvailableOffline);
 }
 
 #[test]

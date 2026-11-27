@@ -163,6 +163,10 @@ pub trait ViewerEngine: Send + Sync + 'static {
     }
     /// Wake the window's loop: an answer or progress is waiting.
     fn wake(&self);
+    /// drive-complete-RS-d: the bytes of `file_id` were read for `session` (the copy here or the download). A picture
+    /// the server has no thumbnail of gets its thumbnails made from them ([`super::thumbs::after_open`]). Must not
+    /// wait on the network. Default: nothing.
+    fn opened(&self, _session: SessionGeneration, _file_id: &str, _bytes: &[u8]) {}
     /// Beebeeb is open: signed in and not locked ([`Engine::lock_state`] is `Open`). Never waits. A screen lock keeps
     /// the session in memory, so [`ViewerEngine::has_session`] alone does not say it.
     fn screen_open(&self) -> bool {
@@ -527,6 +531,10 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
 
     fn wake(&self) {
         self.engine.wake_host();
+    }
+
+    fn opened(&self, session: SessionGeneration, file_id: &str, bytes: &[u8]) {
+        super::thumbs::after_open(&self.engine, session, file_id, bytes);
     }
 
     fn media_ready(&self) -> bool {
@@ -1229,6 +1237,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                                 Ok(read) => read,
                                 Err(error) => return (Err(error), None),
                             };
+                        // A picture with no server thumbnail gets one made from these bytes (on a worker of its own).
+                        if !cancel.load(Ordering::SeqCst) {
+                            engine.opened(session, &file_id, &bytes);
+                        }
                         let (mut content, document) = match (&pdf, shows) {
                             (Some(ends), Shows::Pdf) => {
                                 let (body, document) = open_pdf(bytes, &ends.size, &cancel);

@@ -352,6 +352,14 @@ pub trait DriveSettings {
     fn rebuild_previews(&mut self) {}
     /// Read Thumbnails and previews again after a failed read (its Try again).
     fn reload_previews(&mut self) {}
+    /// "Make missing thumbnails" (drive-complete-RS-d). `None`: no source, the row is not drawn.
+    fn thumbnail_repair(&self) -> Option<super::previews::ThumbRepairView> {
+        None
+    }
+    /// Start "Make missing thumbnails".
+    fn start_thumbnail_repair(&mut self) {}
+    /// Stop it: no new file is begun.
+    fn stop_thumbnail_repair(&mut self) {}
 }
 
 /// The board's sample content for Drive's settings panes.

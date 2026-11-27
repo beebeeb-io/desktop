@@ -60,6 +60,7 @@ impl SampleFiles {
             split: Some(StorageSplit {
                 files_bytes: 0,
                 photos_bytes: 0,
+                backups_bytes: 0,
             }),
             ..SampleFiles::default()
         }

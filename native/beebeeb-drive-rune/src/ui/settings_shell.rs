@@ -26,8 +26,49 @@ use crate::theme::icons_settings as ic;
 
 /// The settings sidebar is 224 pt wide on the board (the Drive sidebar is 220).
 pub const SIDEBAR_W: f32 = 224.0;
-/// A pane's column (`.mk-set-col`).
+/// A pane's column (`.mk-set-col`): at least this wide.
 pub const COLUMN_W: f32 = 540.0;
+/// The column grows with the window up to this readable maximum.
+pub const COLUMN_MAX_W: f32 = 880.0;
+/// A card is never narrower than this: two columns need room for two of them and the gap.
+pub const CARD_MIN_W: f32 = 420.0;
+/// The gap between a pane's children, in both directions.
+pub const FLOW_GAP: f32 = 14.0;
+
+thread_local! {
+    /// How many full-width lead pieces (a crumb, a heading) were built since the last pane:
+    /// those stay above the cards instead of flowing with them.
+    static LEAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A lead piece (crumb, heading) was built: the next pane keeps it full width.
+pub fn mark_lead() {
+    LEAD.with(|l| l.set((l.get() + 1).min(2)));
+}
+
+/// A pane's column: the lead pieces (crumb, heading) stacked full width, then the rest in a
+/// row that wraps. Each flowing child sits in an item at least [`CARD_MIN_W` wide that grows,
+/// so a column wide enough for two items gives two, and a narrower one gives one. Order and
+/// whole children are kept. `min_w` is the column's floor (`COLUMN_W`).
+pub fn flow(children: Vec<El>, min_w: f32) -> El {
+    let lead = LEAD.with(|l| l.replace(0)).min(children.len());
+    let mut column = col().key("set-col").w_full().min_w(min_w).max_w(COLUMN_MAX_W).gap(FLOW_GAP);
+    let mut cards = row().key("set-flow").w_full().flex_wrap().items_start().gap(FLOW_GAP);
+    for (i, child) in children.into_iter().enumerate() {
+        if i < lead {
+            column = column.child(child);
+        } else {
+            cards = cards.child(
+                col()
+                    .key(format!("set-item-{}", i - lead))
+                    .min_w(CARD_MIN_W)
+                    .grow(1.0)
+                    .child(child.w_full()),
+            );
+        }
+    }
+    column.child(cards)
+}
 
 /// 22px/650 on a 28px line, tracked -0.022em: a pane's title (`.t-large` at the desktop scale).
 pub const PANE_TITLE: TextStyle = TextStyle::new(22.0, 650.0).lh(28.0).tracking(-0.484);
@@ -146,10 +187,7 @@ pub fn sidebar(back: El, sections: Vec<(&str, Vec<El>)>, foot: &str, t: &Theme) 
 /// 540 pt column whose children sit 14 pt apart. A pane taller than the window scrolls
 /// (the board draws those frames taller than the window "so the whole section shows").
 pub fn pane(children: Vec<El>, t: &Theme) -> El {
-    let mut column = col().key("set-col").w(COLUMN_W).gap(14.0);
-    for child in children {
-        column = column.child(child);
-    }
+    let column = flow(children, COLUMN_W);
     col()
         .key("set-main")
         .role("main")
@@ -168,6 +206,7 @@ pub fn pane(children: Vec<El>, t: &Theme) -> El {
 /// A link; `back` is what a press does (on the link itself: the element that takes the
 /// focus is the one that takes the press). Keys: `crumb-row`, `crumb-icon`, `crumb`.
 pub fn crumb<S: 'static>(label: &str, t: &Theme, back: impl Fn(&mut S) + 'static) -> El {
+    mark_lead();
     row().key("crumb-line").child(
         row()
             .key("crumb-row")
@@ -193,6 +232,7 @@ pub fn crumb<S: 'static>(label: &str, t: &Theme, back: impl Fn(&mut S) + 'static
 /// A pane's heading (`.mk-set-h`): the title, and a second line where the board has one.
 /// Keys: `set-title`, `set-sub`.
 pub fn heading(title: &str, sub: Option<&str>, t: &Theme) -> El {
+    mark_lead();
     let mut h = col().key("set-h").items_start().gap(3.0).child(
         kit::label("set-title", title, PANE_TITLE, t.text)
             .role("heading")
@@ -288,5 +328,104 @@ mod sidebar_icon_tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), DRIVE_ITEMS.len(), "each Drive entry has its own icon");
+    }
+}
+
+#[cfg(test)]
+mod settings_flow_tests {
+    use super::*;
+    use crate::theme::tokens::theme;
+    use crate::ui::settings_card;
+    use rune::{Cx, Env, Runtime};
+
+    /// A pane of a heading and five cards beside the sidebar.
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        let t = theme(false);
+        let mut kids = vec![heading("Title", Some("A line under it."), &t)];
+        for i in 0..5 {
+            kids.push(
+                settings_card::card(i, &t)
+                    .child(settings_card::head(i, &format!("Card {i}"), &t)),
+            );
+        }
+        row()
+            .key("root")
+            .w_full()
+            .h_full()
+            .child(el().w(SIDEBAR_W).h_full())
+            .child(pane(kids, &t))
+    }
+
+    fn at(content: f32) -> Runtime<()> {
+        let env = Env { system_dark: false, scale: 2.0 };
+        let mut rt = Runtime::new((), view, (SIDEBAR_W + content, 900.0), env);
+        rt.frame(0.0);
+        rt.settle_all();
+        rt.frame(0.0);
+        rt
+    }
+
+    fn rect(rt: &Runtime<()>, key: &str) -> [f32; 4] {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+            .unwrap_or_else(|| panic!("no element keyed {key}"))
+            .rect
+    }
+
+    /// (column width, distinct card x positions) for a window whose content area is `content` wide.
+    fn shape(content: f32) -> (f32, usize) {
+        let rt = at(content);
+        let col = rect(&rt, "set-col");
+        let mut xs: Vec<i32> = Vec::new();
+        for i in 0..5 {
+            let c = rect(&rt, &format!("card-{i}"));
+            assert!(c[0] >= col[0] - 0.5 && c[0] + c[2] <= col[0] + col[2] + 0.5, "card {i} sticks out of the column at {content}");
+            assert!(c[2] >= CARD_MIN_W - 0.5, "card {i} is {} wide at {content}", c[2]);
+            let h = rect(&rt, &format!("card-{i}-head"));
+            assert!(h[0] + h[2] <= c[0] + c[2] + 0.5 && h[1] + h[3] <= c[1] + c[3] + 0.5, "card {i} is cut at {content}");
+            let x = c[0].round() as i32;
+            if !xs.contains(&x) {
+                xs.push(x);
+            }
+        }
+        (col[2], xs.len())
+    }
+
+    #[test]
+    fn narrow_window_keeps_the_540_column() {
+        let (w, cols) = shape(600.0);
+        assert!((COLUMN_W..=600.0 - 60.0 + 0.5).contains(&w) || (w - COLUMN_W).abs() < 0.5, "column {w}");
+        assert_eq!(cols, 1);
+        let (w, cols) = shape(540.0 + 60.0);
+        assert!((w - 540.0).abs() < 0.5, "column {w}");
+        assert_eq!(cols, 1);
+    }
+
+    #[test]
+    fn column_grows_with_the_window_to_880() {
+        // content area = window - sidebar; 30 pt either side
+        let (w, cols) = shape(1000.0 - SIDEBAR_W);
+        assert!((w - (1000.0 - SIDEBAR_W - 60.0)).abs() < 0.5, "1000: column {w}");
+        assert_eq!(cols, 1, "1000: one column");
+        let (w, cols) = shape(1600.0 - SIDEBAR_W);
+        assert!((w - 880.0).abs() < 0.5, "1600: column {w}");
+        assert_eq!(cols, 2, "1600: two columns");
+        let (w, cols) = shape(2500.0 - SIDEBAR_W);
+        assert!((w - 880.0).abs() < 0.5, "2500: column {w}");
+        assert_eq!(cols, 2, "2500: two columns");
+    }
+
+    #[test]
+    fn cards_keep_their_order() {
+        let rt = at(2500.0 - SIDEBAR_W);
+        let mut last = (f32::MIN, f32::MIN);
+        for i in 0..5 {
+            let c = rect(&rt, &format!("card-{i}"));
+            assert!(c[1] > last.0 - 0.5);
+            last = (c[1], c[0]);
+        }
+        let h = rect(&rt, "set-h");
+        assert!(rect(&rt, "card-0")[1] >= h[1] + h[3], "the heading stays above the cards");
     }
 }

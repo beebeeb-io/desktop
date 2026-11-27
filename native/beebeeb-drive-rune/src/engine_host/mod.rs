@@ -110,6 +110,7 @@ pub mod sync;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod this_pc;
+pub mod thumb_repair;
 pub mod thumbs;
 pub mod trash;
 // The first run's steps that have an engine function behind them (`setup`).

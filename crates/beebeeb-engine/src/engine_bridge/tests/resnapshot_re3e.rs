@@ -1,4 +1,4 @@
-//! RE3-e: Guus's PC fetched `/sync/snapshot` twice right after start (42k rows, 64-71 s each): the first
+//! RE3-e: a large account fetched `/sync/snapshot` twice right after start (42k rows, 64-71 s each): the first
 //! snapshot's own apply, or a request made while it was on its way, asked for another. A good snapshot is
 //! fetched once. Not on macOS: there a request raised during a snapshot is kept on purpose (spec §6.3.2).
 #![cfg(not(target_os = "macos"))]

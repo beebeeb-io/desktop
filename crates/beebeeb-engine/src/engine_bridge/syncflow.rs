@@ -730,7 +730,7 @@ pub(super) async fn bootstrap_from_snapshot(
     // RE-a: the bar counts from here (it said "list on its way" through the whole decrypt pass), and the log says
     // how far it is every LISTING_LOG_EVERY.
     let mut progress = ListingProgress::start(bridge.transfers().clone(), snapshot.nodes.len() as u64);
-    // RE3-e: a request made while this list was on its way (64-71 s for 42k rows on Guus's line: the first
+    // RE3-e: a request made while this list was on its way (64-71 s for 42k rows on a slow line: the first
     // reconcile pass's name retry, an accepted share) is served by it: its decrypt pass runs now, with the keys
     // in memory now, and a server change after the list's `seq_id` comes through the ops path. It is given back
     // when the decrypt or the apply fails. macOS keeps its own counted request (spec §6.3.2).

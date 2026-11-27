@@ -322,13 +322,14 @@ fn foot(s: &State, standing: Standing, t: &Theme) -> El {
         .storage_split()
         .filter(|_| s.storage_known && !no_plan && !blanked && !listing);
     let quota = storage.quota_bytes.max(1) as f64;
-    let (files_bytes, photos_bytes) = match split {
-        Some(split) => (split.files_bytes, split.photos_bytes),
-        None if s.storage_known && !no_plan && !blanked => (storage.used_bytes, 0),
-        None => (0, 0),
+    let (files_bytes, photos_bytes, backups_bytes) = match split {
+        Some(split) => (split.files_bytes, split.photos_bytes, split.backups_bytes),
+        None if s.storage_known && !no_plan && !blanked => (storage.used_bytes, 0, 0),
+        None => (0, 0, 0),
     };
     let files_frac = (files_bytes.max(0) as f64 / quota).min(1.0) as f32;
     let photos_frac = (photos_bytes.max(0) as f64 / quota).min(1.0) as f32;
+    let backups_frac = (backups_bytes.max(0) as f64 / quota).min(1.0) as f32;
     let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
     let mut meter = col()
         .key("storage-meter")
@@ -370,6 +371,12 @@ fn foot(s: &State, standing: Standing, t: &Theme) -> El {
                         .h_full()
                         .w(track_w * photos_frac)
                         .fill(t.text_quaternary),
+                )
+                .child(
+                    el().key("meter-fill-2")
+                        .h_full()
+                        .w(track_w * backups_frac)
+                        .fill(t.text_tertiary),
                 ),
         );
     if no_plan {
@@ -380,24 +387,31 @@ fn foot(s: &State, standing: Standing, t: &Theme) -> El {
             t.text_tertiary,
         ));
     } else if split.is_some() {
-        // The split, like the total, is the server's: nothing is shown in its place.
-        meter = meter.child(
-            row()
-                .key("storage-breakdown")
-                .justify_between()
-                .child(kit::label(
-                    "storage-files",
-                    format!("Files {}", format_storage(files_bytes)),
-                    type_::KBD,
-                    t.text_tertiary,
-                ))
-                .child(kit::label(
-                    "storage-photos",
-                    format!("Photos {}", format_storage(photos_bytes)),
-                    type_::KBD,
-                    t.text_tertiary,
-                )),
-        );
+        // Files, Photos and Backups add up to the local total Insights shows. A drive with no Backups says none.
+        let mut breakdown = row()
+            .key("storage-breakdown")
+            .justify_between()
+            .child(kit::label(
+                "storage-files",
+                format!("Files {}", format_storage(files_bytes)),
+                type_::KBD,
+                t.text_tertiary,
+            ))
+            .child(kit::label(
+                "storage-photos",
+                format!("Photos {}", format_storage(photos_bytes)),
+                type_::KBD,
+                t.text_tertiary,
+            ));
+        if backups_bytes > 0 {
+            breakdown = breakdown.child(kit::label(
+                "storage-backups",
+                format!("Backups {}", format_storage(backups_bytes)),
+                type_::KBD,
+                t.text_tertiary,
+            ));
+        }
+        meter = meter.child(breakdown);
     }
 
     // Whose account: the source's own answer. Locked: none shown, the row keeps its shape.

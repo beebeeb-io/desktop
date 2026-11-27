@@ -62,8 +62,8 @@ impl StateDb {
     }
     /// RE3-e: run `apply` (the apply of a snapshot just fetched) on this thread with the re-snapshot requests it
     /// raises itself counted as served. Such a request asks for the list again to learn what this very list just
-    /// told (a name it could not read stays unreadable under the same keys), so it only cost Guus's PC a second
-    /// 42k-row snapshot right after start. Requests from other threads still land. Not on macOS: there a
+    /// told (a name it could not read stays unreadable under the same keys), so it only cost a large account a second
+    /// full snapshot right after start. Requests from other threads still land. Not on macOS: there a
     /// request raised during a snapshot means it must run again (spec §6.3.2).
     pub fn during_snapshot_apply<R>(apply: impl FnOnce() -> R) -> R {
         struct Reset(bool);

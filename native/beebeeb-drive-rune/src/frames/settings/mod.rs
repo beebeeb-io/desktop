@@ -725,6 +725,14 @@ pub fn go(s: &mut State, frame: &'static str) {
             host::dispatch(s, Event::Navigate(shared));
             return;
         }
+        // Storage's Trash row and the "Available offline" rows: settings closes, the section opens.
+        "DW-0747" | "DW-0715" => {
+            use crate::shell::app::{Route, Section};
+            s.settings.reset();
+            let section = if frame == "DW-0747" { Section::Trash } else { Section::AvailableOffline };
+            host::dispatch(s, Event::Navigate(Route::section(section)));
+            return;
+        }
         "DW-A77" => {
             s.settings.reset();
             crate::frames::account::go(s, frame);

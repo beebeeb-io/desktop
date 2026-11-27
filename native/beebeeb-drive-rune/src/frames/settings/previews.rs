@@ -81,6 +81,44 @@ pub struct Previews {
     pub sample: Option<Sample>,
 }
 
+/// "Make missing thumbnails" (drive-complete-RS-d): what the run says, in words the pane draws as they are.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ThumbRepairView {
+    /// A run is going: the row offers Stop.
+    pub running: bool,
+    /// Files handled, of `total`, and how many got thumbnails.
+    pub done: u32,
+    pub total: u32,
+    pub made: u32,
+    /// Why the last run ended early, or that it was stopped. `None`: it did not.
+    pub note: Option<&'static str>,
+    /// A run ended in this app's life (the line under the row says what it came to).
+    pub ran: bool,
+}
+
+impl ThumbRepairView {
+    /// The line under the row.
+    pub fn words(&self) -> String {
+        if self.running {
+            if self.total == 0 {
+                return "Looking for photos without thumbnails".into();
+            }
+            return format!("Making thumbnails: {} of {}", self.done, self.total);
+        }
+        if let Some(note) = self.note {
+            return format!("{note} Made {} of {}.", self.made, self.total);
+        }
+        if self.ran {
+            return match self.made {
+                0 if self.total == 0 => "Every photo has a thumbnail.".into(),
+                1 => "Made 1 missing thumbnail.".into(),
+                n => format!("Made {n} missing thumbnails."),
+            };
+        }
+        "For photos uploaded without one, for example from the web. They are downloaded one by one.".into()
+    }
+}
+
 /// What is kept on this PC, against its limit.
 #[derive(Clone, PartialEq, Debug)]
 pub struct OnPc {
@@ -509,12 +547,35 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         t,
     ));
 
+    if let Some(repair) = ui.drive.thumbnail_repair() {
+        children.push(missing_thumbnails(&repair, t));
+    }
+
     let overlay = match ui.dialog {
         Some(Dialog::ApplyPreviews) => Some(apply_question(ui, &p, t)),
         Some(Dialog::Compare) => Some(compare_view(ui, &p, t)),
         _ => ui.toast.or(p.notice).map(|words| notices::toast(0, words, t)),
     };
     (shell::pane(children, t), overlay)
+}
+
+/// "Make missing thumbnails", with its progress and Stop while it runs (drive-complete-RS-d).
+fn missing_thumbnails(repair: &ThumbRepairView, t: &Theme) -> El {
+    let item = Item::new(Some(&ic::IMAGE), "Make missing thumbnails").sub(repair.words());
+    let action = if repair.running {
+        controls::button(7, "Stop", None, Emphasis::Plain, t)
+            .on_press(|s: &mut State| s.settings.drive.stop_thumbnail_repair())
+    } else {
+        controls::button(7, "Make", None, Emphasis::Plain, t)
+            .on_press(|s: &mut State| s.settings.drive.start_thumbnail_repair())
+    };
+    lists::list(
+        7,
+        Some("Missing thumbnails"),
+        vec![lists::item_with(7, 0, &item, vec![action], t)],
+        None,
+        t,
+    )
 }
 
 /// The Format caption on the board.

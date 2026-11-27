@@ -413,6 +413,8 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     local_reading: bool,
     /// Thumbnails and previews (`drive_previews`): off until the app's start hands it the engine.
     previews: super::drive_previews::PreviewsHost,
+    /// "Make missing thumbnails" (`thumb_repair`): none until the app's start hands it the engine.
+    thumb_repair: Option<super::thumb_repair::ThumbRepair>,
 }
 
 /// The Sync row while the engine holds sync on a metered connection (DW-0746e).
@@ -498,9 +500,16 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             local_at: None,
             local_reading: false,
             previews: super::drive_previews::PreviewsHost::off(),
+            thumb_repair: None,
         };
         // Nothing is read at launch: a pane reads when it opens (`opened`), never before (module doc).
         source
+    }
+
+    /// "Make missing thumbnails" on the engine (the app's start).
+    pub fn with_thumb_repair(mut self, repair: super::thumb_repair::ThumbRepair) -> Self {
+        self.thumb_repair = Some(repair);
+        self
     }
 
     /// Thumbnails and previews on the engine (the app's start; a test's fake).
@@ -971,6 +980,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             }
         }
         changed |= self.previews.pump();
+        changed |= self.thumb_repair.as_ref().is_some_and(|repair| repair.take_changed());
         // App activity: a sample every 2 seconds while Diagnostics is shown; the rates are the engine's newest
         // bandwidth sample, read only when a sample is due.
         let sampling = self.activity.running();
@@ -1342,6 +1352,35 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
 
     fn reload_previews(&mut self) {
         self.previews.reload();
+    }
+
+    fn thumbnail_repair(&self) -> Option<crate::frames::settings::previews::ThumbRepairView> {
+        use super::thumb_repair::Phase;
+        let status = self.thumb_repair.as_ref()?.status();
+        Some(crate::frames::settings::previews::ThumbRepairView {
+            running: status.running(),
+            done: status.done,
+            total: status.total,
+            made: status.made,
+            note: match status.phase {
+                Phase::Held(words) => Some(words),
+                Phase::Stopped => Some("Stopped."),
+                _ => None,
+            },
+            ran: !matches!(status.phase, Phase::Idle),
+        })
+    }
+
+    fn start_thumbnail_repair(&mut self) {
+        if let Some(repair) = &self.thumb_repair {
+            repair.start();
+        }
+    }
+
+    fn stop_thumbnail_repair(&mut self) {
+        if let Some(repair) = &self.thumb_repair {
+            repair.stop();
+        }
     }
 }
 
