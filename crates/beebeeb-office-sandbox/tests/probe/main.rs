@@ -74,6 +74,8 @@
 //!
 //! Numbers are decimal, handle values hexadecimal (as `setevent`); a grant's `wire` is decimal (it is a `u64`).
 //!
+//! macOS has requests and starts of its own: see the `macos` module.
+//!
 //! `beebeeb-sandbox-probe parent sandboxed|plain` is the "parent that dies" of the tests: it starts a second
 //! probe (confined through the crate, or plainly), makes it hang, prints `child <process id>` and sleeps.
 
@@ -86,6 +88,8 @@ use std::time::Duration;
 use beebeeb_office_sandbox::{Access, Granted, SandboxError, helper};
 
 mod hardening;
+#[cfg(target_os = "macos")]
+mod macos;
 
 fn code(error: &std::io::Error) -> String {
     match error.raw_os_error() {
@@ -959,9 +963,13 @@ fn dns(_name: &str) -> String {
 
 /// Opens the system's Segoe UI font file and reads its first 4 bytes: the helper draws text with the system's fonts.
 fn read_font() -> String {
+    #[cfg(target_os = "macos")]
+    let path = std::path::Path::new("/System/Library/Fonts/Helvetica.ttc");
+    #[cfg(not(target_os = "macos"))]
     let Some(system_root) = std::env::var_os("SystemRoot") else {
         return "err unset".into();
     };
+    #[cfg(not(target_os = "macos"))]
     let path = std::path::Path::new(&system_root).join("Fonts").join("segoeui.ttf");
     let mut head = [0u8; 4];
     match std::fs::File::open(path).and_then(|mut file| file.read_exact(&mut head)) {
@@ -1162,8 +1170,12 @@ fn parent(mode: &str) -> ! {
         }
         "plain" => {
             // Never waited for on purpose: this process is the parent that gets killed, the child is the orphan.
+            let mut command = Command::new(&own);
+            // On macOS a probe confines itself unless it is started as the tests' control.
+            #[cfg(target_os = "macos")]
+            command.arg("plain-control");
             #[allow(clippy::zombie_processes)]
-            let mut child = Command::new(&own)
+            let mut child = command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -1179,6 +1191,9 @@ fn parent(mode: &str) -> ! {
 
 fn main() {
     let arguments: Vec<String> = std::env::args().collect();
+    // First of all, before any input is read: on macOS a helper confines itself (the probe as every helper does).
+    #[cfg(target_os = "macos")]
+    macos::start(arguments.get(1).map(String::as_str));
     if arguments.get(1).map(String::as_str) == Some("parent") {
         parent(arguments.get(2).map(String::as_str).unwrap_or(""));
     }
@@ -1232,6 +1247,9 @@ fn main() {
                 }
             }
             "exit" => std::process::exit(rest.parse().unwrap_or(64)),
+            #[cfg(target_os = "macos")]
+            other => macos::request(other, rest),
+            #[cfg(not(target_os = "macos"))]
             _ => "err unknown".to_string(),
         };
         if writeln!(stdout, "{answer}").and_then(|()| stdout.flush()).is_err() {
