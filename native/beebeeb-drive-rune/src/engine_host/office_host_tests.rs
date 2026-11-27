@@ -1228,6 +1228,28 @@ fn a_real_confined_helper_renders_page_one() {
 /// A named rule from two sizes to one.
 type Case = (&'static str, fn(u32, u32) -> u32);
 
+/// Drive-macos-92: a picture's helper answers `Opened` (one page), as a PDF's does: the worker takes it, and page 0
+/// can be asked. Without the arm in `kind_has_pages` every HEIC thumbnail ended as `Stop::Protocol`.
+#[test]
+fn picture_kind_opens_as_one_page_and_its_helper_is_not_killed() {
+    let registry = Registry::new();
+    let sizes = [PageSize { w_pt: 64.0, h_pt: 32.0 }];
+    let kind = DocKind::Picture(office::PictureKind::Heic);
+    let (mut host, log, _) = open_fake(Fake::new(move |link| serve(link, &sizes)), &registry, kind);
+    let mut events = Vec::new();
+    assert!(until_open(&mut host, &mut events), "no answer within 2 s");
+    assert_eq!(
+        &host.state(),
+        &OfficeState::Pages {
+            pages: 1,
+            sizes: sizes.to_vec()
+        }
+    );
+    assert_eq!(log.kills(), 0, "the helper stays for the page");
+    assert!(host.request_page(0, 1.0, None).is_some(), "page 0 can be asked");
+    assert!(pump_for(&mut host, &mut events, WITHIN, |_, events| pages_of(events) == 1), "{:?}", host.state());
+}
+
 /// RC2-3: a PDF's helper answers `Opened` (pages), as a document's does. The worker took that answer for Word and
 /// slides only, so every PDF ended as `Stop::Protocol` and its helper was killed before a page was asked.
 #[test]

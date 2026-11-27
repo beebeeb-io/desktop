@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use beebeeb_office_protocol::check::{self, Limits as Contract};
 use beebeeb_office_protocol::frame::{Frame, Ids, Side, read_frame, write_frame};
 use beebeeb_office_protocol::office::{
-    DocKind, GrantRef, KIND_OPEN, KIND_OPENED, KIND_RENDER, KIND_RENDERED, Open, Opened, Render, Rendered,
+    DocKind, Error, ErrorCode, GrantRef, KIND_ERROR, KIND_OPEN, KIND_OPENED, KIND_RENDER, KIND_RENDERED, Open, Opened,
+    PictureKind, Render, Rendered,
 };
 use beebeeb_office_sandbox::{Access, Child, Limits as SandboxLimits, Sandbox, Section};
 
@@ -25,6 +26,8 @@ const HELPER: &str = env!("CARGO_BIN_EXE_beebeeb-office-render");
 const LETTER: &[u8] = include_bytes!("fixtures/letter-1.docx");
 /// Names a font of the system: the helper reads it from the system's font folder, the one place it may read.
 const SYSTEM_FONT: &[u8] = include_bytes!("fixtures/system-font.docx");
+/// A 64 x 32 HEIC, left half red, right half blue (made with `sips` from a bitmap; drive-macos-92).
+const PHOTO: &[u8] = include_bytes!("fixtures/photo-64x32.heic");
 
 unsafe extern "C" {
     /// The sandbox library's question to the kernel about a process (no public header; as the sandbox crate uses it).
@@ -43,6 +46,18 @@ struct Session {
 
 impl Session {
     fn open(bytes: &[u8]) -> (Session, Opened) {
+        Session::open_as(DocKind::Docx, bytes)
+    }
+
+    fn open_as(kind: DocKind, bytes: &[u8]) -> (Session, Opened) {
+        let (session, frame) = Session::start_as(kind, bytes, &[KIND_OPENED]);
+        let opened = Opened::decode(&frame.payload).expect("the Opened answer decodes");
+        check::check_opened(&opened, &Contract::CONTRACT).expect("the Opened answer passes the checks");
+        (session, opened)
+    }
+
+    /// Starts the helper, sends `Open` and returns its answer, which must be of `expect_kind`.
+    fn start_as(kind: DocKind, bytes: &[u8], expect_kinds: &[u16]) -> (Session, Frame) {
         let sandbox = Sandbox::new(SandboxLimits::default()).expect("the sandbox starts");
         let mut child = sandbox.spawn(Path::new(HELPER)).expect("the confined helper starts");
         let pipes = child.take_pipes().expect("the pipes are there the first time");
@@ -76,19 +91,22 @@ impl Session {
             _doc: doc,
         };
         let open = Open {
-            kind: DocKind::Docx,
+            kind,
             doc: GrantRef {
                 wire: granted.wire,
                 len: granted.len,
             },
         };
-        let frame = session.ask(KIND_OPEN, &open.encode().expect("a small request"), KIND_OPENED);
-        let opened = Opened::decode(&frame.payload).expect("the Opened answer decodes");
-        check::check_opened(&opened, &Contract::CONTRACT).expect("the Opened answer passes the checks");
-        (session, opened)
+        let frame = session.ask_any(KIND_OPEN, &open.encode().expect("a small request"), expect_kinds);
+        (session, frame)
     }
 
     fn ask(&mut self, kind: u16, payload: &[u8], expect_kind: u16) -> Frame {
+        self.ask_any(kind, payload, &[expect_kind])
+    }
+
+    /// [`Session::ask`] when the answer may be one of `expect_kinds`.
+    fn ask_any(&mut self, kind: u16, payload: &[u8], expect_kinds: &[u16]) -> Frame {
         let id = self.ids.next_id();
         write_frame(&mut self.to_helper, kind, id, payload).expect("the request is written");
         let frame = match self.answers.recv_timeout(check::REQUEST_TIMEOUT) {
@@ -97,7 +115,7 @@ impl Session {
             Err(_) => panic!("the helper was silent for {} s", check::REQUEST_TIMEOUT.as_secs()),
         };
         assert_eq!(frame.id, id, "the answer's id is the request's");
-        assert_eq!(frame.kind, expect_kind, "answer kind {:#06x}", frame.kind);
+        assert!(expect_kinds.contains(&frame.kind), "answer kind {:#06x}", frame.kind);
         frame
     }
 
@@ -163,6 +181,35 @@ fn the_confined_helper_opens_a_small_document_and_renders_a_page() {
         rendered += 1;
     }
     assert_eq!(rendered, 2);
+}
+
+/// Drive-macos-92: a HEIC goes to the confined helper (the app never decodes one), and the helper answers without
+/// crashing. In the app the helper is the XPC service, in an App Sandbox, where ImageIO decodes it: one page of the
+/// picture's size in pixels, page 0 at scale 1 the picture (that decode is held by the unit tests of `picture.rs`;
+/// ImageIO under a plain App Sandbox was measured on 2026-11-27 with an ad-hoc signed probe: 64 x 32, red and blue).
+/// Under the deny-default profile a helper puts on itself outside a bundle, macOS's HEVC decoder is denied and draws
+/// nothing (measured): the helper then says `Damaged`, never a blank picture. Either answer passes; a crash, a blank
+/// page or wrong colours do not.
+#[test]
+fn the_confined_helper_decodes_a_heic_photo_or_says_it_cannot() {
+    let (mut session, frame) =
+        Session::start_as(DocKind::Picture(PictureKind::Heic), PHOTO, &[KIND_OPENED, KIND_ERROR]);
+    if frame.kind == KIND_ERROR {
+        let error = Error::decode(&frame.payload).expect("the Error answer decodes");
+        assert_eq!(error.code, ErrorCode::Damaged);
+        println!("the confined helper cannot decode HEVC under this profile: Damaged");
+        return;
+    }
+    let opened = Opened::decode(&frame.payload).expect("the Opened answer decodes");
+    check::check_opened(&opened, &Contract::CONTRACT).expect("the Opened answer passes the checks");
+    assert_eq!(opened.pages, 1);
+    let (pixels, w, h) = session.render(&opened, 0);
+    assert_eq!((w, h), (64, 32));
+    let at = |x: usize, y: usize| &pixels[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4];
+    let (left, right) = (at(2, 16), at(61, 16));
+    assert!(left[0] > left[2] + 60 && left[3] == 255, "left is red: {left:?}");
+    assert!(right[2] > right[0] + 60 && right[3] == 255, "right is blue: {right:?}");
+    assert!(!session.child.killed_for_memory());
 }
 
 /// The helper is never unconfined: started by hand, with no sandbox crate in front of it, it has put the same
