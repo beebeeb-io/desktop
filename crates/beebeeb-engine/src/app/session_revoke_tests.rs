@@ -716,6 +716,11 @@ fn owed_revoke_retry_stops_when_another_path_paid_it() {
     // The start pays it before the first retry is due.
     run(pay_owed(&client_for(&base), &base, &owed));
     assert_eq!(server.heard_within(Duration::from_secs(2)).len(), 1);
+    // The payer may be the background retry holding the claim (a slow runner): the list empties right after its answer.
+    let settled_by = Instant::now() + Duration::from_secs(2);
+    while !owed.owed().is_empty() && Instant::now() < settled_by {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(owed.owed().is_empty());
     std::thread::sleep(RETRY_FIRST + Duration::from_secs(2));
     assert_eq!(

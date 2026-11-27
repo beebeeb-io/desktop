@@ -184,7 +184,10 @@ fn the_security_page_drops_the_first_account_when_another_signs_in() {
     sign_in(&engine, &server.people[1]);
     rt.poll = Some(|s: &mut State, _: f64, tx: &mut Tx| crate::frames::account::poll(s, tx));
     wait_for(&mut rt, "the second account's page", |rt| shows(rt, "1 signed in"));
-    assert!(shows(&rt, "Off: your password alone signs you in"));
+    // Two-factor has its own read after the sign-in: wait for it, as for the first account.
+    wait_for(&mut rt, "the second account's two-factor read", |rt| {
+        shows(rt, "Off: your password alone signs you in")
+    });
     assert!(!has(&rt, "item-0-1-check") && !says_anywhere(&rt, "3 signed in"));
 }
 

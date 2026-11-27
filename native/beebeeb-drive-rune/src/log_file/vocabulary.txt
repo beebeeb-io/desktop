@@ -735,6 +735,7 @@ passes
 password
 path
 paths
+pause
 paused
 payload
 pc
@@ -899,6 +900,7 @@ requester
 requester_image
 requester_pid
 requesting
+requests
 required_length
 required_offset
 reset
@@ -957,6 +959,7 @@ scheduling
 scope
 sealed-key
 search
+search-index
 secs
 seeded
 seeding
@@ -1011,6 +1014,7 @@ size_bytes
 sizes
 skipped
 skipping
+slides
 small
 smart
 snapshot
@@ -1227,6 +1231,7 @@ whose
 why
 will
 window
+window_secs
 windows
 wipe
 with
