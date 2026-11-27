@@ -545,6 +545,9 @@ impl<C: CredentialStores> LiveEngine<C> {
     /// first run: `shell::run` calls it on its own, once, for the instance that is the app.
     pub fn start_finder_setup(&self) {
         finder_setup::start(self.engine.clone(), self.identity);
+        // Dm-91: an older build's Open left decrypted copies in the temp folder; a Mac keeps none.
+        #[cfg(target_os = "macos")]
+        remove_open_copies(&std::env::temp_dir());
         // Dm-75: the rows' marks are Finder's real state; a list that changed draws them again.
         #[cfg(target_os = "macos")]
         {
@@ -988,6 +991,9 @@ pub struct EngineFilesSource<C: CredentialStores> {
     pending: files_launch::Pending,
     /// What starts a file or a folder (the system's own; a test's stand-in).
     starts: files_launch::Starts,
+    /// Dm-91: what a Mac's open asks of the system before an app is started (the system's own; a test's stand-in).
+    #[cfg(target_os = "macos")]
+    mac_open: Arc<dyn MacOpenSteps>,
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
@@ -1010,6 +1016,13 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             later: launch::Later::default(),
             pending: files_launch::Pending::default(),
             starts: files_launch::Starts::default(),
+            #[cfg(all(target_os = "macos", not(test)))]
+            mac_open: Arc::new(SystemMacOpen),
+            #[cfg(all(target_os = "macos", test))]
+            mac_open: Arc::new(MacOpenStandIn {
+                ready: true.into(),
+                ..MacOpenStandIn::default()
+            }),
             engine,
             upload_left: None,
         }
@@ -1045,6 +1058,10 @@ fn path_the_system_opens(db: &StateDb, sync_root: &Path, id: &str) -> Result<std
 /// The file `id` downloaded and decrypted to a copy of its own outside the Beebeeb folder, for an app to open: the
 /// double-click on a file that is not on this PC yet. The copy is the answer's path. Blocks (it runs on the launch
 /// worker, before the launch lock is taken); the press's toast already says it is downloading.
+///
+/// Dm-91: never on a Mac. A Mac opens Finder's copy ([`mac_copy_to_open`]); decrypted bytes are never written to the
+/// Mac's disk, so this function does not exist there.
+#[cfg(not(target_os = "macos"))]
 fn fetch_for_open<C: CredentialStores>(
     engine: &Engine<C>,
     turn: beebeeb_engine::account::SessionGeneration,
@@ -1053,7 +1070,7 @@ fn fetch_for_open<C: CredentialStores>(
 ) -> Result<PathBuf, ActionError> {
     use std::sync::atomic::AtomicBool;
     let name = wanted.file_name().ok_or(ActionError::Failed)?;
-    let dest = std::env::temp_dir().join("beebeeb-open").join(id).join(name);
+    let dest = std::env::temp_dir().join(OPEN_COPIES).join(id).join(name);
     std::fs::create_dir_all(dest.parent().ok_or(ActionError::Failed)?).map_err(|_| ActionError::Failed)?;
     save_copy::save_copy(engine, turn, id, &dest, &|_, _| {}, &AtomicBool::new(false)).map_err(|why| match why {
         save_copy::SaveRefused::NotSignedIn => ActionError::Unavailable,
@@ -1062,59 +1079,164 @@ fn fetch_for_open<C: CredentialStores>(
     Ok(dest)
 }
 
-/// Dm-75: Finder's copy of the file `id` is on this Mac when this answers `Ok(true)`: the one call every open on a
-/// Mac makes (`macos_fp::materialise`), which asks the system for a file that is online only and waits until it is
-/// no longer dataless. `Ok(false)`: Finder has no file for it (Beebeeb is not in Finder, a folder, a file shared
-/// with the account, which is never asked of the File Provider: ruling 1701), or this is not a Mac. `Err`: the
-/// download was refused or brought no byte for the limit; the file's page says so. Blocks: the launch worker's.
-#[cfg(all(target_os = "macos", not(test)))]
-fn finder_copy_present<C: CredentialStores>(
+/// The folder below the system's temp folder where [`fetch_for_open`] puts its copies (and, on a Mac, where an
+/// older build put them: [`remove_open_copies`]).
+const OPEN_COPIES: &str = "beebeeb-open";
+
+/// Dm-91: at the app's start on a Mac, the folder of decrypted copies an older build's Open left in `temp` is removed
+/// (an Open on a Mac never makes one now). Nothing there is the only copy of anything: each is a download. Never logs
+/// a path.
+#[cfg(target_os = "macos")]
+fn remove_open_copies(temp: &Path) {
+    match std::fs::remove_dir_all(temp.join(OPEN_COPIES)) {
+        Ok(()) => tracing::info!("files: removed the open copies an older build left in the temp folder"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => tracing::warn!("files: the open copies an older build left in the temp folder could not be removed"),
+    }
+}
+
+/// Dm-91: what a Mac's open of a file asks of the system before an app is started ([`mac_copy_to_open`]): the
+/// system's own ([`SystemMacOpen`]), a test's stand-in.
+#[cfg(target_os = "macos")]
+pub(crate) trait MacOpenSteps: Send + Sync {
+    /// The row is shared with the account, or not known on this Mac: it has no place in Finder (ruling 1701).
+    fn shared(&self, db: &StateDb, id: &str) -> bool;
+    /// Finder setup is `Ready`.
+    fn ready(&self) -> bool;
+    /// Waits for Finder setup as a whole (dm-87). `Err`: the press is over.
+    fn wait_for_setup(&self, still: &dyn Fn() -> bool) -> Result<(), ActionError>;
+    /// Dm-75's one call: Finder's copy of `id` made present. `Ok(false)`: Finder holds no file for it.
+    fn make_present(
+        &self,
+        id: &str,
+        still: &dyn Fn() -> bool,
+        progress: &dyn Fn() -> Option<(u64, u64)>,
+    ) -> Result<bool, ActionError>;
+}
+
+/// Dm-91: the path a Mac hands an app for the file `id` at `path`: Finder's copy, made present by the system. Never a
+/// copy the engine decrypts (RC20's review: a shared file, or an open during setup, left the whole file in plain
+/// text in the temp folder and still said "Couldn't open"). A shared file is refused ("not available on this
+/// computer yet": the in-app viewer or the web app shows it); an open during setup waits for setup and is refused
+/// the same way when Finder is still not there. Blocks: the launch worker's, outside the launch lock.
+#[cfg(target_os = "macos")]
+fn mac_copy_to_open<C: CredentialStores>(
+    steps: &dyn MacOpenSteps,
     engine: &Engine<C>,
     turn: beebeeb_engine::account::SessionGeneration,
     id: &str,
+    path: &Path,
     still: &dyn Fn() -> bool,
-) -> Result<bool, ActionError> {
-    use crate::shell::platform::macos::macos_fp::materialise::{self, Stop, SystemFinder, Wait, STALL};
-    use crate::shell::platform::macos::macos_fp::open as finder;
-    let own = engine
+) -> Result<PathBuf, ActionError> {
+    let shared = engine
         .local_state_for_changes()
-        .and_then(|state| state.with(|db| finder::refuse_shared(db, id).is_ok()));
-    if !matches!(own, Ok(true)) || finder::not_ready_line(&finder_setup::view()).is_some() {
-        return Ok(false);
+        .and_then(|state| state.with(|db| steps.shared(db, id)))
+        .map_err(|_| ActionError::Unavailable)?;
+    if shared {
+        return Err(ActionError::NotOnThisSystem);
     }
-    let wait = Wait {
-        size: 0,
-        stall: STALL,
-        still,
-        progress: &|| {
-            let rows = engine.downloads_for(turn).ok()?;
-            rows.into_iter().find(|row| row.file_id == id).map(|row| (row.done, row.total))
-        },
-        report: &|_, _| {},
-    };
-    match materialise::make_present(&SystemFinder, id, &wait, &mut |_| {}) {
-        Ok(found) => Ok(found),
-        Err(Stop::Left) => Err(ActionError::Unavailable),
-        Err(Stop::Stalled { .. }) => {
-            tracing::warn!("open: Finder\u{2019}s download of a file stopped moving; the page says so");
-            Err(ActionError::Offline)
+    if !steps.ready() {
+        steps.wait_for_setup(still)?;
+        if !steps.ready() {
+            return Err(ActionError::NotOnThisSystem);
         }
-        Err(Stop::Refused(_)) => {
-            tracing::warn!("open: the system refused to download a file to Finder; the page says so");
-            Err(ActionError::Failed)
+    }
+    let progress = || {
+        let rows = engine.downloads_for(turn).ok()?;
+        rows.into_iter().find(|row| row.file_id == id).map(|row| (row.done, row.total))
+    };
+    // `Ok(false)`: Finder has no file for it; the start asks for the place the press registered and says what it
+    // finds. Nothing is fetched here either way.
+    steps.make_present(id, still, &progress)?;
+    Ok(path.to_path_buf())
+}
+
+/// The system's steps of a Mac's open.
+#[cfg(all(target_os = "macos", not(test)))]
+struct SystemMacOpen;
+
+#[cfg(all(target_os = "macos", not(test)))]
+impl MacOpenSteps for SystemMacOpen {
+    fn shared(&self, db: &StateDb, id: &str) -> bool {
+        crate::shell::platform::macos::macos_fp::open::refuse_shared(db, id).is_err()
+    }
+
+    fn ready(&self) -> bool {
+        crate::shell::platform::macos::macos_fp::open::not_ready_line(&finder_setup::view()).is_none()
+    }
+
+    fn wait_for_setup(&self, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+        macos_wait_for_setup(still)
+    }
+
+    fn make_present(
+        &self,
+        id: &str,
+        still: &dyn Fn() -> bool,
+        progress: &dyn Fn() -> Option<(u64, u64)>,
+    ) -> Result<bool, ActionError> {
+        use crate::shell::platform::macos::macos_fp::materialise::{self, Stop, SystemFinder, Wait, STALL};
+        let wait = Wait {
+            size: 0,
+            stall: STALL,
+            still,
+            progress,
+            report: &|_, _| {},
+        };
+        match materialise::make_present(&SystemFinder, id, &wait, &mut |_| {}) {
+            Ok(found) => Ok(found),
+            Err(Stop::Left) => Err(ActionError::Unavailable),
+            Err(Stop::Stalled { .. }) => {
+                tracing::warn!("open: Finder\u{2019}s download of a file stopped moving; the page says so");
+                Err(ActionError::Offline)
+            }
+            Err(Stop::Refused(_)) => {
+                tracing::warn!("open: the system refused to download a file to Finder; the page says so");
+                Err(ActionError::Failed)
+            }
         }
     }
 }
 
-/// Elsewhere, and in a test: the engine's own copy is the one an app opens.
-#[cfg(not(all(target_os = "macos", not(test))))]
-fn finder_copy_present<C: CredentialStores>(
-    _engine: &Engine<C>,
-    _turn: beebeeb_engine::account::SessionGeneration,
-    _id: &str,
-    _still: &dyn Fn() -> bool,
-) -> Result<bool, ActionError> {
-    Ok(false)
+/// A test's stand-in for a Mac's open steps: the row's sharing, whether setup is ready before and after the wait, and
+/// what Finder answers. Each call is counted.
+#[cfg(all(target_os = "macos", test))]
+#[derive(Default)]
+pub(crate) struct MacOpenStandIn {
+    pub shared: bool,
+    pub ready: std::sync::atomic::AtomicBool,
+    pub ready_after_wait: bool,
+    pub absent: bool,
+    pub waits: std::sync::atomic::AtomicUsize,
+    pub presents: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(all(target_os = "macos", test))]
+impl MacOpenSteps for MacOpenStandIn {
+    fn shared(&self, _db: &StateDb, _id: &str) -> bool {
+        self.shared
+    }
+
+    fn ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn wait_for_setup(&self, _still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.waits.fetch_add(1, SeqCst);
+        self.ready.store(self.ready_after_wait, SeqCst);
+        Ok(())
+    }
+
+    fn make_present(
+        &self,
+        _id: &str,
+        _still: &dyn Fn() -> bool,
+        _progress: &dyn Fn() -> Option<(u64, u64)>,
+    ) -> Result<bool, ActionError> {
+        self.presents.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(!self.absent)
+    }
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
@@ -1174,13 +1296,18 @@ impl<C: CredentialStores> EngineFilesSource<C> {
     ) -> Result<(), ActionError> {
         let turn = self.engine.session_turn();
         let (engine, failed) = (self.engine.clone(), self.start_failed.clone());
+        #[cfg(target_os = "macos")]
+        let mac = self.mac_open.clone();
         let job = move || {
             let still = || engine.session_turn() == turn;
             let started = paths.iter().try_for_each(|(path, id)| {
                 let path = match id {
-                    // Dm-75: on a Mac the copy an app opens is Finder's, made present by the system. Never a copy the
-                    // engine downloads itself: the place the press registered is Finder's, not that copy's.
-                    Some(id) if finder_copy_present(&engine, turn, id, &still)? => path.clone(),
+                    // Dm-75, dm-91: on a Mac the copy an app opens is Finder's, made present by the system. Never a
+                    // copy the engine decrypts itself, whatever Finder answers: the place the press registered is
+                    // Finder's, and no decrypted byte is written to the Mac's disk.
+                    #[cfg(target_os = "macos")]
+                    Some(id) => mac_copy_to_open(&*mac, &engine, turn, id, path, &still)?,
+                    #[cfg(not(target_os = "macos"))]
                     Some(id) if !path.exists() => fetch_for_open(&engine, turn, id, path)?,
                     _ => path.clone(),
                 };
