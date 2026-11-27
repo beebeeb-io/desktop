@@ -161,7 +161,7 @@ pub(super) fn retries_after_429(request: &reqwest::Request) -> bool {
 /// The pause after the `streak`-th refusal in a row (0 for the first). `jitter` is in `0.0..=1.0`: the wait is
 /// `base * (1 + jitter)`, where `base` is the larger of the doubled floor and `Retry-After`, never above `cap`.
 pub(super) fn rate_limit_wait(
-    streak: u32,
+    pub(super) streak: u32,
     retry_after: Option<u64>,
     floor: Duration,
     cap: Duration,
@@ -173,14 +173,14 @@ pub(super) fn rate_limit_wait(
     base.mul_f64(1.0 + jitter.clamp(0.0, 1.0)).min(cap)
 }
 
-struct PauseState {
-    until: Option<tokio::time::Instant>,
-    streak: u32,
+pub(super) struct PauseState {
+    pub(super) until: Option<tokio::time::Instant>,
+    pub(super) streak: u32,
 }
 
 /// What a client knows about being refused: shared by every request it sends (and its backup-pass twin).
 pub(super) struct RatePause {
-    state: std::sync::Mutex<PauseState>,
+    pub(super) state: std::sync::Mutex<PauseState>,
     floor: Duration,
     cap: Duration,
 }

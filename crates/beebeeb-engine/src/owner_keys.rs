@@ -1048,6 +1048,7 @@ impl crate::engine_bridge::EngineBridge {
         Ok(confirmed)
     }
 
+    #[cfg(test)]
     pub(crate) async fn shared_folder_custody_key(&self, id: &str) -> anyhow::Result<Arc<FileKey>> {
         self.shared_folder_custody_key_in(id, &PassInvites::default()).await
     }
