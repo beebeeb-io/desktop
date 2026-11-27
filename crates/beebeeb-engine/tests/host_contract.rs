@@ -3,6 +3,9 @@
 //! production-shaped rows, the listing, pause, resume, stop, a restart, and what is refused.
 //!
 //! One process, one fake server, invented accounts. `BB_API_BASE` is set once, before anything reads it.
+//! Not on macOS: a test build opens no engine there (the same rule as the other integration tests that open one;
+//! `identity::TEST` is refused, and `a_failed_registration_starts_no_engine` pins the refusal).
+#![cfg(not(target_os = "macos"))]
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
