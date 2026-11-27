@@ -427,6 +427,7 @@ gate
 generation
 getpwuid_r
 getthumbnail
+given
 given-up
 go
 goes
@@ -452,6 +453,7 @@ held_for_review
 held_key_replaced
 helper
 helper_ms
+here
 hevc
 hit
 holds
@@ -562,6 +564,7 @@ longest_rows
 looked
 lookup
 loop
+mac
 machine
 macos
 made
@@ -574,6 +577,7 @@ marking
 marks
 match
 matched
+materialise
 materialized
 max
 max_attempts
@@ -607,6 +611,7 @@ moved_files
 moved_items
 moved_legacy_device_identity
 moved_legacy_lock
+moving
 mp2
 mp3
 mpeg2
@@ -939,6 +944,7 @@ same_payload
 sandbox
 save
 saved
+says
 scaffold
 scaffold_dropped
 scaffolded
@@ -949,6 +955,7 @@ scheduling
 scope
 sealed-key
 search
+secs
 seeded
 seeding
 seen
@@ -1005,6 +1012,7 @@ skipping
 small
 smart
 snapshot
+so
 socket
 something
 sound
@@ -1191,6 +1199,7 @@ vp8
 vp9
 w2
 w3
+wait
 waiting
 waits
 walk

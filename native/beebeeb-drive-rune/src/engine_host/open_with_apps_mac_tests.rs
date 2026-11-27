@@ -17,19 +17,16 @@ const WORD: &str = "/Applications/Microsoft Word.app";
 #[derive(Default)]
 struct Fake {
     asked: Mutex<Vec<String>>,
-    /// The copy is on this Mac from the start.
+    /// Finder's copy is on this Mac from the start.
     here: AtomicBool,
-    /// How many looks after the download was asked for until the copy is here (`usize::MAX`: never).
+    /// How many looks after the download was asked for until the copy is no longer dataless (`usize::MAX`: never).
     arrives_after: AtomicUsize,
     looks: AtomicUsize,
-    /// The system cannot list what is downloaded.
-    no_list: AtomicBool,
     download_refused: AtomicBool,
     no_place: AtomicBool,
     no_default: AtomicBool,
     open_refused: AtomicBool,
     picked: Mutex<Option<PathBuf>>,
-    waited: Mutex<Duration>,
 }
 
 impl Fake {
@@ -39,27 +36,43 @@ impl Fake {
     fn asked(&self) -> Vec<String> {
         self.asked.lock().unwrap().clone()
     }
+    /// What was asked, without the looks at the file (their number is the wait's own).
+    fn steps(&self) -> Vec<String> {
+        self.asked().into_iter().filter(|a| a != "dataless?").collect()
+    }
 }
 
 impl Platform for Fake {
-    fn present(&self, item_id: &str) -> Result<bool, String> {
-        self.note(format!("present {item_id}"));
-        if self.no_list.load(SeqCst) {
-            return Err("not listed".into());
-        }
+    fn presence(&self, _file: &Path) -> Presence {
+        self.note("dataless?");
         if self.here.load(SeqCst) {
-            return Ok(true);
+            return Presence::Here;
         }
-        let materialising = self.asked().iter().any(|a| a.starts_with("materialise"));
-        Ok(materialising && self.looks.fetch_add(1, SeqCst) >= self.arrives_after.load(SeqCst))
+        // The system brings the file down only once it was asked.
+        let asked = self.asked().iter().any(|a| a.starts_with("requestDownload"));
+        if asked && self.looks.fetch_add(1, SeqCst) >= self.arrives_after.load(SeqCst) {
+            self.here.store(true, SeqCst);
+            return Presence::Here;
+        }
+        Presence::Cloud
     }
     fn materialise(&self, item_id: &str) -> Result<(), SystemError> {
-        self.note(format!("materialise {item_id}"));
+        self.note(format!("requestDownload {item_id}"));
         if self.download_refused.load(SeqCst) {
             Err(SystemError::new("NSFileProviderErrorDomain", -1004))
         } else {
             Ok(())
         }
+    }
+    fn pull(&self, file: &Path) {
+        self.note(format!("read {}", file.display()));
+    }
+    fn progress(&self, _item_id: &str) -> Option<(u64, u64)> {
+        None
+    }
+    fn stall(&self) -> Duration {
+        // Longer than the looks an arriving file takes; a file that never arrives is given up after it.
+        Duration::from_millis(1500)
     }
     fn choose_app(&self) -> Option<PathBuf> {
         self.note("choose app");
@@ -85,9 +98,6 @@ impl Platform for Fake {
             Ok(())
         }
     }
-    fn wait(&self, time: Duration) {
-        *self.waited.lock().unwrap() += time;
-    }
 }
 
 /// One press on `fake`: what it answered and what the page was told meanwhile.
@@ -98,29 +108,32 @@ fn press(fake: &Fake, pick: Pick) -> (Result<(), Failure>, Vec<Note>) {
 }
 
 #[test]
-fn open_with_default_on_a_cloud_only_file_asks_for_materialise_then_opens_finders_url() {
+fn open_with_default_on_a_dataless_file_asks_requestdownload_and_opens_only_once_it_is_no_longer_dataless() {
     let fake = Fake::default();
     fake.arrives_after.store(2, SeqCst);
     let (done, said) = press(&fake, Pick::Default);
     assert_eq!(done, Ok(()));
     assert_eq!(
-        fake.asked(),
+        fake.steps(),
         [
-            "present f-docx",
-            // Cloud-only: the File Provider is asked for it, as Finder's download does, and it is waited for.
-            "materialise f-docx",
-            "present f-docx",
-            "present f-docx",
-            "present f-docx",
-            // Here now: the place the File Provider gives, opened through NSWorkspace with the kind's app.
+            // Finder's own place for the item, held for the whole press.
             "finder copy f-docx",
+            // Dataless there: the system is asked for it by its identifier, and the file is read so it comes now.
+            "requestDownload f-docx",
+            &format!("read {FINDER}"),
+            // No longer dataless: that very file, opened through NSWorkspace with the kind's app.
             &format!("default app of {FINDER}"),
             &format!("NSWorkspace open {FINDER} with {PAGES}"),
         ]
     );
+    // The app got the file only after a look that found its bytes here.
+    let asked = fake.asked();
+    let opened = asked.iter().position(|a| a.starts_with("NSWorkspace open")).unwrap();
+    let looks_before = asked[..opened].iter().filter(|a| *a == "dataless?").count();
+    assert!(looks_before >= 4, "looked until it was here: {asked:?}");
+    assert!(fake.here.load(SeqCst));
     // The page said it was downloading, then that it was opening.
     assert_eq!(said, [Note::Downloading, Note::Opening]);
-    assert_eq!(*fake.waited.lock().unwrap(), LOOK_EVERY * 2);
 }
 
 #[test]
@@ -134,8 +147,9 @@ fn open_with_a_file_already_here_downloads_nothing_and_the_app_picked_gets_finde
         fake.asked(),
         [
             "choose app",
-            "present f-docx",
             "finder copy f-docx",
+            "dataless?",
+            "dataless?",
             // The app picked, not the kind's own: it is not asked for.
             &format!("NSWorkspace open {FINDER} with {WORD}"),
         ]
@@ -164,10 +178,11 @@ fn open_with_says_every_failure_in_words_and_logs_its_reason() {
             &["the download was refused", "the system answered (NSFileProviderErrorDomain)", "-1004"],
         ),
         (
+            // Dm-75: no byte for the limit. The page says so, and the reason is in the log.
             |f| f.arrives_after.store(usize::MAX, SeqCst),
-            Failure::DownloadSlow,
-            STILL_DOWNLOADING,
-            &["the download was not done in time"],
+            Failure::DownloadStalled,
+            NOT_MOVING,
+            &["the download stopped moving"],
         ),
         (
             |f| f.no_place.store(true, SeqCst),
@@ -233,7 +248,7 @@ fn open_with_a_closed_chooser_or_an_ended_session_opens_nothing_and_says_nothing
     assert_eq!(done, Err(Failure::Moved));
     assert_eq!(Failure::Moved.words(), None);
     assert!(
-        !fake.asked().iter().any(|a| a.starts_with("finder copy")),
+        !fake.asked().iter().any(|a| a.starts_with("NSWorkspace open") || a.starts_with("default app")),
         "{:?}",
         fake.asked()
     );
@@ -255,26 +270,6 @@ fn open_with_a_closed_chooser_or_an_ended_session_opens_nothing_and_says_nothing
         "{:?}",
         fake.asked()
     );
-}
-
-#[test]
-fn open_with_goes_on_to_the_app_when_the_system_cannot_list_what_is_downloaded() {
-    // The download is asked for all the same; the app that opens the file waits for the system, as after Finder's open.
-    let fake = Fake::default();
-    fake.no_list.store(true, SeqCst);
-    let (done, said) = press(&fake, Pick::Default);
-    assert_eq!(done, Ok(()));
-    assert_eq!(
-        fake.asked(),
-        [
-            "present f-docx",
-            "materialise f-docx",
-            "finder copy f-docx",
-            &format!("default app of {FINDER}"),
-            &format!("NSWorkspace open {FINDER} with {PAGES}"),
-        ]
-    );
-    assert_eq!(said, [Note::Opening]);
 }
 
 /// Waits for the page's note of `id` to be `want`.
@@ -326,5 +321,5 @@ fn open_with_start_puts_the_failure_on_the_files_page_and_takes_its_words_away_o
         Some(Note::Failed(NOT_STARTED.to_string()))
     );
     // And the test build's own platform is none: no test reaches the File Provider or NSWorkspace.
-    assert_eq!(start("f-73-test", Pick::Default, || true, || {}), Err(()));
+    assert_eq!(start("f-73-test", Pick::Default, || true, || {}, |_| None), Err(()));
 }

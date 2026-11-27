@@ -11,8 +11,9 @@
 //! - **Finder's copy first** (dm-74, [`Finder`]): the account's own file has a place in Finder, and the system is
 //!   handed THAT file by its URL. The app decrypts nothing, copies nothing and reads none of it into memory. A file
 //!   that is only in the cloud is first asked of the File Provider (the whole file, the one download Finder's own
-//!   open would make); the page shows how far it is, and a download that stops moving ([`Native::stall`]) or is
-//!   refused ends on the page with its reason, and in the log. The security scope of Finder's URL lasts as long as
+//!   open would make, through dm-75's one call `macos_fp::materialise`); the page shows how far it is, and a
+//!   download that brings no byte for [`Native::stall`] or is refused ends on the file's page (dm-73's) with its
+//!   reason, and in the log. The security scope of Finder's URL lasts as long as
 //!   the port's read call does, so the worker's thread stays inside that call for as long as the file is on screen
 //!   ([`FinderCopy`]); leaving the file lets the thread go.
 //! - **The temp copy** (dm-70) is only for a file Finder holds no place for (Beebeeb is not in Finder, a file shared
@@ -39,7 +40,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::viewer_api::OpenFileError;
@@ -47,6 +48,7 @@ use beebeeb_engine::app::viewer_api::OpenFileError;
 use crate::engine_host::viewer::{EngineViewerSource, Recorded, Shows, ViewerEngine, body_of, log, read, shows};
 use crate::frames::viewers::native_preview::{NativeDoc, NativeKind, Stage, StagePort};
 use crate::frames::viewers::source::{Body, NoPreview, Stopped};
+use crate::frames::viewers::unsupported::{self, Note};
 
 #[cfg(test)]
 #[path = "mac_preview_tests.rs"]
@@ -56,12 +58,21 @@ mod tests;
 /// own copy has no limit (the app reads none of it).
 pub(crate) const PREVIEW_MAX: u64 = 64 * 1024 * 1024;
 
-/// How long Finder's download of a file may go without a byte more before the open is given up.
-const STALL: Duration = Duration::from_secs(60);
-/// How often the download is looked at.
-const LOOK_EVERY: Duration = Duration::from_millis(200);
 /// How often Finder's place for a file is asked for while another File Provider call holds the bridge's gate.
 const PLACE_TRIES: usize = 8;
+
+/// What the file's page says when Finder's download brought no byte for [`STALL`].
+pub(crate) const NOT_MOVING: &str = concat!(
+    "The download to ",
+    beebeeb_engine::device_word!(),
+    " stopped, so this file didn\u{2019}t open. Check your connection and try again."
+);
+/// What the file's page says when the system refused Finder's download.
+pub(crate) const NOT_DOWNLOADED: &str = concat!(
+    "Couldn\u{2019}t download this file to ",
+    beebeeb_engine::device_word!(),
+    ", so it didn\u{2019}t open. Check your connection and try again."
+);
 
 /// What of macOS shows a kind of file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,80 +188,13 @@ impl Host for NoHost {
     fn close(&mut self, _file: &Path) {}
 }
 
-/// What there is of a file at Finder's place for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Presence {
-    /// A plain file with its bytes on this Mac.
-    Here,
-    /// A file without its bytes (online only): the system downloads it when asked.
-    Cloud,
-    /// No plain file there.
-    Gone,
-}
-
-/// `SF_DATALESS` (`sys/stat.h`): the file's bytes are not on this Mac.
-const SF_DATALESS: u32 = 0x4000_0000;
-
-/// [`Presence`] from the file's attributes alone: nothing is opened, so nothing is downloaded by the look.
-fn presence_on_disk(file: &Path) -> Presence {
-    use std::os::macos::fs::MetadataExt;
-    match std::fs::symlink_metadata(file) {
-        Ok(meta) if !meta.is_file() => Presence::Gone,
-        Ok(meta) if meta.st_flags() & SF_DATALESS != 0 => Presence::Cloud,
-        Ok(_) => Presence::Here,
-        Err(_) => Presence::Gone,
-    }
-}
-
-/// Finder's copies, as the File Provider hands them out. Asked on the worker (the calls wait for the system). The
-/// app's is [`SystemFinder`]; a test's is a folder of its own.
-pub(crate) trait Finder: Send + Sync {
-    /// `FileProviderPort::with_finder_copy`: `read` is called once with Finder's place for the file, and only for
-    /// the length of that call may the app (and the views it hosts) read there. `false`: no place, `read` not called.
-    fn with_copy(&self, file_id: &str, read: &mut dyn FnMut(&Path)) -> bool;
-    /// What is at that place now.
-    fn presence(&self, file: &Path) -> Presence {
-        presence_on_disk(file)
-    }
-    /// Asks the system to download the whole file (`requestDownloadForItemWithIdentifier:`): the File Provider's own
-    /// fetch is the one download. `Err`: the system's domain and code, for the log.
-    fn request(&self, file_id: &str) -> Result<(), String>;
-}
-
-/// The File Provider bridge. A test never reaches it.
+// Finder's copies and the one call that makes one present (dm-75): `shell::platform::macos_fp::materialise`.
 #[cfg(not(test))]
-pub(crate) struct SystemFinder;
-
-#[cfg(not(test))]
-impl Finder for SystemFinder {
-    fn with_copy(&self, file_id: &str, read: &mut dyn FnMut(&Path)) -> bool {
-        crate::shell::platform::macos::macos_fp::bridge::with_finder_copy(file_id, read)
-    }
-
-    fn request(&self, file_id: &str) -> Result<(), String> {
-        use beebeeb_engine::finder_setup::error::{BRIDGE_DOMAIN, bridge_code};
-
-        use crate::shell::platform::macos::macos_fp::bridge::BeebeebFpErrorC;
-        unsafe extern "C" {
-            /// `requestDownloadForItemWithIdentifier:` (the whole file): 0 = the system took the request.
-            fn beebeeb_fp_request_download(identifier: *const std::ffi::c_char, out_error: *mut BeebeebFpErrorC)
-            -> i32;
-        }
-        let id = std::ffi::CString::new(file_id).map_err(|_| "bad item id".to_string())?;
-        let mut error = BeebeebFpErrorC::zeroed();
-        // SAFETY: `id` is a NUL-terminated string that outlives the call; `error` is the bridge's own struct.
-        if unsafe { beebeeb_fp_request_download(id.as_ptr(), &mut error) } == 0 {
-            return Ok(());
-        }
-        let error = error.into_fp_error();
-        // The system did not answer within the bridge's limit: it may still have taken the request, and the wait
-        // for the file tells.
-        if error.domain == BRIDGE_DOMAIN && error.code == bridge_code::SIGNAL_TIMEOUT {
-            return Ok(());
-        }
-        Err(error.redacted())
-    }
-}
+pub(crate) use crate::shell::platform::macos::macos_fp::materialise::SystemFinder;
+pub(crate) use crate::shell::platform::macos::macos_fp::materialise::Finder;
+#[cfg(test)]
+use crate::shell::platform::macos::macos_fp::materialise::{Presence, presence_on_disk};
+use crate::shell::platform::macos::macos_fp::materialise::{self, LOOK_EVERY, STALL};
 
 /// A test's source finds nothing in Finder unless the test puts a finder of its own in.
 #[cfg(test)]
@@ -382,7 +326,7 @@ pub(crate) struct Native {
     pub(crate) root: PathBuf,
     /// The largest temp copy ([`PREVIEW_MAX`]).
     pub(crate) max: u64,
-    /// How long Finder's download may stand still ([`STALL`]; three times as long while nothing says how far it is).
+    /// How long Finder's download may stand still ([`STALL`], also while nothing says how far it is).
     pub(crate) stall: Duration,
     on: Option<On>,
 }
@@ -514,41 +458,20 @@ impl<E: ViewerEngine> Job<E> {
     }
 
     /// Finder's copy is on this Mac when this answers `Ok(true)`: it was, or the system was asked for it and it
-    /// came. `Ok(false)`: no plain file at Finder's place.
+    /// came (dm-75's one call, `materialise::arrive`). `Ok(false)`: no plain file at Finder's place.
     fn arrive(&self, place: &Path, report: &dyn Fn(u64, u64)) -> Result<bool, Stop> {
-        match self.finder.presence(place) {
-            Presence::Here => return Ok(true),
-            Presence::Gone => return Ok(false),
-            Presence::Cloud => {}
-        }
-        self.finder.request(&self.file_id).map_err(Stop::Refused)?;
-        // When the download last moved, how far it was then, and whether anything said how far it is at all.
-        let (mut moved, mut done, mut seen) = (Instant::now(), 0_u64, false);
-        loop {
-            if self.cancelled() {
-                return Err(Stop::Open(OpenFileError::Cancelled));
-            }
-            match self.finder.presence(place) {
-                Presence::Here => {
-                    report(self.size, self.size);
-                    return Ok(true);
-                }
-                Presence::Gone => return Ok(false),
-                Presence::Cloud => {}
-            }
-            if let Some((now, total)) = self.engine.download_progress(self.session, &self.file_id) {
-                seen = true;
-                report(now, if total == 0 { self.size } else { total });
-                if now != done {
-                    (moved, done) = (Instant::now(), now);
-                }
-            }
-            let limit = if seen { self.stall } else { self.stall * 3 };
-            if moved.elapsed() >= limit {
-                return Err(Stop::Stalled { done, total: self.size });
-            }
-            std::thread::sleep(LOOK_EVERY.min(self.stall));
-        }
+        let wait = materialise::Wait {
+            size: self.size,
+            stall: self.stall,
+            still: &|| !self.cancelled(),
+            progress: &|| self.engine.download_progress(self.session, &self.file_id),
+            report,
+        };
+        materialise::arrive(&*self.finder, &self.file_id, place, &wait).map_err(|stop| match stop {
+            materialise::Stop::Left => Stop::Open(OpenFileError::Cancelled),
+            materialise::Stop::Refused(why) => Stop::Refused(why),
+            materialise::Stop::Stalled { done, total } => Stop::Stalled { done, total },
+        })
     }
 
     /// Inside the port's read call, at Finder's place for the file: makes the file present, hands it over, and stays
@@ -838,17 +761,20 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             Err(stop) => {
                 self.media.mac.end();
                 return Some(match stop {
+                    // Dm-75: both land on the file's page (dm-73's), with the reason on it and the other ways out.
                     Stop::Refused(why) => {
                         log(format!(
-                            "viewer: the system refused to download a file to Finder ({why})"
+                            "viewer: the system refused to download a file to Finder ({why}); the page says so"
                         ));
-                        Some(Body::Stopped(Stopped::NotNow))
+                        unsupported::set_note(file_id, Some(Note::Failed(NOT_DOWNLOADED.to_string())));
+                        Some(Body::NotPreviewable(NoPreview::NoViewer))
                     }
                     Stop::Stalled { done, total } => {
                         log(format!(
-                            "viewer: Finder\u{2019}s download of a file stopped moving ({done} of {total} bytes)"
+                            "viewer: Finder\u{2019}s download of a file stopped moving ({done} of {total} bytes); the page says so"
                         ));
-                        Some(Body::Stopped(Stopped::Offline))
+                        unsupported::set_note(file_id, Some(Note::Failed(NOT_MOVING.to_string())));
+                        Some(Body::NotPreviewable(NoPreview::NoViewer))
                     }
                     Stop::Open(OpenFileError::TooLarge { size }) => {
                         Some(Body::NotPreviewable(NoPreview::TooBig { size, limit: max }))

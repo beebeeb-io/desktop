@@ -157,6 +157,8 @@ pub(crate) mod mac {
     use beebeeb_engine::finder_setup::error::BRIDGE_DOMAIN;
 
     use crate::frames::viewers::unsupported::{self, Note};
+    use crate::shell::platform::macos::macos_fp::materialise::{self, Finder};
+    pub(crate) use crate::shell::platform::macos::macos_fp::materialise::{Presence, STALL};
 
     /// `(app path, app name)` of the default app for files ending in `ext` (no dot).
     pub(crate) fn default_app(ext: &str) -> Option<(String, String)> {
@@ -240,8 +242,8 @@ pub(crate) mod mac {
         Moved,
         /// The File Provider refused the download.
         Download(SystemError),
-        /// The copy did not arrive within [`DOWNLOAD_LIMIT`].
-        DownloadSlow,
+        /// The download brought no byte for [`STALL`] (dm-75).
+        DownloadStalled,
         /// macOS has no place for the item in Finder.
         NotInFinder,
         /// No app on this Mac opens the kind.
@@ -256,9 +258,12 @@ pub(crate) mod mac {
         beebeeb_engine::device_word!(),
         ", so it didn\u{2019}t open. Check your connection and try again."
     );
-    /// What the page says when the download did not end in time.
-    pub(crate) const STILL_DOWNLOADING: &str =
-        "This file is still downloading. Open it again when Finder shows it as downloaded.";
+    /// What the page says when the download stopped moving.
+    pub(crate) const NOT_MOVING: &str = concat!(
+        "The download to ",
+        beebeeb_engine::device_word!(),
+        " stopped, so this file didn\u{2019}t open. Check your connection and try again."
+    );
     /// What the page says when the item has no place in Finder.
     pub(crate) const NOT_IN_FINDER: &str =
         "Beebeeb couldn\u{2019}t find this file in Finder, so it didn\u{2019}t open. Check that Beebeeb is turned on in Finder.";
@@ -279,7 +284,7 @@ pub(crate) mod mac {
             Some(match self {
                 Failure::Cancelled | Failure::Moved => return None,
                 Failure::Download(_) => NOT_DOWNLOADED,
-                Failure::DownloadSlow => STILL_DOWNLOADING,
+                Failure::DownloadStalled => NOT_MOVING,
                 Failure::NotInFinder => NOT_IN_FINDER,
                 Failure::NoApp => NO_APP,
                 Failure::Open(_) => APP_REFUSED,
@@ -295,7 +300,7 @@ pub(crate) mod mac {
                     tracing::warn!("open with: the file did not open, the download was refused");
                     why.log();
                 }
-                Failure::DownloadSlow => tracing::warn!("open with: the file did not open, the download was not done in time"),
+                Failure::DownloadStalled => tracing::warn!("open with: the file did not open, the download stopped moving"),
                 Failure::NotInFinder => tracing::warn!("open with: the file did not open, it has no place in Finder"),
                 Failure::NoApp => tracing::warn!("open with: the file did not open, no app for its kind"),
                 Failure::Open(why) => {
@@ -309,12 +314,16 @@ pub(crate) mod mac {
     /// What is asked of the Mac. The app's is the File Provider bridge and `NSWorkspace` ([`system`]); a test's
     /// remembers what it was asked.
     pub(crate) trait Platform: Send + Sync {
-        /// Whether Finder's copy of the item is on this Mac (the system lists it as downloaded). `Err`: the system
-        /// could not say.
-        fn present(&self, item_id: &str) -> Result<bool, String>;
-        /// Asks the File Provider to bring the item's bytes down, as Finder's own download does. `Ok`: asked; the
-        /// download runs on.
+        /// What is at Finder's place for the item now: its bytes, or a file without them (`SF_DATALESS`). Finder's
+        /// real state, never the engine's own copy.
+        fn presence(&self, file: &Path) -> Presence;
+        /// Asks the File Provider to bring the item's bytes down, as Finder's own download does
+        /// (`materialise::request_download`). `Ok`: asked; the download runs on.
         fn materialise(&self, item_id: &str) -> Result<(), SystemError>;
+        /// Starts a read of Finder's copy, so the system fetches it now (`materialise::Finder::pull`).
+        fn pull(&self, file: &Path);
+        /// How far the item's download is (done, total), from the transfer board.
+        fn progress(&self, item_id: &str) -> Option<(u64, u64)>;
         /// The app the person picks (`NSOpenPanel` on `/Applications`). `None`: closed without one.
         fn choose_app(&self) -> Option<PathBuf>;
         /// Finder's own place of the item, handed to `with` once while the system's access to it is held. `false`:
@@ -324,19 +333,42 @@ pub(crate) mod mac {
         fn default_app(&self, file: &Path) -> Option<PathBuf>;
         /// `NSWorkspace openURLs:withApplicationAtURL:` and its answer.
         fn open_with(&self, app: &Path, file: &Path) -> Result<(), SystemError>;
-        /// Waits between two looks at the download.
-        fn wait(&self, time: Duration);
+        /// How long the download may go without a byte more ([`STALL`]).
+        fn stall(&self) -> Duration {
+            STALL
+        }
     }
 
-    /// How often the download is looked at.
-    pub(crate) const LOOK_EVERY: Duration = Duration::from_secs(2);
-    /// How long a download is waited for before the page says it is still coming.
-    pub(crate) const DOWNLOAD_LIMIT: Duration = Duration::from_secs(20 * 60);
+    /// The platform as dm-75's one call sees it; the system's refusal is kept as it was given.
+    struct AsFinder<'a> {
+        platform: &'a dyn Platform,
+        refused: std::sync::Mutex<Option<SystemError>>,
+    }
+
+    impl Finder for AsFinder<'_> {
+        fn with_copy(&self, file_id: &str, read: &mut dyn FnMut(&Path)) -> bool {
+            self.platform.finder_copy(file_id, read)
+        }
+        fn presence(&self, file: &Path) -> Presence {
+            self.platform.presence(file)
+        }
+        fn request(&self, file_id: &str) -> Result<(), String> {
+            self.platform.materialise(file_id).map_err(|why| {
+                let said = format!("{} {}", why.domain, why.code);
+                *self.refused.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why);
+                said
+            })
+        }
+        fn pull(&self, file: &Path) {
+            self.platform.pull(file);
+        }
+    }
 
     /// One Open with press, start to end, on the thread of its own that [`start`] makes: the app (asked first, so the
-    /// chooser is not shown minutes after the press), Finder's copy made present, then the open. `still` is asked
-    /// before every step that acts: `false` (the session of the press ended, a newer press took over) ends it with
-    /// nothing opened. `say` gets what the page shows meanwhile.
+    /// chooser is not shown minutes after the press), then, at Finder's place for the item, its copy made present
+    /// (dm-75's one call: the system is asked for a file that is online only, and it is waited for until it is no
+    /// longer dataless) and the open. `still` is asked before every step that acts: `false` (the session of the press
+    /// ended, a newer press took over) ends it with nothing opened. `say` gets what the page shows meanwhile.
     pub(crate) fn run(
         platform: &dyn Platform,
         item_id: &str,
@@ -351,61 +383,46 @@ pub(crate) mod mac {
         if !still() {
             return Err(Failure::Moved);
         }
-        make_present(platform, item_id, still, say)?;
-        if !still() {
-            return Err(Failure::Moved);
-        }
-        say(Note::Opening);
+        let finder = AsFinder {
+            platform,
+            refused: std::sync::Mutex::new(None),
+        };
         let mut opened = Err(Failure::NotInFinder);
         let found = platform.finder_copy(item_id, &mut |file| {
-            opened = match picked.clone().or_else(|| platform.default_app(file)) {
-                // The last look at the session, right before the app gets the file.
-                Some(_) if !still() => Err(Failure::Moved),
-                Some(app) => platform.open_with(&app, file).map_err(Failure::Open),
-                None => Err(Failure::NoApp),
-            };
+            opened = (|| {
+                if platform.presence(file) == Presence::Cloud {
+                    say(Note::Downloading);
+                }
+                let wait = materialise::Wait {
+                    size: 0,
+                    stall: platform.stall(),
+                    still,
+                    progress: &|| platform.progress(item_id),
+                    report: &|_, _| {},
+                };
+                match materialise::arrive(&finder, item_id, file, &wait) {
+                    Ok(true) => {}
+                    Ok(false) => return Err(Failure::NotInFinder),
+                    Err(materialise::Stop::Left) => return Err(Failure::Moved),
+                    Err(materialise::Stop::Stalled { .. }) => return Err(Failure::DownloadStalled),
+                    Err(materialise::Stop::Refused(_)) => {
+                        let why = finder.refused.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                        return Err(Failure::Download(why.unwrap_or_else(|| SystemError::new(OWN_DOMAIN, 0))));
+                    }
+                }
+                if !still() {
+                    return Err(Failure::Moved);
+                }
+                say(Note::Opening);
+                match picked.clone().or_else(|| platform.default_app(file)) {
+                    // The last look at the session, right before the app gets the file.
+                    Some(_) if !still() => Err(Failure::Moved),
+                    Some(app) => platform.open_with(&app, file).map_err(Failure::Open),
+                    None => Err(Failure::NoApp),
+                }
+            })();
         });
         if found { opened } else { Err(Failure::NotInFinder) }
-    }
-
-    /// Finder's copy of the item is on this Mac when this returns `Ok`: it was, or the File Provider was asked for it
-    /// and it arrived. Where the system cannot say what is downloaded, the download is asked for and not waited for
-    /// (the app that opens the file waits for the system then, as after a double-click in Finder).
-    fn make_present(
-        platform: &dyn Platform,
-        item_id: &str,
-        still: &dyn Fn() -> bool,
-        say: &dyn Fn(Note),
-    ) -> Result<(), Failure> {
-        match platform.present(item_id) {
-            Ok(true) => return Ok(()),
-            Ok(false) => {}
-            Err(_) => {
-                tracing::warn!("open with: the downloaded files could not be listed");
-                return platform.materialise(item_id).map_err(Failure::Download);
-            }
-        }
-        say(Note::Downloading);
-        platform.materialise(item_id).map_err(Failure::Download)?;
-        let mut waited = Duration::ZERO;
-        loop {
-            if !still() {
-                return Err(Failure::Moved);
-            }
-            match platform.present(item_id) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {}
-                Err(_) => {
-                    tracing::warn!("open with: the downloaded files could not be listed");
-                    return Ok(());
-                }
-            }
-            if waited >= DOWNLOAD_LIMIT {
-                return Err(Failure::DownloadSlow);
-            }
-            platform.wait(LOOK_EVERY);
-            waited += LOOK_EVERY;
-        }
     }
 
     /// The number of the newest press: an older press's thread stops when it sees a newer one, and says nothing more.
@@ -413,14 +430,15 @@ pub(crate) mod mac {
 
     /// Open with for the item `item_id`, on a thread of its own with the Mac's own platform. `still`: the session of
     /// the press is still the one. `wake`: the window draws again (the page reads its note). `Err`: nothing started;
-    /// the page says so (its note is set here too).
+    /// the page says so (its note is set here too). `progress`: how far the item's download is, from the transfer board.
     pub(crate) fn start(
         item_id: &str,
         pick: Pick,
         still: impl Fn() -> bool + Send + 'static,
         wake: impl Fn() + Send + 'static,
+        progress: impl Fn(&str) -> Option<(u64, u64)> + Send + Sync + 'static,
     ) -> Result<(), ()> {
-        start_on(system(), item_id, pick, still, wake)
+        start_on(system(Box::new(progress)), item_id, pick, still, wake)
     }
 
     /// [`start`] on `platform` (`None`: this build has none, a test's).
@@ -467,36 +485,31 @@ pub(crate) mod mac {
         }
     }
 
+    /// How far an item's download is, asked of the engine's transfer board.
+    pub(crate) type Progress = Box<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>;
+
     /// The Mac's own platform. A test never reaches the File Provider, the chooser or `NSWorkspace`: none.
-    fn system() -> Option<std::sync::Arc<dyn Platform>> {
+    fn system(progress: Progress) -> Option<std::sync::Arc<dyn Platform>> {
         #[cfg(not(test))]
         {
-            Some(std::sync::Arc::new(real::System))
+            Some(std::sync::Arc::new(real::System { progress }))
         }
         #[cfg(test)]
         {
+            let _ = progress;
             None
         }
     }
 
     #[cfg(not(test))]
     mod real {
-        use std::ffi::{c_char, CString};
         use std::path::{Path, PathBuf};
         use std::time::Duration;
 
-        use beebeeb_engine::finder_setup::error::{bridge_code, BRIDGE_DOMAIN};
+        use super::{Presence, SystemError, OWN_DOMAIN};
+        use crate::shell::platform::macos::macos_fp::bridge;
+        use crate::shell::platform::macos::macos_fp::materialise::{self, Finder};
 
-        use super::{SystemError, OWN_DOMAIN};
-        use crate::shell::platform::macos::macos_fp::bridge::{self, BeebeebFpErrorC};
-
-        unsafe extern "C" {
-            /// `requestDownloadForItemWithIdentifier:` (the whole file): 0 = the system took the request.
-            fn beebeeb_fp_request_download(identifier: *const c_char, out_error: *mut BeebeebFpErrorC) -> i32;
-        }
-
-        /// The item's id cannot be handed to the system.
-        const OWN_NO_IDENTIFIER: i64 = 1;
         /// A path that is not text.
         const OWN_NO_PATH: i64 = 2;
         /// `NSWorkspace` did not answer in time.
@@ -511,31 +524,25 @@ pub(crate) mod mac {
         /// How often the item's place is asked for while another File Provider call is in flight.
         const PLACE_TRIES: usize = 12;
 
-        pub(super) struct System;
+        pub(super) struct System {
+            pub(super) progress: super::Progress,
+        }
 
         impl super::Platform for System {
-            fn present(&self, item_id: &str) -> Result<bool, String> {
-                let listed = crate::engine_host::macos_downloaded::system()
-                    .ok_or_else(|| "no list".to_string())?
-                    .items()
-                    .map_err(|_| "not listed".to_string())?;
-                Ok(listed.iter().any(|item| item.id == item_id))
+            fn presence(&self, file: &Path) -> Presence {
+                materialise::presence_on_disk(file)
             }
 
             fn materialise(&self, item_id: &str) -> Result<(), SystemError> {
-                let id = CString::new(item_id).map_err(|_| own(OWN_NO_IDENTIFIER))?;
-                let mut error = BeebeebFpErrorC::zeroed();
-                // SAFETY: `id` is a NUL-terminated string that outlives the call; `error` is the bridge's own struct.
-                if unsafe { beebeeb_fp_request_download(id.as_ptr(), &mut error) } == 0 {
-                    return Ok(());
-                }
-                let error = error.into_fp_error();
-                // The system did not answer the request within the bridge's limit: it may still have taken it, and
-                // the wait for the copy tells.
-                if error.domain == BRIDGE_DOMAIN && error.code == bridge_code::SIGNAL_TIMEOUT {
-                    return Ok(());
-                }
-                Err(SystemError::new(error.domain, error.code))
+                materialise::request_download(item_id).map_err(|error| SystemError::new(error.domain, error.code))
+            }
+
+            fn pull(&self, file: &Path) {
+                materialise::SystemFinder.pull(file);
+            }
+
+            fn progress(&self, item_id: &str) -> Option<(u64, u64)> {
+                (self.progress)(item_id)
             }
 
             fn choose_app(&self) -> Option<PathBuf> {
@@ -598,9 +605,6 @@ pub(crate) mod mac {
                 }
             }
 
-            fn wait(&self, time: Duration) {
-                std::thread::sleep(time);
-            }
         }
     }
 }

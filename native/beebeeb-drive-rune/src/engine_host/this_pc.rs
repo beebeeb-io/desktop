@@ -129,20 +129,11 @@ pub const SETTLED_REMOVED: &str = "Removed from the list. The file on Beebeeb is
 /// bridge's pin call. The extension's fetch is the one download and the one copy on disk.
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_keep {
-    use crate::shell::platform::macos::macos_fp::bridge::BeebeebFpErrorC;
-    use std::ffi::{c_char, CString};
-
-    unsafe extern "C" {
-        fn beebeeb_fp_request_download(identifier: *const c_char, out_error: *mut BeebeebFpErrorC) -> i32;
-    }
-
-    /// `false`: the system refused or did not answer (a folder is one it may refuse: its files are fetched by
-    /// their own content policy). Waits up to ten seconds: a worker's.
+    /// `false`: the system refused (a folder is one it may refuse: its files are fetched by their own content
+    /// policy). Dm-75: the one request the viewer and Open with make too (`materialise::request_download`). Waits up
+    /// to ten seconds: a worker's.
     pub(super) fn ask_for_download(id: &str) -> bool {
-        let Ok(id) = CString::new(id) else { return false };
-        let mut error = BeebeebFpErrorC::zeroed();
-        // SAFETY: `id` is a NUL-terminated string that outlives the call, and `error` is the bridge's own struct.
-        unsafe { beebeeb_fp_request_download(id.as_ptr(), &mut error) == 0 }
+        crate::shell::platform::macos::macos_fp::materialise::request_download(id).is_ok()
     }
 }
 
@@ -811,7 +802,7 @@ fn kept(db: &StateDb, backups: &BackupsTree) -> Result<(Vec<Kept>, KeptFiles), S
         let path = e.path.trim_start_matches('/');
         for (at, _) in path.match_indices('/') {
             if let Some(ok) = all_local.get_mut(&path[..=at]) {
-                *ok &= e.status == FileStatus::Local;
+                *ok &= finder_status(&e.file_id, &e.status) == FileStatus::Local;
             }
         }
     }
@@ -826,10 +817,10 @@ fn kept(db: &StateDb, backups: &BackupsTree) -> Result<(Vec<Kept>, KeptFiles), S
                     let prefix = format!("{}/", row.path.trim_matches('/'));
                     rows.iter()
                         .filter(|(e, _, _)| !e.is_dir() && e.path.trim_start_matches('/').starts_with(&prefix))
-                        .map(|(e, _, _)| (e.file_id.clone(), e.status.clone()))
+                        .map(|(e, _, _)| (e.file_id.clone(), finder_status(&e.file_id, &e.status)))
                         .collect()
                 } else {
-                    vec![(row.file_id.clone(), row.status.clone())]
+                    vec![(row.file_id.clone(), finder_status(&row.file_id, &row.status))]
                 },
             );
             let here = if row.is_dir() {
@@ -838,7 +829,7 @@ fn kept(db: &StateDb, backups: &BackupsTree) -> Result<(Vec<Kept>, KeptFiles), S
                     .copied()
                     .unwrap_or(true)
             } else {
-                row.status == FileStatus::Local
+                finder_status(&row.file_id, &row.status) == FileStatus::Local
             };
             Some(Kept {
                 id: entry.item.id.clone(),
@@ -858,6 +849,21 @@ fn kept(db: &StateDb, backups: &BackupsTree) -> Result<(Vec<Kept>, KeptFiles), S
         })
         .collect();
     Ok((list, files))
+}
+
+/// Dm-75: a kept file's state as Available offline counts it. On a Mac that is Finder's real state (the system's
+/// list of materialised items, `macos_downloaded::finder_state`): a file Finder holds no bytes of is not on this
+/// Mac yet whatever the engine records, and one Finder holds is. A file on its way, and every file elsewhere or
+/// until the system has answered, keeps the engine's state.
+fn finder_status(file_id: &str, status: &FileStatus) -> FileStatus {
+    #[cfg(target_os = "macos")]
+    match (status, super::macos_downloaded::finder_state::here(file_id)) {
+        (FileStatus::Local, Some(false)) => return FileStatus::CloudOnly,
+        (FileStatus::CloudOnly, Some(true)) => return FileStatus::Local,
+        _ => {}
+    }
+    let _ = file_id;
+    status.clone()
 }
 
 /// Per kept item, its files and their state at the read.
