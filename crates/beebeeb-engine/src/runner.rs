@@ -1038,7 +1038,7 @@ async fn run(
                         match search_index.refresh(&db) {
                             // RS-g: sync_if_due makes no request unless names changed since the last successful
                             // push, pauses after a failure and caps the requests per window.
-                            Ok(_) => match search_sync.sync_if_due(&db, &search_index, &api).await {
+                            Ok(_) => match search_sync.sync_if_due(&db, &search_index, api.as_ref()).await {
                                 Some(Ok(summary)) => {
                                     tracing::debug!(
                                         indexed_file_count = summary.indexed_file_count,
