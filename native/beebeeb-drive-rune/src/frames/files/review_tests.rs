@@ -627,8 +627,9 @@ fn a_window_with_no_engine_shows_no_sample_and_claims_no_change() {
 fn the_sample_account_counts_and_sync_state_come_from_the_source() {
     let rt = runtime();
     assert_eq!(info(&rt, "account-name").text.as_deref(), Some("Anna Visser"));
-    assert_eq!(info(&rt, "storage-files").text.as_deref(), Some("Files 24 GB"));
-    assert_eq!(info(&rt, "storage-photos").text.as_deref(), Some("Photos 216 GB"));
+    assert_eq!(info(&rt, "storage-files-name").text.as_deref(), Some("Files"));
+    assert_eq!(info(&rt, "storage-files-size").text.as_deref(), Some("24 GB"));
+    assert_eq!(info(&rt, "storage-photos-size").text.as_deref(), Some("216 GB"));
     assert_eq!(info(&rt, "status-text").text.as_deref(), Some("Up to date"));
 }
 

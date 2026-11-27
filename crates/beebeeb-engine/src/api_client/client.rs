@@ -28,6 +28,8 @@ pub struct ApiClient {
     /// no default headers (so no `X-Beebeeb-*`), no cookies, no `Authorization`, redirects
     /// refused, https only (loopback http when the API itself is on loopback http).
     pub(super) storage_client: std::sync::OnceLock<Option<Client>>,
+    /// The pause after a 429, shared by every request of this session (and its backup-pass client).
+    pub(super) rate_pause: std::sync::Arc<RatePause>,
 }
 
 impl Drop for ApiClient {
@@ -78,7 +80,15 @@ impl ApiClient {
             link: std::sync::Arc::new(crate::link_health::LinkMonitor::new()),
             direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
             storage_client: std::sync::OnceLock::new(),
+            rate_pause: std::sync::Arc::new(RatePause::new()),
         }
+    }
+
+    /// Tests: this client with a shorter 429 pause (`floor` doubling up to `cap`) so a refusal does not cost seconds.
+    #[cfg(test)]
+    pub(crate) fn with_rate_limits(mut self, floor: Duration, cap: Duration) -> Self {
+        self.rate_pause = std::sync::Arc::new(RatePause::with_limits(floor, cap));
+        self
     }
 
     /// This client with `timeout` for each request in place of the app's
@@ -118,6 +128,7 @@ impl ApiClient {
             link: self.link.clone(),
             direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
             storage_client: std::sync::OnceLock::new(),
+            rate_pause: self.rate_pause.clone(),
         }
     }
 
@@ -296,13 +307,11 @@ impl ApiClient {
     // `GET`/`DELETE`/`POST` calls returning typed DTOs from `account_dto`.
     // Unlike the sync-engine binary paths above, they go through
     // `get_typed` / `send_with_retry`, which:
-    //   * retry on HTTP 429 (rate limit) — up to `MAX_429_RETRIES` extra
-    //     attempts — honouring `Retry-After` / `x-ratelimit-reset` for the
-    //     per-attempt wait (capped at `RETRY_WAIT_CAP_SECS`) and bounding the
-    //     CUMULATIVE wait at `RETRY_TOTAL_BUDGET_SECS` so a hammered endpoint
-    //     can't stall a view indefinitely. This makes a transient 429 (the prod
-    //     account-data endpoints currently 429 under load) retry gracefully
-    //     instead of surfacing "Couldn't load" to the view.
+    //   * on HTTP 429 (rate limit) start one pause every request of this client
+    //     waits out (`RatePause`: `Retry-After`, or a 2 s floor that doubles, with
+    //     jitter, capped at 60 s), and send a GET again (or a write that carries
+    //     an idempotency key) up to `MAX_429_RETRIES` times. Other writes surface
+    //     the 429: they are never replayed.
     //   * surface a clean `<status>: <body-snippet>` error on any other
     //     non-2xx instead of reqwest's opaque default.
 
@@ -359,14 +368,13 @@ impl ApiClient {
         Ok(resp.json::<T>().await?)
     }
 
-    /// Internal: issue an arbitrary request (built by `build`) with bounded 429
-    /// backoff + retry, returning a 2xx response or a descriptive error.
+    /// Internal: issue an arbitrary request (built by `build`) with the shared 429 pause,
+    /// returning a 2xx response or a descriptive error.
     ///
-    /// On a 429 we read the server's hint (`Retry-After` seconds or
-    /// `x-ratelimit-reset` epoch-seconds), clamp it to a sane per-attempt cap,
-    /// sleep, and retry — up to `MAX_429_RETRIES` extra attempts and a total
-    /// sleep budget of `RETRY_TOTAL_BUDGET_SECS`. The final 429 (or a non-429
-    /// non-2xx at any point) is surfaced via `check_status`.
+    /// On a 429 the client's [`RatePause`] starts (the server's `Retry-After`, or a doubling
+    /// floor with jitter, capped at 60 s); every request waits for it before it is sent. A GET
+    /// (or a write with an idempotency key) is then sent again, up to `MAX_429_RETRIES` times;
+    /// any other request is not replayed and gets the 429 as its error.
     pub(super) async fn send_with_retry(
         &self,
         build: impl Fn() -> reqwest::RequestBuilder,
@@ -380,17 +388,18 @@ impl ApiClient {
         http: &reqwest::Client,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> ApiResult<reqwest::Response> {
-        let mut spent: u64 = 0;
         let mut attempt: u32 = 0;
         // Transport/5xx retries are counted apart from 429 retries; each class is bounded on its own.
         let mut transport_attempt: u32 = 0;
         // The last 502/503/504 seen: surfaced if the retry that followed it fails to connect at all.
         let mut held: Option<reqwest::Response> = None;
         loop {
+            self.rate_pause.wait().await;
             let request = build()
                 .header("Authorization", format!("Bearer {}", self.token))
                 .build()?;
             let idempotent = is_idempotent(request.method());
+            let again_after_429 = retries_after_429(&request);
             let resp = match http.execute(request).await {
                 Ok(resp) => resp,
                 Err(e) => {
@@ -421,24 +430,16 @@ impl ApiClient {
                 continue;
             }
             if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+                self.rate_pause.answered();
                 return Self::check_status(resp).await;
             }
-            // 429: decide whether (and how long) to wait before retrying.
-            let retry_after = header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str());
-            let reset_in =
-                header_secs(resp.headers(), "x-ratelimit-reset").map(|epoch| epoch.saturating_sub(now_unix_secs()));
-            match retry_decision(attempt, spent, retry_after, reset_in) {
-                Some(wait) => {
-                    if wait > 0 {
-                        tokio::time::sleep(Duration::from_secs(wait)).await;
-                    }
-                    spent = spent.saturating_add(wait);
-                    attempt += 1;
-                    // Loop back and retry.
-                }
-                // Budget/attempt exhausted — surface the 429 as a clean error.
-                None => return Self::check_status(resp).await,
+            // 429: everyone waits; only a request that is safe to repeat is sent again.
+            self.rate_pause
+                .refused(header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str()));
+            if !again_after_429 || attempt >= MAX_429_RETRIES {
+                return Self::check_status(resp).await;
             }
+            attempt += 1;
         }
     }
 
