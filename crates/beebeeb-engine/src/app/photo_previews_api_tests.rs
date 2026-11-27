@@ -1118,3 +1118,120 @@ fn a_hundred_looks_read_the_setting_once_and_a_local_change_reads_it_again() {
     assert_eq!(world.upload_made(M9, 0, true), MadeUpload::Sent);
     assert_eq!(gets(&world), 2);
 }
+
+// ---- drive-complete-RS-d: thumbnails made from an opened file's pixels ------------------------------------------
+
+const G1: &str = "d0000000-0000-4000-8000-000000000201";
+const G2: &str = "d0000000-0000-4000-8000-000000000202";
+const G3: &str = "d0000000-0000-4000-8000-000000000203";
+
+impl World {
+    fn set_flag(&self, id: &str, has: bool) {
+        let state = self.engine.local_state_for_changes().expect("the local state");
+        state.with(|db| db.set_server_has_thumbnail(id, has)).unwrap().unwrap();
+    }
+
+    fn flag(&self, id: &str) -> Option<bool> {
+        self.engine.server_thumbnail_known_for(self.engine.session_turn(), id)
+    }
+
+    fn opened_pixels(&self) -> ThumbPixels {
+        let (w, h) = (640u32, 480u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, 90, 255]);
+            }
+        }
+        ThumbPixels {
+            session: self.engine.session_turn(),
+            width: w,
+            height: h,
+            rgba: zeroize::Zeroizing::new(rgba),
+        }
+    }
+
+    fn upload_generated(&self, id: &str, server_404: bool) -> MadeUpload {
+        let session = self.engine.session_turn();
+        let pixels = self.opened_pixels();
+        self.run(|| self.engine.upload_generated_thumbnails_for(session, id, &pixels, server_404))
+    }
+
+    fn medium_puts(&self) -> Vec<Request> {
+        self.thumb_puts().into_iter().filter(|req| !req.path.contains("/thumbnail/")).collect()
+    }
+}
+
+#[test]
+fn thumbnail_of_an_opened_file_with_none_is_sent_medium_and_has_thumbnail_becomes_true() {
+    let world = world("gen1", &[(G1, "Invented forest.jpg", FileStatus::CloudOnly, jpeg(800, 600))]);
+    world.previews.set_setting(JPEG_1920);
+    world.set_flag(G1, false);
+    assert_eq!(world.flag(G1), Some(false));
+    assert_eq!(world.upload_generated(G1, false), MadeUpload::Sent);
+    let puts = world.medium_puts();
+    assert_eq!(puts.len(), 1, "one medium thumbnail upload");
+    let key = beebeeb_core::kdf::derive_file_key(
+        &beebeeb_core::kdf::MasterKey::from_bytes(world.account.master_key),
+        G1.as_bytes(),
+    );
+    let webp = beebeeb_core::encrypt::decrypt_thumbnail(&key, &puts[0].body).expect("opens as a thumbnail");
+    assert_eq!(&webp[..4], b"RIFF");
+    assert_eq!(world.flag(G1), Some(true));
+    // The photo preview the setting asks for went too.
+    assert_eq!(world.preview_puts().len(), 1);
+    // Done: a second open sends nothing more.
+    assert_eq!(world.upload_generated(G1, false), MadeUpload::NothingToSend);
+    assert_eq!(world.medium_puts().len(), 1);
+}
+
+#[test]
+fn thumbnail_is_not_generated_for_a_file_the_server_has_one_of_or_not_known_without_a_404() {
+    let world = world(
+        "gen2",
+        &[
+            (G1, "Invented a.jpg", FileStatus::CloudOnly, jpeg(80, 60)),
+            (G2, "Invented b.jpg", FileStatus::CloudOnly, jpeg(80, 60)),
+        ],
+    );
+    world.previews.set_setting(JPEG_1920);
+    world.set_flag(G1, true);
+    assert_eq!(world.upload_generated(G1, false), MadeUpload::NothingToSend);
+    assert_eq!(world.upload_generated(G2, false), MadeUpload::NothingToSend);
+    assert!(world.thumb_puts().is_empty());
+    // Not known, and the caller's fetch said none just now: sent.
+    assert_eq!(world.upload_generated(G2, true), MadeUpload::Sent);
+    assert_eq!(world.flag(G2), Some(true));
+}
+
+#[test]
+fn thumbnail_is_not_generated_while_the_setting_is_off_or_paused() {
+    let world = world("gen3", &[(G1, "Invented a.jpg", FileStatus::CloudOnly, jpeg(80, 60))]);
+    world.set_flag(G1, false);
+    assert_eq!(world.upload_generated(G1, false), MadeUpload::NotNow(NotNow::SettingOff));
+    let session = world.engine.session_turn();
+    assert_eq!(
+        world.run(|| world.engine.thumbnail_send_hold_for(session)),
+        Some(MadeUpload::NotNow(NotNow::SettingOff))
+    );
+    assert!(world.thumb_puts().is_empty());
+    assert_eq!(world.flag(G1), Some(false));
+}
+
+#[test]
+fn thumbnail_repair_lists_pictures_with_none_or_not_known_and_leaves_the_rest() {
+    let world = world(
+        "gen4",
+        &[
+            (G1, "Invented a.jpg", FileStatus::CloudOnly, jpeg(80, 60)),
+            (G2, "Invented b.jpg", FileStatus::CloudOnly, jpeg(80, 60)),
+            (G3, "Invented c.jpg", FileStatus::CloudOnly, jpeg(80, 60)),
+        ],
+    );
+    world.set_flag(G1, false);
+    world.set_flag(G2, true);
+    let session = world.engine.session_turn();
+    let missing = world.engine.files_missing_thumbnails_for(session).unwrap();
+    let ids: Vec<(&str, bool)> = missing.iter().map(|m| (m.file_id.as_str(), m.server_said_none)).collect();
+    assert_eq!(ids, vec![(G1, true), (G3, false)]);
+}

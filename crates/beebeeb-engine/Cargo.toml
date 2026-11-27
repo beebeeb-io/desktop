@@ -188,7 +188,7 @@ tokio = { version = "1", features = ["test-util"] }
 beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "9b3219cf415c553d50cfb8a93f886c2bd0d06332", features = ["test-support"] }
 # The crate's own integration tests (`tests/`) link the lib with its test helpers (the in-memory credential store,
 # the fake API, the sandboxed config dir): a dev edge only, as in the native app.
-beebeeb-engine = { path = ".", features = ["test-support"] }
+beebeeb-engine = { path = ".", features = ["test-support", "macos-test-engine"] }
 
 [features]
 # Task 2488: the local state database's raw constructors (`StateDb::open`, `StateDb::open_read_only`,

@@ -430,7 +430,7 @@ async fn i2_a_failed_snapshot_keeps_the_request_and_base_pending_resolves_on_the
     {
         let mut s = server.state.lock().unwrap();
         s.snapshots
-            .push_back(("503 Service Unavailable".into(), serde_json::json!({ "error": "busy" })));
+            .push_back(("500 Internal Server Error".into(), serde_json::json!({ "error": "busy" })));
         s.snapshots.push_back((
             "200 OK".into(),
             serde_json::json!({

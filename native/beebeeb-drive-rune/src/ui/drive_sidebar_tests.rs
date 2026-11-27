@@ -11,7 +11,7 @@ use crate::shell::actions::FixtureEngine;
 use crate::shell::app::{GateState, Screen, Section, SettingsPane};
 use crate::shell::host::Shell;
 use crate::shell::platform::fake::FakePlatform;
-use crate::{State, view};
+use crate::{view, State};
 
 /// The windows with a Drive sidebar, each on a board frame, and the row it lights.
 type Setup = fn(&mut State);
@@ -20,10 +20,22 @@ const WINDOWS: [(&str, Setup, &str); 8] = [
     ("Search", |s| s.frames.find.open = true, "Files-row"),
     ("Shared", crate::frames::shared::scenes::dw_0501, "Shared-row"),
     ("Trash", crate::frames::trash::scenes::dw_0747, "Trash-row"),
-    ("Photos", |s| crate::frames::photos::set_scene(s, "DW-0601"), "Photos-row"),
+    (
+        "Photos",
+        |s| crate::frames::photos::set_scene(s, "DW-0601"),
+        "Photos-row",
+    ),
     ("Viewer", |s| crate::frames::viewers::set_scene(s, "DW-1512"), ""),
-    ("Sync history", crate::frames::this_pc::scenes::dw_1301, "Sync history-row"),
-    ("Available offline", crate::frames::this_pc::scenes::dw_0715, "Available offline-row"),
+    (
+        "Sync history",
+        crate::frames::this_pc::scenes::dw_1301,
+        "Sync history-row",
+    ),
+    (
+        "Available offline",
+        crate::frames::this_pc::scenes::dw_0715,
+        "Available offline-row",
+    ),
 ];
 
 fn window(scene: fn(&mut State)) -> Runtime<State> {
@@ -184,12 +196,81 @@ fn locked_and_no_plan_are_dimmed_and_inert() {
             assert!(!e.focusable, "{gate:?}: {:?} takes no focus", e.key);
         }
         assert!(
-            rt.elements().iter().any(|e| e.key.as_deref() == Some("sidebar") && e.opacity < 0.6),
+            rt.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("sidebar") && e.opacity < 0.6),
             "{gate:?}: dimmed"
         );
-        for key in ["Shared-row", "Sync history-row", "Available offline-row", "settings-btn"] {
+        for key in [
+            "Shared-row",
+            "Sync history-row",
+            "Available offline-row",
+            "settings-btn",
+        ] {
             click(&mut rt, key);
         }
-        assert_eq!(rt.state.shell.app.screen(), Screen::Gate(gate), "{gate:?}: the window stays");
+        assert_eq!(
+            rt.state.shell.app.screen(),
+            Screen::Gate(gate),
+            "{gate:?}: the window stays"
+        );
     }
+}
+
+/// RS-e: the storage legend is one row per category, inside the sidebar, never one run-together line.
+#[test]
+fn the_storage_legend_is_a_row_per_category_inside_the_sidebar() {
+    use crate::theme::tokens::theme;
+    fn view(_: &(), _: &mut rune::Cx<()>) -> rune::El {
+        let t = theme(false);
+        // The sidebar's own width and padding: 220 wide, 10 + 6 each side.
+        rune::col().key("host").w(220.0).px(16.0).child(super::legend(
+            94_000_000,
+            19_800_000_000,
+            120_000_000_000,
+            false,
+            &t,
+        ))
+    }
+    let mut rt = Runtime::new(
+        (),
+        view,
+        (220.0, 400.0),
+        Env {
+            system_dark: false,
+            scale: 2.0,
+        },
+    );
+    settle_plain(&mut rt);
+    let all = rt.elements();
+    let rect = |k: &str| {
+        all.iter()
+            .find(|e| e.key.as_deref() == Some(k))
+            .unwrap_or_else(|| panic!("no {k}"))
+            .rect
+    };
+    let mut ys = vec![];
+    for cat in ["files", "photos", "backups"] {
+        let size = rect(&format!("storage-{cat}-size"));
+        let name = rect(&format!("storage-{cat}-name"));
+        assert!(
+            size[0] + size[2] <= 220.0 - 16.0 + 0.5,
+            "{cat} size runs past the sidebar: {size:?}"
+        );
+        assert!(name[0] + name[2] <= size[0] + 0.5, "{cat}: name and size overlap");
+        ys.push(rect(&format!("storage-{cat}"))[1]);
+    }
+    assert!(ys[0] < ys[1] && ys[1] < ys[2], "one row each: {ys:?}");
+    let text = |k: &str| {
+        all.iter()
+            .find(|e| e.key.as_deref() == Some(k))
+            .and_then(|e| e.text.clone())
+    };
+    assert_eq!(text("storage-photos-name").as_deref(), Some("Photos"));
+    assert_eq!(text("storage-photos-size").as_deref(), Some("19.8 GB"));
+}
+
+fn settle_plain(rt: &mut Runtime<()>) {
+    rt.frame(0.0);
+    rt.settle_all();
 }

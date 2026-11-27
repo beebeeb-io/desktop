@@ -54,6 +54,8 @@ use crate::frames::global::grid::ThumbSource;
 #[path = "thumbs_tests.rs"]
 mod tests;
 
+pub use beebeeb_engine::app::photo_previews_api::MadeUpload;
+
 /// At most this many pictures are held.
 pub const MAX_PICTURES: usize = 600;
 /// At most this many bytes of pixels are held.
@@ -703,5 +705,165 @@ impl<C: CredentialStores> ThumbSource for EngineThumbs<C> {
 
     fn release(&self, id: &str) {
         self.store.drop_file(id);
+    }
+}
+
+// ---- drive-complete-RS-d: thumbnails made from a file's bytes (the viewer's open, the repair) ----------------------
+
+/// The longest side the thumbnails' source is decoded at: room for the large thumbnail and a photo preview.
+pub const SOURCE_PX: u32 = 2048;
+
+/// A file's picture, decoded on this PC to make its thumbnails from: upright RGBA, its long edge at most
+/// [`SOURCE_PX`]. Wiped when dropped; its `Debug` prints sizes only.
+pub struct Thumbs {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: zeroize::Zeroizing<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Thumbs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Thumbs").field("width", &self.width).field("height", &self.height).finish()
+    }
+}
+
+/// What makes [`Thumbs`] of a file's bytes ([`generate_for`]; a test's stand-in).
+pub type Generate = fn(&[u8], &str) -> Option<Thumbs>;
+
+/// THE one way a file's bytes become the picture its thumbnails are made of. `mime`: the file's kind by its name.
+/// Today a picture is decoded by the confined media helper ([`super::media::decode_picture`]), never in this
+/// process. A platform decoder (QuickLook on macOS for HEIC and RAW) goes behind this function and nowhere else.
+/// `None`: not a kind made here, or it did not decode. BLOCKS: the helper; a worker's.
+pub fn generate_for(bytes: &[u8], mime: &str) -> Option<Thumbs> {
+    if !mime.starts_with("image/") || bytes.is_empty() || bytes.len() as u64 > MAX_IMAGE_FILE {
+        return None;
+    }
+    let decoded = super::media::decode_picture(bytes, SOURCE_PX).ok()?;
+    if decoded.width == 0 || decoded.height == 0 || decoded.width.max(decoded.height) > SOURCE_PX {
+        return None;
+    }
+    Some(Thumbs {
+        width: decoded.width,
+        height: decoded.height,
+        rgba: decoded.rgba,
+    })
+}
+
+/// The engine as the thumbnails made from bytes ask it (a test's fake in the tests).
+pub trait ThumbMaker: Send + Sync {
+    /// [`Engine::server_thumbnail_known_for`]: `Some(false)` the server has none, `Some(true)` it has one.
+    fn known(&self, session: beebeeb_engine::account::SessionGeneration, file_id: &str) -> Option<bool>;
+    /// Ask Beebeeb: `true` only when it answered that it holds no thumbnail of the file (a 404).
+    fn server_has_none(&self, session: beebeeb_engine::account::SessionGeneration, file_id: &str) -> bool;
+    /// [`Engine::upload_generated_thumbnails_for`].
+    fn send(
+        &self,
+        session: beebeeb_engine::account::SessionGeneration,
+        file_id: &str,
+        thumbs: &Thumbs,
+        server_404: bool,
+    ) -> MadeUpload;
+}
+
+impl<C: CredentialStores> ThumbMaker for Engine<C> {
+    fn known(&self, session: beebeeb_engine::account::SessionGeneration, file_id: &str) -> Option<bool> {
+        self.server_thumbnail_known_for(session, file_id)
+    }
+
+    fn server_has_none(&self, session: beebeeb_engine::account::SessionGeneration, file_id: &str) -> bool {
+        matches!(
+            self.thumbnail_pixels_for(session, file_id, ThumbCut::Whole),
+            Err(ThumbRefused::NoThumbnail)
+        )
+    }
+
+    fn send(
+        &self,
+        session: beebeeb_engine::account::SessionGeneration,
+        file_id: &str,
+        thumbs: &Thumbs,
+        server_404: bool,
+    ) -> MadeUpload {
+        let pixels = ThumbPixels {
+            session,
+            width: thumbs.width,
+            height: thumbs.height,
+            rgba: thumbs.rgba.clone(),
+        };
+        self.upload_generated_thumbnails_for(session, file_id, &pixels, server_404)
+    }
+}
+
+/// A file whose bytes are in memory (opened, previewed, or downloaded by the repair): when it is a picture the server
+/// has no thumbnail of, its thumbnails are made from those bytes and sent. `None`: nothing was asked of the engine's
+/// send (not a picture, the server has one, it did not decode). A worker's: the network and the helper.
+pub fn make_from_bytes<M: ThumbMaker + ?Sized>(
+    maker: &M,
+    session: beebeeb_engine::account::SessionGeneration,
+    file_id: &str,
+    mime: &str,
+    bytes: &[u8],
+    generate: Generate,
+) -> Option<MadeUpload> {
+    if !mime.starts_with("image/") {
+        return None;
+    }
+    let server_404 = match maker.known(session, file_id) {
+        Some(true) => return None,
+        Some(false) => false,
+        None if maker.server_has_none(session, file_id) => true,
+        None => return None,
+    };
+    let thumbs = generate(bytes, mime)?;
+    Some(maker.send(session, file_id, &thumbs, server_404))
+}
+
+/// The files whose open is making thumbnails now: one at a time each, at most [`OPEN_AT_ONCE`] in all.
+static OPENED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// How many opened files make thumbnails at once.
+const OPEN_AT_ONCE: usize = 2;
+
+/// The viewer read the bytes of the file `file_id` for `session`: when it is a picture the server has no thumbnail
+/// of (or may have none), its thumbnails are made from a copy of those bytes on a worker of their own and sent, so
+/// the viewer's own work does not wait. Never waits on the network here; the copy is wiped when the worker ends.
+pub fn after_open<C: CredentialStores + 'static>(
+    engine: &Arc<Engine<C>>,
+    session: beebeeb_engine::account::SessionGeneration,
+    file_id: &str,
+    bytes: &[u8],
+) {
+    if engine.server_thumbnail_known_for(session, file_id) == Some(true) {
+        return;
+    }
+    let Ok(facts) = engine.open_file_facts(file_id) else { return };
+    let Some(mime) = beebeeb_engine::drive_v2::model::mime_for_name(&facts.name) else { return };
+    if facts.session != session || !mime.starts_with("image/") || bytes.len() as u64 > MAX_IMAGE_FILE {
+        return;
+    }
+    {
+        let mut opened = OPENED.lock().unwrap_or_else(PoisonError::into_inner);
+        if opened.len() >= OPEN_AT_ONCE || opened.iter().any(|id| id == file_id) {
+            return;
+        }
+        opened.push(file_id.to_string());
+    }
+    let copy = zeroize::Zeroizing::new(bytes.to_vec());
+    let (engine, id) = (engine.clone(), file_id.to_string());
+    let started = std::thread::Builder::new().name("thumbnail-on-open".into()).spawn({
+        let id = id.clone();
+        move || {
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                make_from_bytes(&*engine, session, &id, mime, &copy, generate_for)
+            }));
+            drop(copy);
+            OPENED.lock().unwrap_or_else(PoisonError::into_inner).retain(|opened| *opened != id);
+            if matches!(made, Ok(Some(MadeUpload::Sent))) {
+                engine.wake_host();
+            }
+        }
+    });
+    if started.is_err() {
+        OPENED.lock().unwrap_or_else(PoisonError::into_inner).retain(|opened| *opened != id);
+        log("thumbnails: could not start the open's worker");
     }
 }

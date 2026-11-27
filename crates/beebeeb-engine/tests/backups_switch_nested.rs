@@ -2,12 +2,18 @@
 
 mod common;
 
+#[cfg(not(target_os = "macos"))]
 use beebeeb_engine::app::backups_api::BackupsError;
+#[cfg(not(target_os = "macos"))]
 use beebeeb_engine::app::bindings::backup_folders::owner_tag;
+#[cfg(not(target_os = "macos"))]
 use beebeeb_engine::backup::sources::ChosenFolder;
+#[cfg(not(target_os = "macos"))]
 use beebeeb_engine::config::DesktopConfig;
+#[cfg(not(target_os = "macos"))]
 use beebeeb_engine::identity::TEST;
 
+#[cfg(not(target_os = "macos"))]
 fn chosen(name: &str, path: std::path::PathBuf, owner: Option<String>) -> ChosenFolder {
     ChosenFolder {
         name: name.into(),
@@ -17,6 +23,7 @@ fn chosen(name: &str, path: std::path::PathBuf, owner: Option<String>) -> Chosen
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_chosen_folder_is_not_switched_on_over_one_that_is_backed_up() {
     let s = common::setup();
@@ -53,4 +60,10 @@ fn a_chosen_folder_is_not_switched_on_over_one_that_is_backed_up() {
 
     assert_eq!(s.engine.set_backup_folder("custom:Recipes", true), Ok(()));
     assert!(on("custom:Recipes"), "a folder apart is switched on");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_test_build_is_refused_on_macos() {
+    common::assert_the_test_build_is_refused();
 }

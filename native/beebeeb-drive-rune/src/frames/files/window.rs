@@ -245,7 +245,6 @@ fn paused_folder(t: &Theme) -> El {
             button::outline_button("paused-resume", "Resume", None, t)
                 .expanded(false)
                 .on_press(|s: &mut State| {
-                    use crate::shell::actions::ShellActions as _;
                     let _ = s.shell.actions.resume_sync();
                 }),
         ),

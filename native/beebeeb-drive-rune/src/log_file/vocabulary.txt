@@ -425,6 +425,7 @@ further
 fuse
 gap
 gate
+generated
 generation
 getpwuid_r
 getthumbnail
@@ -722,6 +723,7 @@ passes
 password
 path
 paths
+pause
 paused
 payload
 pc
@@ -764,6 +766,7 @@ pre-upload
 presentation_read_failed
 presented
 preserving
+preview
 previews
 previous
 primary
@@ -816,6 +819,7 @@ re-download
 re-materialise
 re-snapshot
 reach
+reached
 reaches
 reactivation
 read
@@ -938,6 +942,7 @@ scheduling
 scope
 sealed-key
 search
+search-index
 seeded
 seeding
 seen
@@ -991,6 +996,7 @@ sizes
 skipped
 skipped_gone
 skipping
+slides
 small
 smart
 snapshot
@@ -1202,6 +1208,7 @@ whose
 why
 will
 window
+window_secs
 windows
 wipe
 with
