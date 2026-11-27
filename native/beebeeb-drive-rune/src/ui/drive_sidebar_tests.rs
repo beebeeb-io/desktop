@@ -141,6 +141,47 @@ fn each_item_goes_through_the_route_machine_and_the_gear_to_settings() {
     assert_eq!(rt.state.shell.app.screen(), Screen::Settings(SettingsPane::General));
 }
 
+/// Dm-73: Files in the sidebar is the top of Files, as a place in Finder's sidebar is its top: from a folder inside
+/// it, and from another window that left Files in a folder. Back still returns to the folder.
+#[test]
+fn files_in_the_sidebar_lists_the_root_from_a_subfolder() {
+    let mut rt = window(|_| {});
+    let folder = rt
+        .state
+        .listing
+        .items
+        .iter()
+        .find(|item| item.is_folder)
+        .expect("a folder in Files")
+        .id
+        .clone();
+    let root: Vec<String> = rt.state.listing.items.iter().map(|item| item.id.clone()).collect();
+    let enter = |rt: &mut Runtime<State>| {
+        rt.update(|s, _| s.open_folder(Some(folder.clone())));
+        settle(rt);
+        assert_eq!(rt.state.listing.folder.id.as_deref(), Some(folder.as_str()), "inside the folder");
+    };
+
+    enter(&mut rt);
+    click(&mut rt, "Files-row");
+    assert_eq!(rt.state.listing.folder.id, None, "Files shows its root");
+    let listed: Vec<String> = rt.state.listing.items.iter().map(|item| item.id.clone()).collect();
+    assert_eq!(listed, root, "the root's own rows");
+    assert_eq!(rt.state.shell.app.route().section, Section::Files);
+
+    // From another window, with Files left inside the folder.
+    enter(&mut rt);
+    click(&mut rt, "Shared-row");
+    click(&mut rt, "Files-row");
+    assert_eq!(rt.state.shell.app.route().section, Section::Files);
+    assert_eq!(rt.state.listing.folder.id, None, "Files shows its root");
+
+    // At the root already: the press changes nothing, and Back has nothing new to return to.
+    let back = rt.state.files.back.len();
+    click(&mut rt, "Files-row");
+    assert_eq!((rt.state.listing.folder.id.clone(), rt.state.files.back.len()), (None, back));
+}
+
 #[test]
 fn sync_problems_show_the_red_pill_in_files_and_in_sync_history() {
     let mut rt = window(crate::frames::this_pc::scenes::dw_0428);

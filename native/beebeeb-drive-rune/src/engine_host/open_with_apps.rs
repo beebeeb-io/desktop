@@ -141,12 +141,22 @@ fn ask_default(_ext: &str) -> Option<(String, String)> {
     None
 }
 
-/// macOS: the app chooser and the start with the app picked, on the copy of the file the engine keeps on this Mac.
-/// Never a registry-like write, never a shell, never a child process: `NSWorkspace` and `NSOpenPanel`.
+/// macOS (dm-73): Open with, on Finder's copy of the file. The copy is made present first (a cloud-only file is
+/// asked of the File Provider, as Finder's own download does, and waited for while the page says so), then the URL
+/// the File Provider gives for the item is opened through `NSWorkspace openURLs:withApplicationAtURL:` with the
+/// default app of its kind, or with the app picked in the chooser (`NSOpenPanel` on `/Applications`). Every failure
+/// is words on the page ([`Failure::words`]) and a line in the log ([`Failure::log`]: the system's domain and code).
+///
+/// Never: a shell, a child process, a temporary copy, a path made from a name. Must not log a path or a name.
 #[cfg(target_os = "macos")]
 pub(crate) mod mac {
     use std::path::{Path, PathBuf};
-    use crate::frames::files::source::ActionError;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use beebeeb_engine::finder_setup::error::BRIDGE_DOMAIN;
+
+    use crate::frames::viewers::unsupported::{self, Note};
 
     /// `(app path, app name)` of the default app for files ending in `ext` (no dot).
     pub(crate) fn default_app(ext: &str) -> Option<(String, String)> {
@@ -160,41 +170,12 @@ pub(crate) mod mac {
         Some((path, name))
     }
 
-    /// The app the person picks in the system's chooser (`/Applications`, apps only). `None`: cancelled.
-    pub(crate) fn choose_app() -> Option<PathBuf> {
-        crate::shell::platform::macos_panels::pick_app()
-    }
-
-    /// Opens `file` with the app at `app` through `NSWorkspace` (never a child `open`).
-    pub(crate) fn open_with(app: &Path, file: &Path) -> Result<(), ActionError> {
-        use objc2_app_kit::{NSWorkspace, NSWorkspaceOpenConfiguration};
-        use objc2_foundation::{NSArray, NSString, NSURL};
-        let (Some(app), Some(file)) = (app.to_str(), file.to_str()) else {
-            return Err(ActionError::Failed);
-        };
-        let app = NSURL::fileURLWithPath(&NSString::from_str(app));
-        let file = NSURL::fileURLWithPath(&NSString::from_str(file));
-        let config = unsafe { NSWorkspaceOpenConfiguration::configuration() };
-        #[cfg(not(test))]
-        unsafe {
-            NSWorkspace::sharedWorkspace().openURLs_withApplicationAtURL_configuration_completionHandler(
-                &NSArray::from_retained_slice(&[file]),
-                &app,
-                &config,
-                None,
-            );
-        }
-        #[cfg(test)]
-        let _ = (app, file, config, NSWorkspace::sharedWorkspace, NSArray::<NSURL>::new);
-        Ok(())
-    }
-
     /// Shows `file` in Finder through `NSWorkspace`.
-    pub(crate) fn reveal(file: &Path) -> Result<(), ActionError> {
+    pub(crate) fn reveal(file: &Path) -> Result<(), crate::frames::files::source::ActionError> {
         use objc2_app_kit::NSWorkspace;
         use objc2_foundation::{NSArray, NSString, NSURL};
         let Some(text) = file.to_str() else {
-            return Err(ActionError::Failed);
+            return Err(crate::frames::files::source::ActionError::Failed);
         };
         let url = NSURL::fileURLWithPath(&NSString::from_str(text));
         #[cfg(not(test))]
@@ -203,7 +184,430 @@ pub(crate) mod mac {
         let _ = (url, NSWorkspace::sharedWorkspace, NSArray::<NSURL>::new);
         Ok(())
     }
+
+    /// Which app opens the file.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Pick {
+        /// The app the Mac opens the kind with.
+        Default,
+        /// The app the person picks in the chooser.
+        Choose,
+    }
+
+    /// The system's own answer to a call that failed: its error domain and code, never its text (that can name a
+    /// file).
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct SystemError {
+        pub domain: String,
+        pub code: i64,
+    }
+
+    /// The domain of a failure this app found itself (`real`'s codes: an id or a path that cannot be handed over, no
+    /// answer in time).
+    pub(crate) const OWN_DOMAIN: &str = "Beebeeb";
+
+    impl SystemError {
+        pub(crate) fn new(domain: impl Into<String>, code: i64) -> Self {
+            SystemError { domain: domain.into(), code }
+        }
+
+        /// One line in the log: the domain, when it is one this app knows the name of, and the code (as `status`:
+        /// the log masks a field named `code`, which elsewhere is a sign-in code).
+        fn log(&self) {
+            tracing::warn!(
+                status = self.code,
+                "open with: the system answered ({})",
+                match self.domain.as_str() {
+                    "NSFileProviderErrorDomain" => "NSFileProviderErrorDomain",
+                    "NSCocoaErrorDomain" => "NSCocoaErrorDomain",
+                    "NSOSStatusErrorDomain" => "NSOSStatusErrorDomain",
+                    "NSPOSIXErrorDomain" => "NSPOSIXErrorDomain",
+                    "NSURLErrorDomain" => "NSURLErrorDomain",
+                    domain if domain == BRIDGE_DOMAIN => "the bridge",
+                    domain if domain == OWN_DOMAIN => "Beebeeb",
+                    _ => "another domain",
+                }
+            );
+        }
+    }
+
+    /// Why the file did not open in another app.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) enum Failure {
+        /// The person closed the chooser. Nothing is said.
+        Cancelled,
+        /// The session of the press ended, or a newer press took over. Nothing is said.
+        Moved,
+        /// The File Provider refused the download.
+        Download(SystemError),
+        /// The copy did not arrive within [`DOWNLOAD_LIMIT`].
+        DownloadSlow,
+        /// macOS has no place for the item in Finder.
+        NotInFinder,
+        /// No app on this Mac opens the kind.
+        NoApp,
+        /// `NSWorkspace` refused the open.
+        Open(SystemError),
+    }
+
+    /// What the page says when the download was refused.
+    pub(crate) const NOT_DOWNLOADED: &str = concat!(
+        "Couldn\u{2019}t download this file to ",
+        beebeeb_engine::device_word!(),
+        ", so it didn\u{2019}t open. Check your connection and try again."
+    );
+    /// What the page says when the download did not end in time.
+    pub(crate) const STILL_DOWNLOADING: &str =
+        "This file is still downloading. Open it again when Finder shows it as downloaded.";
+    /// What the page says when the item has no place in Finder.
+    pub(crate) const NOT_IN_FINDER: &str =
+        "Beebeeb couldn\u{2019}t find this file in Finder, so it didn\u{2019}t open. Check that Beebeeb is turned on in Finder.";
+    /// What the page says when no app opens the kind.
+    pub(crate) const NO_APP: &str = concat!(
+        "No app on ",
+        beebeeb_engine::device_word!(),
+        " opens this kind of file. Choose one with Open with another app\u{2026}"
+    );
+    /// What the page says when the app did not take the file.
+    pub(crate) const APP_REFUSED: &str = "The app didn\u{2019}t open this file. Try another app, or show it in Finder.";
+    /// What the page says when the open could not even begin.
+    pub(crate) const NOT_STARTED: &str = "Couldn\u{2019}t open this file in another app. Try again.";
+
+    impl Failure {
+        /// The sentence for the page. `None`: nothing is said (the person cancelled, or the press is over).
+        pub(crate) fn words(&self) -> Option<&'static str> {
+            Some(match self {
+                Failure::Cancelled | Failure::Moved => return None,
+                Failure::Download(_) => NOT_DOWNLOADED,
+                Failure::DownloadSlow => STILL_DOWNLOADING,
+                Failure::NotInFinder => NOT_IN_FINDER,
+                Failure::NoApp => NO_APP,
+                Failure::Open(_) => APP_REFUSED,
+            })
+        }
+
+        /// What failed, in the log, and the system's domain and code where it gave one. Never a path, a name or the
+        /// system's own text. A closed chooser and a press that is over are not failures: nothing is written.
+        pub(crate) fn log(&self) {
+            match self {
+                Failure::Cancelled | Failure::Moved => {}
+                Failure::Download(why) => {
+                    tracing::warn!("open with: the file did not open, the download was refused");
+                    why.log();
+                }
+                Failure::DownloadSlow => tracing::warn!("open with: the file did not open, the download was not done in time"),
+                Failure::NotInFinder => tracing::warn!("open with: the file did not open, it has no place in Finder"),
+                Failure::NoApp => tracing::warn!("open with: the file did not open, no app for its kind"),
+                Failure::Open(why) => {
+                    tracing::warn!("open with: the file did not open, NSWorkspace refused");
+                    why.log();
+                }
+            }
+        }
+    }
+
+    /// What is asked of the Mac. The app's is the File Provider bridge and `NSWorkspace` ([`system`]); a test's
+    /// remembers what it was asked.
+    pub(crate) trait Platform: Send + Sync {
+        /// Whether Finder's copy of the item is on this Mac (the system lists it as downloaded). `Err`: the system
+        /// could not say.
+        fn present(&self, item_id: &str) -> Result<bool, String>;
+        /// Asks the File Provider to bring the item's bytes down, as Finder's own download does. `Ok`: asked; the
+        /// download runs on.
+        fn materialise(&self, item_id: &str) -> Result<(), SystemError>;
+        /// The app the person picks (`NSOpenPanel` on `/Applications`). `None`: closed without one.
+        fn choose_app(&self) -> Option<PathBuf>;
+        /// Finder's own place of the item, handed to `with` once while the system's access to it is held. `false`:
+        /// the item has no place in Finder, and `with` was not called.
+        fn finder_copy(&self, item_id: &str, with: &mut dyn FnMut(&Path)) -> bool;
+        /// The app the Mac opens `file` with. `None`: none, or only Beebeeb itself.
+        fn default_app(&self, file: &Path) -> Option<PathBuf>;
+        /// `NSWorkspace openURLs:withApplicationAtURL:` and its answer.
+        fn open_with(&self, app: &Path, file: &Path) -> Result<(), SystemError>;
+        /// Waits between two looks at the download.
+        fn wait(&self, time: Duration);
+    }
+
+    /// How often the download is looked at.
+    pub(crate) const LOOK_EVERY: Duration = Duration::from_secs(2);
+    /// How long a download is waited for before the page says it is still coming.
+    pub(crate) const DOWNLOAD_LIMIT: Duration = Duration::from_secs(20 * 60);
+
+    /// One Open with press, start to end, on the thread of its own that [`start`] makes: the app (asked first, so the
+    /// chooser is not shown minutes after the press), Finder's copy made present, then the open. `still` is asked
+    /// before every step that acts: `false` (the session of the press ended, a newer press took over) ends it with
+    /// nothing opened. `say` gets what the page shows meanwhile.
+    pub(crate) fn run(
+        platform: &dyn Platform,
+        item_id: &str,
+        pick: Pick,
+        still: &dyn Fn() -> bool,
+        say: &dyn Fn(Note),
+    ) -> Result<(), Failure> {
+        let picked = match pick {
+            Pick::Default => None,
+            Pick::Choose => Some(platform.choose_app().ok_or(Failure::Cancelled)?),
+        };
+        if !still() {
+            return Err(Failure::Moved);
+        }
+        make_present(platform, item_id, still, say)?;
+        if !still() {
+            return Err(Failure::Moved);
+        }
+        say(Note::Opening);
+        let mut opened = Err(Failure::NotInFinder);
+        let found = platform.finder_copy(item_id, &mut |file| {
+            opened = match picked.clone().or_else(|| platform.default_app(file)) {
+                // The last look at the session, right before the app gets the file.
+                Some(_) if !still() => Err(Failure::Moved),
+                Some(app) => platform.open_with(&app, file).map_err(Failure::Open),
+                None => Err(Failure::NoApp),
+            };
+        });
+        if found { opened } else { Err(Failure::NotInFinder) }
+    }
+
+    /// Finder's copy of the item is on this Mac when this returns `Ok`: it was, or the File Provider was asked for it
+    /// and it arrived. Where the system cannot say what is downloaded, the download is asked for and not waited for
+    /// (the app that opens the file waits for the system then, as after a double-click in Finder).
+    fn make_present(
+        platform: &dyn Platform,
+        item_id: &str,
+        still: &dyn Fn() -> bool,
+        say: &dyn Fn(Note),
+    ) -> Result<(), Failure> {
+        match platform.present(item_id) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(_) => {
+                tracing::warn!("open with: the downloaded files could not be listed");
+                return platform.materialise(item_id).map_err(Failure::Download);
+            }
+        }
+        say(Note::Downloading);
+        platform.materialise(item_id).map_err(Failure::Download)?;
+        let mut waited = Duration::ZERO;
+        loop {
+            if !still() {
+                return Err(Failure::Moved);
+            }
+            match platform.present(item_id) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(_) => {
+                    tracing::warn!("open with: the downloaded files could not be listed");
+                    return Ok(());
+                }
+            }
+            if waited >= DOWNLOAD_LIMIT {
+                return Err(Failure::DownloadSlow);
+            }
+            platform.wait(LOOK_EVERY);
+            waited += LOOK_EVERY;
+        }
+    }
+
+    /// The number of the newest press: an older press's thread stops when it sees a newer one, and says nothing more.
+    static NEWEST: AtomicU64 = AtomicU64::new(0);
+
+    /// Open with for the item `item_id`, on a thread of its own with the Mac's own platform. `still`: the session of
+    /// the press is still the one. `wake`: the window draws again (the page reads its note). `Err`: nothing started;
+    /// the page says so (its note is set here too).
+    pub(crate) fn start(
+        item_id: &str,
+        pick: Pick,
+        still: impl Fn() -> bool + Send + 'static,
+        wake: impl Fn() + Send + 'static,
+    ) -> Result<(), ()> {
+        start_on(system(), item_id, pick, still, wake)
+    }
+
+    /// [`start`] on `platform` (`None`: this build has none, a test's).
+    pub(crate) fn start_on(
+        platform: Option<std::sync::Arc<dyn Platform>>,
+        item_id: &str,
+        pick: Pick,
+        still: impl Fn() -> bool + Send + 'static,
+        wake: impl Fn() + Send + 'static,
+    ) -> Result<(), ()> {
+        let refuse = |item_id: &str| {
+            tracing::warn!("open with: the open did not start");
+            unsupported::set_note(item_id, Some(Note::Failed(NOT_STARTED.to_string())));
+            Err(())
+        };
+        let Some(platform) = platform else {
+            return refuse(item_id);
+        };
+        let press = NEWEST.fetch_add(1, Ordering::SeqCst) + 1;
+        let id = item_id.to_string();
+        let started = std::thread::Builder::new().name("viewer-open-with".into()).spawn(move || {
+            let newest = || NEWEST.load(Ordering::SeqCst) == press;
+            let still = || newest() && still();
+            let say = |note: Note| {
+                if newest() {
+                    unsupported::set_note(&id, Some(note));
+                    wake();
+                }
+            };
+            let done = run(platform.as_ref(), &id, pick, &still, &say);
+            if let Err(why) = &done {
+                why.log();
+            }
+            // A newer press owns the page's words now.
+            if newest() {
+                let note = done.err().and_then(|why| why.words()).map(|words| Note::Failed(words.to_string()));
+                unsupported::set_note(&id, note);
+                wake();
+            }
+        });
+        match started {
+            Ok(_) => Ok(()),
+            Err(_) => refuse(item_id),
+        }
+    }
+
+    /// The Mac's own platform. A test never reaches the File Provider, the chooser or `NSWorkspace`: none.
+    fn system() -> Option<std::sync::Arc<dyn Platform>> {
+        #[cfg(not(test))]
+        {
+            Some(std::sync::Arc::new(real::System))
+        }
+        #[cfg(test)]
+        {
+            None
+        }
+    }
+
+    #[cfg(not(test))]
+    mod real {
+        use std::ffi::{c_char, CString};
+        use std::path::{Path, PathBuf};
+        use std::time::Duration;
+
+        use beebeeb_engine::finder_setup::error::{bridge_code, BRIDGE_DOMAIN};
+
+        use super::{SystemError, OWN_DOMAIN};
+        use crate::shell::platform::macos::macos_fp::bridge::{self, BeebeebFpErrorC};
+
+        unsafe extern "C" {
+            /// `requestDownloadForItemWithIdentifier:` (the whole file): 0 = the system took the request.
+            fn beebeeb_fp_request_download(identifier: *const c_char, out_error: *mut BeebeebFpErrorC) -> i32;
+        }
+
+        /// The item's id cannot be handed to the system.
+        const OWN_NO_IDENTIFIER: i64 = 1;
+        /// A path that is not text.
+        const OWN_NO_PATH: i64 = 2;
+        /// `NSWorkspace` did not answer in time.
+        const OWN_NO_ANSWER: i64 = 3;
+
+        fn own(code: i64) -> SystemError {
+            SystemError::new(OWN_DOMAIN, code)
+        }
+
+        /// How long `NSWorkspace` is waited for.
+        const OPEN_WAIT: Duration = Duration::from_secs(20);
+        /// How often the item's place is asked for while another File Provider call is in flight.
+        const PLACE_TRIES: usize = 12;
+
+        pub(super) struct System;
+
+        impl super::Platform for System {
+            fn present(&self, item_id: &str) -> Result<bool, String> {
+                let listed = crate::engine_host::macos_downloaded::system()
+                    .ok_or_else(|| "no list".to_string())?
+                    .items()
+                    .map_err(|_| "not listed".to_string())?;
+                Ok(listed.iter().any(|item| item.id == item_id))
+            }
+
+            fn materialise(&self, item_id: &str) -> Result<(), SystemError> {
+                let id = CString::new(item_id).map_err(|_| own(OWN_NO_IDENTIFIER))?;
+                let mut error = BeebeebFpErrorC::zeroed();
+                // SAFETY: `id` is a NUL-terminated string that outlives the call; `error` is the bridge's own struct.
+                if unsafe { beebeeb_fp_request_download(id.as_ptr(), &mut error) } == 0 {
+                    return Ok(());
+                }
+                let error = error.into_fp_error();
+                // The system did not answer the request within the bridge's limit: it may still have taken it, and
+                // the wait for the copy tells.
+                if error.domain == BRIDGE_DOMAIN && error.code == bridge_code::SIGNAL_TIMEOUT {
+                    return Ok(());
+                }
+                Err(SystemError::new(error.domain, error.code))
+            }
+
+            fn choose_app(&self) -> Option<PathBuf> {
+                crate::shell::platform::macos_panels::pick_app()
+            }
+
+            fn finder_copy(&self, item_id: &str, with: &mut dyn FnMut(&Path)) -> bool {
+                // The bridge's gate is one per process and is waited for briefly: asked again while it is busy.
+                for attempt in 0..PLACE_TRIES {
+                    if attempt > 0 {
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    if bridge::with_finder_copy(item_id, with) {
+                        return true;
+                    }
+                }
+                false
+            }
+
+            fn default_app(&self, file: &Path) -> Option<PathBuf> {
+                use objc2_app_kit::NSWorkspace;
+                use objc2_foundation::{NSString, NSURL};
+                let url = NSURL::fileURLWithPath(&NSString::from_str(file.to_str()?));
+                let app = NSWorkspace::sharedWorkspace().URLForApplicationToOpenURL(&url)?;
+                let app = PathBuf::from(app.path()?.to_string());
+                // Beebeeb is never the other app.
+                let own = std::env::current_exe().ok();
+                let is_own = own.as_deref().is_some_and(|exe| exe.starts_with(&app));
+                (!is_own).then_some(app)
+            }
+
+            fn open_with(&self, app: &Path, file: &Path) -> Result<(), SystemError> {
+                use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration};
+                use objc2_foundation::{NSArray, NSError, NSString, NSURL};
+                let (Some(app), Some(file)) = (app.to_str(), file.to_str()) else {
+                    return Err(own(OWN_NO_PATH));
+                };
+                let app = NSURL::fileURLWithPath(&NSString::from_str(app));
+                let file = NSURL::fileURLWithPath(&NSString::from_str(file));
+                let (answer, answered) = std::sync::mpsc::channel::<Option<SystemError>>();
+                let handler = block2::RcBlock::new(move |_app: *mut NSRunningApplication, error: *mut NSError| {
+                    // SAFETY: AppKit hands a valid NSError or nil for the length of this call.
+                    let why = unsafe { error.as_ref() }
+                        .map(|error| SystemError::new(error.domain().to_string(), error.code() as i64));
+                    let _ = answer.send(why);
+                });
+                // AppKit copies the block and calls it once, on a queue of its own.
+                let config = NSWorkspaceOpenConfiguration::configuration();
+                NSWorkspace::sharedWorkspace().openURLs_withApplicationAtURL_configuration_completionHandler(
+                    &NSArray::from_retained_slice(&[file]),
+                    &app,
+                    &config,
+                    Some(&handler),
+                );
+                // Waited for inside `finder_copy`: the system's access to the file is held until the app has it.
+                match answered.recv_timeout(OPEN_WAIT) {
+                    Ok(None) => Ok(()),
+                    Ok(Some(why)) => Err(why),
+                    Err(_) => Err(own(OWN_NO_ANSWER)),
+                }
+            }
+
+            fn wait(&self, time: Duration) {
+                std::thread::sleep(time);
+            }
+        }
+    }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "open_with_apps_mac_tests.rs"]
+mod mac_tests;
 
 /// The path of this app's own program, as Windows names a handler's.
 fn own_exe() -> String {

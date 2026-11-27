@@ -2,13 +2,18 @@
 //! to `viewer_save`. Every press here acts on the OPEN file only; the Files window's own selection is not read.
 //! Office(..) is taken while an editor runs on the open document (a refusal, said as one) and NewDocument opens the
 //! New document dialog in the folder shown; EditInSheets, OpenInAnotherApp and CreateFile are not this file's (`false`).
+//!
+//! The failed-open route (dm-73) is here too: a file a list handed to another app that did not open gets its page
+//! (the reason, Open with, Show in Finder), never a toast alone ([`open_failed`], [`open_failed_later`]). Files
+//! takes this route on a Mac; on Windows a failed open keeps its toast with Try again.
 
 use rune::Tx;
 
 use crate::State;
-use crate::frames::files::source::Action;
+use crate::frames::files::source::{Action, ActionError};
 use crate::frames::files::{MenuKind, Toast};
-use crate::frames::viewers::source::Origin;
+use crate::frames::viewers::source::{Body, Origin};
+use crate::frames::viewers::unsupported::{self, Note, UnsupportedReason};
 use crate::frames::viewers::{self, Intent};
 use crate::source::DriveItem;
 
@@ -60,6 +65,57 @@ pub fn take(s: &mut State, tx: &mut Tx, intent: Intent) -> bool {
         _ => return false,
     }
     true
+}
+
+thread_local! {
+    /// The file a list last handed to another app, until its start answered: an answer that comes later names no file.
+    /// The window's thread only.
+    static HANDED_OUT: std::cell::RefCell<Option<DriveItem>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `item` was handed to another app from a list: a start that fails later is this file's ([`open_failed_later`]).
+pub fn handed_out(item: &DriveItem) {
+    HANDED_OUT.with(|held| *held.borrow_mut() = Some(item.clone()));
+}
+
+/// The failed-open route: `item` did not open (no app took it, the system refused, its copy is not there). The
+/// viewer shows the file's page with the reason on it and the other ways out (Open with, Show in Finder), and the
+/// reason is logged (its kind, never a name). `false`: there is no page to show it on (a folder, no session, a
+/// window with no viewer); the caller says it its own way.
+pub fn open_failed(s: &mut State, item: &DriveItem, why: ActionError) -> bool {
+    if item.is_folder || !viewers::open_item(s, item) {
+        return false;
+    }
+    let Some(ui) = viewers::ui(s).filter(|ui| ui.file.id == item.id) else {
+        return false;
+    };
+    tracing::warn!(
+        "open: a file did not open ({})",
+        match why {
+            ActionError::Unavailable => "sync is not running",
+            ActionError::Offline => "offline",
+            ActionError::NoRoom => "no space",
+            ActionError::NotOnThisSystem => "not on this system",
+            _ => "the system did not open it",
+        }
+    );
+    // A file the viewer shows after all, or one that says why it stopped, keeps what it shows.
+    if let Body::NotPreviewable(shown) = ui.file.body {
+        if UnsupportedReason::of(shown).is_none() {
+            unsupported::open_unsupported(&mut ui.file, UnsupportedReason::UnknownType);
+        }
+        unsupported::set_note(&item.id, Some(Note::Failed(Toast::failure(Action::Open, why))));
+    }
+    true
+}
+
+/// [`open_failed`] for a start that answered later: the file is the one last handed out. `false`: none was, or it
+/// has no page; the caller says it its own way.
+pub fn open_failed_later(s: &mut State, why: ActionError) -> bool {
+    match HANDED_OUT.with(|held| held.borrow_mut().take()) {
+        Some(item) => open_failed(s, &item, why),
+        None => false,
+    }
 }
 
 /// What a command says when the running editor did not take it.

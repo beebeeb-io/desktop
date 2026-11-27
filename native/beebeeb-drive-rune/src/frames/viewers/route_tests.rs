@@ -473,10 +473,9 @@ fn an_unsupported_file_and_a_player_refusal_get_the_page_with_three_buttons_and_
         });
         route_to_file(&mut rt);
         let page = drawn(&rt);
-        assert!(
-            page.contains("Beebeeb can\u{2019}t show this kind of file here"),
-            "{page}"
-        );
+        // The page says why it is shown, in the reason's own sentence (dm-73).
+        let reason = super::unsupported::UnsupportedReason::of(why).expect("an unsupported kind");
+        assert!(page.contains(reason.sentence()), "{page}");
         assert!(
             page.contains("Open with default app") || page.contains("Open with "),
             "{page}"

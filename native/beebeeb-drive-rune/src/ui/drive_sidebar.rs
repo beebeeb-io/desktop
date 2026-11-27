@@ -4,7 +4,7 @@
 
 use crate::State;
 use crate::frames::files::source::Account;
-use crate::shell::app::{Event, Route, Section, SettingsPane};
+use crate::shell::app::{Event, Route, Screen, Section, SettingsPane};
 use crate::shell::host;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
@@ -76,9 +76,16 @@ fn section(section: SidebarSection) -> Section {
 }
 
 /// Goes to `to` through the route machine (which points `s.sidebar_section` at a Drive section).
+///
+/// Files goes to the top of Files (dm-73), as a place in Finder's sidebar goes to its top: a folder opened inside it is
+/// left to Back.
 fn go(to: Section) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
         host::dispatch(s, Event::Navigate(Route::section(to)));
+        let in_files = matches!(s.shell.app.screen(), Screen::Drive(route) if route.section == Section::Files);
+        if to == Section::Files && in_files && s.listing.folder.id.is_some() {
+            s.open_folder(None);
+        }
     }
 }
 

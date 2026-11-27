@@ -649,6 +649,12 @@ notify_conflict
 notify_quota_warning
 notify_sync_complete
 now
+nscocoaerrordomain
+nsfileprovidererrordomain
+nsosstatuserrordomain
+nsposixerrordomain
+nsurlerrordomain
+nsworkspace
 null
 null-envelope
 object
