@@ -119,7 +119,9 @@ impl Materialisation for System {
         Ok(parse(&bridge::list()?))
     }
     fn evict(&self, id: &str) -> Result<(), String> {
-        bridge::evict(id)
+        bridge::evict(id)?;
+        finder_state::forget(id);
+        Ok(())
     }
 }
 
@@ -142,26 +144,44 @@ fn parse(text: &str) -> Vec<Item> {
 /// its file in Finder is dataless. The engine's own record is not asked: the system makes a file online only again
 /// without telling the engine, and the engine may hold a copy Finder does not.
 ///
-/// The list is read on a thread of its own, never by the caller: an answer is the last list read, and asking starts
-/// a new read when that one is older than [`finder_state::FRESH_FOR`]. Until the system has answered once nothing is
-/// known ([`finder_state::here`] is `None`) and the engine's word stands.
+/// The list is read on a thread of its own, never by the caller: an answer is the last list read. Until the system
+/// has answered once nothing is known ([`finder_state::here`] is `None`) and the engine's word stands.
+///
+/// Dm-77: when the list is read again. A row's mark is taken when its list is read, so a mark is only as new as the
+/// list was then (RC12: a video landed and its row kept the cloud mark, "0 on this Mac"). So:
+/// - every ask is followed by a read that began after it (at most one read per [`finder_state::FRESH_FOR`]): what a
+///   row was told is checked against Finder's state once more;
+/// - a materialise that saw a file land says so at once ([`finder_state::landed`]): the file is held as here from
+///   that moment, while the system's list may not name it yet ([`finder_state::LANDED_FOR`]);
+/// - the File Provider's own signal of a change asks for a read ([`finder_state::refresh`]);
+/// - whenever what is held changed, the window is woken and [`finder_state::take_changed`] answers `true` once: the
+///   window's poll reads its lists again then, as after a finished check, and the marks and the counts are new.
 pub(crate) mod finder_state {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex, PoisonError};
     use std::time::{Duration, Instant};
 
-    use super::Materialisation;
+    use super::{Item, Materialisation};
 
     /// How old the list may be before it is read again.
     pub(crate) const FRESH_FOR: Duration = Duration::from_secs(3);
+    /// How long a file a materialise saw land is held as here while the system's list does not name it yet.
+    pub(crate) const LANDED_FOR: Duration = Duration::from_secs(30);
 
-    /// The system's list at one read.
+    /// The system's list at one read, and what was seen since.
     #[derive(Default)]
     pub(crate) struct Held {
         here: Option<Arc<HashSet<String>>>,
         read_at: Option<Instant>,
         reading: bool,
         wake: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// The files a materialise saw land (by their own attributes), and when: here whatever the list says, until
+        /// the list names them or [`LANDED_FOR`] is over.
+        landed: Vec<(String, Instant)>,
+        /// When a row (or a signal) last asked.
+        asked: Option<Instant>,
+        /// What is held changed since the window last took it.
+        changed: bool,
     }
 
     static HELD: Mutex<Held> = Mutex::new(Held {
@@ -169,6 +189,9 @@ pub(crate) mod finder_state {
         read_at: None,
         reading: false,
         wake: None,
+        landed: Vec::new(),
+        asked: None,
+        changed: false,
     });
 
     impl Held {
@@ -177,20 +200,67 @@ pub(crate) mod finder_state {
             self.here.as_ref().map(|here| here.contains(id))
         }
 
-        /// Takes one read of the system's list. `true`: what is held changed. A read that failed keeps the last
-        /// list: a file is never called online only because the system could not say.
+        /// Takes one read of the system's list. `true`: what is held changed.
+        #[cfg_attr(not(test), allow(dead_code))]
         pub(in crate::engine_host) fn take(&mut self, source: &dyn Materialisation) -> bool {
+            self.apply(source.items())
+        }
+
+        /// One answer of the system's list. `true`: what is held changed. A read that failed keeps the last list: a
+        /// file is never called online only because the system could not say. A file a materialise saw land stays
+        /// here while the list does not name it yet.
+        pub(in crate::engine_host) fn apply(&mut self, listed: Result<Vec<Item>, String>) -> bool {
             self.read_at = Some(Instant::now());
-            let Ok(items) = source.items() else {
+            let Ok(items) = listed else {
                 tracing::warn!("finder state: the downloaded files could not be listed");
                 return false;
             };
-            let now: HashSet<String> = items.into_iter().map(|item| item.id).collect();
+            let mut now: HashSet<String> = items.into_iter().map(|item| item.id).collect();
+            self.landed
+                .retain(|(id, at)| !now.contains(id) && at.elapsed() < LANDED_FOR);
+            now.extend(self.landed.iter().map(|(id, _)| id.clone()));
             if self.here.as_deref() == Some(&now) {
                 return false;
             }
             self.here = Some(Arc::new(now));
+            self.changed = true;
             true
+        }
+
+        /// A materialise saw the file `id` on this Mac, by its own attributes. `true`: what is held changed. Before
+        /// the system has answered once nothing is made up from one file: the first list read is given it.
+        pub(in crate::engine_host) fn land(&mut self, id: &str) -> bool {
+            self.forget(id);
+            self.landed.push((id.to_string(), Instant::now()));
+            match &mut self.here {
+                Some(here) if !here.contains(id) => {
+                    Arc::make_mut(here).insert(id.to_string());
+                    self.changed = true;
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        /// The file `id` is no longer held as landed (this app made it online only, or it lands anew).
+        pub(in crate::engine_host) fn forget(&mut self, id: &str) {
+            self.landed.retain(|(held, _)| held != id);
+        }
+
+        /// `true` once after what is held changed: the window reads its lists again.
+        pub(in crate::engine_host) fn take_changed(&mut self) -> bool {
+            std::mem::take(&mut self.changed)
+        }
+
+        /// Notes an ask, now.
+        pub(in crate::engine_host) fn ask_now(&mut self) {
+            self.asked = Some(Instant::now());
+        }
+
+        /// A read that began at `began` is over: was there an ask after it began? What that ask was told may be
+        /// older than Finder's state, so one more read follows.
+        pub(in crate::engine_host) fn asked_since(&self, began: Instant) -> bool {
+            self.asked.is_some_and(|asked| asked > began)
         }
     }
 
@@ -199,37 +269,100 @@ pub(crate) mod finder_state {
         HELD.lock().unwrap_or_else(PoisonError::into_inner).wake = Some(Arc::new(wake));
     }
 
-    /// Whether Finder holds the bytes of the file `id`, by the last list read; a new read is started when that one
-    /// is old. `None`: not a Mac, or the system has not said yet. Never waits.
+    /// Notes the ask and makes sure a read follows it: the reader is started unless one is at work (that one reads
+    /// once more when it sees the ask). Called with the lock held; never waits.
+    fn ask(held: &mut Held, source: &'static dyn Materialisation) {
+        held.ask_now();
+        if held.reading {
+            return;
+        }
+        held.reading = true;
+        let started = std::thread::Builder::new()
+            .name("finder-state".into())
+            .spawn(move || read_until_asked_no_more(source));
+        if started.is_err() {
+            held.reading = false;
+        }
+    }
+
+    /// The reader: one read of the system's list per [`FRESH_FOR`], for as long as an ask came after the last read
+    /// began. The system is asked outside the lock (it can take seconds); a row meanwhile gets the last list.
+    fn read_until_asked_no_more(source: &'static dyn Materialisation) {
+        loop {
+            let fresh_for = {
+                let held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+                held.read_at
+                    .map_or(Duration::ZERO, |at| FRESH_FOR.saturating_sub(at.elapsed()))
+            };
+            if !fresh_for.is_zero() {
+                std::thread::sleep(fresh_for);
+            }
+            let began = Instant::now();
+            let listed = source.items();
+            let (wake, again) = {
+                let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+                let changed = held.apply(listed);
+                let again = held.asked_since(began);
+                held.reading = again;
+                (changed.then(|| held.wake.clone()).flatten(), again)
+            };
+            if let Some(wake) = wake {
+                wake();
+            }
+            if !again {
+                return;
+            }
+        }
+    }
+
+    /// Whether Finder holds the bytes of the file `id`, by the last list read; a read that begins after this ask
+    /// follows. `None`: not a Mac, or the system has not said yet. Never waits.
     pub(crate) fn here(id: &str) -> Option<bool> {
         let source = super::system()?;
         let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
-        let fresh = held.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
-        if !fresh && !held.reading {
-            held.reading = true;
-            let started = std::thread::Builder::new().name("finder-state".into()).spawn(move || {
-                // The system is asked outside the lock (it can take seconds); a reader meanwhile gets the last list.
-                let mut read = Held::default();
-                let listed = read.take(source);
-                let wake = {
-                    let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
-                    held.reading = false;
-                    held.read_at = read.read_at;
-                    let changed = listed && held.here.as_deref() != read.here.as_deref();
-                    if changed {
-                        held.here = read.here;
-                    }
-                    changed.then(|| held.wake.clone()).flatten()
-                };
-                if let Some(wake) = wake {
-                    wake();
-                }
-            });
-            if started.is_err() {
-                held.reading = false;
-            }
-        }
+        ask(&mut held, source);
         held.here(id)
+    }
+
+    /// Dm-77: a materialise saw the file `id` land on this Mac (`macos_fp::materialise`). It is held as here at
+    /// once, the window is woken, and the system's list is read again. Never waits.
+    #[cfg_attr(any(test, not(target_os = "macos")), allow(dead_code))] // the Mac's own finder calls it
+    pub(crate) fn landed(id: &str) {
+        let Some(source) = super::system() else {
+            return;
+        };
+        let wake = {
+            let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+            let changed = held.land(id);
+            ask(&mut held, source);
+            changed.then(|| held.wake.clone()).flatten()
+        };
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
+    /// Dm-77: the File Provider signalled a change (Finder downloaded a file, or made one online only): the system's
+    /// list is read again, and the window is woken when it differs. Never waits.
+    #[allow(dead_code)] // for the File Provider's signal (see the module's doc); nothing in this file's reach sends one
+    pub(crate) fn refresh() {
+        let Some(source) = super::system() else {
+            return;
+        };
+        ask(&mut HELD.lock().unwrap_or_else(PoisonError::into_inner), source);
+    }
+
+    /// Dm-77: `true` once after Finder's state changed (a file landed, or the list read differs): the window's poll
+    /// reads the lists it shows again, as after a finished check, so the marks and the counts are Finder's state now.
+    #[allow(dead_code)] // the window's poll calls it (see the module's doc)
+    pub(crate) fn take_changed() -> bool {
+        HELD.lock().unwrap_or_else(PoisonError::into_inner).take_changed()
+    }
+
+    /// This app made the file `id` online only: it is not held as landed any longer.
+    #[allow(dead_code)] // the Mac's own evict calls it; a test and another system have none
+    pub(super) fn forget(id: &str) {
+        HELD.lock().unwrap_or_else(PoisonError::into_inner).forget(id);
     }
 
     /// The mark a file's row gets (`pc_status`), from the engine's `mark` and Finder's state: a file Finder holds
@@ -375,5 +508,79 @@ mod tests {
         assert!(!held.take(&Fake::new(&[("a", 10)])));
         assert!(held.take(&Fake::new(&[])));
         assert_eq!(held.here("a"), Some(false));
+    }
+
+    /// Dm-77, RC12: a video landed in Finder and its row kept the cloud mark and "0 on this Mac" until a relaunch.
+    #[test]
+    fn a_completed_materialise_flips_the_mark_at_once_and_tells_the_window_to_read_its_lists_again() {
+        use super::finder_state::{mark, Held};
+        let on = |m: &str| Some(m.to_string());
+        let mut held = Held::default();
+        assert!(held.take(&Fake::new(&[("a", 10)])));
+        assert!(held.take_changed(), "the first list is a change");
+        assert!(!held.take_changed(), "told once");
+        assert_eq!(mark(on("online_only"), held.here("mov")), on("online_only"));
+
+        // The materialise saw it land: the badge and every count that asks `here` say on this Mac from now.
+        assert!(held.land("mov"));
+        assert_eq!(held.here("mov"), Some(true));
+        assert_eq!(mark(on("online_only"), held.here("mov")), on("on_this_pc"));
+        assert!(held.take_changed(), "the window reads its lists again");
+        // Landing again changes nothing, and wakes nothing.
+        assert!(!held.land("mov"));
+        assert!(!held.take_changed());
+
+        // The system's list does not name it yet: it stays here, and nothing flips back.
+        assert!(!held.take(&Fake::new(&[("a", 10)])));
+        assert_eq!(held.here("mov"), Some(true));
+        // The list names it: the list is the truth from here on.
+        assert!(!held.take(&Fake::new(&[("a", 10), ("mov", 384)])));
+        assert_eq!(held.here("mov"), Some(true));
+        // Finder made it online only again later: the mark follows the list, and the window is told.
+        assert!(held.take(&Fake::new(&[("a", 10)])));
+        assert_eq!(held.here("mov"), Some(false));
+        assert!(held.take_changed());
+    }
+
+    #[test]
+    fn a_file_that_landed_before_the_system_answered_is_in_the_first_list_and_one_this_app_evicted_is_not_held() {
+        use super::finder_state::Held;
+        let mut held = Held::default();
+        // Nothing is known yet: one file is not a list (every other row would read as online only).
+        assert!(!held.land("mov"));
+        assert_eq!((held.here("mov"), held.here("a")), (None, None));
+        assert!(held.take(&Fake::new(&[("a", 10)])));
+        assert_eq!((held.here("mov"), held.here("a")), (Some(true), Some(true)));
+
+        // Clear made it online only right after: it is not held as landed over the list.
+        held.forget("mov");
+        assert!(held.take(&Fake::new(&[("a", 10)])));
+        assert_eq!(held.here("mov"), Some(false));
+    }
+
+    #[test]
+    fn a_file_provider_change_is_read_again_and_an_ask_during_a_read_is_followed_by_one_more() {
+        use super::finder_state::Held;
+        use std::time::{Duration, Instant};
+        let mut held = Held::default();
+        assert!(held.take(&Fake::new(&[])));
+        assert!(held.take_changed());
+        // Finder itself downloaded "doc" (the File Provider's change): the read that follows differs, and the
+        // window is told to read its lists again.
+        assert!(held.take(&Fake::new(&[("doc", 7)])));
+        assert_eq!(held.here("doc"), Some(true));
+        assert!(held.take_changed());
+        // The same list again: nothing to tell.
+        assert!(!held.take(&Fake::new(&[("doc", 7)])));
+        assert!(!held.take_changed());
+
+        // A read began; nobody asked since: the reader ends.
+        let began = Instant::now();
+        assert!(!held.asked_since(began));
+        // A row asked while it ran (what it was told is the list from before): one more read follows.
+        std::thread::sleep(Duration::from_millis(2));
+        held.ask_now();
+        assert!(held.asked_since(began));
+        assert!(!held.asked_since(Instant::now() + Duration::from_secs(1)));
     }
 }
