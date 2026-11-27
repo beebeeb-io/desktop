@@ -154,10 +154,10 @@ fn mac_service_helper(exe: &std::path::Path) -> Option<PathBuf> {
         });
     let path = found.next()?;
     if found.next().is_some() {
-        tracing::warn!("office helper: more than one office-render XPC service in the bundle; none is used");
+        tracing::warn!("office helper: more than one service found; none is used");
         return None;
     }
-    tracing::info!("office helper: the app's XPC service ({})", path.display());
+    tracing::info!("office helper: the service is used");
     Some(path)
 }
 
