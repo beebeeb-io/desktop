@@ -193,7 +193,8 @@ fn a_draw_reads_nothing_and_the_poll_after_it_brings_the_figures() {
         source.storage_split(),
         Some(StorageSplit {
             files_bytes: 1_500,
-            photos_bytes: 230_000
+            photos_bytes: 230_000,
+            backups_bytes: 9_000_000
         })
     );
 }

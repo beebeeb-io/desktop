@@ -287,6 +287,7 @@ pub struct Account {
 pub struct StorageSplit {
     pub files_bytes: i64,
     pub photos_bytes: i64,
+    pub backups_bytes: i64,
 }
 
 /// An app Windows reports for a type, as Open With lists it (DW-1562).
@@ -751,6 +752,7 @@ impl FilesSource for FilesFixture {
         Some(StorageSplit {
             files_bytes: 24_000_000_000,
             photos_bytes: 216_000_000_000,
+            backups_bytes: 0,
         })
     }
 
