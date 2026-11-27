@@ -189,12 +189,12 @@ impl Host for NoHost {
 }
 
 // Finder's copies and the one call that makes one present (dm-75): `shell::platform::macos_fp::materialise`.
+pub(crate) use crate::shell::platform::macos::macos_fp::materialise::Finder;
 #[cfg(not(test))]
 pub(crate) use crate::shell::platform::macos::macos_fp::materialise::SystemFinder;
-pub(crate) use crate::shell::platform::macos::macos_fp::materialise::Finder;
+use crate::shell::platform::macos::macos_fp::materialise::{self, LOOK_EVERY, STALL};
 #[cfg(test)]
 use crate::shell::platform::macos::macos_fp::materialise::{Presence, presence_on_disk};
-use crate::shell::platform::macos::macos_fp::materialise::{self, LOOK_EVERY, STALL};
 
 /// A test's source finds nothing in Finder unless the test puts a finder of its own in.
 #[cfg(test)]
@@ -580,6 +580,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         held(&self.media.mac.host).shower_of(name)
     }
 
+    /// What of macOS shows `name`, whether or not the app has a viewer of its own for it.
+    pub(in crate::engine_host::viewer) fn mac_shows_itself(&self, name: &str) -> Option<Shower> {
+        held(&self.media.mac.host).shower_of(name)
+    }
+
     /// Starts showing `file_id` through macOS: the body shown now. `None`: not a kind macOS shows (nothing started).
     pub(in crate::engine_host::viewer) fn mac_begin(
         &mut self,
@@ -590,6 +595,20 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     ) -> Option<Body> {
         self.mac_leave();
         let shower = self.mac_shower(name)?;
+        self.mac_begin_with(shower, session, account, file_id, name)
+    }
+
+    /// [`Self::mac_begin`] with the shower already chosen: a kind the app shows itself where its own renderer runs,
+    /// and hands to macOS where it does not (a PDF without the confined helper, `viewer_pdf`'s macOS arm).
+    pub(in crate::engine_host::viewer) fn mac_begin_with(
+        &mut self,
+        shower: Shower,
+        session: SessionGeneration,
+        account: Option<String>,
+        file_id: &str,
+        name: &str,
+    ) -> Option<Body> {
+        self.mac_leave();
         let facts = self.engine.facts(file_id).ok()?;
         let cancel = Arc::new(AtomicBool::new(false));
         let progress = Arc::new((AtomicU64::new(0), AtomicU64::new(facts.size)));

@@ -289,7 +289,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     /// On a Mac: whether the sandbox starts the helper. Asked once for this source; a refusal is logged once, with the
     /// sandbox's fixed text.
     #[cfg(target_os = "macos")]
-    fn mac_helper_starts(&mut self, helper: &Path) -> bool {
+    pub(in crate::engine_host::viewer) fn mac_helper_starts(&mut self, helper: &Path) -> bool {
         if let Some(said) = self.office.mac_sandbox_said {
             return said;
         }

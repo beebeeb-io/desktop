@@ -18,7 +18,8 @@ use crate::engine_host::office_host::EditKind;
 use crate::engine_host::viewer::viewer_media::playback_ready_for;
 use crate::frames::viewers::source::{Elsewhere, ViewerSource};
 
-const FILES: [(&str, &str, &[u8]); 4] = [
+const FILES: [(&str, &str, &[u8]); 5] = [
+    ("p1", "invented-pricelist.pdf", b"invented pdf bytes"),
     ("v1", "invented-clip.mov", b"invented video bytes"),
     ("d1", "invented-letter.docx", b"invented document bytes"),
     ("x1", "invented-thing.xyz", b"invented unknown bytes"),
@@ -183,7 +184,7 @@ impl Host for FakeHost {
     fn shower_of(&self, name: &str) -> Option<Shower> {
         match name.rsplit_once('.')?.1 {
             "mov" => Some(Shower::Player),
-            "docx" | "txt" => Some(Shower::QuickLook),
+            "docx" | "txt" | "pdf" => Some(Shower::QuickLook),
             _ => None,
         }
     }
@@ -896,4 +897,59 @@ fn with_the_helper_and_a_sandbox_that_refuses_a_docx_goes_to_quick_look_and_the_
     );
     assert_eq!(asked.load(Ordering::SeqCst), 1, "the sandbox is asked once");
     assert_eq!(rig.source.office.mac_refusals_logged, 1, "one line in the log");
+}
+
+#[test]
+fn with_the_helper_and_a_sandbox_that_starts_it_a_pdf_is_the_helpers_as_on_windows() {
+    // The real system's answer for the type: Quick Look shows a PDF (the fallback exists).
+    assert_eq!(SystemHost.shower_of("Prijslijst.pdf"), Some(Shower::QuickLook));
+    let (mut rig, asked, _) = rig_with_helper(Ok(()));
+    let file = rig.source.open("p1").expect("opens");
+    // The viewer's own worker reads it for the helper (a stand-in in the tests): macOS is handed nothing.
+    assert!(matches!(file.body, Body::Decrypting { .. }), "{:?}", file.body);
+    assert!(rig.source.media.mac.on.is_none(), "not macOS's file");
+    let body = rig.settle("p1");
+    assert!(!matches!(body, Some(Body::Native(_))), "{body:?}");
+    assert_eq!(rig.world.fetched(), ["p1"], "read once, by the viewer's worker");
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert_eq!(rig.source.office.mac_refusals_logged, 0);
+    let seen = rig.seen();
+    assert!(
+        seen.embedded.is_empty() && seen.panel.is_empty(),
+        "Quick Look was not asked"
+    );
+}
+
+#[test]
+fn with_the_helper_and_a_sandbox_that_refuses_a_pdf_goes_to_quick_look_and_the_log_says_so_once() {
+    let refusal = String::from("no sandbox on this operating system; the helper was not started");
+    let (mut rig, asked, (edits, views)) = rig_with_helper(Err(refusal));
+    // A PDF twice and a .docx between them: one ask of the sandbox and one line in the log for all three.
+    for id in ["p1", "d1", "p1"] {
+        let file = rig.source.open(id).expect("opens");
+        assert!(matches!(file.body, Body::Decrypting { .. }), "{id}: {:?}", file.body);
+        let body = rig.settle(id);
+        // Quick Look's view inside the window, never the page that says there is no viewer.
+        stage_of(&body, NativeKind::QuickLook);
+    }
+    let seen = rig.seen();
+    assert_eq!(seen.embedded.len(), 3);
+    assert_eq!(seen.embedded[0].1.file_name().unwrap(), "invented-pricelist.pdf");
+    assert_eq!(seen.embedded[0].2, b"invented pdf bytes");
+    assert!(
+        edits.lock().unwrap().is_empty() && views.load(Ordering::SeqCst) == 0,
+        "no helper was started"
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "the sandbox is asked once");
+    assert_eq!(rig.source.office.mac_refusals_logged, 1, "one line in the log");
+}
+
+#[test]
+fn without_the_helper_a_pdf_goes_to_quick_look_too() {
+    // RC13: no helper beside the app. The PDF landed on the page with the other apps; Quick Look shows it.
+    let mut rig = rig();
+    let file = rig.source.open("p1").expect("opens");
+    assert!(matches!(file.body, Body::Decrypting { .. }), "{:?}", file.body);
+    let body = rig.settle("p1");
+    stage_of(&body, NativeKind::QuickLook);
 }

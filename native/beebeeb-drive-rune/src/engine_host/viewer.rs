@@ -1101,10 +1101,24 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let media = self.media_body(session, opening.account.clone(), file_id, &facts.name, &facts.folders);
         // An Office file goes by its own route, before the viewer's kinds (`viewer_office`).
         let office = self.office_route(&facts.name);
+        // On a Mac a PDF whose helper does not run is Quick Look's (`viewer_pdf`'s macOS arm): no pages are kept here.
+        #[cfg(target_os = "macos")]
+        let pdf_by_macos = if shows == Shows::Pdf && office.is_none() && media.is_none() {
+            self.pdf_mac_begin(session, opening.account.clone(), file_id, &facts.name)
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let pdf_by_macos: Option<Body> = None;
+        if pdf_by_macos.is_some() {
+            opening.pages = None;
+        }
         let body = if let Some(route) = office {
             self.office_begin(route, &opening, &facts, recorded)
         } else if let Some(media) = media {
             media
+        } else if let Some(body) = pdf_by_macos {
+            body
         } else if shows == Shows::Nothing {
             Body::NotPreviewable(heic_or_no_viewer(&facts.name))
         } else if facts.size > IN_MEMORY_MAX {
