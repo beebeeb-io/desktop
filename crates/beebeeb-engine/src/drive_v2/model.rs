@@ -735,26 +735,53 @@ pub fn versions_from_payload(body: &serde_json::Value) -> Result<Vec<VersionEntr
     Ok(out)
 }
 
-/// Files, Photos and Backups bytes from the mirror (the meter's split). `used` and `quota` are the
-/// account's, from the server; the split is what this PC's copy knows.
-pub fn storage_split(db: &StateDb) -> Result<(i64, i64, i64), DriveError> {
-    let backups: Vec<String> = db
+/// What the storage meter and Insights count a file as. Defined once: both read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageCategory {
+    Files,
+    Photos,
+    Backups,
+}
+
+/// The Backups roots' paths, lowercase and without outer slashes, for [`storage_category`].
+pub fn backups_root_paths(db: &StateDb) -> Result<Vec<String>, DriveError> {
+    Ok(db
         .backups_roots()
         .map_err(DriveError::db)?
         .into_iter()
         .map(|(_, p)| p.trim_matches('/').to_lowercase())
         .filter(|p| !p.is_empty())
-        .collect();
+        .collect())
+}
+
+/// Anything under a Backups root is Backups; else a photo or video is Photos; else Files. `name` is the file's
+/// own name (the last part of `path`).
+pub fn storage_category(path: &str, name: &str, backups: &[String]) -> StorageCategory {
+    let path = path.trim_matches('/').to_lowercase();
+    if backups.iter().any(|b| path == *b || path.starts_with(&format!("{b}/"))) {
+        StorageCategory::Backups
+    } else if is_photo_or_video(name) {
+        StorageCategory::Photos
+    } else {
+        StorageCategory::Files
+    }
+}
+
+/// Files, Photos and Backups bytes from the mirror (the meter's split), over the same rows Insights counts
+/// (never a device's manifest in Backups). The three add up to Insights' local total.
+pub fn storage_split(db: &StateDb) -> Result<(i64, i64, i64), DriveError> {
+    let backups = backups_root_paths(db)?;
+    let tree = crate::backup_protect::BackupsTree::read(db);
     let (mut files, mut photos, mut backup_bytes) = (0i64, 0i64, 0i64);
-    for row in live_rows(db)?.iter().filter(|r| !r.is_dir()) {
-        let path = row.path.trim_matches('/').to_lowercase();
+    for row in live_rows(db)?
+        .iter()
+        .filter(|r| !r.is_dir() && !tree.is_hidden(&r.path))
+    {
         let size = row.size_bytes.max(0);
-        if backups.iter().any(|b| path == *b || path.starts_with(&format!("{b}/"))) {
-            backup_bytes += size;
-        } else if is_photo_or_video(&leaf_name(row)) {
-            photos += size;
-        } else {
-            files += size;
+        match storage_category(&row.path, &leaf_name(row), &backups) {
+            StorageCategory::Backups => backup_bytes += size,
+            StorageCategory::Photos => photos += size,
+            StorageCategory::Files => files += size,
         }
     }
     Ok((files, photos, backup_bytes))

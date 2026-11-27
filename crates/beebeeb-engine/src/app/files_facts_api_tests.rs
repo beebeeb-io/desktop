@@ -94,6 +94,12 @@ fn the_facts_count_the_kept_files_and_split_the_bytes_outside_backups() {
         facts.photos_bytes, 230_000,
         "the shot and the clip; what is in Backups is neither"
     );
+    assert_eq!(facts.backups_bytes, 9_000_000, "what is under Backups is counted, not dropped");
+    assert_eq!(
+        facts.files_bytes + facts.photos_bytes + facts.backups_bytes,
+        1_500 + 230_000 + 9_000_000,
+        "the three add up to every file's bytes"
+    );
 }
 
 #[test]
