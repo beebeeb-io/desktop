@@ -6,10 +6,13 @@
 //! the tick, never inside it: the tick holds the pull lock a save waits for.
 //!
 //! 1. When the root's digest is stored and still holds, the check ends there: one request.
-//! 2. Otherwise it walks depth first from the root against the digests stored in `remote_folder_digests`: a child
-//!    folder whose digest is stored unchanged is not entered. A folder is checked once every changed folder under it
-//!    is (deepest first), and at most [`FOLDERS_PER_CHECK`] folders are checked per window: the next window goes on
-//!    from what is stored.
+//! 2. Otherwise it descends top down from the root (a Merkle descent): one folder's digest page gives the digests of
+//!    all its child folders in one read, and only a child whose digest differs from the one stored in
+//!    `remote_folder_digests` (or was never stored) is entered, level by level, down to the folders that changed. A
+//!    child the page gives no digest for is entered and listed. Children stored and now changed (or watched) go
+//!    before children never stored, so a change since a verified state is found first. A folder is checked once every
+//!    changed folder under it is (deepest first), and at most [`FOLDERS_PER_CHECK`] folders are checked per window: the
+//!    next window goes on from what is stored. A change `d` levels down costs about `2 * d` requests.
 //! 3. A checked folder is listed (the engine's listing, `prepare_owned_rows` and the stored or decrypted name) and
 //!    its direct children compared with the mirror's rows under it: ids, kind, size, version
 //!    (`download_version.version_number`, not against a mirror row at version 0) and object version id (only when the
@@ -18,8 +21,9 @@
 //!    that has a local op queued, makes the folder in flux: not stored, not counted. A mirror row in `Trashing` the
 //!    server does not list is the server's trash, not drift. A server folder the mirror lacks that is a system folder
 //!    (`system_role` or `managed_by`) is skipped: sync may leave those out.
-//! 5. A folder that agrees, whose changed subfolders were all stored, is stored at once by the after-read rule (its
-//!    `digest_now`, asked after everything was read, is still the digest the walk read). A folder whose subtree holds
+//! 5. A folder that agrees, whose changed subfolders all agreed, is stored at the end of the check by the after-read
+//!    rule: one `digest_now` of the root, still the digest the descent read, holds for every folder read; when the root
+//!    moved, each folder is asked on its own. A folder whose subtree holds
 //!    a disagreeing or in-flux folder is not stored, so the next walk enters it again.
 //! 6. A folder that disagrees is drift when the next check still finds it disagreeing and no op touched it in
 //!    between: the sync cursor did not move, or the mirror's rows under it are what they were. Then a re-snapshot is
@@ -36,17 +40,24 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::folder_digest::{digest_now, read_folder, FolderDigests, RequestCount, WalkError};
+use crate::api_client::{ApiClient, DigestsAnswer};
+use crate::folder_digest::{digest_now, RequestCount, WalkError, MAX_RESTARTS, PAGE_LIMIT};
 use crate::state_db::folder_digests::DriftChild;
 
 /// How often the check runs at most.
 pub(super) const CHECK_EVERY: Duration = Duration::from_secs(15 * 60);
 
-/// How many folders one check lists at most (about three requests each); the next window goes on from there.
-pub(super) const FOLDERS_PER_CHECK: usize = 200;
+/// How many folders one check lists at most (two requests each: its digest page and its listing). An idle tree costs
+/// one request; this bounds the first check after a sign-in or a re-snapshot, which reads every folder once, so a tree
+/// of a few thousand folders is verified in one check and a change after it is found by the next.
+pub(super) const FOLDERS_PER_CHECK: usize = 5_000;
 
-/// The pause between two checked folders, so a check never sends its requests back to back.
-const PACE: Duration = Duration::from_millis(25);
+/// The pause between two checked folders, so a check never sends its requests back to back (none in tests).
+const PACE: Duration = if cfg!(test) {
+    Duration::ZERO
+} else {
+    Duration::from_millis(25)
+};
 
 /// More rows than this in one folder listing is refused (a cursor loop, not a folder).
 const LISTING_CAP: usize = 200_000;
@@ -255,14 +266,117 @@ enum Verdict {
     Disagrees(u64),
 }
 
-/// A folder of the walk whose changed child folders are not all checked yet.
-struct Frame {
-    folder: FolderDigests,
-    next_child: usize,
-    /// Every changed child folder checked so far was stored.
-    whole: bool,
+/// One folder's digest page, every page of it read at one digest: the folder's digest and each child folder with
+/// the digest its parent's page gave it (`None`: the page carried none, so that child is read and listed as changed).
+struct DigestRead {
+    id: String,
+    digest: String,
+    child_folders: Vec<(String, Option<String>)>,
 }
 
+/// Read every page of `folder_id` (`""` = the root) at [`PAGE_LIMIT`], each counted. A digest that moves between pages
+/// starts the folder again, at most [`MAX_RESTARTS`] times. A child folder without a digest is kept, as unknown: the
+/// descent lists that one folder instead of failing the check.
+async fn read_digests(api: &ApiClient, folder_id: &str, count: &RequestCount) -> Result<DigestRead, WalkError> {
+    let param = (!folder_id.is_empty()).then_some(folder_id);
+    let mut restarts = 0u32;
+    'read: loop {
+        let mut cursor: Option<String> = None;
+        let mut out: Option<DigestRead> = None;
+        loop {
+            count.add(1);
+            let page = match api.folder_digests(param, cursor.as_deref(), PAGE_LIMIT).await {
+                Ok(DigestsAnswer::Page(page)) => page,
+                Ok(DigestsAnswer::FolderGone) => return Err(WalkError::FolderGone(folder_id.to_string())),
+                Ok(DigestsAnswer::NotReady { retry_after_secs }) => {
+                    return Err(WalkError::NotReady { retry_after_secs })
+                }
+                Ok(DigestsAnswer::Unsupported) => return Err(WalkError::Unsupported),
+                Err(error) => return Err(WalkError::Failed(error)),
+            };
+            let folder = out.get_or_insert_with(|| DigestRead {
+                id: folder_id.to_string(),
+                digest: page.digest.clone(),
+                child_folders: Vec::new(),
+            });
+            if page.digest != folder.digest {
+                if restarts >= MAX_RESTARTS {
+                    return Err(WalkError::Failed(anyhow::anyhow!(
+                        "a folder's digest moved between pages {} times in a row",
+                        restarts + 1
+                    )));
+                }
+                restarts += 1;
+                continue 'read;
+            }
+            folder.child_folders.extend(
+                page.children
+                    .into_iter()
+                    .filter(|child| child.is_folder)
+                    .map(|child| (child.id.to_string(), child.digest)),
+            );
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return Ok(out.expect("a first page was read")),
+            }
+        }
+    }
+}
+
+/// The child folders of `folder` the descent enters, in order: first those this PC stored a digest for that now
+/// differs, or that disagreed at the last check (a change since a verified state: drift is found there), then those
+/// never stored. A child whose digest equals the stored one is not entered: nothing under it changed.
+fn to_enter(folder: &DigestRead, known: &HashMap<String, String>, watched: &Watching) -> Vec<String> {
+    let mut suspects = Vec::new();
+    let mut fresh = Vec::new();
+    for (child, digest) in &folder.child_folders {
+        match (known.get(child), digest) {
+            (Some(stored), Some(now)) if stored == now => {}
+            (Some(_), _) => suspects.push(child.clone()),
+            (None, _) if watched.contains_key(child) => suspects.push(child.clone()),
+            (None, _) => fresh.push(child.clone()),
+        }
+    }
+    suspects.extend(fresh);
+    suspects
+}
+
+/// A folder of the descent whose changed child folders are not all checked yet.
+struct Frame {
+    folder: DigestRead,
+    enter: Vec<String>,
+    next_child: usize,
+    /// Every changed child folder checked so far agreed, whole.
+    whole: bool,
+    /// The changed child folders checked (each waits in `pending`).
+    checked: Vec<String>,
+}
+
+impl Frame {
+    fn new(folder: DigestRead, known: &HashMap<String, String>, watched: &Watching) -> Self {
+        let enter = to_enter(&folder, known, watched);
+        Frame {
+            folder,
+            enter,
+            next_child: 0,
+            whole: true,
+            checked: Vec::new(),
+        }
+    }
+}
+
+/// A folder that agrees with its whole changed subtree, waiting for the after-read rule before its digest is stored.
+struct Pending {
+    id: String,
+    digest: String,
+    checked: Vec<String>,
+}
+
+/// The top-down descent. The root's digest first: equal to the stored one, the check ends (one request). Otherwise the
+/// root's page gives its child folders' digests in one read; only a child whose digest differs from the stored one
+/// (or was never stored) is entered, level by level, so a change `d` levels down costs about `2 * d` requests (one
+/// digest page and one listing per folder on its path). A folder is compared with the mirror once every changed
+/// folder under it is (deepest first). What agrees is stored at the end, under one after-read of the root.
 async fn check(
     bridge: &EngineBridge,
     watching: Option<Watching>,
@@ -271,6 +385,7 @@ async fn check(
     let count = RequestCount::default();
     let cursor = bridge.db().get_sync_cursor()?;
     let known = bridge.db().remote_folder_digests()?;
+    let watched = watching.clone().unwrap_or_default();
     let ended = |action: DriftAction, count: &RequestCount| {
         let mut report = DriftReport::new(action);
         report.requests = count.get();
@@ -293,50 +408,39 @@ async fn check(
             Err(error) => return Ok(stop(error, &count, watching)),
         }
     }
-    let root = match read_folder(bridge.api(), "", &count).await {
+    let root = match read_digests(bridge.api(), "", &count).await {
         Ok(root) => root,
         Err(error) => return Ok(stop(error, &count, watching)),
     };
+    let root_digest = root.digest.clone();
 
     let mut report = DriftReport::new(DriftAction::Agreed);
     let mut disagreeing: Watching = HashMap::new();
     let mut visited: HashSet<String> = HashSet::new();
-    let mut stack = vec![Frame {
-        folder: root,
-        next_child: 0,
-        whole: true,
-    }];
+    let mut pending: Vec<Pending> = Vec::new();
+    let mut forget: Vec<String> = Vec::new();
+    let mut failure: Option<WalkError> = None;
+    let mut stack = vec![Frame::new(root, &known, &watched)];
     while let Some(top) = stack.last_mut() {
         if bridge.is_stopping() {
             report.action = DriftAction::Failed;
             break;
         }
         // Depth first: the next changed child folder of the deepest open folder.
-        let next = top.folder.child_folders[top.next_child..]
-            .iter()
-            .position(|(child, digest)| known.get(child) != Some(digest));
-        if let Some(offset) = next {
+        if top.next_child < top.enter.len() {
             if report.changed >= cap {
                 report.capped = true;
                 break;
             }
-            let child = top.folder.child_folders[top.next_child + offset].0.clone();
-            top.next_child += offset + 1;
-            match read_folder(bridge.api(), &child, &count).await {
-                Ok(folder) => stack.push(Frame {
-                    folder,
-                    next_child: 0,
-                    whole: true,
-                }),
+            let child = top.enter[top.next_child].clone();
+            top.next_child += 1;
+            match read_digests(bridge.api(), &child, &count).await {
+                Ok(folder) => stack.push(Frame::new(folder, &known, &watched)),
                 // Gone since its parent was read: the parent's digest moved, so the parent is not stored.
                 Err(WalkError::FolderGone(_)) => top.whole = false,
                 Err(error) => {
-                    let (mut ended, watching) = stop(error, &count, watching);
-                    ended.changed = report.changed;
-                    ended.in_flux = report.in_flux;
-                    ended.disagreeing = disagreeing.len();
-                    ended.stored = report.stored;
-                    return Ok((ended, watching));
+                    failure = Some(error);
+                    break;
                 }
             }
             continue;
@@ -360,25 +464,36 @@ async fn check(
                 disagreeing.insert(frame.folder.id.clone(), Seen { cursor, mirror });
             }
         }
-        let stored =
-            frame.whole && verdict == Verdict::Agrees && after_read_holds(bridge, &frame.folder, &count).await?;
-        if stored {
-            bridge.db().update_remote_folder_digests(
-                std::slice::from_ref(&(frame.folder.id.clone(), frame.folder.digest.clone())),
-                &[],
-            )?;
-            report.stored += 1;
+        let storable = frame.whole && verdict == Verdict::Agrees;
+        if storable {
+            pending.push(Pending {
+                id: frame.folder.id.clone(),
+                digest: frame.folder.digest.clone(),
+                checked: frame.checked,
+            });
         } else if known.contains_key(&frame.folder.id) {
-            bridge
-                .db()
-                .update_remote_folder_digests(&[], std::slice::from_ref(&frame.folder.id))?;
+            forget.push(frame.folder.id.clone());
         }
         if let Some(parent) = stack.last_mut() {
-            parent.whole &= stored;
+            parent.whole &= storable;
+            if storable {
+                parent.checked.push(frame.folder.id);
+            }
         }
+    }
+    if !bridge.is_stopping() {
+        report.stored = store_verified(bridge, &root_digest, pending, forget, &known, &count).await?;
     }
     report.disagreeing = disagreeing.len();
     report.requests = count.get();
+    if let Some(error) = failure {
+        let (mut ended, watching) = stop(error, &count, watching);
+        ended.changed = report.changed;
+        ended.in_flux = report.in_flux;
+        ended.disagreeing = report.disagreeing;
+        ended.stored = report.stored;
+        return Ok((ended, watching));
+    }
 
     let previous = watching.unwrap_or_default();
     // Drift: a folder that disagreed last time and again now, with no op on it in between.
@@ -409,9 +524,50 @@ async fn check(
     Ok((report, (!next.is_empty()).then_some(next)))
 }
 
-async fn after_read_holds(bridge: &EngineBridge, folder: &FolderDigests, count: &RequestCount) -> anyhow::Result<bool> {
-    match digest_now(bridge.api(), &folder.id, count).await {
-        Ok(now) => Ok(now == folder.digest),
+/// Store the folders that agreed (deepest first in `pending`) by the after-read rule, and forget the stored digests of
+/// those that did not. One read of the root's digest first: unmoved since the descent read it, nothing anywhere in
+/// the tree changed while the check read it, so every folder holds. Moved: each folder is asked on its own, and one
+/// is stored only when it holds and every changed child folder under it was stored.
+async fn store_verified(
+    bridge: &EngineBridge,
+    root_digest: &str,
+    pending: Vec<Pending>,
+    mut forget: Vec<String>,
+    known: &HashMap<String, String>,
+    count: &RequestCount,
+) -> anyhow::Result<usize> {
+    let mut trusted: Vec<(String, String)> = Vec::new();
+    if !pending.is_empty() {
+        if after_read_holds(bridge, "", root_digest, count).await? {
+            trusted = pending.into_iter().map(|p| (p.id, p.digest)).collect();
+        } else {
+            let mut held: HashSet<String> = HashSet::new();
+            for p in pending {
+                if p.checked.iter().all(|child| held.contains(child))
+                    && after_read_holds(bridge, &p.id, &p.digest, count).await?
+                {
+                    held.insert(p.id.clone());
+                    trusted.push((p.id, p.digest));
+                } else if known.contains_key(&p.id) {
+                    forget.push(p.id);
+                }
+            }
+        }
+    }
+    if !trusted.is_empty() || !forget.is_empty() {
+        bridge.db().update_remote_folder_digests(&trusted, &forget)?;
+    }
+    Ok(trusted.len())
+}
+
+async fn after_read_holds(
+    bridge: &EngineBridge,
+    folder_id: &str,
+    digest: &str,
+    count: &RequestCount,
+) -> anyhow::Result<bool> {
+    match digest_now(bridge.api(), folder_id, count).await {
+        Ok(now) => Ok(now == digest),
         Err(WalkError::FolderGone(_)) => Ok(false),
         Err(WalkError::Failed(error)) => Err(error),
         Err(other) => Err(anyhow::anyhow!("{other}")),
@@ -610,6 +766,8 @@ mod tests {
     struct Knobs {
         bumps: std::sync::Mutex<HashMap<String, i64>>,
         digest_delay_ms: std::sync::atomic::AtomicU64,
+        /// Child folders whose digest the digest pages leave out (`null`).
+        no_digest: std::sync::Mutex<HashSet<String>>,
     }
 
     /// A snapshot node as `GET /api/v1/files` carries it: the version under `download_version` (with an object id,
@@ -643,6 +801,18 @@ mod tests {
                 if ms > 0 {
                     std::thread::sleep(Duration::from_millis(ms));
                 }
+                let left_out = knobs.no_digest.lock().unwrap().clone();
+                let reply = inner(req);
+                if left_out.is_empty() || reply.status != 200 {
+                    return reply;
+                }
+                let mut page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+                for child in page["children"].as_array_mut().into_iter().flatten() {
+                    if child["id"].as_str().is_some_and(|id| left_out.contains(id)) {
+                        child["digest"] = serde_json::Value::Null;
+                    }
+                }
+                return Reply::ok(page);
             }
             if req.method == "GET" && req.path.split('?').next() == Some("/api/v1/files") {
                 let parent = req.query("parent_id").map(str::to_string);
@@ -758,7 +928,7 @@ mod tests {
             let report = check_now(&fx.bridge, &fx.root).await;
             println!("drift idle check {n}: {report:?}");
             assert_eq!(report.action, DriftAction::Unchanged);
-            assert!(report.requests <= 2, "{report:?}");
+            assert!(report.requests <= 1, "{report:?}");
             assert!(!fx.resnapshot_asked());
         }
     }
@@ -1006,5 +1176,100 @@ mod tests {
         let cut = tokio::time::timeout(Duration::from_millis(50), check_now(&fx.bridge, &fx.root)).await;
         assert!(cut.is_err(), "the check was cut");
         assert!(!with_state(&fx.root, |state| state.running));
+    }
+    /// fd-24: a tree of 2,700 folders is verified by one check, and a file changed with no op 7 levels down is found
+    /// by the next check with at most `2 * 7 + 2` requests (the root's digest, then one digest page and one listing
+    /// per folder on its path); the check after that asks for the re-snapshot. Idle checks cost one request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_a_deep_change_in_a_large_tree_is_found_by_the_next_check() {
+        let fx = Fixture::new();
+        // 30 folders at the top with 89 folders each, and a chain of 5 more under the first: 2,705 folders besides the
+        // existing three. The file at /T0/L2/L3/L4/L5/L6/deep.txt is 7 levels deep.
+        let mut n = 100;
+        for t in 0..30u32 {
+            let top = uid(3, t);
+            fx.account.add_item(&top, None, &format!("T{t}"), true, 0);
+            for _ in 0..89 {
+                n += 1;
+                fx.account.add_item(&uid(3, n), Some(&top), &format!("F{n}"), true, 0);
+            }
+        }
+        let mut parent = uid(3, 0);
+        for level in 2..=6u32 {
+            let folder = uid(4, level);
+            fx.account
+                .add_item(&folder, Some(&parent), &format!("L{level}"), true, 0);
+            parent = folder;
+        }
+        fx.account.add_item(&uid(5, 1), Some(&parent), "deep.txt", false, 70);
+        fx.tick().await;
+
+        let first = check_now(&fx.bridge, &fx.root).await;
+        println!("drift first check of the large tree: {first:?}");
+        assert_eq!(first.action, DriftAction::Agreed, "{first:?}");
+        assert!(!first.capped, "the whole tree is verified in one check: {first:?}");
+        assert_eq!(first.stored, 3 + 2_705, "{first:?}");
+        assert!(
+            first.requests as usize <= 2 * first.changed + 3,
+            "two requests per folder: {first:?}"
+        );
+
+        for n in 0..3 {
+            let idle = check_now(&fx.bridge, &fx.root).await;
+            println!("drift idle check {n} of the large tree: {idle:?}");
+            assert_eq!(idle.action, DriftAction::Unchanged, "{idle:?}");
+            assert!(idle.requests <= 1, "{idle:?}");
+            assert!(!fx.resnapshot_asked());
+        }
+
+        // The server changes deep.txt and records no op (direct SQL).
+        fx.account.add_item(&uid(5, 1), Some(&parent), "deep.txt", false, 71);
+        fx.tick().await;
+        let found = check_now(&fx.bridge, &fx.root).await;
+        println!("drift check after a change 7 levels down: {found:?}");
+        assert_eq!(found.disagreeing, 1, "{found:?}");
+        assert_eq!(found.action, DriftAction::Watching, "{found:?}");
+        assert!(found.requests <= 2 * 7 + 2, "{found:?}");
+        assert!(!fx.resnapshot_asked());
+
+        let second = check_now(&fx.bridge, &fx.root).await;
+        println!("drift check 2 after a change 7 levels down: {second:?}");
+        assert_eq!(second.action, DriftAction::Resnapshot, "{second:?}");
+        assert!(second.requests <= 2 * 7 + 2, "{second:?}");
+        assert!(fx.resnapshot_asked());
+    }
+
+    /// fd-24: a change below a child folder whose digest the root's page leaves out is still found: that folder is
+    /// entered and listed, the check does not fail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_a_child_without_a_digest_is_listed() {
+        let fx = Fixture::new();
+        fx.synced_and_checked().await;
+        fx.knobs.no_digest.lock().unwrap().insert(uid(1, 1));
+        fx.account.add_item(&uid(2, 3), Some(&uid(1, 2)), "c.txt", false, 31);
+        let first = check_now(&fx.bridge, &fx.root).await;
+        println!("drift check with a child digest left out: {first:?}");
+        assert_eq!(first.action, DriftAction::Watching, "{first:?}");
+        assert_eq!(first.disagreeing, 1, "{first:?}");
+        let second = check_now(&fx.bridge, &fx.root).await;
+        assert_eq!(second.action, DriftAction::Resnapshot, "{second:?}");
+    }
+
+    /// fd-24: a root changed by an op sync applied, with a child folder's digest left out, agrees: the child is
+    /// listed, nothing is watched and no re-snapshot is asked for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_check_a_missing_child_digest_is_not_misread() {
+        let fx = Fixture::new();
+        fx.synced_and_checked().await;
+        fx.knobs.no_digest.lock().unwrap().insert(uid(1, 1));
+        fx.account.push_newer_version(&uid(2, 4), b"a newer version").unwrap();
+        fx.tick().await;
+        for n in 0..2 {
+            let report = check_now(&fx.bridge, &fx.root).await;
+            println!("drift check {n} with a child digest left out: {report:?}");
+            assert_ne!(report.action, DriftAction::Failed, "{report:?}");
+            assert_eq!(report.disagreeing, 0, "{report:?}");
+            assert!(!fx.resnapshot_asked());
+        }
     }
 }
