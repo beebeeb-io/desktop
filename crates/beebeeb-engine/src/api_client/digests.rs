@@ -107,7 +107,7 @@ impl ApiClient {
                         _ => DigestsAnswer::Unsupported,
                     });
                 }
-                503 | 502 | 504 => {
+                502..=504 => {
                     let retry_after = header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str());
                     if status == 503 {
                         let body = resp.text().await.unwrap_or_default();
