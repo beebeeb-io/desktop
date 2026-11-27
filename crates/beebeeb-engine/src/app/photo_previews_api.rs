@@ -535,10 +535,7 @@ impl<C: CredentialStores> Engine<C> {
     /// asks this before it downloads a file to make its thumbnails (the repair), so nothing is downloaded for a
     /// thumbnail that would not be sent. WORKER call: the network (the setting, read at most every ten minutes).
     pub fn thumbnail_send_hold_for(&self, session: SessionGeneration) -> Option<MadeUpload> {
-        match self.thumb_send_context(session) {
-            Ok(_) => None,
-            Err(why) => Some(why),
-        }
+        self.thumb_send_context(session).err()
     }
 
     /// drive-complete-RS-d: thumbnails made on this PC from a file's decoded pixels (the viewer's open, the repair),
@@ -1099,7 +1096,7 @@ const LARGE_SEALED_MAX: usize = 512 * 1024;
 fn preview_from_pixels(pixels: &ThumbPixels, px: u32) -> Option<Zeroizing<Vec<u8>>> {
     use zeroize::Zeroize;
     let mut rgb = Vec::with_capacity(pixels.rgba.len() / 4 * 3);
-    for p in pixels.rgba.chunks_exact(4) {
+    for p in pixels.rgba.as_chunks::<4>().0 {
         rgb.extend_from_slice(&p[..3]);
     }
     let mut whole = image::RgbImage::from_raw(pixels.width, pixels.height, rgb)?;

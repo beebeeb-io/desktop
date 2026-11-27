@@ -384,7 +384,7 @@ mod settings_flow_tests {
     #[test]
     fn narrow_window_keeps_the_540_column() {
         let (w, cols) = shape(600.0);
-        assert!(w >= COLUMN_W && w <= 600.0 - 60.0 + 0.5 || (w - COLUMN_W).abs() < 0.5, "column {w}");
+        assert!((COLUMN_W..=600.0 - 60.0 + 0.5).contains(&w) || (w - COLUMN_W).abs() < 0.5, "column {w}");
         assert_eq!(cols, 1);
         let (w, cols) = shape(540.0 + 60.0);
         assert!((w - 540.0).abs() < 0.5, "column {w}");
