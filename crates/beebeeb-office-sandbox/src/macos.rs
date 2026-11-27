@@ -33,7 +33,10 @@
 //! and a process that has a sandbox cannot apply another. The helper would then hold what the app holds (its network
 //! entitlements, its container), which is far more than this crate promises. So [`spawn`] starts nothing when the
 //! app has a sandbox, and a helper whose profile is refused ends itself: fail closed, never the inherited sandbox.
-//! The same Apple page names the way out: an XPC service, which the system starts outside the app's sandbox.
+//! The same Apple page names the way out: an XPC service, which the system starts outside the app's sandbox. That
+//! is what a helper inside an XPC service's bundle is started as (`macos_xpc.rs`, with what differs there: the
+//! confinement is the App Sandbox the system gives the service, sections are anonymous shared memory, the service
+//! watches its own memory, and one runs at a time).
 //!
 //! **Shared memory.** A [`crate::Section`] is a POSIX shared-memory object made under a random name that is removed
 //! at once, so nothing can open it by name; the app keeps two descriptors of it, one opened read-write and one opened
@@ -74,6 +77,13 @@ use crate::{
     Access, DEFAULT_MEMORY_LIMIT_BYTES, ExitStatus, Granted, KILLED_EXIT_CODE, LaunchGuard, Limits, MAX_SECTION_BYTES,
     Pipes, Profile, SandboxError, over_memory,
 };
+
+/// The helper's side of being the app's XPC service.
+#[path = "macos_service.rs"]
+mod service;
+/// The app's side of a helper that is its XPC service: what an app inside the App Sandbox starts.
+#[path = "macos_xpc.rs"]
+mod xpc;
 
 /// The helper's whole confinement, in the system's profile language. Everything not named is denied.
 ///
@@ -690,6 +700,24 @@ fn denied(pid: c_int, check: Check) -> Option<bool> {
     }
 }
 
+/// The kernel's answer for `operation` on `path`, a path only known when the app runs (the user's home).
+fn denied_path(pid: c_int, operation: &CStr, path: &CStr) -> Option<bool> {
+    // SAFETY: as in `denied`: two terminated strings that live past the call, which only reads them.
+    let answer = unsafe {
+        sys::sandbox_check(
+            pid,
+            operation.as_ptr(),
+            sys::SANDBOX_FILTER_PATH | sys::SANDBOX_CHECK_NO_REPORT,
+            path.as_ptr(),
+        )
+    };
+    match answer {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
 /// Whether the kernel reports a sandbox on the process `pid`.
 fn has_sandbox(pid: c_int) -> bool {
     // SAFETY: a null operation asks only whether the process has a sandbox; nothing is read through a pointer.
@@ -835,10 +863,75 @@ impl Process {
     }
 }
 
-/// A confined helper: its process, the app's end of its control socket and its memory watch. Dropping it ends the
-/// helper.
+/// A confined helper: one the app started itself, or the app's XPC service. Dropping it ends the helper.
 #[derive(Debug)]
-pub(crate) struct ChildInner {
+pub(crate) enum ChildInner {
+    /// Started by the app, under the profile it applied to itself.
+    Spawned(Spawned),
+    /// Started by the system as the app's XPC service, in the sandbox the system gave it.
+    Service(xpc::ServiceChild),
+}
+
+impl ChildInner {
+    pub(crate) fn id(&self) -> u32 {
+        match self {
+            Self::Spawned(child) => child.id(),
+            Self::Service(child) => child.id(),
+        }
+    }
+
+    pub(crate) fn wait(&self, bound: Duration) -> Result<Option<ExitStatus>, SandboxError> {
+        match self {
+            Self::Spawned(child) => child.wait(bound),
+            Self::Service(child) => child.wait(bound),
+        }
+    }
+
+    pub(crate) fn kill(&self) -> Result<(), SandboxError> {
+        match self {
+            Self::Spawned(child) => child.kill(),
+            Self::Service(child) => child.kill(),
+        }
+    }
+
+    pub(crate) fn granted_bytes(&self) -> &Arc<AtomicU64> {
+        match self {
+            Self::Spawned(child) => child.granted_bytes(),
+            Self::Service(child) => child.granted_bytes(),
+        }
+    }
+
+    /// Never true for a service: it watches its own memory (the app may not read it) and ends itself.
+    pub(crate) fn killed_for_memory(&self) -> bool {
+        match self {
+            Self::Spawned(child) => child.killed_for_memory(),
+            Self::Service(_) => false,
+        }
+    }
+
+    pub(crate) fn grant(&self, section: &SectionInner, access: Access) -> Result<Granted, SandboxError> {
+        match self {
+            Self::Spawned(child) => child.grant(section, access),
+            Self::Service(child) => child.grant(section, access),
+        }
+    }
+
+    /// A sandboxed app may not list the descriptors of its service (system code 1, measured): no count there.
+    pub(crate) fn handle_count(&self) -> Result<u32, SandboxError> {
+        match self {
+            Self::Spawned(child) => child.handle_count(),
+            Self::Service(_) => Err(SandboxError::Os {
+                step: "handle count",
+                code: 1,
+            }),
+        }
+    }
+}
+
+/// A helper the app started itself: its process, the app's end of its control socket and its memory watch.
+/// Dropping it ends the helper.
+#[derive(Debug)]
+pub(crate) struct Spawned {
     process: Arc<Process>,
     control: OwnedFd,
     /// The number of the next grant.
@@ -850,7 +943,7 @@ pub(crate) struct ChildInner {
     watch: Option<Watch>,
 }
 
-impl ChildInner {
+impl Spawned {
     pub(crate) fn id(&self) -> u32 {
         self.process.pid as u32
     }
@@ -875,9 +968,16 @@ impl ChildInner {
     /// cannot be mapped writable, the read-write one otherwise.
     pub(crate) fn grant(&self, section: &SectionInner, access: Access) -> Result<Granted, SandboxError> {
         let wire = self.next_wire.fetch_add(1, Ordering::SeqCst);
+        // A section without descriptors (made by an app inside the App Sandbox) goes to a service, never here.
+        let Some((read_write, read_only)) = &section.descriptors else {
+            return Err(SandboxError::Os {
+                step: "grant",
+                code: sys::ENOENT as u32,
+            });
+        };
         let descriptor = match access {
-            Access::Read => section.read_only.as_raw_fd(),
-            Access::ReadWrite => section.read_write.as_raw_fd(),
+            Access::Read => read_only.as_raw_fd(),
+            Access::ReadWrite => read_write.as_raw_fd(),
         };
         let message = grant_message(wire, section.len as u64, access);
         let started = Instant::now();
@@ -923,7 +1023,7 @@ impl ChildInner {
     }
 }
 
-impl Drop for ChildInner {
+impl Drop for Spawned {
     fn drop(&mut self) {
         let _ = self.process.kill();
         // Collected here, so no ended helper is left behind for the app's lifetime.
@@ -1016,13 +1116,18 @@ fn watch(process: &Process, limit: u64, granted: &AtomicU64, killed: &AtomicBool
     }
 }
 
-/// A shared-memory object without a name, the app's read-write view of all of it, and its two descriptors.
+/// Shared memory without a name and the app's read-write view of all of it. Outside the App Sandbox it is a POSIX
+/// shared-memory object with two descriptors; inside, where the system lets an app make none (code 1, measured), it
+/// is anonymous shared memory that only an XPC service can be handed (`macos_xpc.rs`).
 pub(crate) struct SectionInner {
-    read_write: OwnedFd,
-    /// Opened read-only: what a read grant sends. A mapping of it cannot be written.
-    read_only: OwnedFd,
+    /// (opened read-write, opened read-only): what a grant to a helper the app started sends. A mapping of the
+    /// second cannot be written.
+    descriptors: Option<(OwnedFd, OwnedFd)>,
     view: *mut u8,
     len: usize,
+    /// A second view of the same memory that can never be made writable, made for the first read grant to a
+    /// service (an address, 0 until then).
+    sealed: Mutex<usize>,
 }
 
 // SAFETY: the view is memory of this process that only this value unmaps; a shared reference lends it for reading
@@ -1051,7 +1156,27 @@ fn random_name() -> Result<CString, SandboxError> {
 impl SectionInner {
     /// `len` is 1 byte to 4 GiB (checked by the caller).
     pub(crate) fn new(len: usize) -> Result<Self, SandboxError> {
-        let (read_write, read_only) = Self::descriptors()?;
+        // Not even tried inside a sandbox: the system refuses it and writes each refusal to its log.
+        let made = if xpc::app_is_sandboxed() {
+            None
+        } else {
+            match Self::descriptors() {
+                Ok(descriptors) => Some(descriptors),
+                Err(SandboxError::Os {
+                    step: "section",
+                    code: 1,
+                }) => None,
+                Err(error) => return Err(error),
+            }
+        };
+        let Some((read_write, read_only)) = made else {
+            return Ok(Self {
+                descriptors: None,
+                view: xpc::anonymous(len)?,
+                len,
+                sealed: Mutex::new(0),
+            });
+        };
         close_on_exec(&read_write, "section")?;
         close_on_exec(&read_only, "section")?;
         // SAFETY: `read_write` is the open, still empty object just made.
@@ -1074,11 +1199,21 @@ impl SectionInner {
             return Err(os("section view"));
         }
         Ok(Self {
-            read_write,
-            read_only,
+            descriptors: Some((read_write, read_only)),
             view: view.cast(),
             len,
+            sealed: Mutex::new(0),
         })
+    }
+
+    /// The view of this section that can never be written, made on first use: what a read grant to a service is
+    /// made from.
+    fn sealed_view(&self) -> Result<*mut u8, SandboxError> {
+        let mut sealed = lock(&self.sealed);
+        if *sealed == 0 {
+            *sealed = xpc::sealed(self.view, self.len)? as usize;
+        }
+        Ok(*sealed as *mut u8)
     }
 
     /// Makes the object under a random name, opens it a second time read-only, and removes the name: from then on
@@ -1164,6 +1299,11 @@ impl Drop for SectionInner {
         zeroize(self.as_mut_slice());
         #[cfg(test)]
         tests::record_zeroed(self.as_slice());
+        let sealed = *lock(&self.sealed);
+        if sealed != 0 {
+            // SAFETY: the second view made in `sealed_view`, unmapped once, here.
+            unsafe { sys::munmap(sealed as *mut c_void, xpc::span(self.len)) };
+        }
         // SAFETY: the address `mmap` returned in `new`, unmapped once, here. The two descriptors close right after.
         unsafe { sys::munmap(self.view.cast(), self.len) };
     }
@@ -1190,6 +1330,10 @@ pub(crate) struct MappedInner {
     view: *mut u8,
     len: usize,
     writable: bool,
+    /// How many bytes are mapped at `view`: `len`, or the whole pages a service's grant carries.
+    span: usize,
+    /// Mapped by a service, which counts what it has mapped for its own memory watch.
+    counted: bool,
 }
 
 // SAFETY: as for `SectionInner`: the view is memory of this process that only this value unmaps.
@@ -1214,8 +1358,11 @@ impl MappedInner {
 
 impl Drop for MappedInner {
     fn drop(&mut self) {
-        // SAFETY: the address `mmap` returned in `map`, unmapped once, here.
-        unsafe { sys::munmap(self.view.cast(), self.len) };
+        // SAFETY: the address mapped in `map`, for the length mapped there, unmapped once, here.
+        unsafe { sys::munmap(self.view.cast(), self.span) };
+        if self.counted {
+            service::unmapped(self.span);
+        }
     }
 }
 
@@ -1240,6 +1387,10 @@ static CONTROL: Mutex<Control> = Mutex::new(Control {
 /// the pipe, so it is waiting on the control socket or already taken off it; nothing here waits. The grant's
 /// descriptor is closed as soon as it is mapped, or at once when mapping fails, so a grant maps once.
 pub(crate) fn map(wire: u64, len: usize, access: Access) -> Result<MappedInner, SandboxError> {
+    // An XPC service is handed its sections on its connection, not on a control socket.
+    if service::is_service() {
+        return service::map(wire, len, access);
+    }
     let descriptor = {
         let mut control = lock(&CONTROL);
         let Some(socket) = control.socket else {
@@ -1294,6 +1445,8 @@ pub(crate) fn map(wire: u64, len: usize, access: Access) -> Result<MappedInner, 
         view: view.cast(),
         len,
         writable: access == Access::ReadWrite,
+        span: len,
+        counted: false,
     })
 }
 
@@ -1332,6 +1485,12 @@ fn control_socket() -> Option<RawFd> {
 /// 5. The kernel is asked whether this process now has a sandbox.
 /// 6. The handshake to the app, which asks the kernel itself before it sends anything.
 pub(crate) fn confine_or_exit() {
+    // The app's XPC service: the system confined this process before its first instruction, and the app's first
+    // message is handled on the service's connection (`macos_service.rs`). Returns once that is done.
+    if service::is_service() {
+        service::wait_until_started();
+        return;
+    }
     let control = control_socket();
     let refuse = || refuse(control);
 
@@ -1638,6 +1797,11 @@ pub(crate) fn spawn(
     launch: LaunchGuard,
 ) -> Result<(ChildInner, Pipes), SandboxError> {
     let path = checked_path(helper_exe)?;
+    // A helper inside an XPC service's bundle is that service: the system starts it, in a sandbox of its own.
+    if let Some(name) = xpc::service_name(helper_exe) {
+        let (child, pipes) = xpc::spawn_service(&name, limits, mode, launch)?;
+        return Ok((ChildInner::Service(child), pipes));
+    }
     // A process this one starts inherits this one's sandbox and cannot apply the helper's profile on top (the module
     // documentation). Nothing is started: the helper would hold what this app holds.
     // SAFETY: takes no pointer.
@@ -1692,7 +1856,7 @@ pub(crate) fn spawn(
     }
 
     // From here every early return drops `child`, which ends the helper and collects it.
-    let mut child = ChildInner {
+    let mut child = Spawned {
         process: Arc::new(Process {
             pid,
             ended: Mutex::new(None),
@@ -1723,7 +1887,7 @@ pub(crate) fn spawn(
         Arc::clone(&child.killed_for_memory),
     )?);
     Ok((
-        child,
+        ChildInner::Spawned(child),
         Pipes {
             to_helper: File::from(to_helper),
             from_helper: File::from(from_helper),
@@ -1789,7 +1953,8 @@ mod tests {
     #[test]
     fn a_sections_read_only_descriptor_refuses_a_writable_mapping() {
         let section = SectionInner::new(16384).unwrap();
-        for fd in [&section.read_write, &section.read_only] {
+        let (read_write, read_only) = section.descriptors.as_ref().expect("an app without a sandbox has both");
+        for fd in [read_write, read_only] {
             // SAFETY: `fd` is open; the command takes no further argument.
             let flags = unsafe { sys::fcntl(fd.as_raw_fd(), sys::F_GETFD) };
             assert_eq!(flags & sys::FD_CLOEXEC, sys::FD_CLOEXEC, "close-on-exec");
@@ -1805,14 +1970,14 @@ mod tests {
             }
             code
         };
-        assert_eq!(map(&section.read_only, sys::PROT_READ), 0, "read-only maps for reading");
+        assert_eq!(map(read_only, sys::PROT_READ), 0, "read-only maps for reading");
         assert_eq!(
-            map(&section.read_only, sys::PROT_READ | sys::PROT_WRITE),
+            map(read_only, sys::PROT_READ | sys::PROT_WRITE),
             1,
             "a writable mapping of the read-only descriptor is refused (system code 1)"
         );
         assert_eq!(
-            map(&section.read_write, sys::PROT_READ | sys::PROT_WRITE),
+            map(read_write, sys::PROT_READ | sys::PROT_WRITE),
             0,
             "the instrument can fail: the read-write descriptor maps writable"
         );

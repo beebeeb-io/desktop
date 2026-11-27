@@ -121,10 +121,75 @@ pub const HANDLE_SLACK: u32 = 16;
 /// Called by the worker after it queued an event: the window then polls.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
-/// The helper beside the app's executable, when that file exists.
+/// The helper beside the app's executable, when that file exists. On a Mac it is the app's XPC service instead
+/// (`Contents/XPCServices/<app id>.office-render.xpc`): the system starts that in a sandbox of its own, where a child
+/// of the app would inherit the app's. A dev build run outside a bundle keeps the helper beside its executable.
 pub fn helper_exe() -> Option<PathBuf> {
-    let path = std::env::current_exe().ok()?.with_file_name(HELPER_EXE);
+    let exe = std::env::current_exe().ok()?;
+    #[cfg(target_os = "macos")]
+    if let Some(path) = mac_service_helper(&exe) {
+        return Some(path);
+    }
+    let path = exe.with_file_name(HELPER_EXE);
     path.is_file().then_some(path)
+}
+
+/// The executable of the Office helper's XPC service in the bundle `exe` runs from: exactly one
+/// `*.office-render.xpc` under `Contents/XPCServices`, with the helper inside it. `None` outside a bundle, or when
+/// there is none or more than one.
+#[cfg(target_os = "macos")]
+fn mac_service_helper(exe: &std::path::Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    if macos.file_name()? != "MacOS" {
+        return None;
+    }
+    let services = macos.parent()?.join("XPCServices");
+    let mut found = std::fs::read_dir(services)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let path = entry.path().join("Contents/MacOS").join(HELPER_EXE);
+            (name.to_str()?.ends_with(".office-render.xpc") && path.is_file()).then_some(path)
+        });
+    let path = found.next()?;
+    if found.next().is_some() {
+        tracing::warn!("office helper: more than one office-render XPC service in the bundle; none is used");
+        return None;
+    }
+    tracing::info!("office helper: the app's XPC service ({})", path.display());
+    Some(path)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mac_service_helper_tests {
+    use super::*;
+
+    /// The service's executable is found in a bundle laid out as bundle-app.sh lays it out, and only there.
+    #[test]
+    fn the_helper_is_the_bundles_one_office_render_service() {
+        let dir = std::env::temp_dir().join(format!("dm82-lookup-{}", std::process::id()));
+        let app = dir.join("Beebeeb.app/Contents");
+        let exe = app.join("MacOS/beebeeb-drive");
+        let helper = app
+            .join("XPCServices/io.beebeeb.app.office-render.xpc/Contents/MacOS")
+            .join(HELPER_EXE);
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        assert_eq!(mac_service_helper(&exe), None, "no executable in the service yet");
+        std::fs::write(&helper, b"").unwrap();
+        assert_eq!(mac_service_helper(&exe), Some(helper.clone()));
+        assert_eq!(
+            mac_service_helper(&dir.join("beebeeb-drive")),
+            None,
+            "not inside a bundle"
+        );
+        let other = app.join("XPCServices/io.beebeeb.app.test.office-render.xpc/Contents/MacOS");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(HELPER_EXE), b"").unwrap();
+        assert_eq!(mac_service_helper(&exe), None, "two services: neither is taken");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 /// Every host of this process.

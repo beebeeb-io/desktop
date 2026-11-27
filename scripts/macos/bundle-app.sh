@@ -2,8 +2,9 @@
 # Assemble the native macOS app: <out>/<Product>.app from a built beebeeb-drive binary.
 # Spec: native/beebeeb-drive-rune/docs/macos/packaging-signing-update.md §1, §2, §6.
 #   scripts/macos/bundle-app.sh --identity real|test --binary <path> --out <dir> [--office-helper <path>] [--sign]
-# The Office helper (Contents/MacOS/beebeeb-office-render) is built here, from its own workspace, unless
-# --office-helper names one already built (the bundle test hands a stub).
+# The Office helper is built here, from its own workspace, unless --office-helper names one already built (the bundle
+# test hands a stub). It ships as the app's XPC service, Contents/XPCServices/<bundle id>.office-render.xpc, never
+# beside the app's executable: the system starts a service in a sandbox of its own (crates/beebeeb-office-sandbox).
 # Nothing here launches the app. Signing is scripts/macos/sign-app.sh (run with --sign, or by hand).
 # Provisioning: MACOS_APP_PROVISION_PROFILE / MACOS_FILE_PROVIDER_PROVISION_PROFILE (a path) or the
 # *_BASE64 twin; with neither, an empty placeholder is embedded and preflight.sh rejects it.
@@ -49,16 +50,23 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$CONTENTS/PlugIns"
 cp "$BINARY" "$CONTENTS/MacOS/$EXE"
 chmod 755 "$CONTENTS/MacOS/$EXE"
 
-# The Office helper, beside the app's executable: where the host looks for it (office_host.rs helper_exe).
+# The Office helper, as the app's XPC service: where the host looks for it (office_host.rs helper_exe). The bundle's
+# folder name is its identifier, which is the name the app connects to.
 OFFICE_EXE="beebeeb-office-render"
+OFFICE_ID="$BUNDLE_ID.office-render"
 if [[ -z "$OFFICE_HELPER" ]]; then
   OFFICE_TARGET="aarch64-apple-darwin"
   (cd native/beebeeb-office-render && cargo build --release --locked --target "$OFFICE_TARGET")
   OFFICE_HELPER="$(cd native/beebeeb-office-render && cd "${CARGO_TARGET_DIR:-target}" && pwd)/$OFFICE_TARGET/release/$OFFICE_EXE"
 fi
 [[ -f "$OFFICE_HELPER" ]] || { printf 'office helper not found: %s\n' "$OFFICE_HELPER" >&2; exit 1; }
-cp "$OFFICE_HELPER" "$CONTENTS/MacOS/$OFFICE_EXE"
-chmod 755 "$CONTENTS/MacOS/$OFFICE_EXE"
+OFFICE_XPC="$CONTENTS/XPCServices/$OFFICE_ID.xpc"
+mkdir -p "$OFFICE_XPC/Contents/MacOS"
+cp "$OFFICE_HELPER" "$OFFICE_XPC/Contents/MacOS/$OFFICE_EXE"
+chmod 755 "$OFFICE_XPC/Contents/MacOS/$OFFICE_EXE"
+sed -e "s|@EXECUTABLE@|$OFFICE_EXE|g" -e "s|@BUNDLE_ID@|$OFFICE_ID|g" -e "s|@VERSION@|$VERSION|g" \
+    packaging/macos/office-render-Info.plist > "$OFFICE_XPC/Contents/Info.plist"
+plutil -lint "$OFFICE_XPC/Contents/Info.plist" >/dev/null
 
 cp packaging/macos/icon.icns "$CONTENTS/Resources/icon.icns"
 cp packaging/macos/tray-template.png packaging/macos/tray-template@2x.png "$CONTENTS/Resources/"
