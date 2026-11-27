@@ -287,7 +287,7 @@ impl<E: super::ViewerEngine> super::EngineViewerSource<E> {
         name: &str,
     ) -> Option<crate::frames::viewers::source::Body> {
         let shower = self.mac_shows_itself(name)?;
-        tracing::warn!("viewer: the PDF helper could not start; Quick Look shows the file");
+        tracing::warn!("viewer: the helper could not start; macOS shows the file");
         self.mac_begin_with(shower, session, account, file_id, name)
     }
 }

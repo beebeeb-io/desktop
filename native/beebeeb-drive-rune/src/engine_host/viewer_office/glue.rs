@@ -418,7 +418,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         }
         shown.ended = true;
         crate::office_log::helper_not_started(
-            "the helper could not start; Quick Look shows the file",
+            "the helper could not start; macOS shows the file",
             if edit { "edit" } else { "view" },
         );
         Some(
