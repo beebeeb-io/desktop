@@ -899,3 +899,37 @@ fn review_p2_1_an_earlier_indexed_owner_folder_is_removed() {
         "an owner folder's name is removed from the old shared index"
     );
 }
+
+/// A pass over many shared folders reads the sent invites once, not once per folder (the 429 alert's second
+/// amplifier): 20 roots without custody still make at most 2 `GET /shares/invites/sent`.
+#[test]
+fn rate_limit_a_pass_over_20_shared_folders_reads_the_sent_invites_at_most_twice() {
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    let fixture = Fixture::wire(move |req| {
+        log.lock().unwrap().push(format!("{} {}", req.method, req.path));
+        let (status, body) = if req.path == "/api/v1/shares/invites/sent" {
+            (200, json!({"invites":[]}))
+        } else {
+            (404, json!({}))
+        };
+        Some((status, serde_json::to_vec(&body).unwrap()))
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::TEST, db.clone(), Arc::new(fixture.api()));
+    for n in 0..20 {
+        db.mark_shared_index_dirty(&format!("10000000-0000-4000-8000-{n:012}"))
+            .unwrap();
+    }
+    run(bridge.maintain_owned_keys(1_000)).unwrap();
+    assert!(
+        count(&seen, "/api/v1/shares/invites/sent") <= 2,
+        "{} reads of the sent invites for 20 folders",
+        count(&seen, "/api/v1/shares/invites/sent")
+    );
+    assert!(
+        count(&seen, "/api/v1/shared-folders/") >= 20,
+        "every folder was still asked: {seen:?}"
+    );
+}

@@ -820,7 +820,7 @@ async fn test_sync_tick_ops_429_backs_off_and_preserves_cursor() {
     // Pre-set a cursor so we take the ops path (not bootstrap).
     bridge.db().set_sync_cursor(8).unwrap();
 
-    // send_with_retry does up to 1 + MAX_429_RETRIES (=3) attempts → 4 total.
+    // A GET is sent again up to MAX_429_RETRIES (=3) times → 4 total.
     let err_body = serde_json::json!({ "error": "rate limit exceeded", "retry_after": 0 });
     let responses = vec![
         ("429 Too Many Requests".into(), err_body.clone()),

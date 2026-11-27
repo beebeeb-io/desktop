@@ -10,7 +10,10 @@ pub(super) fn test_bridge(db_path: &Path) -> EngineBridge {
 
 pub(super) fn test_bridge_with_api(db_path: &Path, base_url: String, master_key: [u8; 32]) -> EngineBridge {
     let db = Arc::new(StateDb::open(db_path).unwrap());
-    let api = Arc::new(ApiClient::new(base_url, "token".into(), master_key));
+    let api = Arc::new(
+        ApiClient::new(base_url, "token".into(), master_key)
+            .with_rate_limits(std::time::Duration::from_millis(10), std::time::Duration::from_millis(100)),
+    );
     EngineBridge::new(&crate::identity::REAL, db, api)
 }
 
