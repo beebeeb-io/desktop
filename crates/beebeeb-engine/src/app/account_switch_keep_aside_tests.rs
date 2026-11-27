@@ -209,7 +209,9 @@ fn the_discard_keeps_a_copy_of_each_left_file_and_switches() {
     let kept_root = std::fs::canonicalize(&pc.engine.config.state_dir)
         .unwrap()
         .join(crate::sign_out::kept_names::KEPT_FOLDER_NAME);
-    assert!(done.kept_in.starts_with(&kept_root), "{:?} not under {kept_root:?}", done.kept_in);
+    // Windows: canonicalize gives the \\?\ form; resolve both sides the same way.
+    let kept_in = std::fs::canonicalize(&done.kept_in).unwrap();
+    assert!(kept_in.starts_with(&kept_root), "{kept_in:?} not under {kept_root:?}");
     let mut kept: Vec<String> = listing(&done.kept_in)
         .into_iter()
         .filter(|path| done.kept_in.join(path).is_file())
