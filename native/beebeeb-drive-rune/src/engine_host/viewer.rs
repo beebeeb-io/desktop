@@ -182,6 +182,16 @@ pub trait ViewerEngine: Send + Sync + 'static {
     fn media_queue(&self, _session: SessionGeneration, _file_id: &str) -> Option<viewer_media::MediaQueue> {
         None
     }
+    /// macOS (dm-74): whether the file's copy is Finder's to show: the account's own file (never one shared with it,
+    /// ruling 1701) while Beebeeb is set up in Finder. Reads the local state: a worker's. Default: no.
+    fn in_finder(&self, _file_id: &str) -> bool {
+        false
+    }
+    /// How far a download of the whole file to this computer has come (done, total; a total of 0 is not known yet),
+    /// from the transfer board ([`Engine::downloads_for`]). A worker's. Default: not known.
+    fn download_progress(&self, _session: SessionGeneration, _file_id: &str) -> Option<(u64, u64)> {
+        None
+    }
     fn edit_facts(&self, _session: SessionGeneration, _file_id: &str, _opening: u64) -> Option<EditFacts> {
         None
     }
@@ -458,6 +468,26 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
 
     fn media_queue(&self, session: SessionGeneration, file_id: &str) -> Option<viewer_media::MediaQueue> {
         viewer_media::queue_of(&self.engine, session, file_id)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn in_finder(&self, file_id: &str) -> bool {
+        use crate::shell::platform::macos::macos_fp::open as finder;
+        if finder::not_ready_line(&super::finder_setup::view()).is_some() {
+            return false;
+        }
+        let own = self
+            .engine
+            .local_state_for_changes()
+            .and_then(|state| state.with(|db| finder::refuse_shared(db, file_id).is_ok()));
+        matches!(own, Ok(true))
+    }
+
+    fn download_progress(&self, session: SessionGeneration, file_id: &str) -> Option<(u64, u64)> {
+        let rows = self.engine.downloads_for(session).ok()?;
+        rows.into_iter()
+            .find(|row| row.file_id == file_id)
+            .map(|row| (row.done, row.total))
     }
 
     fn edit_facts(&self, session: SessionGeneration, file_id: &str, opening: u64) -> Option<EditFacts> {

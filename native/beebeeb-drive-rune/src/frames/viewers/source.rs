@@ -256,6 +256,8 @@ pub enum Body {
     NoEditor,
     /// DW-1556, DW-1563, DW-1564: the Office viewer's state (a failure, opening, content missing).
     OfficeState(super::super::office::states::StateBody),
+    /// macOS (dm-74): the system's own view of the file (a player, Quick Look) inside the window.
+    Native(super::native_preview::NativeDoc),
 }
 
 /// The kind and its counts, never a word of the content, a name or a title.
@@ -275,6 +277,7 @@ impl fmt::Debug for Body {
             Body::Word(doc) => write!(f, "Word({doc:?})"),
             Body::NoEditor => f.write_str("NoEditor"),
             Body::OfficeState(b) => write!(f, "OfficeState({:?})", b.state),
+            Body::Native(doc) => write!(f, "Native({:?})", doc.kind),
             Body::Sheet(v) => write!(f, "Sheet({} cells)", v.cells.len()),
             Body::Deck(d) => write!(f, "Deck({} slides)", d.view.slides.len()),
             Body::Doc(d) => fmt::Debug::fmt(d, f),

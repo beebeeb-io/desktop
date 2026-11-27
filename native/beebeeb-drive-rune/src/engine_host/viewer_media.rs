@@ -17,9 +17,11 @@
 //! Nothing is downloaded to open the view or to list the queue: the queue is a read of the local state (owner-checked,
 //! task 2488); a track's bytes are read by the player when it plays.
 //!
-//! macOS (dm-70): the Mac has no player helper, so a recording or a video AVFoundation plays, and any other kind the
-//! app has no viewer for and Quick Look previews, is shown by macOS itself (`viewer_office/mac_preview.rs`): asked
-//! here first, in `media_previews`, `media_body` and `media_poll`.
+//! macOS (dm-70, dm-74): the Mac has no player helper, so a recording or a video AVFoundation plays, and any other
+//! kind the app has no viewer for and Quick Look previews, is shown by macOS itself inside the window
+//! (`viewer_office/mac_preview.rs`, `Body::Native`): asked here first, in `media_previews`, `media_body` and
+//! `media_poll`. Its view leaves the window when the file is left (`media_leave`) or the viewer closes
+//! (`media_closed`).
 //!
 //! Must not: log a name, an id, a title or a byte; keep the queue after the file is left.
 
@@ -96,8 +98,8 @@ pub(super) fn playback_ready() -> bool {
     cfg!(windows) && crate::media::transport::helper_exe().is_some()
 }
 
-/// macOS: whether the Mac itself plays this file, asked of AVFoundation (`AVURLAsset.isPlayable`) on the decrypted
-/// copy. The Mac's answer in place of [`playback_ready`]'s helper: no helper is needed, the system decodes in its own
+/// macOS: whether the Mac itself plays this file, asked of AVFoundation (`AVURLAsset.isPlayable`) on Finder's copy
+/// (or the temp copy of a file Finder has no place for). The Mac's answer in place of [`playback_ready`]'s helper: no helper is needed, the system decodes in its own
 /// media services.
 #[cfg(target_os = "macos")]
 #[cfg_attr(not(test), allow(dead_code))] // the app asks through `mac_preview::SystemHost`, the same call
@@ -339,7 +341,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// The view is closed (the source is dropped): a video stops with its view; audio keeps playing (Back leaves it).
     pub(super) fn media_closed(&mut self) {
-        // What macOS shows closes with the view, and its copy is removed.
+        // What macOS shows leaves the window with the viewer; Finder's copy is let go, a temp copy is removed.
         #[cfg(target_os = "macos")]
         self.mac_leave();
         if let (Some(shown), Some(player)) = (self.media.on.take(), self.engine.media_player())

@@ -45,6 +45,7 @@ pub mod office_over;
 mod open_route;
 mod pdf;
 mod more_menu;
+pub mod native_preview;
 mod photo;
 mod settle;
 pub mod source;
@@ -1186,6 +1187,7 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             let (tools, note, body) = (archive::tools(&t), archive::banner(doc, &t), archive::body(ui, &t));
             return chrome::window(s, cx, ui, head, tools, Some(note), body, &archive::status(), &t);
         }
+        Body::Native(doc) => return native_preview::window(s, cx, ui, doc, &t),
         _ => {}
     }
     let (body, status) = match (
