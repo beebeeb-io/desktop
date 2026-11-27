@@ -206,7 +206,9 @@ pub(crate) mod mac {
 
     /// The domain of a failure this app found itself (`real`'s codes: an id or a path that cannot be handed over, no
     /// answer in time).
-    pub(crate) const OWN_DOMAIN: &str = "Beebeeb";
+    pub(crate) fn own_domain() -> &'static str {
+        crate::shell::identity::engine_identity().bundle_identifier()
+    }
 
     impl SystemError {
         pub(crate) fn new(domain: impl Into<String>, code: i64) -> Self {
@@ -226,7 +228,7 @@ pub(crate) mod mac {
                     "NSPOSIXErrorDomain" => "NSPOSIXErrorDomain",
                     "NSURLErrorDomain" => "NSURLErrorDomain",
                     domain if domain == BRIDGE_DOMAIN => "the bridge",
-                    domain if domain == OWN_DOMAIN => "Beebeeb",
+                    domain if domain == own_domain() => "this app",
                     _ => "another domain",
                 }
             );
@@ -407,7 +409,7 @@ pub(crate) mod mac {
                     Err(materialise::Stop::Stalled { .. }) => return Err(Failure::DownloadStalled),
                     Err(materialise::Stop::Refused(_)) => {
                         let why = finder.refused.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-                        return Err(Failure::Download(why.unwrap_or_else(|| SystemError::new(OWN_DOMAIN, 0))));
+                        return Err(Failure::Download(why.unwrap_or_else(|| SystemError::new(own_domain(), 0))));
                     }
                 }
                 if !still() {
@@ -506,7 +508,7 @@ pub(crate) mod mac {
         use std::path::{Path, PathBuf};
         use std::time::Duration;
 
-        use super::{Presence, SystemError, OWN_DOMAIN};
+        use super::{own_domain, Presence, SystemError};
         use crate::shell::platform::macos::macos_fp::bridge;
         use crate::shell::platform::macos::macos_fp::materialise::{self, Finder};
 
@@ -516,7 +518,7 @@ pub(crate) mod mac {
         const OWN_NO_ANSWER: i64 = 3;
 
         fn own(code: i64) -> SystemError {
-            SystemError::new(OWN_DOMAIN, code)
+            SystemError::new(own_domain(), code)
         }
 
         /// How long `NSWorkspace` is waited for.
