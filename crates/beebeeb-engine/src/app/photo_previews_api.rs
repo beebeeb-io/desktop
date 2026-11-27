@@ -25,6 +25,7 @@ use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
 use crate::api_client::{ApiClient, PreviewPutError, preview_retry_wait};
 use crate::photo_previews::runner::{RunEnd, Stopped};
+use crate::app::photos_api::ThumbPixels;
 use crate::photo_previews::{
     PX_CHOICES, PreviewFormat, PreviewSetting, PreviewState, PreviewsSummary, averages, encode, plan, seal,
 };
@@ -501,6 +502,7 @@ impl<C: CredentialStores> Engine<C> {
         };
         if end.sent == 1 {
             let _ = self.with_thumb_cache(session, |cache| cache.mark_uploaded(file_id, version));
+            self.note_server_has_thumbnail(session, file_id);
             return MadeUpload::Sent;
         }
         if offline {
@@ -509,6 +511,258 @@ impl<C: CredentialStores> Engine<C> {
             MadeUpload::SessionMoved
         } else {
             MadeUpload::Failed
+        }
+    }
+
+    /// drive-complete-RS-d: what the local state says of the server's thumbnail of `file_id`, at the row's current
+    /// version: `Some(false)` none (dc-168's `has_thumbnail`), `Some(true)` one is there, `None` not known (no flag,
+    /// another version, an unknown id, or the session moved). A read of the state database only; never the network.
+    pub fn server_thumbnail_known_for(&self, session: SessionGeneration, file_id: &str) -> Option<bool> {
+        match self.local_state() {
+            Ok(state) if state.session() == session => state
+                .with(|db| {
+                    let version = db.get_file_contract_state(file_id).ok().flatten()?.current_version;
+                    db.server_has_thumbnail(file_id, version).ok().flatten()
+                })
+                .ok()
+                .flatten(),
+            _ => None,
+        }
+    }
+
+    /// Why no thumbnail may be made and sent now, for `session`: a paused sync, a metered-network or battery-saver
+    /// hold, the account's preview setting off, a session that moved, or Beebeeb out of reach. `None`: it may. A host
+    /// asks this before it downloads a file to make its thumbnails (the repair), so nothing is downloaded for a
+    /// thumbnail that would not be sent. WORKER call: the network (the setting, read at most every ten minutes).
+    pub fn thumbnail_send_hold_for(&self, session: SessionGeneration) -> Option<MadeUpload> {
+        match self.thumb_send_context(session) {
+            Ok(_) => None,
+            Err(why) => Some(why),
+        }
+    }
+
+    /// drive-complete-RS-d: thumbnails made on this PC from a file's decoded pixels (the viewer's open, the repair),
+    /// sealed with core's thumbnail recipe and sent: the medium one (what every grid shows) and, best effort, the
+    /// large one and the photo preview the account's setting asks for. Sent only when the server has none:
+    /// `server_404` (the caller's fetch said so just now) or the row's `has_thumbnail` says none at its current
+    /// version. Once the medium one is on the server, the row's `has_thumbnail` is set. Respects the setting, the
+    /// holds and the pause, as [`Engine::upload_made_thumbnail_for`] does; every send asks the session again.
+    /// `pixels` is upright RGBA, its long edge at most a few thousand pixels. WORKER call: the network.
+    pub fn upload_generated_thumbnails_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        pixels: &ThumbPixels,
+        server_404: bool,
+    ) -> MadeUpload {
+        use crate::photo_previews::thumbs_upload::{MadeThumb, SendResult, Sent, send_all};
+        if pixels.session != session
+            || self.acct.session.is_poisoned()
+            || !self.acct.session_unchanged_since(session)
+        {
+            return MadeUpload::SessionMoved;
+        }
+        let rgba_len = u64::from(pixels.width) * u64::from(pixels.height) * 4;
+        if pixels.width == 0 || pixels.height == 0 || pixels.rgba.len() as u64 != rgba_len {
+            return MadeUpload::Failed;
+        }
+        let version = match self.local_state() {
+            Ok(state) if state.session() == session => state
+                .with(|db| db.get_file_contract_state(file_id).ok().flatten().map(|c| c.current_version))
+                .ok()
+                .flatten(),
+            _ => return MadeUpload::SessionMoved,
+        };
+        let Some(version) = version else {
+            return MadeUpload::NothingToSend;
+        };
+        let server_has = self.server_thumbnail_known_for(session, file_id);
+        if !(server_404 || server_has == Some(false)) {
+            return MadeUpload::NothingToSend;
+        }
+        let (api, key, setting) = match self.thumb_send_context(session) {
+            Ok(context) => context,
+            Err(why) => return why,
+        };
+        let pin = match self.local_state() {
+            Ok(state) if state.session() == session => {
+                state.with(|db| crate::engine_bridge::recorded_pin(db, &key, file_id))
+            }
+            _ => return MadeUpload::SessionMoved,
+        };
+        let Ok(Some(pin)) = pin else {
+            return MadeUpload::Failed;
+        };
+        let thumb = MadeThumb {
+            file_id: file_id.to_owned(),
+            version,
+            width: pixels.width,
+            height: pixels.height,
+            rgba: pixels.rgba.clone(),
+            pin,
+        };
+        let mut offline = false;
+        let mut send = |id: &str, sealed: &[u8]| {
+            // Right before the send: still the very session the key and the token were copied from.
+            if !self.session_is_still(session, &key) {
+                return SendResult::Stop(Stopped::Failed);
+            }
+            match self.runtime.block_on(api.upload_thumbnail(id, "medium", sealed, None)) {
+                Ok(()) => SendResult::Sent,
+                Err(error) if error.downcast_ref::<crate::api_client::DesktopApiError>().is_none() => {
+                    offline = true;
+                    SendResult::Stop(Stopped::Offline)
+                }
+                Err(_) => SendResult::Refused,
+            }
+        };
+        let mut sent = Sent::default();
+        let end = match send_all(&key, &setting, None, std::slice::from_ref(&thumb), &mut sent, &mut send) {
+            Ok(end) => end,
+            Err(why) => return MadeUpload::NotNow(why),
+        };
+        drop(thumb);
+        if end.sent != 1 {
+            return if offline {
+                MadeUpload::Offline
+            } else if !self.acct.session_unchanged_since(session) {
+                MadeUpload::SessionMoved
+            } else {
+                MadeUpload::Failed
+            };
+        }
+        self.note_server_has_thumbnail(session, file_id);
+        // Best effort, after the one every grid shows: the large thumbnail, then the photo preview.
+        if let Ok(sealed) = seal_large(&key, file_id, pixels, pin)
+            && self.session_is_still(session, &key)
+            && self.runtime.block_on(api.upload_thumbnail(file_id, "large", &sealed, None)).is_err()
+        {
+            tracing::info!("generated thumbnails: the large thumbnail was not sent");
+        }
+        if setting.format == PreviewFormat::Jpeg
+            && let Some(jpeg) = preview_from_pixels(pixels, setting.px)
+            && let Ok(sealed) = seal::seal_preview(&key, file_id, &jpeg)
+        {
+            drop(jpeg);
+            if self.session_is_still(session, &key)
+                && self.runtime.block_on(api.upload_preview(file_id, setting.px, &sealed)).is_err()
+            {
+                tracing::info!("generated thumbnails: the photo preview was not sent");
+            }
+        }
+        MadeUpload::Sent
+    }
+
+    /// drive-complete-RS-d: the account's media files with no server thumbnail, for the repair: pictures by their
+    /// name, not folders, not on their way out, whose `has_thumbnail` says none (`server_said_none`) or is not known
+    /// at their current version. One already said to have one is left out. In path order, so a folder is done
+    /// together.
+    pub fn files_missing_thumbnails_for(&self, session: SessionGeneration) -> Result<Vec<MissingThumb>, PreviewsRefused> {
+        use crate::drive_v2::model::{leaf_name, mime_for_name};
+        use crate::state_db::FileStatus;
+        let state = match self.local_state() {
+            Ok(state) if state.session() == session => state,
+            _ => return Err(PreviewsRefused::NotSignedIn),
+        };
+        let found = state
+            .with(|db| -> Option<Vec<MissingThumb>> {
+                let mut rows = db.list_files().ok()?;
+                rows.sort_by(|a, b| a.path.cmp(&b.path));
+                let mut missing = Vec::new();
+                for row in rows {
+                    if row.is_dir() || matches!(row.status, FileStatus::Trashing | FileStatus::Conflict) {
+                        continue;
+                    }
+                    let name = leaf_name(&row);
+                    if !mime_for_name(&name).is_some_and(|mime| mime.starts_with("image/")) {
+                        continue;
+                    }
+                    let Some(version) =
+                        db.get_file_contract_state(&row.file_id).ok().flatten().map(|c| c.current_version)
+                    else {
+                        continue;
+                    };
+                    let flag = db.server_has_thumbnail(&row.file_id, version).ok().flatten();
+                    if flag == Some(true) {
+                        continue;
+                    }
+                    missing.push(MissingThumb {
+                        file_id: row.file_id,
+                        name,
+                        server_said_none: flag == Some(false),
+                    });
+                }
+                Some(missing)
+            })
+            .map_err(|_| PreviewsRefused::NotSignedIn)?
+            .ok_or(PreviewsRefused::Failed)?;
+        self.previews_handed_over(session)?;
+        Ok(found)
+    }
+
+    /// The row's `has_thumbnail` set: the server holds a thumbnail of `file_id` at the row's current version now.
+    fn note_server_has_thumbnail(&self, session: SessionGeneration, file_id: &str) {
+        if let Ok(state) = self.local_state()
+            && state.session() == session
+        {
+            let _ = state.with(|db| db.set_server_has_thumbnail(file_id, true));
+        }
+    }
+
+    /// What every thumbnail send needs, asked in this order: not paused, no hold, the session's token and key (only
+    /// while it is that very session), and the account's preview setting on (read at most every ten minutes).
+    fn thumb_send_context(
+        &self,
+        session: SessionGeneration,
+    ) -> Result<(ApiClient, Zeroizing<[u8; 32]>, PreviewSetting), MadeUpload> {
+        use crate::photo_previews::thumbs_upload::NotNow;
+        if self.acct.session.is_poisoned() || !self.acct.session_unchanged_since(session) {
+            return Err(MadeUpload::SessionMoved);
+        }
+        if self.is_paused() {
+            return Err(MadeUpload::Paused);
+        }
+        let metered = crate::config::DesktopConfig::load_for(self.identity).ok().and_then(|c| c.metered);
+        if let Some(hold) = crate::power::hold_now(metered, &crate::power::SystemPower) {
+            return Err(MadeUpload::NotNow(NotNow::Hold(hold)));
+        }
+        let Ok(Some((token, key))) = self.person_session(|current, generation| {
+            (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
+        }) else {
+            return Err(MadeUpload::SessionMoved);
+        };
+        let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
+        let setting = self.thumb_setting(session, &api)?;
+        if !setting.enabled {
+            return Err(MadeUpload::NotNow(NotNow::SettingOff));
+        }
+        Ok((api, key, setting))
+    }
+
+    /// The account's preview setting for the thumbnail sends: the read of the last ten minutes for this session of
+    /// this account, else read now (and kept).
+    fn thumb_setting(&self, session: SessionGeneration, api: &ApiClient) -> Result<PreviewSetting, MadeUpload> {
+        let read_key = (session, self.config.account_id.clone(), self.config.api_base.clone());
+        let cached = SETTING_READ
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|(at, read, _)| *at == read_key && read.elapsed() < SETTING_LIFETIME)
+            .map(|(_, _, setting)| *setting);
+        if let Some(setting) = cached {
+            return Ok(setting);
+        }
+        match self.runtime.block_on(api.photo_previews_setting()) {
+            Ok(setting) => {
+                *SETTING_READ.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some((read_key, std::time::Instant::now(), setting));
+                Ok(setting)
+            }
+            Err(error) => Err(match super::settings_api::kind_of(&anyhow::Error::from(error)) {
+                AccountCallError::NotSignedIn | AccountCallError::SessionEnded => MadeUpload::SessionMoved,
+                AccountCallError::Offline => MadeUpload::Offline,
+                _ => MadeUpload::Failed,
+            }),
         }
     }
 
@@ -799,4 +1053,78 @@ enum Made {
     No,
     SessionMoved,
     Stop(Stopped),
+}
+
+/// A media file with no server thumbnail, as the repair walks it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingThumb {
+    pub file_id: String,
+    /// Its name (for the kind of file it is; never logged).
+    pub name: String,
+    /// The row's `has_thumbnail` says the server has none. `false`: not known (a host asks the server first).
+    pub server_said_none: bool,
+}
+
+/// The large thumbnail of `pixels`, sealed for `file_id` with core's thumbnail recipe (the one the upload path uses
+/// for its large variant): owner-class ids only.
+fn seal_large(
+    master: &[u8; 32],
+    file_id: &str,
+    pixels: &ThumbPixels,
+    pin: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+) -> Result<Vec<u8>, ()> {
+    use beebeeb_core::item_id::{ItemClass, item_class};
+    use beebeeb_core::kdf::{MasterKey, derive_file_key};
+    use beebeeb_core::thumbnail::{ThumbnailConfig, generate_thumbnail};
+    if !matches!(item_class(file_id), Ok(ItemClass::Owner)) {
+        return Err(());
+    }
+    let made =
+        generate_thumbnail(&pixels.rgba, pixels.width, pixels.height, &ThumbnailConfig::large()).map_err(|_| ())?;
+    let webp = Zeroizing::new(made.data);
+    let key = derive_file_key(&MasterKey::from_bytes(*master), file_id.as_bytes());
+    #[allow(deprecated)]
+    let sealed = beebeeb_core::encrypt::encrypt_thumbnail_for(&key, &webp, pin).map_err(|_| ())?;
+    if sealed.len() > LARGE_SEALED_MAX {
+        return Err(());
+    }
+    Ok(sealed)
+}
+
+/// The server stores a large thumbnail up to this many sealed bytes.
+const LARGE_SEALED_MAX: usize = 512 * 1024;
+
+/// A JPEG photo preview of upright RGBA `pixels`, its long edge at most `px`: quality 85, else 70, else none (over
+/// the preview's cap). Every buffer is wiped when dropped.
+fn preview_from_pixels(pixels: &ThumbPixels, px: u32) -> Option<Zeroizing<Vec<u8>>> {
+    use zeroize::Zeroize;
+    let mut rgb = Vec::with_capacity(pixels.rgba.len() / 4 * 3);
+    for p in pixels.rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&p[..3]);
+    }
+    let mut whole = image::RgbImage::from_raw(pixels.width, pixels.height, rgb)?;
+    let (w, h) = encode::fitted(pixels.width, pixels.height, px);
+    let mut picture = if (w, h) == (pixels.width, pixels.height) {
+        whole
+    } else {
+        let scaled = image::imageops::resize(&whole, w, h, image::imageops::FilterType::Lanczos3);
+        let raw: &mut [u8] = &mut whole;
+        raw.zeroize();
+        scaled
+    };
+    let mut out = None;
+    for quality in [85u8, 70] {
+        // Room for the whole picture up front: the encoder's output never moves (a move leaves a copy not wiped).
+        let mut jpeg = Zeroizing::new(Vec::with_capacity(w as usize * h as usize * 3 + 64 * 1024));
+        let encoded = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut *jpeg, quality)
+            .encode(picture.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+            .is_ok();
+        if encoded && jpeg.len() <= seal::MAX_PLAINTEXT {
+            out = Some(jpeg);
+            break;
+        }
+    }
+    let raw: &mut [u8] = &mut picture;
+    raw.zeroize();
+    out
 }
