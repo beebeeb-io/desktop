@@ -710,6 +710,11 @@ impl<C: CredentialStores> ThumbSource for EngineThumbs<C> {
 
 // ---- drive-complete-RS-d: thumbnails made from a file's bytes (the viewer's open, the repair) ----------------------
 
+/// macOS: HEIC/HEIF and camera RAW decoded by ImageIO from memory (drive-macos-81).
+#[cfg(target_os = "macos")]
+#[path = "thumbs_mac.rs"]
+mod mac;
+
 /// The longest side the thumbnails' source is decoded at: room for the large thumbnail and a photo preview.
 pub const SOURCE_PX: u32 = 2048;
 
@@ -731,12 +736,17 @@ impl std::fmt::Debug for Thumbs {
 pub type Generate = fn(&[u8], &str) -> Option<Thumbs>;
 
 /// THE one way a file's bytes become the picture its thumbnails are made of. `mime`: the file's kind by its name.
-/// Today a picture is decoded by the confined media helper ([`super::media::decode_picture`]), never in this
-/// process. A platform decoder (QuickLook on macOS for HEIC and RAW) goes behind this function and nowhere else.
+/// A picture is decoded by the confined media helper ([`super::media::decode_picture`]), never in this process,
+/// except on macOS a HEIC/HEIF or camera RAW: macOS's own ImageIO decodes it from memory (`thumbs_mac.rs`), and
+/// the helper is asked when it cannot. A platform decoder goes behind this function and nowhere else.
 /// `None`: not a kind made here, or it did not decode. BLOCKS: the helper; a worker's.
 pub fn generate_for(bytes: &[u8], mime: &str) -> Option<Thumbs> {
     if !mime.starts_with("image/") || bytes.is_empty() || bytes.len() as u64 > MAX_IMAGE_FILE {
         return None;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(thumbs) = mac::generate(bytes, mime) {
+        return Some(thumbs);
     }
     let decoded = super::media::decode_picture(bytes, SOURCE_PX).ok()?;
     if decoded.width == 0 || decoded.height == 0 || decoded.width.max(decoded.height) > SOURCE_PX {
