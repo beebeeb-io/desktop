@@ -146,6 +146,7 @@ candidate
 candidates
 cannot
 cap
+capped
 category
 cf
 cf_callback_info
