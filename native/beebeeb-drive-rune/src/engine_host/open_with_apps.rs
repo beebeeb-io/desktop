@@ -617,7 +617,10 @@ pub(crate) mod mac {
                 match picked.clone().or_else(|| platform.default_app(file)) {
                     // The last look at the session, right before the app gets the file.
                     Some(_) if !still() => Err(Failure::Moved),
-                    Some(app) => platform.open_with(&app, file).map_err(Failure::Open),
+                    Some(app) => platform.open_with(&app, file).map_err(Failure::Open).map(|()| {
+                        // Dm-83: the page says which app has it ([`start_on`]).
+                        OPENED_WITH.with(|opened| *opened.borrow_mut() = Some(app));
+                    }),
                     None => Err(Failure::NoApp),
                 }
             })();
@@ -627,6 +630,61 @@ pub(crate) mod mac {
 
     /// The number of the newest press: an older press's thread stops when it sees a newer one, and says nothing more.
     static NEWEST: AtomicU64 = AtomicU64::new(0);
+
+    thread_local! {
+        /// Dm-83: the app the press's own thread last handed the file to, for the page's "Opened in <app>".
+        static OPENED_WITH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// The name of an app as the page says it: "Adobe Illustrator 2026" of `.../Adobe Illustrator 2026.app`.
+    pub(crate) fn app_name(app: &Path) -> String {
+        app.file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "the other app".to_string())
+    }
+
+    /// What `NSWorkspace openURLs:withApplicationAtURL:configuration:completionHandler:` came to (dm-83).
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) enum Answer {
+        /// The completion handler was called: with the app it started (`launched`), and with an error or none.
+        Answered { launched: bool, error: Option<SystemError> },
+        /// No answer within the wait. `launched`: the app was not running before the open and is now (a big app
+        /// that is still starting, as Illustrator was on RC14).
+        Silent { launched: bool },
+    }
+
+    /// Dm-83, RC14: "Open with default app" on the .eps started Illustrator, and the page said it did not open. An app
+    /// that was started with the file opened it, whatever error the system also gave (it is logged: its domain and
+    /// code), and so did an app that is still starting when the wait ends. Only an answer with no app and an error,
+    /// or a silence with nothing started, is a refusal.
+    pub(crate) fn outcome(answer: Answer) -> Result<(), SystemError> {
+        match answer {
+            Answer::Answered { launched: true, error } => {
+                if let Some(error) = error {
+                    tracing::info!("open with: the app was started with the file; the system also answered an error");
+                    error.log();
+                }
+                Ok(())
+            }
+            Answer::Answered {
+                launched: false,
+                error: None,
+            } => Ok(()),
+            Answer::Answered {
+                launched: false,
+                error: Some(error),
+            } => Err(error),
+            Answer::Silent { launched: true } => {
+                tracing::info!("open with: the app is still starting with the file");
+                Ok(())
+            }
+            Answer::Silent { launched: false } => Err(SystemError::new(own_domain(), NO_ANSWER)),
+        }
+    }
+
+    /// `NSWorkspace` did not answer in time, and nothing was started ([`outcome`]).
+    pub(crate) const NO_ANSWER: i64 = 3;
 
     /// Wakes the window through the waker a press's thread and the watch over its wait share.
     fn woken<W: Fn()>(wake: &std::sync::Mutex<W>) {
@@ -703,13 +761,18 @@ pub(crate) mod mac {
                         woken(&wake);
                     })
                 };
+                OPENED_WITH.with(|opened| opened.borrow_mut().take());
                 let done = run_watched(platform.as_ref(), &id, pick, &still, &say, Some(stuck));
                 if let Err(why) = &done {
                     why.log();
                 }
-                // A newer press owns the page's words now.
+                let opened = OPENED_WITH.with(|opened| opened.borrow_mut().take());
+                // A newer press owns the page's words now. Dm-83: an open says which app has the file.
                 if newest() {
-                    let note = done.err().and_then(|why| why.words()).map(Note::Failed);
+                    let note = match done {
+                        Ok(()) => opened.map(|app| Note::Opened(app_name(&app))),
+                        Err(why) => why.words().map(Note::Failed),
+                    };
                     unsupported::set_note(&id, note);
                     woken(&wake);
                 }
@@ -750,8 +813,6 @@ pub(crate) mod mac {
 
         /// A path that is not text.
         const OWN_NO_PATH: i64 = 2;
-        /// `NSWorkspace` did not answer in time.
-        const OWN_NO_ANSWER: i64 = 3;
 
         fn own(code: i64) -> SystemError {
             SystemError::new(own_domain(), code)
@@ -833,12 +894,14 @@ pub(crate) mod mac {
                 };
                 let app = NSURL::fileURLWithPath(&NSString::from_str(app));
                 let file = NSURL::fileURLWithPath(&NSString::from_str(file));
-                let (answer, answered) = std::sync::mpsc::channel::<Option<SystemError>>();
-                let handler = block2::RcBlock::new(move |_app: *mut NSRunningApplication, error: *mut NSError| {
+                let running_before = running(&app);
+                let (answer, answered) = std::sync::mpsc::channel::<(bool, Option<SystemError>)>();
+                let handler = block2::RcBlock::new(move |started: *mut NSRunningApplication, error: *mut NSError| {
                     // SAFETY: AppKit hands a valid NSError or nil for the length of this call.
                     let why = unsafe { error.as_ref() }
                         .map(|error| SystemError::new(error.domain().to_string(), error.code() as i64));
-                    let _ = answer.send(why);
+                    // Dm-83: the app it was handed to comes with the answer when it was started with the file.
+                    let _ = answer.send((!started.is_null(), why));
                 });
                 // AppKit copies the block and calls it once, on a queue of its own.
                 let config = NSWorkspaceOpenConfiguration::configuration();
@@ -849,12 +912,23 @@ pub(crate) mod mac {
                     Some(&handler),
                 );
                 // Waited for inside `finder_copy`: the system's access to the file is held until the app has it.
-                match answered.recv_timeout(OPEN_WAIT) {
-                    Ok(None) => Ok(()),
-                    Ok(Some(why)) => Err(why),
-                    Err(_) => Err(own(OWN_NO_ANSWER)),
-                }
+                let answer = match answered.recv_timeout(OPEN_WAIT) {
+                    Ok((launched, error)) => super::Answer::Answered { launched, error },
+                    Err(_) => super::Answer::Silent {
+                        launched: !running_before && running(&app),
+                    },
+                };
+                super::outcome(answer)
             }
+        }
+
+        /// Whether the app at `app` is running now (`NSRunningApplication`, by its bundle's identifier).
+        fn running(app: &objc2_foundation::NSURL) -> bool {
+            use objc2_app_kit::NSRunningApplication;
+            use objc2_foundation::NSBundle;
+            NSBundle::bundleWithURL(app)
+                .and_then(|bundle| bundle.bundleIdentifier())
+                .is_some_and(|id| NSRunningApplication::runningApplicationsWithBundleIdentifier(&id).count() > 0)
         }
     }
 }

@@ -6,9 +6,12 @@
 //! - **Where the view sits** is the body's laid-out rect ([`Stage::at`], from `El::on_layout`): it is told again
 //!   whenever the rect changes, so the view follows a resize of the window and the details panel, as the photo's
 //!   `aspect_fit` does.
-//! - **What is over it:** a child view covers whatever the toolkit draws in the same place. While the viewer's menu,
-//!   a toast or a dialog is open the view is hidden ([`Stage::cover`]) and the plain stage shows; a player keeps
-//!   playing.
+//! - **What is over it:** a child view covers whatever the toolkit draws in the same place. While a dialog is open
+//!   the view is hidden ([`Stage::cover`]) and the plain stage shows; a player keeps playing. Dm-83 (RC14: the
+//!   document vanished while the "…" menu was open): on a Mac the "…" menu is the system's own menu, over the view
+//!   (`more_menu`), so the document stays; only where there is no system menu does the app-drawn one hide the view.
+//!   A toast no longer hides it either: the view's room ends above the toast ([`TOAST_ROOM`]). The details panel
+//!   stands beside the view, never over it.
 //! - **Without a stage** the system could host no view and the file is in the Quick Look panel (a window of its
 //!   own): the body says so.
 //!
@@ -80,14 +83,17 @@ pub const IN_PANEL: &str = "This file is open in the Quick Look window.";
 /// `.t-body`: 13px/400 on 20px.
 const BODY: TextStyle = TextStyle::new(13.0, 400.0).lh(20.0);
 
-/// Whether something the app draws is over the body now: the toolbar's menu, a toast, the viewer's own dialog, or
-/// one of Files' dialogs for the open file (Share, Version history).
+/// Whether something the app draws is over the body now: the app-drawn "…" menu (only where there is no system
+/// menu: `more_menu`), the viewer's own dialog, or one of Files' dialogs for the open file (Share, Version history).
+/// A toast is not (dm-83): the room ends above it.
 fn covered(s: &State, ui: &Ui, t: &Theme) -> bool {
-    ui.more.is_some()
-        || ui.toast.is_some()
-        || ui.dialog.is_some()
-        || crate::frames::files::window::dialog_over_viewer(s, t).is_some()
+    ui.more.is_some() || ui.dialog.is_some() || crate::frames::files::window::dialog_over_viewer(s, t).is_some()
 }
+
+/// How much of the body's foot is left free while a toast shows, so the view ends above it (dm-83): the toast stands
+/// [`crate::ui::toast::INSET`] over the window's foot and is 34 tall; the status line (28) is under the body
+/// already; 8 more between them.
+pub const TOAST_ROOM: f32 = crate::ui::toast::INSET + 34.0 + 8.0 - 28.0;
 
 /// The status line: the file is on this Mac, and macOS shows it.
 pub fn status(doc: &NativeDoc) -> Status {
@@ -120,9 +126,11 @@ pub fn body(ui: &Ui, doc: &NativeDoc, covered: bool, t: &Theme) -> El {
             .center()
             .child(kit::label("native-panel", IN_PANEL, BODY, ink).align(Align::Center));
     };
-    // Said at every draw: the view is hidden the moment a menu or a dialog opens, and back when it closes.
+    // Said at every draw: the view is hidden the moment a dialog opens, and back when it closes.
     stage.cover(covered);
     let place = stage.clone();
+    // Dm-83: while a toast shows, the view's room ends above it, so both are seen.
+    let body = if ui.toast.is_some() { body.pb(TOAST_ROOM) } else { body };
     body.child(
         el().key("native-stage")
             .role("group")
@@ -319,8 +327,9 @@ mod tests {
         assert_eq!(small, rect_of(&rt, "native-stage"));
     }
 
+    /// Where there is no system menu (off a Mac), the app-drawn "…" menu hides the view while it is open.
     #[test]
-    fn the_view_is_covered_while_the_menu_or_a_toast_is_open() {
+    fn the_view_is_covered_while_the_app_drawn_menu_is_open() {
         let (mut rt, told) = staged(NativeKind::Player);
         assert!(!told.covered());
         rt.update(|s, _| s.viewer.ui.as_mut().expect("open").toggle_more());
@@ -329,9 +338,61 @@ mod tests {
         rt.update(|s, _| s.viewer.ui.as_mut().expect("open").toggle_more());
         settle(&mut rt);
         assert!(!told.covered());
+    }
+
+    /// Dm-83, RC14: on a .docx, the "…" menu made the document vanish until it closed. With the system's menu (a
+    /// Mac's) the view is never hidden: the menu is the system's window over it, and the line picked runs as the
+    /// app-drawn one's does.
+    #[test]
+    fn the_systems_menu_keeps_the_document_on_screen_and_its_pick_runs() {
+        use super::super::more_menu::{TEST_POPUP, entries};
+        fn rename(entries: &[crate::ui::menu::Entry]) -> Option<usize> {
+            entries.iter().position(|e| e.id() == Some("rename"))
+        }
+        fn closed(_: &[crate::ui::menu::Entry]) -> Option<usize> {
+            None
+        }
+        let (mut rt, told) = staged(NativeKind::QuickLook);
+        TEST_POPUP.with(|popup| popup.set(Some(closed)));
+        rt.update(|s, _| s.viewer.ui.as_mut().expect("open").toggle_more());
+        settle(&mut rt);
+        assert!(!told.covered(), "the document stays while the menu is open");
+        assert!(told.covers.lock().unwrap().iter().all(|on| !on), "never hidden");
+        rt.update(|s, _| assert!(s.viewer.ui.as_ref().expect("open").more.is_none(), "no app-drawn menu"));
+
+        // A line picked in the system's menu is the file's action, as in the app's own menu.
+        TEST_POPUP.with(|popup| popup.set(Some(rename)));
+        let mut asked = Vec::new();
+        rt.update(|s, _| {
+            let ui = s.viewer.ui.as_mut().expect("open");
+            assert!(entries(ui).iter().any(|e| e.id() == Some("rename")));
+            ui.take_intents();
+            ui.toggle_more();
+            asked = ui.take_intents();
+        });
+        TEST_POPUP.with(|popup| popup.set(None));
+        assert_eq!(asked, [super::super::Intent::Rename]);
+        assert!(!told.covered());
+    }
+
+    /// Dm-83: a toast leaves the document on screen; the view's room ends above the toast.
+    #[test]
+    fn a_toast_leaves_the_view_on_screen_above_it() {
+        let (mut rt, told) = staged(NativeKind::QuickLook);
+        let before = told.rect();
         rt.update(|s, _| s.viewer.ui.as_mut().expect("open").toast = Some("Invented words".into()));
         settle(&mut rt);
-        assert!(told.covered());
+        assert!(!told.covered(), "a toast hides nothing");
+        let room = told.rect();
+        let toast = rect_of(&rt, "toast");
+        assert_eq!((room[0], room[1], room[2]), (before[0], before[1], before[2]));
+        assert!(
+            room[1] + room[3] <= toast[1] + 0.5,
+            "the view {room:?} ends above the toast {toast:?}"
+        );
+        rt.update(|s, _| s.viewer.ui.as_mut().expect("open").toast = None);
+        settle(&mut rt);
+        assert_eq!(told.rect(), before, "the whole room again");
     }
 
     #[test]

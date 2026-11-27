@@ -487,7 +487,7 @@ fn open_with_start_puts_the_failure_on_the_files_page_and_takes_its_words_away_o
     note_becomes("f-73-refused", Some(Note::Failed(APP_REFUSED.to_string())));
     assert!(woken.load(SeqCst) >= 1);
 
-    // It opened: nothing is left on the page.
+    // It opened: the page says which app has it (dm-83), and nothing of the older press is left.
     let fake = Arc::new(Fake::default());
     fake.here.store(true, SeqCst);
     unsupported::set_note("f-73-opened", Some(Note::Failed("an older press".into())));
@@ -495,7 +495,7 @@ fn open_with_start_puts_the_failure_on_the_files_page_and_takes_its_words_away_o
         start_on(Some(fake.clone()), "f-73-opened", Pick::Default, || true, || {}),
         Ok(())
     );
-    note_becomes("f-73-opened", None);
+    note_becomes("f-73-opened", Some(Note::Opened("Pages".into())));
     assert!(fake.asked().iter().any(|a| a.starts_with("NSWorkspace open")));
 
     // No platform (a build without one): refused at once, said on the page.
@@ -760,5 +760,61 @@ fn open_with_start_says_the_wait_for_finder_on_the_page_and_then_what_became_of_
         "{:?}",
         fake.asked()
     );
-    note_becomes("f-78-ready", None);
+    note_becomes("f-78-ready", Some(Note::Opened("Pages".into())));
+}
+
+/// Dm-83, RC14: "Open with default app" on the .eps started Adobe Illustrator (it was in the Dock), and the page said
+/// "Couldn't open.". The completion handler's app is read: an app started with the file opened it, whatever error the
+/// system answered after; an app still starting when the wait ends did too. Only no app and an error, or a silence
+/// with nothing started, is a refusal, with the system's domain and code.
+#[test]
+fn an_open_whose_answer_brings_an_error_after_the_app_started_is_opened_in_that_app() {
+    let late = SystemError::new("NSCocoaErrorDomain", 256);
+    assert_eq!(
+        outcome(Answer::Answered {
+            launched: true,
+            error: Some(late.clone())
+        }),
+        Ok(())
+    );
+    assert_eq!(
+        outcome(Answer::Answered {
+            launched: true,
+            error: None
+        }),
+        Ok(())
+    );
+    assert_eq!(
+        outcome(Answer::Answered {
+            launched: false,
+            error: None
+        }),
+        Ok(())
+    );
+    assert_eq!(outcome(Answer::Silent { launched: true }), Ok(()), "still starting");
+    assert_eq!(
+        outcome(Answer::Answered {
+            launched: false,
+            error: Some(late.clone())
+        }),
+        Err(late)
+    );
+    assert_eq!(
+        outcome(Answer::Silent { launched: false }),
+        Err(SystemError::new(own_domain(), NO_ANSWER))
+    );
+    // And the page's words name the app.
+    assert_eq!(
+        app_name(Path::new(
+            "/Applications/Adobe Illustrator 2026/Adobe Illustrator 2026.app"
+        )),
+        "Adobe Illustrator 2026"
+    );
+    assert_eq!(
+        Note::Opened(app_name(Path::new(
+            "/Applications/Adobe Illustrator 2026/Adobe Illustrator 2026.app"
+        )))
+        .words(),
+        "Opened in Adobe Illustrator 2026."
+    );
 }

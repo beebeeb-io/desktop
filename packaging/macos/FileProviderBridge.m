@@ -722,12 +722,16 @@ int beebeeb_fp_reimport(BeebeebFpError *out_error) {
     }
 }
 
-// dm-65: Settings > Storage > "Downloaded files". The items the system holds on disk for this domain (materialised),
-// one per line as "<item identifier>\t<bytes>"; a folder has no size and is left out. Returns the count (lines that
-// fit are written, bounded by the buffer), 0 when the domain is not registered, or -1 (out_error set).
+// dm-65: Settings > Storage > "Downloaded files", and (dm-75) the marks of the rows. The items the system holds on
+// disk for this domain (materialised), one per line as "<item identifier>\t<bytes>"; a folder has no size and is left
+// out.
+// dm-83: the list comes in pages, and every page is read. RC14 read the first page only, and a file Finder had
+// downloaded itself was not in it. Rust drives the pages (`macos_downloaded::read_all`), so the loop is tested: open
+// the enumerator once, ask one page at a time with the page the last one named, close it at the end.
 @interface BeebeebMaterialisedObserver : NSObject <NSFileProviderEnumerationObserver>
 @property(nonatomic, strong) NSMutableString *lines;
 @property(nonatomic, assign) int count;
+@property(nonatomic, strong) NSData *nextPage;
 @property(nonatomic, strong) NSError *error;
 @property(nonatomic, strong) dispatch_semaphore_t done;
 @end
@@ -746,6 +750,8 @@ int beebeeb_fp_reimport(BeebeebFpError *out_error) {
     }
 }
 - (void)finishEnumeratingUpToPage:(NSFileProviderPage)nextPage {
+    // nil: this was the last page.
+    self.nextPage = nextPage;
     dispatch_semaphore_signal(self.done);
 }
 - (void)finishEnumeratingWithError:(NSError *)error {
@@ -754,17 +760,50 @@ int beebeeb_fp_reimport(BeebeebFpError *out_error) {
 }
 @end
 
-int beebeeb_fp_materialised(char *buffer, unsigned long buffer_len, BeebeebFpError *out_error) {
+// The enumerator of the materialised items, as a retained handle the caller passes to every page and then to
+// beebeeb_fp_materialised_close. NULL: the domain is not registered (no manager), nothing to list.
+void *beebeeb_fp_materialised_open(void) {
     @autoreleasepool {
         NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
         if (manager == nil) {
-            return 0;
+            return NULL;
         }
+        id<NSFileProviderEnumerator> enumerator = [manager enumeratorForMaterializedItems];
+        if (enumerator == nil) {
+            return NULL;
+        }
+        return (void *)CFBridgingRetain(enumerator);
+    }
+}
+
+// One page. `page`/`page_len`: the page the last one named (length 0: the first page). The page's lines go into
+// `buffer` (bounded); the page that follows into `next` (`*next_len` 0: this was the last). Returns the number of
+// items on the page (fewer lines than that in `buffer` means it was too small), or -1 (out_error set; also when the
+// next page does not fit `next`).
+int beebeeb_fp_materialised_page(void *handle,
+                                 const unsigned char *page,
+                                 unsigned long page_len,
+                                 char *buffer,
+                                 unsigned long buffer_len,
+                                 unsigned char *next,
+                                 unsigned long next_cap,
+                                 unsigned long *next_len,
+                                 BeebeebFpError *out_error) {
+    @autoreleasepool {
+        if (next_len != NULL) {
+            *next_len = 0;
+        }
+        if (handle == NULL || next_len == NULL) {
+            BeebeebFillBridgeError(BeebeebBridgeManagerUnavailable, @"no enumerator handle given", out_error);
+            return -1;
+        }
+        id<NSFileProviderEnumerator> enumerator = (__bridge id<NSFileProviderEnumerator>)handle;
+        NSFileProviderPage start = page_len == 0 ? NSFileProviderInitialPageSortedByDate
+                                                 : [NSData dataWithBytes:page length:page_len];
         BeebeebMaterialisedObserver *observer = [[BeebeebMaterialisedObserver alloc] init];
         observer.lines = [NSMutableString string];
         observer.done = dispatch_semaphore_create(0);
-        id<NSFileProviderEnumerator> enumerator = [manager enumeratorForMaterializedItems];
-        [enumerator enumerateItemsForObserver:observer startingAtPage:NSFileProviderInitialPageSortedByDate];
+        [enumerator enumerateItemsForObserver:observer startingAtPage:start];
         long wait_result = dispatch_semaphore_wait(observer.done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
         if (wait_result != 0) {
             BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out listing the downloaded items", out_error);
@@ -774,8 +813,30 @@ int beebeeb_fp_materialised(char *buffer, unsigned long buffer_len, BeebeebFpErr
             BeebeebFillError(observer.error, out_error);
             return -1;
         }
+        NSData *following = observer.nextPage;
+        if (following.length > 0) {
+            if (next == NULL || following.length > next_cap) {
+                BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"The next page of the downloaded items is too long", out_error);
+                return -1;
+            }
+            memcpy(next, following.bytes, following.length);
+            *next_len = following.length;
+        }
         BeebeebCopyString(observer.lines, buffer, buffer_len);
         return observer.count;
+    }
+}
+
+// Ends the enumeration and lets go of the handle beebeeb_fp_materialised_open gave.
+void beebeeb_fp_materialised_close(void *handle) {
+    @autoreleasepool {
+        if (handle == NULL) {
+            return;
+        }
+        id<NSFileProviderEnumerator> enumerator = (id<NSFileProviderEnumerator>)CFBridgingRelease(handle);
+        if ([enumerator respondsToSelector:@selector(invalidate)]) {
+            [enumerator invalidate];
+        }
     }
 }
 

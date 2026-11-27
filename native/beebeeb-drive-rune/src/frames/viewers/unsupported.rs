@@ -16,10 +16,10 @@ use std::sync::{Mutex, PoisonError};
 use rune::El;
 
 use super::source::{Body, NoPreview, OpenFile, Origin};
-use super::{icons, Intent};
-use crate::theme::tokens::Theme;
-use crate::ui::button::{button, keys, ButtonState, Size, Variant};
+use super::{Intent, icons};
 use crate::State;
+use crate::theme::tokens::Theme;
+use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 
 /// Why a file is shown as the unsupported page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +68,8 @@ pub enum Note {
     Downloading,
     /// It is here, and the app was asked to open it.
     Opening,
+    /// Dm-83: the app (its name) was started with the file: it opened there, whatever the system said after.
+    Opened(String),
     /// It did not open, and why, in words for a person.
     Failed(String),
 }
@@ -78,16 +80,25 @@ impl Note {
         match self {
             Note::Downloading => DOWNLOADING.to_string(),
             Note::Opening => OPENING.to_string(),
+            Note::Opened(app) => opened_in(app),
             Note::Failed(why) => why.clone(),
         }
     }
 }
 
 /// What the page says while the file comes down before it opens.
-pub const DOWNLOADING: &str =
-    concat!("Downloading it to ", beebeeb_engine::device_word!(), " first. It opens when it is here\u{2026}");
+pub const DOWNLOADING: &str = concat!(
+    "Downloading it to ",
+    beebeeb_engine::device_word!(),
+    " first. It opens when it is here\u{2026}"
+);
 /// What the page says once the app was asked.
 pub const OPENING: &str = "Opening it in the other app\u{2026}";
+
+/// Dm-83: what the page says once the app was started with the file: "Opened in Adobe Illustrator."
+pub fn opened_in(app: &str) -> String {
+    format!("Opened in {app}.")
+}
 
 /// At most this many files' notes are held: the open file's, and the ones before it.
 const NOTES: usize = 32;
@@ -107,7 +118,10 @@ impl Notes {
     }
 
     fn of(&self, file_id: &str) -> Option<Note> {
-        self.0.iter().find(|(id, _)| id == file_id).map(|(_, note)| note.clone())
+        self.0
+            .iter()
+            .find(|(id, _)| id == file_id)
+            .map(|(_, note)| note.clone())
     }
 }
 
@@ -133,8 +147,10 @@ pub fn open_unsupported(file_ref: &mut OpenFile, reason: UnsupportedReason) {
 /// The sentence under the name of a kind with no viewer.
 pub const SENTENCE: &str = "Beebeeb can\u{2019}t show this kind of file here.";
 /// The sentence when the player refused the file itself.
-pub const PLAYER_REFUSED: &str =
-    concat!(beebeeb_engine::device_word_cap!(), " can\u{2019}t play this file, so Beebeeb can\u{2019}t show it here.");
+pub const PLAYER_REFUSED: &str = concat!(
+    beebeeb_engine::device_word_cap!(),
+    " can\u{2019}t play this file, so Beebeeb can\u{2019}t show it here."
+);
 /// The sentence when the document's viewer cannot run here.
 pub const OFFICE_UNAVAILABLE: &str = "Beebeeb can\u{2019}t show this document here.";
 
@@ -151,13 +167,35 @@ pub fn show_label() -> String {
     format!("Show in {}", beebeeb_engine::os_words::file_manager())
 }
 
-/// Where the file is, in the page's words.
-fn local_state(origin: Origin) -> &'static str {
-    match origin {
-        Origin::ThisPc { .. } | Origin::ThisPcSyncOff => {
+/// What the page says of a file whose bytes are on this Mac in Finder (dm-83).
+pub const ON_THIS_DEVICE: &str = concat!("On ", beebeeb_engine::device_word!(), ".");
+/// What the page says of a file whose bytes are only in the cloud.
+pub const IN_THE_CLOUD: &str = "In the cloud, safe in Beebeeb.";
+
+/// Where the file is, in the page's words. `here` (dm-83): Finder's own state of the file on a Mac, the one the rows'
+/// marks show (`engine_host::macos_downloaded::finder_state`); `None` where there is none (not a Mac, not read yet).
+fn local_state(origin: Origin, here: Option<bool>) -> &'static str {
+    match (origin, here) {
+        (_, Some(true)) => ON_THIS_DEVICE,
+        (_, Some(false)) => IN_THE_CLOUD,
+        (Origin::ThisPc { .. } | Origin::ThisPcSyncOff, None) => {
             concat!("Downloaded to ", beebeeb_engine::device_word!(), ".")
         }
-        _ => "In the cloud, safe in Beebeeb.",
+        _ => IN_THE_CLOUD,
+    }
+}
+
+/// Finder's state of the file `id` on a Mac (dm-83: the rows' marks), so the page says "On this Mac" for a file that
+/// is there. `None` elsewhere, and while Finder has not said.
+fn here_in_finder(id: &str) -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::engine_host::macos_downloaded::finder_state::here(id)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = id;
+        None
     }
 }
 
@@ -167,8 +205,14 @@ fn ext_of(name: &str) -> Option<&str> {
 
 /// The page's words under the name: the file's facts, why it is not shown, where it is, and what became of the last
 /// Open with press.
-fn body_words(facts: &str, reason: UnsupportedReason, origin: Origin, note: Option<&Note>) -> String {
-    let mut body = format!("{facts} {} {}", reason.sentence(), local_state(origin));
+fn body_words(
+    facts: &str,
+    reason: UnsupportedReason,
+    origin: Origin,
+    here: Option<bool>,
+    note: Option<&Note>,
+) -> String {
+    let mut body = format!("{facts} {} {}", reason.sentence(), local_state(origin, here));
     if let Some(note) = note {
         body.push(' ');
         body.push_str(&note.words());
@@ -184,8 +228,10 @@ fn press(intent: Intent) -> impl Fn(&mut State) + 'static {
         // The last press's words go: this press says its own.
         set_note(&id, None);
         ui.intent(intent.clone());
-        if matches!(intent, Intent::OpenInAnotherApp | Intent::ChooseApp | Intent::ShowInFolder)
-            && let Some(why) = ui.toast.take()
+        if matches!(
+            intent,
+            Intent::OpenInAnotherApp | Intent::ChooseApp | Intent::ShowInFolder
+        ) && let Some(why) = ui.toast.take()
         {
             tracing::warn!("unsupported page: a way out was refused");
             set_note(&id, Some(Note::Failed(why)));
@@ -198,7 +244,7 @@ pub(super) fn page(file: &OpenFile, reason: UnsupportedReason, copies: bool, ori
     let default_app =
         ext_of(&file.name).and_then(|ext| crate::engine_host::open_with_apps::default_app_name(ext, || {}));
     let note = note_of(&file.id);
-    let body = body_words(&file.facts, reason, origin, note.as_ref());
+    let body = body_words(&file.facts, reason, origin, here_in_finder(&file.id), note.as_ref());
     let mut buttons = vec![
         button(
             keys("state-btn-0"),
@@ -271,8 +317,8 @@ mod tests {
     fn labels_and_local_state() {
         assert_eq!(open_label(Some("Preview")), "Open with Preview");
         assert_eq!(open_label(None), "Open with default app");
-        assert!(local_state(Origin::ThisPc { unsent: false }).starts_with("Downloaded to "));
-        assert!(local_state(Origin::Beebeeb).starts_with("In the cloud"));
+        assert!(local_state(Origin::ThisPc { unsent: false }, None).starts_with("Downloaded to "));
+        assert!(local_state(Origin::Beebeeb, None).starts_with("In the cloud"));
         assert_eq!(ext_of("a.eps"), Some("eps"));
         assert_eq!(ext_of("noext"), None);
     }
@@ -289,15 +335,64 @@ mod tests {
         assert!(sentences[1].contains("can\u{2019}t play this file"), "{}", sentences[1]);
         assert!(sentences[0] != sentences[1] && sentences[1] != sentences[2] && sentences[0] != sentences[2]);
 
-        let plain = body_words("Video \u{b7} 366.9 MB", UnsupportedReason::PlayerRefused, Origin::Beebeeb, None);
-        assert!(plain.starts_with("Video \u{b7} 366.9 MB ") && plain.contains(PLAYER_REFUSED), "{plain}");
+        let plain = body_words(
+            "Video \u{b7} 366.9 MB",
+            UnsupportedReason::PlayerRefused,
+            Origin::Beebeeb,
+            None,
+            None,
+        );
+        assert!(
+            plain.starts_with("Video \u{b7} 366.9 MB ") && plain.contains(PLAYER_REFUSED),
+            "{plain}"
+        );
         assert!(plain.ends_with("In the cloud, safe in Beebeeb."), "{plain}");
         // What the last press came to is the last thing the page says.
-        for note in [Note::Downloading, Note::Opening, Note::Failed("The app didn\u{2019}t open this file.".into())] {
-            let with = body_words("", UnsupportedReason::UnknownType, Origin::Beebeeb, Some(&note));
+        for note in [
+            Note::Downloading,
+            Note::Opening,
+            Note::Failed("The app didn\u{2019}t open this file.".into()),
+        ] {
+            let with = body_words("", UnsupportedReason::UnknownType, Origin::Beebeeb, None, Some(&note));
             assert!(with.starts_with(SENTENCE) && with.ends_with(&note.words()), "{with}");
         }
         assert!(Note::Downloading.words().starts_with("Downloading it to "));
+    }
+
+    /// Dm-83, RC14: the .eps page said "In the cloud, safe in Beebeeb" for a file `ls -lO` showed was on the Mac. The
+    /// page says what the row's mark says: Finder's own state of the file.
+    #[test]
+    fn the_page_says_on_this_mac_for_a_file_finder_holds_and_the_cloud_for_one_it_does_not() {
+        let eps = |here| {
+            body_words(
+                "EPS \u{b7} 2.1 MB",
+                UnsupportedReason::UnknownType,
+                Origin::Beebeeb,
+                here,
+                None,
+            )
+        };
+        let local = eps(Some(true));
+        assert!(local.ends_with(ON_THIS_DEVICE) && !local.contains("cloud"), "{local}");
+        assert_eq!(ON_THIS_DEVICE, concat!("On ", beebeeb_engine::device_word!(), "."));
+        assert!(eps(Some(false)).ends_with(IN_THE_CLOUD));
+        // While Finder has not said (not read yet, not a Mac): where the viewer opened it from.
+        assert!(eps(None).ends_with(IN_THE_CLOUD));
+        assert_eq!(local_state(Origin::ThisPc { unsent: false }, Some(false)), IN_THE_CLOUD);
+        // What the last press came to still follows it.
+        let opened = Note::Opened("Adobe Illustrator 2026".into());
+        let with = body_words(
+            "",
+            UnsupportedReason::UnknownType,
+            Origin::Beebeeb,
+            Some(true),
+            Some(&opened),
+        );
+        assert!(
+            with.ends_with("On this Mac. Opened in Adobe Illustrator 2026.") || !cfg!(target_os = "macos"),
+            "{with}"
+        );
+        assert_eq!(opened.words(), "Opened in Adobe Illustrator 2026.");
     }
 
     #[test]

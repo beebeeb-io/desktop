@@ -69,13 +69,99 @@ pub fn take(s: &mut State, tx: &mut Tx, intent: Intent) -> bool {
 
 thread_local! {
     /// The file a list last handed to another app, until its start answered: an answer that comes later names no file.
-    /// The window's thread only.
-    static HANDED_OUT: std::cell::RefCell<Option<DriveItem>> = const { std::cell::RefCell::new(None) };
+    /// With it, the app its kind opens with and whether that app was running then (dm-83). The window's thread only.
+    static HANDED_OUT: std::cell::RefCell<Option<(DriveItem, Option<HandedTo>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Dm-83: the app a file was handed to, as it was at the hand-over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HandedTo {
+    /// Where the app is (Launch Services' answer for the kind); asked again when the answer comes.
+    path: String,
+    /// Its name, as the page says it.
+    name: String,
+    /// It was running at the hand-over.
+    running: bool,
 }
 
 /// `item` was handed to another app from a list: a start that fails later is this file's ([`open_failed_later`]).
 pub fn handed_out(item: &DriveItem) {
-    HANDED_OUT.with(|held| *held.borrow_mut() = Some(item.clone()));
+    let to = apps::default_of(&item.name).map(|(path, name)| HandedTo {
+        running: apps::running(&path),
+        path,
+        name,
+    });
+    HANDED_OUT.with(|held| *held.borrow_mut() = Some((item.clone(), to)));
+}
+
+/// The Mac's apps as the failed-open route asks them (dm-83): the default app of a file's kind, and whether an app
+/// runs. A test's are its own ([`apps::fake`]); every other system has none.
+mod apps {
+    /// `(path, name)` of the app the Mac opens files named `name` with.
+    pub(super) fn default_of(name: &str) -> Option<(String, String)> {
+        let ext = name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext)
+            .filter(|ext| !ext.is_empty())?;
+        #[cfg(test)]
+        {
+            FAKE.with(|apps| {
+                apps.borrow()
+                    .iter()
+                    .find(|app| app.0 == ext)
+                    .map(|app| (app.1.clone(), app.2.clone()))
+            })
+        }
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            crate::engine_host::open_with_apps::mac::default_app(ext)
+        }
+        #[cfg(not(any(test, target_os = "macos")))]
+        {
+            let _ = ext;
+            None
+        }
+    }
+
+    /// Whether the app at `path` runs now.
+    pub(super) fn running(path: &str) -> bool {
+        #[cfg(test)]
+        {
+            FAKE.with(|apps| apps.borrow().iter().any(|app| app.1 == path && app.3))
+        }
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            use objc2_app_kit::NSRunningApplication;
+            use objc2_foundation::{NSBundle, NSString, NSURL};
+            let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+            NSBundle::bundleWithURL(&url)
+                .and_then(|bundle| bundle.bundleIdentifier())
+                .is_some_and(|id| NSRunningApplication::runningApplicationsWithBundleIdentifier(&id).count() > 0)
+        }
+        #[cfg(not(any(test, target_os = "macos")))]
+        {
+            let _ = path;
+            false
+        }
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// The test's apps: `(extension, path, name, running)`.
+        pub(super) static FAKE: std::cell::RefCell<Vec<(String, String, String, bool)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// The test's apps, for the window's thread.
+    #[cfg(test)]
+    pub(super) fn fake(apps: &[(&str, &str, &str, bool)]) {
+        FAKE.with(|held| {
+            *held.borrow_mut() = apps
+                .iter()
+                .map(|(ext, path, name, running)| (ext.to_string(), path.to_string(), name.to_string(), *running))
+                .collect()
+        });
+    }
 }
 
 /// The failed-open route: `item` did not open (no app took it, the system refused, its copy is not there). The
@@ -89,16 +175,7 @@ pub fn open_failed(s: &mut State, item: &DriveItem, why: ActionError) -> bool {
     let Some(ui) = viewers::ui(s).filter(|ui| ui.file.id == item.id) else {
         return false;
     };
-    tracing::warn!(
-        "open: a file did not open ({})",
-        match why {
-            ActionError::Unavailable => "sync is not running",
-            ActionError::Offline => "offline",
-            ActionError::NoRoom => "no space",
-            ActionError::NotOnThisSystem => "not on this system",
-            _ => "the system did not open it",
-        }
-    );
+    tracing::warn!("open: a file did not open ({})", why_words(why));
     // A file the viewer shows after all, or one that says why it stopped, keeps what it shows.
     if let Body::NotPreviewable(shown) = ui.file.body {
         if UnsupportedReason::of(shown).is_none() {
@@ -111,10 +188,34 @@ pub fn open_failed(s: &mut State, item: &DriveItem, why: ActionError) -> bool {
 
 /// [`open_failed`] for a start that answered later: the file is the one last handed out. `false`: none was, or it
 /// has no page; the caller says it its own way.
+///
+/// Dm-83, RC14: the .eps started Adobe Illustrator (it was in the Dock) and its page said "Couldn't open.": the
+/// system's answer came as a failure while the app was still starting with the file. On a Mac, when the app its kind
+/// opens with was not running at the hand-over and runs now, the open started it with the file: that is no failure.
+/// Its page, where it is open, says "Opened in <app>", and the log says what the system answered.
 pub fn open_failed_later(s: &mut State, why: ActionError) -> bool {
     match HANDED_OUT.with(|held| held.borrow_mut().take()) {
-        Some(item) => open_failed(s, &item, why),
+        Some((item, Some(to))) if cfg!(target_os = "macos") && !to.running && apps::running(&to.path) => {
+            tracing::info!(
+                "open: the system answered that a file did not open ({}), but its app was started with it; said as opened",
+                why_words(why)
+            );
+            unsupported::set_note(&item.id, Some(Note::Opened(to.name)));
+            true
+        }
+        Some((item, _)) => open_failed(s, &item, why),
         None => false,
+    }
+}
+
+/// The kind of a failed open, for the log (never a name).
+fn why_words(why: ActionError) -> &'static str {
+    match why {
+        ActionError::Unavailable => "sync is not running",
+        ActionError::Offline => "offline",
+        ActionError::NoRoom => "no space",
+        ActionError::NotOnThisSystem => "not on this system",
+        _ => "the system did not open it",
     }
 }
 
@@ -126,7 +227,9 @@ pub const NOT_TAKEN: &str = "That change was not taken. Try again.";
 /// (the board's sample document): the router's "Not built yet".
 fn office_command(s: &mut State) -> bool {
     let Some(ui) = viewers::ui(s) else { return false };
-    let Some(edit) = ui.office.edit.as_ref() else { return false };
+    let Some(edit) = ui.office.edit.as_ref() else {
+        return false;
+    };
     let words = if edit.stopped {
         crate::frames::office::edit::recovery::read_only_words()
     } else {
@@ -227,7 +330,11 @@ fn why_not_edit(s: &State, item: &DriveItem) -> &'static str {
     }
     match s.viewer.ui.as_ref().map(|ui| ui.origin()) {
         Some(Origin::Beebeeb | Origin::BeebeebNotThisPcs | Origin::BeebeebUnconfirmedHere) => {
-            concat!("Not on ", beebeeb_engine::device_word!(), ": keep it available offline to edit it here")
+            concat!(
+                "Not on ",
+                beebeeb_engine::device_word!(),
+                ": keep it available offline to edit it here"
+            )
         }
         _ => "This file is read-only here",
     }
@@ -295,7 +402,9 @@ fn resolve_in_folder(path: &str, here: &[String]) -> Option<String> {
     }
     let (rooted, parts): (bool, Vec<&str>) = (
         path.starts_with('/'),
-        path.split('/').filter(|part| !part.is_empty() && *part != ".").collect(),
+        path.split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .collect(),
     );
     if parts.contains(&"..") {
         return None;

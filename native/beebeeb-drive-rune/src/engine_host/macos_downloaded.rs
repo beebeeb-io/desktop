@@ -24,6 +24,12 @@ pub(super) trait Materialisation: Send + Sync {
     fn ready(&self) -> bool {
         true
     }
+    /// Dm-83: whether Finder's own file for `id` has its bytes, by its attributes (`SF_DATALESS`: what `ls -lO`
+    /// shows). This holds for a file Finder, Quick Look or a shell's read downloaded, which the list may not name
+    /// (RC14). `None`: there is no file to look at, or it could not be looked at now. Default: `None`.
+    fn look(&self, _id: &str) -> Option<bool> {
+        None
+    }
 }
 
 /// The downloaded copies Clear… may remove: the materialised ones that are not kept (Available offline stays).
@@ -83,30 +89,86 @@ struct System;
 #[cfg(all(target_os = "macos", not(test)))]
 mod bridge {
     use crate::shell::platform::macos::macos_fp::bridge::BeebeebFpErrorC;
-    use std::ffi::{CString, c_char};
+    use std::ffi::{CString, c_char, c_void};
 
     unsafe extern "C" {
-        fn beebeeb_fp_materialised(buffer: *mut c_char, buffer_len: usize, out_error: *mut BeebeebFpErrorC) -> i32;
+        fn beebeeb_fp_materialised_open() -> *mut c_void;
+        #[allow(clippy::too_many_arguments)]
+        fn beebeeb_fp_materialised_page(
+            handle: *mut c_void,
+            page: *const u8,
+            page_len: usize,
+            buffer: *mut c_char,
+            buffer_len: usize,
+            next: *mut u8,
+            next_cap: usize,
+            next_len: *mut usize,
+            out_error: *mut BeebeebFpErrorC,
+        ) -> i32;
+        fn beebeeb_fp_materialised_close(handle: *mut c_void);
         fn beebeeb_fp_evict_item(identifier: *const c_char, out_error: *mut BeebeebFpErrorC) -> i32;
     }
 
-    /// Room for about 1 800 items of 36-character ids; a longer list is refused rather than cut short.
-    const LIST: usize = 1 << 20;
+    /// Room for one page: about 1 800 items of 36-character ids; a longer page is refused rather than cut short.
+    const PAGE: usize = 1 << 20;
+    /// Room for the token of the page that follows.
+    const NEXT: usize = 4096;
 
-    pub fn list() -> Result<String, String> {
-        let mut buffer = vec![0 as c_char; LIST];
-        let mut error = BeebeebFpErrorC::zeroed();
-        let count = unsafe { beebeeb_fp_materialised(buffer.as_mut_ptr(), buffer.len(), &mut error) };
-        if count < 0 {
-            return Err("The system could not list the downloaded files.".into());
+    /// The system's enumerator of the materialised items, open for one read of every page. Closed when dropped.
+    pub struct Enumerator(*mut c_void);
+
+    impl Enumerator {
+        /// `None`: the domain is not registered: there is nothing to list.
+        pub fn open() -> Option<Enumerator> {
+            // SAFETY: no arguments; a NULL return is no handle.
+            let handle = unsafe { beebeeb_fp_materialised_open() };
+            (!handle.is_null()).then_some(Enumerator(handle))
         }
-        let bytes: Vec<u8> = buffer.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        // The bridge bounds its copy: fewer lines than it counted means the buffer was too small.
-        if text.lines().count() < count as usize {
-            return Err("There are too many downloaded files to list.".into());
+    }
+
+    impl Drop for Enumerator {
+        fn drop(&mut self) {
+            // SAFETY: the handle `open` gave, closed once.
+            unsafe { beebeeb_fp_materialised_close(self.0) }
         }
-        Ok(text)
+    }
+
+    impl super::Pages for Enumerator {
+        fn page(&mut self, from: Option<&[u8]>) -> Result<super::Page, String> {
+            let from = from.unwrap_or_default();
+            let mut buffer = vec![0 as c_char; PAGE];
+            let mut next = vec![0_u8; NEXT];
+            let mut next_len = 0_usize;
+            let mut error = BeebeebFpErrorC::zeroed();
+            // SAFETY: the handle is live (dropped only after the read); every buffer's length is the one passed.
+            let count = unsafe {
+                beebeeb_fp_materialised_page(
+                    self.0,
+                    from.as_ptr(),
+                    from.len(),
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    next.as_mut_ptr(),
+                    next.len(),
+                    &mut next_len,
+                    &mut error,
+                )
+            };
+            if count < 0 {
+                return Err("The system could not list the downloaded files.".into());
+            }
+            let bytes: Vec<u8> = buffer.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            // The bridge bounds its copy: fewer lines than it counted means the buffer was too small.
+            if text.lines().count() < count as usize {
+                return Err("There are too many downloaded files to list.".into());
+            }
+            next.truncate(next_len.min(NEXT));
+            Ok(super::Page {
+                items: super::parse(&text),
+                next: (!next.is_empty()).then_some(next),
+            })
+        }
     }
 
     pub fn evict(id: &str) -> Result<(), String> {
@@ -126,7 +188,10 @@ impl Materialisation for System {
         if !self.ready() {
             return Err("Beebeeb is not in Finder yet.".into());
         }
-        Ok(parse(&bridge::list()?))
+        match bridge::Enumerator::open() {
+            Some(mut pages) => read_all(&mut pages),
+            None => Ok(Vec::new()),
+        }
     }
     fn evict(&self, id: &str) -> Result<(), String> {
         bridge::evict(id)?;
@@ -136,6 +201,55 @@ impl Materialisation for System {
     fn ready(&self) -> bool {
         crate::engine_host::finder_setup::is_ready()
     }
+    fn look(&self, id: &str) -> Option<bool> {
+        use crate::shell::platform::macos::macos_fp::{bridge, materialise};
+        let mut presence = None;
+        // Finder's own file, by its attributes alone: nothing is opened, so nothing is downloaded.
+        bridge::with_finder_copy(id, &mut |file| presence = Some(materialise::presence_on_disk(file)));
+        match presence? {
+            materialise::Presence::Here => Some(true),
+            materialise::Presence::Cloud => Some(false),
+            materialise::Presence::Gone => None,
+        }
+    }
+}
+
+/// One page of the system's list, and the page that follows (`None`: it was the last).
+#[cfg_attr(not(any(test, all(target_os = "macos", not(test)))), allow(dead_code))]
+pub(super) struct Page {
+    pub items: Vec<Item>,
+    pub next: Option<Vec<u8>>,
+}
+
+/// The system's list, page by page (`enumeratorForMaterializedItems`).
+#[cfg_attr(not(any(test, all(target_os = "macos", not(test)))), allow(dead_code))]
+pub(super) trait Pages {
+    /// The page `from` names (`None`: the first).
+    fn page(&mut self, from: Option<&[u8]>) -> Result<Page, String>;
+}
+
+/// More pages than this is a system that does not end its list: the read is refused, never cut short.
+#[cfg_attr(not(any(test, all(target_os = "macos", not(test)))), allow(dead_code))]
+const MAX_PAGES: usize = 10_000;
+
+/// Dm-83: every page of the list, read to its end (RC14 read the first page only). A page that names itself as the
+/// next, or a list longer than [`MAX_PAGES`], is an error: the list is whole or it is not given.
+#[cfg_attr(not(any(test, all(target_os = "macos", not(test)))), allow(dead_code))]
+pub(super) fn read_all(pages: &mut dyn Pages) -> Result<Vec<Item>, String> {
+    let mut items = Vec::new();
+    let mut from: Option<Vec<u8>> = None;
+    for _ in 0..MAX_PAGES {
+        let page = pages.page(from.as_deref())?;
+        items.extend(page.items);
+        match page.next {
+            None => return Ok(items),
+            Some(next) if from.as_ref() == Some(&next) => {
+                return Err("The system named the same page again.".into());
+            }
+            Some(next) => from = Some(next),
+        }
+    }
+    Err("The system's list of downloaded files did not end.".into())
 }
 
 /// The bridge's list: "<id>\t<bytes>" per line. A line that does not read is skipped, never counted as 0.
@@ -180,6 +294,15 @@ fn parse(text: &str) -> Vec<Item> {
 ///
 /// Only where there is no system to ask (not a Mac, a test) does the engine's word stand.
 ///
+/// Dm-83: RC14 showed the cloud on six files `ls -lO` called not dataless: Finder, Quick Look, a shell's read or an
+/// earlier build had downloaded them, and the list held only what this app's own materialise recorded (it was read one
+/// page only, too). So now:
+/// - the list is read whole, page by page ([`read_all`]);
+/// - every file a row asks about is looked at in Finder itself, by its own attributes ([`Materialisation::look`]:
+///   `SF_DATALESS`, what `ls -lO` shows), by the reader, a few at a time ([`finder_state::LOOKS_PER_READ`]). What a
+///   look saw is the file's mark, over the list: it holds for a file whoever downloaded it;
+/// - once the reads after setup are over, the count is logged once ("finder state: N downloaded").
+///
 /// Dm-77: when the list is read again. A row's mark is taken when its list is read, so a mark is only as new as the
 /// list was then (RC12: a video landed and its row kept the cloud mark, "0 on this Mac"). So:
 /// - every ask is followed by a read that began after it (at most one read per [`finder_state::FRESH_FOR`]): what a
@@ -190,7 +313,7 @@ fn parse(text: &str) -> Vec<Item> {
 /// - whenever what is held changed, the window is woken and [`finder_state::take_changed`] answers `true` once: the
 ///   window's poll reads its lists again then, as after a finished check, and the marks and the counts are new.
 pub(crate) mod finder_state {
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::sync::{Arc, Mutex, PoisonError};
     use std::time::{Duration, Instant};
 
@@ -205,6 +328,8 @@ pub(crate) mod finder_state {
     pub(crate) const SETTLE_READS: u8 = 3;
     /// How many reads in a row may fail, while no list was read yet, before the reader waits for the next ask.
     pub(crate) const UNREAD_TRIES: u8 = 5;
+    /// How many files the reader looks at in Finder per read (dm-83); the rest are looked at in the reads that follow.
+    pub(crate) const LOOKS_PER_READ: usize = 256;
 
     /// The system's list at one read, and what was seen since.
     #[derive(Default)]
@@ -226,6 +351,13 @@ pub(crate) mod finder_state {
         settle: u8,
         /// The reads that failed in a row.
         failed: u8,
+        /// Dm-83: what Finder's own file of each id looked like at its last look (`true`: its bytes are here). Over
+        /// the list: it holds for a file whoever downloaded it.
+        looked: BTreeMap<String, bool>,
+        /// Dm-83: the files rows asked about since the reader last looked.
+        to_look: BTreeSet<String>,
+        /// The count was logged since Finder setup turned ready.
+        counted: bool,
     }
 
     static HELD: Mutex<Held> = Mutex::new(Held {
@@ -239,6 +371,9 @@ pub(crate) mod finder_state {
         was_ready: false,
         settle: 0,
         failed: 0,
+        looked: BTreeMap::new(),
+        to_look: BTreeSet::new(),
+        counted: false,
     });
 
     impl Held {
@@ -249,7 +384,11 @@ pub(crate) mod finder_state {
 
         /// What a file's row is told on a Mac (dm-78): whether the system's list names `id`. While no list was read
         /// (`None`: not known, so no mark at all), a file a materialise saw land within [`LANDED_FOR`] is here.
+        /// Dm-83: what a look at Finder's own file saw comes first ([`Self::apply_looks`]).
         pub(crate) fn answer(&self, id: &str) -> Option<bool> {
+            if let Some(looked) = self.looked.get(id) {
+                return Some(*looked);
+            }
             self.here(id).or_else(|| {
                 self.landed
                     .iter()
@@ -262,7 +401,68 @@ pub(crate) mod finder_state {
         /// not. `true`: what is held changed.
         #[cfg_attr(not(test), allow(dead_code))]
         pub(in crate::engine_host) fn take(&mut self, source: &dyn Materialisation) -> bool {
-            self.take_read(source.ready().then(|| source.items()))
+            let ready = source.ready();
+            let listed = ready.then(|| source.items());
+            let looks = if ready {
+                look_at(source, self.take_looks())
+            } else {
+                Vec::new()
+            };
+            let changed = self.take_read(listed) | self.apply_looks(looks);
+            self.log_count();
+            changed
+        }
+
+        /// A row asked about `id`: the reader looks at its file in Finder (dm-83).
+        pub(in crate::engine_host) fn want(&mut self, id: &str) {
+            if !self.to_look.contains(id) {
+                self.to_look.insert(id.to_string());
+            }
+        }
+
+        /// The files to look at in this read: at most [`LOOKS_PER_READ`]; the rest wait for the next.
+        pub(in crate::engine_host) fn take_looks(&mut self) -> Vec<String> {
+            let ids: Vec<String> = self.to_look.iter().take(LOOKS_PER_READ).cloned().collect();
+            for id in &ids {
+                self.to_look.remove(id);
+            }
+            ids
+        }
+
+        /// What the looks saw (dm-83): a file's own attributes are its mark from now, over the list. A look that
+        /// could not say (`None`) changes nothing. `true`: a row's answer changed.
+        pub(in crate::engine_host) fn apply_looks(&mut self, looks: Vec<(String, Option<bool>)>) -> bool {
+            let mut changed = false;
+            for (id, seen) in looks {
+                let Some(seen) = seen else { continue };
+                let was = self.answer(&id);
+                self.looked.insert(id.clone(), seen);
+                changed |= was != self.answer(&id);
+            }
+            self.changed |= changed;
+            changed
+        }
+
+        /// How many files Finder holds by what is known now: the list, and the looks over it.
+        pub(crate) fn downloaded(&self) -> usize {
+            let listed = self.here.as_deref();
+            let in_list = listed.map_or(0, |here| {
+                here.iter().filter(|id| self.looked.get(*id) != Some(&false)).count()
+            });
+            let looked = self
+                .looked
+                .iter()
+                .filter(|(id, here)| **here && !listed.is_some_and(|listed| listed.contains(*id)))
+                .count();
+            in_list + looked
+        }
+
+        /// Once the reads after Finder setup turned ready are over, the count is logged, once (dm-83).
+        fn log_count(&mut self) {
+            if self.was_ready && self.settle == 0 && !self.counted && self.here.is_some() {
+                tracing::info!("finder state: {} downloaded", self.downloaded());
+                self.counted = true;
+            }
         }
 
         /// One look of the reader. `None`: Finder setup is not ready, so there is no list: one held from before is
@@ -272,8 +472,10 @@ pub(crate) mod finder_state {
         pub(in crate::engine_host) fn take_read(&mut self, listed: Option<Result<Vec<Item>, String>>) -> bool {
             let Some(listed) = listed else {
                 self.read_at = Some(Instant::now());
-                (self.was_ready, self.settle, self.failed) = (false, 0, 0);
-                let held = self.here.take().is_some();
+                (self.was_ready, self.settle, self.failed, self.counted) = (false, 0, 0, false);
+                // What was looked at is of a domain that may be gone too.
+                let looked = !std::mem::take(&mut self.looked).is_empty();
+                let held = self.here.take().is_some() || looked;
                 self.changed |= held;
                 return held;
             };
@@ -298,6 +500,7 @@ pub(crate) mod finder_state {
             !self.was_ready
                 || self.settle > 0
                 || self.asked_since(began)
+                || !self.to_look.is_empty()
                 || (self.here.is_none() && self.failed < UNREAD_TRIES)
         }
 
@@ -329,6 +532,10 @@ pub(crate) mod finder_state {
             let was = self.answer(id);
             self.forget(id);
             self.landed.push((id.to_string(), Instant::now()));
+            // It was looked at before it landed: it is here now.
+            if let Some(looked) = self.looked.get_mut(id) {
+                *looked = true;
+            }
             if let Some(here) = &mut self.here
                 && !here.contains(id)
             {
@@ -342,6 +549,12 @@ pub(crate) mod finder_state {
         /// The file `id` is no longer held as landed (this app made it online only, or it lands anew).
         pub(in crate::engine_host) fn forget(&mut self, id: &str) {
             self.landed.retain(|(held, _)| held != id);
+        }
+
+        /// This app made the file `id` online only: what was looked at and what landed are let go.
+        pub(in crate::engine_host) fn evicted(&mut self, id: &str) {
+            self.forget(id);
+            self.looked.remove(id);
         }
 
         /// `true` once after what is held changed: the window reads its lists again.
@@ -396,10 +609,19 @@ pub(crate) mod finder_state {
                 std::thread::sleep(fresh_for);
             }
             let began = Instant::now();
-            let listed = source.ready().then(|| source.items());
+            let ready = source.ready();
+            let listed = ready.then(|| source.items());
+            // Dm-83: the files rows asked about, each looked at in Finder, outside the lock.
+            let ids = if ready {
+                HELD.lock().unwrap_or_else(PoisonError::into_inner).take_looks()
+            } else {
+                Vec::new()
+            };
+            let looks = look_at(source, ids);
             let (wake, again) = {
                 let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
-                let changed = held.take_read(listed);
+                let changed = held.take_read(listed) | held.apply_looks(looks);
+                held.log_count();
                 let again = held.reads_on(began);
                 held.reading = again;
                 (changed.then(|| held.wake.clone()).flatten(), again)
@@ -419,6 +641,7 @@ pub(crate) mod finder_state {
     pub(crate) fn here(id: &str) -> Option<bool> {
         let source = super::system()?;
         let mut held = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+        held.want(id);
         ask(&mut held, source);
         held.answer(id)
     }
@@ -462,7 +685,17 @@ pub(crate) mod finder_state {
     /// This app made the file `id` online only: it is not held as landed any longer.
     #[allow(dead_code)] // the Mac's own evict calls it; a test and another system have none
     pub(super) fn forget(id: &str) {
-        HELD.lock().unwrap_or_else(PoisonError::into_inner).forget(id);
+        HELD.lock().unwrap_or_else(PoisonError::into_inner).evicted(id);
+    }
+
+    /// Each file looked at in Finder (dm-83), by the source; one at a time, as the system answers.
+    fn look_at(source: &dyn Materialisation, ids: Vec<String>) -> Vec<(String, Option<bool>)> {
+        ids.into_iter()
+            .map(|id| {
+                let seen = source.look(&id);
+                (id, seen)
+            })
+            .collect()
     }
 
     /// The mark a file's row gets (`pc_status`), from the engine's `mark` and Finder's state ([`here`]): see
@@ -602,6 +835,10 @@ mod tests {
         ready: std::sync::atomic::AtomicBool,
         list: std::sync::Mutex<Result<Vec<Item>, String>>,
         asked: std::sync::atomic::AtomicUsize,
+        /// Dm-83: Finder's own files, by their attributes (`ls -lO`): `true` not dataless, `false` dataless. A file
+        /// not here has no file to look at.
+        files: std::sync::Mutex<HashMap<String, bool>>,
+        looked: std::sync::Mutex<Vec<String>>,
     }
 
     impl Mac {
@@ -611,7 +848,13 @@ mod tests {
                 // What the bridge answers for a domain that is not there yet: no items.
                 list: std::sync::Mutex::new(Ok(Vec::new())),
                 asked: 0.into(),
+                files: std::sync::Mutex::new(HashMap::new()),
+                looked: std::sync::Mutex::new(Vec::new()),
             }
+        }
+        /// `ls -lO` of Finder's files: each id, and whether its bytes are here.
+        fn on_disk(&self, files: &[(&str, bool)]) {
+            *self.files.lock().unwrap() = files.iter().map(|(id, here)| (id.to_string(), *here)).collect();
         }
         fn holds(&self, ids: &[&str]) {
             let items = ids.iter().map(|id| Item {
@@ -635,6 +878,10 @@ mod tests {
         }
         fn ready(&self) -> bool {
             self.ready.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn look(&self, id: &str) -> Option<bool> {
+            self.looked.lock().unwrap().push(id.to_string());
+            self.files.lock().unwrap().get(id).copied()
         }
     }
 
@@ -879,5 +1126,140 @@ mod tests {
         held.ask_now();
         assert!(held.asked_since(began));
         assert!(!held.asked_since(Instant::now() + Duration::from_secs(1)));
+    }
+
+    /// A system list that comes in pages; `pages[i]` names `i + 1` as the next, the last names none.
+    struct Paged {
+        pages: Vec<Vec<(&'static str, u64)>>,
+        asked: Vec<Option<Vec<u8>>>,
+        /// The page that names itself again (a system that never ends its list).
+        stuck: Option<usize>,
+    }
+
+    impl Pages for Paged {
+        fn page(&mut self, from: Option<&[u8]>) -> Result<Page, String> {
+            self.asked.push(from.map(<[u8]>::to_vec));
+            let at = from.map_or(0, |from| from[0] as usize);
+            let items = self.pages[at]
+                .iter()
+                .map(|(id, bytes)| Item {
+                    id: id.to_string(),
+                    bytes: *bytes,
+                })
+                .collect();
+            let next = if self.stuck == Some(at) {
+                Some(vec![at as u8])
+            } else {
+                (at + 1 < self.pages.len()).then(|| vec![(at + 1) as u8])
+            };
+            Ok(Page { items, next })
+        }
+    }
+
+    /// Dm-83, RC14: the bridge read the first page of the list only. Every page is read, each from the page the one
+    /// before it named, and a list that does not end is refused rather than cut short.
+    #[test]
+    fn a_list_longer_than_one_page_is_read_whole() {
+        let mut paged = Paged {
+            pages: vec![vec![("mov", 384)], vec![("docx", 20), ("txt", 1)], vec![("eps", 9)]],
+            asked: Vec::new(),
+            stuck: None,
+        };
+        let items = read_all(&mut paged).unwrap();
+        assert_eq!(
+            items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            ["mov", "docx", "txt", "eps"],
+            "every page, in order"
+        );
+        assert_eq!(paged.asked, [None, Some(vec![1]), Some(vec![2])]);
+        assert_eq!(bytes_of(&items), 414);
+
+        // A page that names itself as the next: an error, never a list cut short or a read that never ends.
+        let mut stuck = Paged {
+            pages: vec![vec![("a", 1)], vec![("b", 1)]],
+            asked: Vec::new(),
+            stuck: Some(1),
+        };
+        assert!(read_all(&mut stuck).is_err());
+        assert_eq!(stuck.asked.len(), 2, "refused at the page that named itself");
+    }
+
+    /// Dm-83, RC14's Files root next to `ls -lO`: the .mov was landed by this app's materialise; the .docx, .txt,
+    /// .eps, .pdf and .md were downloaded by Finder, Quick Look or a shell's read and are not in the system's list;
+    /// the .zip is dataless. Each row's file is looked at in Finder, and its mark is what `ls -lO` says.
+    #[test]
+    fn a_file_finder_downloaded_itself_shows_the_tick_and_a_dataless_one_the_cloud() {
+        use super::finder_state::{Held, LOOKS_PER_READ, mark_on};
+        let on = |m: &str| Some(m.to_string());
+        let ls = [
+            ("zip", false),
+            ("mov", true),
+            ("docx", true),
+            ("txt", true),
+            ("eps", true),
+            ("pdf", true),
+            ("md", true),
+        ];
+        let mac = Mac::setting_up();
+        mac.set_ready(true);
+        mac.holds(&["mov", "zip"]); // the list: what this app recorded, and one Finder has made dataless since
+        mac.on_disk(&ls);
+        let mut held = Held::default();
+        // The rows ask (the engine calls all but the .mov online only).
+        for (id, _) in ls {
+            held.want(id);
+        }
+        assert!(held.take(&mac));
+        assert!(held.take_changed());
+        for (id, here) in ls {
+            let engine = if id == "zip" { "on_this_pc" } else { "online_only" };
+            let want = if here { "on_this_pc" } else { "online_only" };
+            assert_eq!(
+                mark_on(on(engine), held.answer(id), true),
+                on(want),
+                "{id}: the mark is `ls -lO`"
+            );
+        }
+        assert_eq!(held.downloaded(), 6);
+        assert_eq!(
+            mac.looked.lock().unwrap().len(),
+            ls.len(),
+            "each row's file looked at once"
+        );
+
+        // Nothing asked since: nothing is looked at again; a file with no file in Finder keeps the list's word.
+        assert!(!held.take(&mac));
+        assert_eq!(mac.looked.lock().unwrap().len(), ls.len());
+        held.want("gone");
+        mac.holds(&["mov", "zip", "gone"]);
+        held.take(&mac);
+        assert_eq!(held.answer("gone"), Some(true), "no file to look at: the list says");
+
+        // Finder makes the .txt online only: the next ask looks again, and the mark follows.
+        mac.on_disk(&[("txt", false)]);
+        held.want("txt");
+        assert!(held.take(&mac));
+        assert_eq!(mark_on(on("on_this_pc"), held.answer("txt"), true), on("online_only"));
+        // This app makes the .docx online only: what was looked at is let go, and the list says.
+        held.evicted("docx");
+        assert_eq!(held.answer("docx"), Some(false));
+        // A materialise lands the .txt: it is here, over the look before it.
+        held.land("txt");
+        assert_eq!(held.answer("txt"), Some(true));
+
+        // A long folder: at most a few files per read, the rest in the reads that follow.
+        for n in 0..LOOKS_PER_READ + 3 {
+            held.want(&format!("f-{n}"));
+        }
+        let began = std::time::Instant::now();
+        held.take(&mac);
+        assert!(held.reads_on(began), "the rest are looked at next");
+        held.take(&mac);
+        assert!(held.take_looks().is_empty());
+
+        // Setup leaves ready: what was looked at goes with the list.
+        mac.set_ready(false);
+        assert!(held.take(&mac));
+        assert_eq!(held.answer("eps"), None);
     }
 }

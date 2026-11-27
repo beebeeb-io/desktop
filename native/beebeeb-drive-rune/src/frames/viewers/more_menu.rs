@@ -1,6 +1,12 @@
 //! The "…" (More actions) button of the open file's toolbar (task 67): one menu under the button, for every kind of
 //! file the shared toolbar draws (text, notes, photo, audio, video, PDF, table, archive, the states). It holds the
 //! actions of the file row's menu that apply to the file already open. Keys: `more-menu`, `more-menu-item-<i>`.
+//!
+//! Dm-83: on a Mac, while the system's own view shows the file (a Quick Look document, a player:
+//! `native_preview`), the menu is the system's own (`NSMenu`, [`Ui::toggle_more`]). A child view covers whatever the
+//! app draws in its place, so the app-drawn menu hid the document while it was open (RC14, on a .docx); the system's
+//! menu is a window of its own over the view, and the document stays on screen. Its lines and what each does are the
+//! same ([`entries`], [`Ui::pick_more`]).
 
 use rune::{El, Key, KeyEvent, Tx, row};
 
@@ -45,8 +51,18 @@ pub fn entries(ui: &Ui) -> Vec<Entry> {
 }
 
 impl Ui {
-    /// The "…" button: opens the menu, or closes it.
+    /// The "…" button: opens the menu, or closes it. Over the system's own view (dm-83) the menu is the system's: it
+    /// runs until it closes, and the line picked there is picked here.
     pub fn toggle_more(&mut self) {
+        if self.more.is_none()
+            && self.shows_system_view()
+            && let Some(popup) = system_menu()
+        {
+            if let Some(index) = popup(&entries(self)) {
+                self.pick_more(index);
+            }
+            return;
+        }
         self.more = if self.more.is_some() {
             None
         } else {
@@ -72,6 +88,132 @@ impl Ui {
             "trash" => self.intent(Intent::Trash),
             _ => {}
         }
+    }
+}
+
+impl Ui {
+    /// The system's own view shows the file inside the window (`native_preview`, with a stage).
+    fn shows_system_view(&self) -> bool {
+        matches!(&self.file.body, super::source::Body::Native(doc) if doc.stage.is_some())
+    }
+}
+
+/// The system's menu: shows `entries` and answers the line picked (`None`: closed without one).
+pub(super) type Popup = fn(&[Entry]) -> Option<usize>;
+
+/// The system's menu on a Mac; none elsewhere (the app draws its own). A test sets its own ([`TEST_POPUP`]).
+fn system_menu() -> Option<Popup> {
+    #[cfg(test)]
+    {
+        TEST_POPUP.with(std::cell::Cell::get)
+    }
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        Some(native::popup)
+    }
+    #[cfg(not(any(test, target_os = "macos")))]
+    {
+        None
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The test's system menu (`None`: there is none, as off a Mac).
+    pub(super) static TEST_POPUP: std::cell::Cell<Option<Popup>> = const { std::cell::Cell::new(None) };
+}
+
+/// Where the system's menu stands: as the app-drawn one does ([`layer`]), its right edge [`RIGHT`] points from the
+/// window's right, its top [`TOP`] points from the window's top, under the "…".
+const TOP: f64 = 78.0;
+const RIGHT: f64 = 96.0;
+
+#[cfg(all(target_os = "macos", not(test)))]
+mod native {
+    use std::cell::Cell;
+
+    use objc2::rc::Retained;
+    use objc2::runtime::NSObject;
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2_app_kit::{NSApplication, NSControlStateValueOn, NSMenu, NSMenuItem};
+    use objc2_foundation::{NSPoint, NSString};
+
+    use crate::ui::menu::Entry;
+
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements, and this class has no `Drop`.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "BeebeebMoreMenuPick"]
+        #[ivars = Cell<isize>]
+        struct Pick;
+
+        /// The target of every line: notes the line picked (its tag is its place in the entries).
+        impl Pick {
+            #[unsafe(method(picked:))]
+            fn picked(&self, sender: &NSMenuItem) {
+                self.ivars().set(sender.tag());
+            }
+        }
+    );
+
+    impl Pick {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(Cell::new(-1));
+            // SAFETY: NSObject's designated initialiser.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// `NSMenu popUpMenuPositioningItem:atLocation:inView:` under the "…", on the window's content view. Runs until
+    /// the menu closes. `None`: closed without a line, or not on the main thread, or no window.
+    pub(super) fn popup(entries: &[Entry]) -> Option<usize> {
+        let mtm = MainThreadMarker::new()?;
+        let app = NSApplication::sharedApplication(mtm);
+        let window = app.keyWindow().or_else(|| app.mainWindow())?;
+        let view = window.contentView()?;
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("More actions"));
+        menu.setAutoenablesItems(false);
+        let pick = Pick::new(mtm);
+        let none = NSString::from_str("");
+        for (index, entry) in entries.iter().enumerate() {
+            let (label, checked, off) = match entry {
+                Entry::Sep => {
+                    menu.addItem(&NSMenuItem::separatorItem(mtm));
+                    continue;
+                }
+                Entry::Head(label) => (*label, false, true),
+                Entry::Item {
+                    label, checked, off, ..
+                } => (*label, *checked, *off),
+            };
+            // SAFETY: `picked:` is the target's own method, which takes the item.
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(label),
+                    Some(sel!(picked:)),
+                    &none,
+                )
+            };
+            // SAFETY: the target outlives the menu: both live until this call returns, after the menu closed.
+            unsafe { item.setTarget(Some(&pick)) };
+            item.setTag(index as isize);
+            item.setEnabled(!off);
+            if checked {
+                item.setState(NSControlStateValueOn);
+            }
+            menu.addItem(&item);
+        }
+        let bounds = view.bounds();
+        let x = (bounds.size.width - super::RIGHT - menu.size().width).max(0.0);
+        let y = if view.isFlipped() {
+            super::TOP
+        } else {
+            bounds.size.height - super::TOP
+        };
+        menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(x, y), Some(&view));
+        usize::try_from(pick.ivars().get()).ok()
     }
 }
 
@@ -180,8 +322,8 @@ pub fn layer(ui: &Ui, open: Open, t: &Theme) -> El {
         .absolute(0.0, 0.0)
         .w_full()
         .h_full()
-        .pt(78.0)
-        .pr(96.0)
+        .pt(TOP as f32)
+        .pr(RIGHT as f32)
         .justify_end()
         .items_start()
         .child(surface)
