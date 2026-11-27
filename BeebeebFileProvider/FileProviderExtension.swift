@@ -449,15 +449,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
     }
 
-    /// dm-54: the item already under `parent` with this name and kind, if any.
-    static func existingItem(
-        parent: NSFileProviderItemIdentifier,
-        filename: String,
-        kind: BeebeebItemKind,
-        list: (NSFileProviderItemIdentifier) throws -> [BeebeebProviderItem]
-    ) throws -> BeebeebProviderItem? {
-        try list(parent).first { $0.filename == filename && $0.kind == kind }
-    }
+    // dm-54 `existingItem` and dm-89 `resolveMayAlreadyExist` live in MayAlreadyExist.swift (size ratchet).
 
     func createItem(
         basedOn itemTemplate: NSFileProviderItem,
@@ -491,17 +483,25 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             // the person edited it. The template's identifier is the item the delete was for,
             // and its content version is the base of the edit (REPL.h:462-470).
             let deletionConflicted = options.contains(.deletionConflicted)
-            // dm-54: a reimport or re-enumeration replays creates for items the server already has;
-            // return the existing item instead of creating a duplicate.
+            // dm-54/dm-89: a reimport or re-enumeration replays creates for items the server already
+            // has. A folder, or a file with the server's bytes, is the server's item; a file that
+            // differs is uploaded as a new version of it, never dropped.
             if options.contains(.mayAlreadyExist),
-               let existing = try Self.existingItem(
-                   parent: itemTemplate.parentItemIdentifier,
-                   filename: itemTemplate.filename,
-                   kind: kind,
-                   list: { try self.ipc.enumerate(containerIdentifier: $0) }
+               let replayed = try Self.resolveMayAlreadyExist(
+                   parent: itemTemplate.parentItemIdentifier, filename: itemTemplate.filename, kind: kind, contents: url,
+                   list: { try self.ipc.enumerate(containerIdentifier: $0) },
+                   queueNewVersion: { existing in
+                       try self.ipc.queueModifyItem(
+                           itemIdentifier: NSFileProviderItemIdentifier(existing.identifier),
+                           parentIdentifier: itemTemplate.parentItemIdentifier, filename: existing.filename, kind: .file,
+                           contentsURL: url, contentType: contentType?.identifier,
+                           baseVersionIdentifier: existing.contentVersion ?? existing.versionIdentifier,
+                           changedFields: .contents
+                       )
+                   }
                ) {
-                completionHandler(FileProviderItem(model: existing), [], false, nil)
-                signalErrorResolvedIfPending()
+                completionHandler(replayed.item, [], replayed.shouldFetchContent, replayed.error)
+                if let error = replayed.error { noteFailure(error) } else { signalErrorResolvedIfPending() }
                 progress.completedUnitCount = 1
                 return progress
             }

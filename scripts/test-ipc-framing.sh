@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-EXPECTED_TESTS=112
+EXPECTED_TESTS=115
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -108,8 +108,10 @@ xcrun swiftc \
   BeebeebFileProvider/UploadStaging.swift \
   BeebeebFileProvider/ExtensionLog.swift \
   BeebeebFileProvider/ModifyFields.swift \
+  BeebeebFileProvider/MayAlreadyExist.swift \
   BeebeebFileProviderTests/AddedBySomeoneElseTests.swift \
   BeebeebFileProviderTests/ProtectedItemTests.swift \
+  BeebeebFileProviderTests/MayAlreadyExistTests.swift \
   BeebeebFileProviderTests/FeatureChecks.swift \
   BeebeebFileProviderTests/main.swift
 

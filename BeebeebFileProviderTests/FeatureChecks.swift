@@ -4,4 +4,5 @@
 func runFeatureChecks() {
     runAddedBySomeoneElseChecks()
     runProtectedItemChecks()
+    runMayAlreadyExistChecks()
 }
