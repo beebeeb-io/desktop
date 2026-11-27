@@ -1,4 +1,4 @@
-//! Writer-provenance headers and the bounded 429 retry policy.
+//! Writer-provenance headers, the shared 429 pause and the bounded retry policy.
 //!
 //! Owns: the `X-Beebeeb-Client*` values every request carries and
 //! `retry_decision`'s backoff arithmetic. Must not: touch the network or the
@@ -131,6 +131,102 @@ pub(super) fn retry_decision(attempt: u32, spent: u64, retry_after: Option<u64>,
     let remaining = RETRY_TOTAL_BUDGET_SECS.saturating_sub(spent);
     let wait = wait.min(remaining);
     Some(wait)
+}
+
+// ── Shared 429 pause (one per client) ──────────────────────────────────────────
+//
+// A 429 means the account is over its window, so every request of this client waits, not only the refused one.
+// The wait is the server's `Retry-After` or a 2 s floor that doubles with each refusal in a row, plus full
+// jitter, capped at 60 s. `x-ratelimit-reset` is not read. Only requests that are safe to send twice (a GET, or
+// a write carrying an idempotency key) are sent again on their own; the rest surface the 429.
+
+/// The shortest pause after a 429; doubles with each refusal in a row.
+pub(super) const RATE_FLOOR: Duration = Duration::from_secs(2);
+
+/// The longest pause after a 429, whatever the server asks for.
+pub(super) const RATE_CAP: Duration = Duration::from_secs(60);
+
+/// The header that makes a write safe to send twice.
+pub(super) const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+
+/// Whether a request refused with 429 may be sent again without the caller's say: it was not processed, but a
+/// write the server may have half-applied is only repeated when its idempotency key lets the server dedupe it.
+pub(super) fn retries_after_429(request: &reqwest::Request) -> bool {
+    matches!(
+        *request.method(),
+        reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
+    ) || request.headers().contains_key(IDEMPOTENCY_KEY_HEADER)
+}
+
+/// The pause after the `streak`-th refusal in a row (0 for the first). `jitter` is in `0.0..=1.0`: the wait is
+/// `base * (1 + jitter)`, where `base` is the larger of the doubled floor and `Retry-After`, never above `cap`.
+pub(super) fn rate_limit_wait(
+    streak: u32,
+    retry_after: Option<u64>,
+    floor: Duration,
+    cap: Duration,
+    jitter: f64,
+) -> Duration {
+    let doubled = floor.saturating_mul(1u32 << streak.min(16));
+    let hint = Duration::from_secs(retry_after.unwrap_or(0));
+    let base = doubled.max(hint).min(cap);
+    base.mul_f64(1.0 + jitter.clamp(0.0, 1.0)).min(cap)
+}
+
+struct PauseState {
+    until: Option<tokio::time::Instant>,
+    streak: u32,
+}
+
+/// What a client knows about being refused: shared by every request it sends (and its backup-pass twin).
+pub(super) struct RatePause {
+    state: std::sync::Mutex<PauseState>,
+    floor: Duration,
+    cap: Duration,
+}
+
+impl RatePause {
+    pub(super) fn new() -> Self {
+        Self::with_limits(RATE_FLOOR, RATE_CAP)
+    }
+
+    pub(super) fn with_limits(floor: Duration, cap: Duration) -> Self {
+        Self {
+            state: std::sync::Mutex::new(PauseState { until: None, streak: 0 }),
+            floor,
+            cap,
+        }
+    }
+
+    /// Returns once no pause is running.
+    pub(super) async fn wait(&self) {
+        loop {
+            let until = self.state.lock().unwrap_or_else(|e| e.into_inner()).until;
+            match until {
+                Some(at) if at > tokio::time::Instant::now() => tokio::time::sleep_until(at).await,
+                _ => return,
+            }
+        }
+    }
+
+    /// A 429 came back. Starts the pause, unless one is already running: the refusals of one burst are one event
+    /// and do not double the wait again.
+    pub(super) fn refused(&self, retry_after: Option<u64>) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let now = tokio::time::Instant::now();
+        if state.until.is_some_and(|at| at > now) {
+            return;
+        }
+        let jitter: f64 = rand::Rng::gen_range(&mut rand::thread_rng(), 0.0..=1.0);
+        let wait = rate_limit_wait(state.streak, retry_after, self.floor, self.cap, jitter);
+        state.until = Some(now + wait);
+        state.streak = state.streak.saturating_add(1);
+    }
+
+    /// A request got an answer that is not a 429: the streak ends.
+    pub(super) fn answered(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).streak = 0;
+    }
 }
 
 // ── Transport / 5xx retry (bounded) ────────────────────────────────────────────
