@@ -403,10 +403,10 @@ pub(crate) mod mac {
                     tracing::warn!("open with: the file did not open, Finder setup ended without Finder")
                 }
                 Failure::SetupSlow => {
-                    tracing::warn!("open with: the file did not open, Finder setup was not ready in time")
+                    tracing::warn!("open with: the file did not open, Finder was not set up in time")
                 }
                 Failure::Refused => {
-                    tracing::warn!("open with: the file did not open, its checks did not pass once Finder was ready")
+                    tracing::warn!("open with: the file did not open, its checks did not pass once Finder was set up")
                 }
             }
         }
@@ -518,7 +518,7 @@ pub(crate) mod mac {
                     if said {
                         tracing::info!(
                             ms = asked.elapsed().as_millis() as u64,
-                            "open with: Finder is ready; the press goes on"
+                            "open with: Finder is set up; the open goes on"
                         );
                     }
                     return Ok(());
@@ -537,7 +537,7 @@ pub(crate) mod mac {
             }
             if !said {
                 said = true;
-                tracing::info!("open with: Finder is still being set up; the press waits for it");
+                tracing::info!("open with: Finder is still being set up; the open waits for it");
                 say(setting_up());
             }
             std::thread::sleep(materialise::LOOK_EVERY.min(platform.setup_wait()));

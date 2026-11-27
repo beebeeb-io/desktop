@@ -402,7 +402,7 @@ impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
             Ok(()) => {}
             // Sync runs only once Beebeeb is in Finder: the press's thread waits for setup, or says why it ended.
             Err(Elsewhere::NeedsSync) if mac::setup_of(&super::finder_setup::view()) != mac::Setup::Ready => {
-                tracing::info!("open with: Finder is not set up yet; the press goes on to wait for it");
+                tracing::info!("open with: Finder is not set up yet; the open goes on to wait for it");
             }
             Err(why) => return why,
         }
