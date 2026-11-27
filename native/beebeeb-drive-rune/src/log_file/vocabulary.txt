@@ -86,6 +86,7 @@ authenticated
 auto-resolving
 auto_resolve_keep_both
 av1
+available
 away
 back
 backed-up
@@ -253,6 +254,7 @@ database
 dated
 db
 db_ms
+debt
 decision
 declared
 decline
@@ -672,6 +674,7 @@ offset
 ok
 old
 old_version
+older
 on
 on-demand
 on_disk_whole
