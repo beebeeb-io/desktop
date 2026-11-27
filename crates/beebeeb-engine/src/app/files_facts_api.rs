@@ -25,6 +25,8 @@ pub struct FilesFacts {
     pub files_bytes: i64,
     /// Bytes of the photos and videos outside Backups.
     pub photos_bytes: i64,
+    /// Bytes of everything under Backups.
+    pub backups_bytes: i64,
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -35,12 +37,13 @@ impl<C: CredentialStores> Engine<C> {
         let (available_offline, split) = self
             .local_state()?
             .with(|db| (available_offline_count(db), storage_split(db)))?;
-        let (files_bytes, photos_bytes, _backups) = split.map_err(|_| LocalStateRefused::Unreadable)?;
+        let (files_bytes, photos_bytes, backups_bytes) = split.map_err(|_| LocalStateRefused::Unreadable)?;
         Ok(FilesFacts {
             session,
             available_offline,
             files_bytes,
             photos_bytes,
+            backups_bytes,
         })
     }
 }

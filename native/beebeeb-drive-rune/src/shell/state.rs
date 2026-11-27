@@ -216,7 +216,8 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
             .with_previews(crate::engine_host::drive_previews::PreviewsHost::new(
                 engine.clone(),
                 crate::engine_host::drive_previews::shared_run(),
-            )),
+            ))
+            .with_thumb_repair(crate::engine_host::thumb_repair::ThumbRepair::new(engine.clone())),
     );
     // The lock screen's Windows Hello prompt is owned by the main window.
     let hello = crate::engine_host::hello::WindowHello::new(s.shell.main_window_slot());

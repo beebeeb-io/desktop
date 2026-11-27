@@ -5,7 +5,7 @@
 //!   other counts (shares that wait for an answer, items in Trash) are not known here: the engine has no count
 //!   call for either, and counting means listing and decrypting each from Beebeeb, which a badge must not do.
 //!   They are 0, and the sidebar draws no badge for 0.
-//! - `storage_split`: the bytes of files and of photos and videos outside Backups, from the same read.
+//! - `storage_split`: the bytes of files, of photos and videos, and of Backups, from the same read.
 //! - `sort_of` / `set_sort`: each folder's sort, kept here in memory for the session (the engine has no setting
 //!   for it): a folder keeps its sort for as long as the account is signed in and the app runs.
 //! - `changed_label`: "Just now" for an item changed within the last minute, from the row's own time.
@@ -106,6 +106,7 @@ impl<C: CredentialStores> Facts<C> {
         self.current().map(|facts| StorageSplit {
             files_bytes: facts.files_bytes,
             photos_bytes: facts.photos_bytes,
+            backups_bytes: facts.backups_bytes,
         })
     }
 
