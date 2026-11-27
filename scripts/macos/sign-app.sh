@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Sign a bundled Beebeeb .app inside out: extension (its entitlements), the File Provider helper, the Office helper
-# (its own two entitlements: sandboxed, inheriting the app's sandbox), then the app.
+# Sign a bundled Beebeeb .app inside out: extension (its entitlements), the File Provider helper, the Office helper's
+# XPC service (its own one entitlement: the App Sandbox the system starts it in), then the app.
 # Ad hoc without APPLE_SIGNING_IDENTITY (local bundle checks only). APPLE_SIGNING_IDENTITY may be a
 # certificate name or its 40-hex SHA-1 (preferred: names can match several certificates).
 # BEEBEEB_MACOS_HARDENED_RUNTIME=1 adds --options runtime and a secure timestamp (a notarised release).
@@ -18,10 +18,14 @@ EXT_ENT="BeebeebFileProvider/BeebeebFileProvider.entitlements"
 APPEX="$APP/Contents/PlugIns/BeebeebFileProvider.appex"
 HELPER="$APP/Contents/MacOS/BeebeebFileProviderCtl"
 [[ -d "$APPEX" ]] || { printf 'extension missing: %s\n' "$APPEX" >&2; exit 1; }
-OFFICE="$APP/Contents/MacOS/beebeeb-office-render"
+# The Office helper's XPC service: exactly one, <bundle id>.office-render.xpc.
+OFFICE_XPCS=("$APP"/Contents/XPCServices/*.office-render.xpc)
+OFFICE="${OFFICE_XPCS[0]}"
 OFFICE_ENT="packaging/macos/office-render.entitlements"
 [[ -f "$HELPER" ]] || { printf 'helper missing: %s\n' "$HELPER" >&2; exit 1; }
-[[ -f "$OFFICE" ]] || { printf 'office helper missing: %s\n' "$OFFICE" >&2; exit 1; }
+[[ ${#OFFICE_XPCS[@]} == 1 && -x "$OFFICE/Contents/MacOS/beebeeb-office-render" ]] || { printf 'office helper service missing: %s\n' "$OFFICE" >&2; exit 1; }
+# The helper's old place, beside the app's executable: a child there would inherit the app's sandbox. Never shipped.
+[[ ! -e "$APP/Contents/MacOS/beebeeb-office-render" ]] || { printf 'office helper beside the app executable: remove it\n' >&2; exit 1; }
 
 if [[ "$IDENTITY" != "-" && "$IDENTITY" =~ ^[0-9A-Fa-f]{40}$ ]]; then
   security find-identity -v -p codesigning | grep -qi "$IDENTITY" || { printf 'identity %s is not in the keychain\n' "$IDENTITY" >&2; exit 1; }

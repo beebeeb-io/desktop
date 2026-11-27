@@ -1,17 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Entitlements of the Office helper, Contents/MacOS/beebeeb-office-render (scripts/macos/sign-app.sh).
+  Entitlements of the Office helper, the app's XPC service
+  Contents/XPCServices/<app id>.office-render.xpc (scripts/macos/sign-app.sh).
 
-  Exactly these two keys, nothing else: a helper that inherits the app's sandbox may carry no other entitlement
-  (macOS ends it at its start if it does). It is started by the sandboxed app only, and is confined further by
-  crates/beebeeb-office-sandbox. scripts/tests/test-macos-bundle.sh checks the signed helper has these two alone.
+  Exactly this one key, nothing else. The system starts an XPC service in a fresh App Sandbox made from its own
+  entitlements (not the app's: no `inherit`, which is for a child the app starts itself). With this key alone the
+  service has no network, no file of the user and no write outside its own container. The app checks the running
+  service's signature carries exactly this one before it hands it anything (crates/beebeeb-office-sandbox,
+  macos_xpc.rs); scripts/tests/test-macos-bundle.sh checks the signed bundle.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>com.apple.security.app-sandbox</key>
-    <true/>
-    <key>com.apple.security.inherit</key>
     <true/>
 </dict>
 </plist>

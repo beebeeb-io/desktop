@@ -40,7 +40,8 @@ fn the_helper_writes_nothing_but_frames() {
             "pdf.rs",
             "save.rs",
             "serve.rs",
-            "start.rs"
+            "start.rs",
+            "xpc.rs"
         ],
         "every module was read; a new one joins this list"
     );
@@ -74,7 +75,7 @@ fn the_helper_writes_nothing_but_frames() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 11 * 17, "eleven files, seventeen words");
+    assert_eq!(checked, 12 * 17, "twelve files, seventeen words");
 }
 
 /// The panic hook exits and never looks at the panic: its message can quote the document.
