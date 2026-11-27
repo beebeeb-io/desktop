@@ -702,7 +702,7 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The row's `has_thumbnail` set: the server holds a thumbnail of `file_id` at the row's current version now.
     fn note_server_has_thumbnail(&self, session: SessionGeneration, file_id: &str) {
-        if let Ok(state) = self.local_state()
+        if let Ok(state) = self.local_state_for_changes()
             && state.session() == session
         {
             let _ = state.with(|db| db.set_server_has_thumbnail(file_id, true));

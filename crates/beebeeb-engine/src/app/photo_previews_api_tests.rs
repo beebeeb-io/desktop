@@ -1127,7 +1127,7 @@ const G3: &str = "d0000000-0000-4000-8000-000000000203";
 
 impl World {
     fn set_flag(&self, id: &str, has: bool) {
-        let state = self.engine.local_state().expect("the local state");
+        let state = self.engine.local_state_for_changes().expect("the local state");
         state.with(|db| db.set_server_has_thumbnail(id, has)).unwrap().unwrap();
     }
 
