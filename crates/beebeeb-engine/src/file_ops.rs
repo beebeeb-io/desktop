@@ -757,7 +757,10 @@ mod tests {
         let client = include_str!("api_client/files.rs");
         let call = &client[client.find("pub async fn trash_file_sent").unwrap()..];
         let call = &call[..call.find("\n    }").unwrap()];
-        assert!(call.contains(".delete(self.file_url("), "the file endpoint");
+        assert!(
+            call.contains("self.file_url(") && call.contains(".delete(&url)"),
+            "the file endpoint"
+        );
         assert!(
             !call.contains("permanent") && !call.contains("X-Confirm-Token"),
             "trash does NOT send a confirm token"
