@@ -164,10 +164,8 @@ impl<C: CredentialStores> TraySource for EngineTraySource<C> {
                 }
             }
             // Lift the metered hold until the connection changes; the engine ticks now.
-            Action::SyncAnyway => {
-                if crate::shell::actions::EngineActions::sync_anyway(&*self.live).is_err() {
-                    log("the flyout could not ask the engine to sync anyway");
-                }
+            Action::SyncAnyway if crate::shell::actions::EngineActions::sync_anyway(&*self.live).is_err() => {
+                log("the flyout could not ask the engine to sync anyway");
             }
             Action::TryAgain => {
                 let mut read = self.storage.lock().unwrap_or_else(PoisonError::into_inner);
