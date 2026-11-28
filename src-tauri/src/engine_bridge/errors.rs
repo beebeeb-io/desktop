@@ -628,11 +628,22 @@ pub(crate) fn error_http_status(error: &anyhow::Error) -> Option<u16> {
     if init_conflict_class(error).is_some() {
         return Some(409);
     }
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
-        .and_then(reqwest::Error::status)
-        .map(|status| status.as_u16())
+    // The API client's own refusals carry no `reqwest::Error` below them: a non-2xx answer is
+    // `HttpStatus`, and a 429 policy refusal is `RateLimited`. The first cause that names a
+    // status answers.
+    error.chain().find_map(|cause| {
+        if let Some(api) = cause.downcast_ref::<crate::api_client::DesktopApiError>() {
+            match api {
+                crate::api_client::DesktopApiError::HttpStatus { status, .. } => return Some(status.as_u16()),
+                crate::api_client::DesktopApiError::RateLimited { .. } => return Some(429),
+                _ => {}
+            }
+        }
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .and_then(reqwest::Error::status)
+            .map(|status| status.as_u16())
+    })
 }
 
 /// A guarded queue write matched no row: the op moved since its claim (spec §8.7 S2, S4).
@@ -674,7 +685,13 @@ pub fn classify_operation_error(error: &str) -> OperationFailureClass {
     // on our own descriptive errors, none of which live past `" for url ("`.
     let message = error.split(" for url (").next().unwrap_or(error);
     let lower = message.to_ascii_lowercase();
-    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid token") {
+    // A 429 is decided first, by its status line (`HTTP 429 Too Many Requests: …`, or reqwest's
+    // `(429 Too Many Requests)`): waiting cures it whatever the rest of the text says. A policy
+    // refusal reads "temporarily blocked", which holds "locked", and its body or its seconds
+    // could hold any other word matched below.
+    if lower.contains("429 too many requests") {
+        OperationFailureClass::Retryable
+    } else if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid token") {
         OperationFailureClass::Auth
     } else if lower.contains("quota") || lower.contains("insufficient storage") || lower.contains("storage limit") {
         OperationFailureClass::Quota
@@ -893,5 +910,90 @@ mod tests {
         }));
         assert!(engine_cause::<StagedCopyGone>(&error).is_none());
         assert!(engine_cause::<FinderStagingUnavailable>(&error).is_none());
+    }
+
+    fn too_many_requests(snippet: &str) -> anyhow::Error {
+        anyhow::Error::new(crate::api_client::DesktopApiError::HttpStatus {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            snippet: snippet.into(),
+        })
+    }
+
+    fn rate_limited(retry_after: Option<u64>) -> anyhow::Error {
+        anyhow::Error::new(crate::api_client::DesktopApiError::RateLimited {
+            banned: retry_after.is_none(),
+            retry_after,
+        })
+    }
+
+    /// A 429 the API client hands back typed (no `reqwest::Error` below it) still answers its
+    /// status, bare, under context and inside [`EngineError`].
+    #[test]
+    fn error_http_status_reads_the_api_clients_own_refusals() {
+        assert_eq!(error_http_status(&too_many_requests("slow down")), Some(429));
+        assert_eq!(error_http_status(&rate_limited(Some(120))), Some(429));
+        assert_eq!(error_http_status(&rate_limited(None)), Some(429));
+        assert_eq!(
+            error_http_status(&rate_limited(Some(120)).context("upload chunk")),
+            Some(429)
+        );
+        let boxed = anyhow::Error::new(EngineError::Api(too_many_requests("slow down")));
+        assert_eq!(error_http_status(&boxed), Some(429));
+        let not_found = anyhow::Error::new(crate::api_client::DesktopApiError::HttpStatus {
+            status: reqwest::StatusCode::NOT_FOUND,
+            snippet: String::new(),
+        });
+        assert_eq!(error_http_status(&not_found), Some(404));
+    }
+
+    /// A 429 on a File Provider write is transient: it never uses up the write's attempts.
+    #[test]
+    fn a_429_on_a_finder_write_is_transient() {
+        for error in [
+            too_many_requests("slow down"),
+            rate_limited(Some(120)),
+            rate_limited(None),
+            rate_limited(Some(401)),
+        ] {
+            let class = classify_operation_error(&format!("{error:#}"));
+            assert_eq!(class, OperationFailureClass::Retryable, "{error:#}");
+            assert!(finder_write_failure_is_transient(class, &error), "{error:#}");
+        }
+        // A status waiting does not cure is still counted.
+        let gone = anyhow::Error::new(crate::api_client::DesktopApiError::HttpStatus {
+            status: reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            snippet: String::new(),
+        });
+        assert!(!finder_write_failure_is_transient(
+            OperationFailureClass::Retryable,
+            &gone
+        ));
+    }
+
+    /// A policy refusal's "temporarily blocked" holds "locked"; it retries, it never pauses the
+    /// op as locked. Nor does a 429 whose body names a word another class matches.
+    #[test]
+    fn a_429_is_retryable_whatever_its_text() {
+        let blocked = rate_limited(Some(120)).to_string();
+        assert!(blocked.contains("blocked"), "{blocked}");
+        assert_eq!(classify_operation_error(&blocked), OperationFailureClass::Retryable);
+        assert_eq!(
+            classify_operation_error(&rate_limited(None).to_string()),
+            OperationFailureClass::Retryable
+        );
+        for snippet in [
+            "account locked out",
+            "quota window",
+            "forbidden for now",
+            "unauthorized burst",
+        ] {
+            assert_eq!(
+                classify_operation_error(&too_many_requests(snippet).to_string()),
+                OperationFailureClass::Retryable,
+                "{snippet}"
+            );
+        }
+        // The lock itself still reads as locked.
+        assert_eq!(classify_operation_error("vault locked"), OperationFailureClass::Locked);
     }
 }
