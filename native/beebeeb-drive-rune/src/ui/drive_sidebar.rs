@@ -6,7 +6,6 @@ use crate::frames::files::source::Account;
 use crate::shell::app::{Event, Route, Screen, Section, SettingsPane};
 use crate::shell::host;
 use crate::theme::icons;
-use crate::theme::scale;
 use crate::theme::tokens::{radius, type_, Theme};
 use crate::State;
 use rune::{col, el, row, El};

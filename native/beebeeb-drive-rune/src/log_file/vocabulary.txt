@@ -1,6 +1,6 @@
+!
 # The words of every string literal and field name at the engine's and this crate's tracing calls, one per line,
 # sorted, lowercase. A test (vocabulary_sync.rs) fails, naming the words, when a log call's word is missing here.
-!
 $home
 +
 0x
@@ -302,6 +302,7 @@ disagreeing
 discard
 discarded
 disk
+dismissed
 dispatch
 dispatched
 dnxhd
@@ -1161,6 +1162,7 @@ trigger
 true_size_bytes
 trying
 ttl
+turn-off
 turned
 turned_off
 type
