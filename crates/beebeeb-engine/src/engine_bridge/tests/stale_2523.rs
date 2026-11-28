@@ -133,6 +133,31 @@ async fn stale_2523_a_copy_with_a_change_is_left_alone_and_parks_as_before() {
     assert_eq!(std::fs::read(&local).unwrap(), b"edited on this PC, not seen yet");
 }
 
+/// A copy with a change is reported once: the next tick's pass neither counts it again nor reads its bytes again
+/// (the log said `changed=2` every 30 s for ever), until the copy itself changes.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[tokio::test]
+async fn stale_copies_a_change_seen_once_is_not_counted_or_read_again_on_the_next_tick() {
+    let master_key = [235u8; 32];
+    let file = "23500000-0000-4000-8000-000000000001";
+    let (_dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+    std::fs::write(&local, b"edited on this PC, not seen yet").unwrap();
+    regression_1640_web_saves(&server, master_key, file, b"edited on the web");
+    sync_tick_outcome(&bridge, &sync_root).await.unwrap();
+    let first = bridge.refresh_stale_copies(&sync_root).unwrap();
+    assert_eq!(first.changed, 1, "seen once");
+    let second = bridge.refresh_stale_copies(&sync_root).unwrap();
+    assert_eq!(
+        (second.changed, second.later),
+        (0, 0),
+        "a settled change is not counted again"
+    );
+    std::fs::write(&local, b"edited again, longer than before").unwrap();
+    let third = bridge.refresh_stale_copies(&sync_root).unwrap();
+    assert_eq!(third.changed, 1, "a copy that changed again is looked at again");
+    drop(server);
+}
+
 /// The hydrate the pass queued meets a change made after the pass checked the bytes, before the download started:
 /// refused, the change keeps its bytes, and the re-download is dropped (never retried over it).
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]

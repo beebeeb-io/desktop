@@ -253,7 +253,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot 0.12.5",
  "percent-encoding",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -534,7 +534,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "beebeeb-api"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=a5176f974649bf6c69000188b982898b216046a1#a5176f974649bf6c69000188b982898b216046a1"
+source = "git+https://github.com/beebeeb-io/core?rev=9b3219cf415c553d50cfb8a93f886c2bd0d06332#9b3219cf415c553d50cfb8a93f886c2bd0d06332"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -547,7 +547,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-backup"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=a5176f974649bf6c69000188b982898b216046a1#a5176f974649bf6c69000188b982898b216046a1"
+source = "git+https://github.com/beebeeb-io/core?rev=9b3219cf415c553d50cfb8a93f886c2bd0d06332#9b3219cf415c553d50cfb8a93f886c2bd0d06332"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -559,7 +559,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-client"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=a5176f974649bf6c69000188b982898b216046a1#a5176f974649bf6c69000188b982898b216046a1"
+source = "git+https://github.com/beebeeb-io/core?rev=9b3219cf415c553d50cfb8a93f886c2bd0d06332#9b3219cf415c553d50cfb8a93f886c2bd0d06332"
 dependencies = [
  "base64 0.23.1",
  "beebeeb-api",
@@ -579,7 +579,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-core"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=a5176f974649bf6c69000188b982898b216046a1#a5176f974649bf6c69000188b982898b216046a1"
+source = "git+https://github.com/beebeeb-io/core?rev=9b3219cf415c553d50cfb8a93f886c2bd0d06332#9b3219cf415c553d50cfb8a93f886c2bd0d06332"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -722,7 +722,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-sync"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=a5176f974649bf6c69000188b982898b216046a1#a5176f974649bf6c69000188b982898b216046a1"
+source = "git+https://github.com/beebeeb-io/core?rev=9b3219cf415c553d50cfb8a93f886c2bd0d06332#9b3219cf415c553d50cfb8a93f886c2bd0d06332"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -740,7 +740,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-transfer"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=a5176f974649bf6c69000188b982898b216046a1#a5176f974649bf6c69000188b982898b216046a1"
+source = "git+https://github.com/beebeeb-io/core?rev=9b3219cf415c553d50cfb8a93f886c2bd0d06332#9b3219cf415c553d50cfb8a93f886c2bd0d06332"
 dependencies = [
  "beebeeb-core",
  "beebeeb-types",
@@ -755,9 +755,10 @@ dependencies = [
 [[package]]
 name = "beebeeb-types"
 version = "0.3.0"
-source = "git+https://github.com/beebeeb-io/core?rev=a5176f974649bf6c69000188b982898b216046a1#a5176f974649bf6c69000188b982898b216046a1"
+source = "git+https://github.com/beebeeb-io/core?rev=9b3219cf415c553d50cfb8a93f886c2bd0d06332#9b3219cf415c553d50cfb8a93f886c2bd0d06332"
 dependencies = [
  "serde",
+ "uuid",
 ]
 
 [[package]]
@@ -1516,7 +1517,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1748,7 +1749,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2635,7 +2636,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -4044,7 +4045,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4661,7 +4662,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5227,7 +5228,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5285,7 +5286,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5939,7 +5940,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7002,7 +7003,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7364,7 +7365,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

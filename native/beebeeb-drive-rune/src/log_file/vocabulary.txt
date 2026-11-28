@@ -28,6 +28,7 @@ accounts
 ack
 acknowledged
 acquire
+action
 active
 activity
 add
@@ -116,6 +117,7 @@ belong
 belongs
 beside
 best-effort
+between
 bind
 binding
 bit
@@ -148,6 +150,7 @@ candidate
 candidates
 cannot
 cap
+capped
 category
 cf
 cf_callback_info
@@ -286,12 +289,16 @@ differ
 different
 differing
 differs
+digest
+digest_requests
+digests
 dir
 direct
 directory
 dirs
 dirs_listed
 disabled
+disagreeing
 discard
 discarded
 disk
@@ -306,6 +313,7 @@ download
 downloaded
 downloading
 drained
+drift
 driver
 dropped
 dropping
@@ -402,6 +410,9 @@ folded
 folder
 folder_id
 folders
+folders_changed
+folders_from_cache
+folders_listed
 following
 follows
 for
@@ -482,6 +493,7 @@ in
 in-flight
 in-progress
 in-sync
+in_flux
 incoming
 index
 indexed_file_count
@@ -550,6 +562,8 @@ list_by_status
 listed
 listening
 listing
+listing_requests
+lists
 live
 load
 local
@@ -722,6 +736,7 @@ ownership
 pace
 paced
 page
+pages
 panic
 panicked
 parallel
@@ -844,6 +859,7 @@ read-only
 read_ms
 readable
 reader
+reading
 reads
 real
 reaps
@@ -916,6 +932,7 @@ resolving
 rest
 restart
 restarting
+restarts
 restore
 restore_bookkeeping_failed
 restored
@@ -1016,6 +1033,7 @@ size-resolve
 size_bytes
 sizes
 skipped
+skipped_gone
 skipping
 slides
 small

@@ -11,6 +11,7 @@
 //!   merged) and this device's folder (core's identity rule, the device manifest written on adoption and creation).
 
 pub mod device;
+pub mod digest_cache;
 pub mod host;
 pub mod kfm;
 pub mod layout;

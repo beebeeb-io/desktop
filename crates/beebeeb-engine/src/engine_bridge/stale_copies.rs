@@ -117,7 +117,14 @@ impl EngineBridge {
                 pass.later += 1;
                 continue;
             };
+            // A copy already seen as a change, untouched since: not looked at, not counted, not read again.
+            let seen = ContentFingerprint::of(&place).ok();
+            if seen.is_some() && settled_change(&copy, &place) == seen {
+                continue;
+            }
+            let changed_before = pass.changed;
             self.refresh_stale_copy(&copy, &place, &mut pass)?;
+            remember_change(&copy, &place, seen.filter(|_| pass.changed > changed_before));
         }
         #[cfg(target_os = "windows")]
         self.wipe_stale_ranges(sync_root, &mut pass)?;
@@ -297,6 +304,38 @@ mod signalled {
 
     pub(super) fn remember(db: &Arc<StateDb>, new: &[(String, i64)]) {
         of(db, |known| known.extend(new.iter().cloned()));
+    }
+}
+
+/// Copies the pass saw as a change: kept in the rule's set until the change is sent, so without this memory every
+/// tick read them again and counted them again. The fingerprint is the copy's own (size, times, identity), and the
+/// row's version and agreed hash are part of the key: a copy that changed, or a row that moved, is looked at again.
+type SeenChange = (ContentFingerprint, i64, String);
+static SEEN_CHANGES: std::sync::OnceLock<std::sync::Mutex<HashMap<(String, PathBuf), SeenChange>>> =
+    std::sync::OnceLock::new();
+
+fn settled_change(copy: &crate::state_db::StaleCopy, place: &Path) -> Option<ContentFingerprint> {
+    let map = SEEN_CHANGES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let (fingerprint, version, hash) = map.get(&(copy.file_id.clone(), place.to_path_buf()))?;
+    (*version == copy.current_version && *hash == copy.local_hash).then_some(*fingerprint)
+}
+
+fn remember_change(copy: &crate::state_db::StaleCopy, place: &Path, seen: Option<ContentFingerprint>) {
+    let mut map = SEEN_CHANGES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let key = (copy.file_id.clone(), place.to_path_buf());
+    match seen {
+        Some(fingerprint) => {
+            map.insert(key, (fingerprint, copy.current_version, copy.local_hash.clone()));
+        }
+        None => {
+            map.remove(&key);
+        }
     }
 }
 

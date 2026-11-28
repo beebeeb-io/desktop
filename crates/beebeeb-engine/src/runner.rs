@@ -712,6 +712,7 @@ async fn run(
                 let hold = power_hold(identity, user_paused);
                 let mode = RunMode::of_flag(user_paused || hold.is_some());
                 if mode.is_paused() {
+                    backup_scheduler.pause();
                     if awaiting_first_list {
                         retry_marks_step(&sync_root).await;
                     }
