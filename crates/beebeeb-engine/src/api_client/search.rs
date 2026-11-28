@@ -49,13 +49,14 @@ impl ApiClient {
         }
         let url = self.search_shard_url(shard.bucket, shard.page);
         let resp = self
-            .send_with_retry(|| {
+            .send_paced(&self.client, || {
                 self.client
                     .put(&url)
                     .header("Content-Type", "application/octet-stream")
                     .body(shard.blob.clone())
             })
             .await?;
+        let resp = Self::check_status(resp).await?;
         Ok(resp.json::<SearchShardRef>().await?)
     }
 

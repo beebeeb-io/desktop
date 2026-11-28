@@ -20,13 +20,15 @@ impl ApiClient {
         blurhash: Option<&str>,
     ) -> anyhow::Result<()> {
         let url = self.thumbnail_upload_url(FileId::new(file_id), variant, blurhash);
-        self.send_with_retry(|| {
-            self.client
-                .put(&url)
-                .header("Content-Type", "application/octet-stream")
-                .body(encrypted.to_vec())
-        })
-        .await?;
+        let resp = self
+            .send_paced(&self.client, || {
+                self.client
+                    .put(&url)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(encrypted.to_vec())
+            })
+            .await?;
+        Self::check_status(resp).await?;
         Ok(())
     }
 

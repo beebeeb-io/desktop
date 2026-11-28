@@ -399,7 +399,7 @@ impl ApiClient {
         http: &reqwest::Client,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> ApiResult<reqwest::Response> {
-        Self::check_status(self.send_paced(http, build).await?).await
+        Self::check_status(self.send_under_pause(http, build, true).await?).await
     }
 
     /// One API request under the shared 429 pause, for a caller with status branches of its own (404 = absent, a
@@ -410,10 +410,26 @@ impl ApiClient {
     /// `Retry-After` header and the body's `retry_after`. A GET (or a write with an idempotency key) is then sent
     /// again, up to `MAX_429_RETRIES` times; any other request is sent exactly once and its 429 is the error
     /// (`DesktopApiError::HttpStatus`), as is the last 429 of a request that was sent again.
+    ///
+    /// Only the 429 is handled here. A connection that fails, a timeout and a 502/503/504 come back at once and are
+    /// not sent again: these callers were single sends before they waited on the pause, and the layers above them
+    /// (the sync and transfer retries, the adapter's own read-again) already decide what a failure means.
     pub(super) async fn send_paced(
         &self,
         http: &reqwest::Client,
         build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> ApiResult<reqwest::Response> {
+        self.send_under_pause(http, build, false).await
+    }
+
+    /// The send loop behind [`Self::send_paced`] and [`Self::send_with_retry_on`]. `transport_retries` adds the
+    /// bounded resend after a connect failure, a timeout or a 502/503/504 (`transport_retry_decision`): the typed
+    /// data-layer wrappers have it, the engine's own calls do not.
+    async fn send_under_pause(
+        &self,
+        http: &reqwest::Client,
+        build: impl Fn() -> reqwest::RequestBuilder,
+        transport_retries: bool,
     ) -> ApiResult<reqwest::Response> {
         let mut attempt: u32 = 0;
         // Transport/5xx retries are counted apart from 429 retries; each class is bounded on its own.
@@ -433,12 +449,14 @@ impl ApiClient {
                     if let Some(old) = held.take() {
                         return Ok(old);
                     }
-                    if let Some(wait) = transport_retry_decision(
-                        transport_attempt,
-                        e.is_connect(),
-                        e.is_timeout() || e.is_request(),
-                        idempotent,
-                    ) {
+                    if transport_retries
+                        && let Some(wait) = transport_retry_decision(
+                            transport_attempt,
+                            e.is_connect(),
+                            e.is_timeout() || e.is_request(),
+                            idempotent,
+                        )
+                    {
                         tokio::time::sleep(wait).await;
                         transport_attempt += 1;
                         continue;
@@ -448,7 +466,8 @@ impl ApiClient {
                 }
             };
             self.link.note_status(resp.status(), now_unix_secs() as i64);
-            if matches!(resp.status().as_u16(), 502..=504)
+            if transport_retries
+                && matches!(resp.status().as_u16(), 502..=504)
                 && let Some(wait) = transport_retry_decision(transport_attempt, false, true, idempotent)
             {
                 tokio::time::sleep(wait).await;
