@@ -65,6 +65,133 @@ fn header_secs_parses_numeric_and_rejects_dates() {
     assert_eq!(header_secs(&headers, "nope"), None);
 }
 
+// ── shared 429 pause (rate_limit_*) ────────────────────────────────────────
+
+const TOO_MANY: &str =
+    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+
+/// Answers the first request 429 (`Retry-After: 1`) and every later one 200. Returns the base URL and the arrival time
+/// of every request.
+fn refuse_once_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let arrivals = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = arrivals.clone();
+    std::thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            let first = {
+                let mut log = log.lock().unwrap();
+                log.push(std::time::Instant::now());
+                log.len() == 1
+            };
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(if first { TOO_MANY } else { OK_JSON }.as_bytes());
+            });
+        }
+    });
+    (url, arrivals)
+}
+
+#[test]
+fn rate_limit_burst_of_gets_sends_at_most_one_request_during_the_pause() {
+    let (base, arrivals) = refuse_once_server();
+    let client = link_client(base).with_rate_limits(Duration::from_millis(300), Duration::from_secs(5));
+    run_async(async {
+        // The first GET meets the 429 ...
+        let first = client.get_typed::<serde_json::Value>("/x");
+        let burst = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            // ... and the other nine are issued while the pause (at least the 1 s `Retry-After`) runs.
+            futures_util::future::join_all((0..9).map(|_| client.get_typed::<serde_json::Value>("/x"))).await
+        };
+        let (first, rest) = tokio::join!(first, burst);
+        first.expect("the refused GET is sent again and succeeds");
+        for r in rest {
+            r.expect("a GET issued during the pause waits and succeeds");
+        }
+    });
+    let arrivals = arrivals.lock().unwrap();
+    let t0 = arrivals[0];
+    let during = arrivals
+        .iter()
+        .skip(1)
+        .filter(|at| at.duration_since(t0) < Duration::from_millis(950))
+        .count();
+    assert!(during <= 1, "{during} requests reached the server during the pause");
+    assert_eq!(arrivals.len(), 11, "one refusal, ten answered");
+}
+
+#[test]
+fn rate_limit_post_that_is_refused_is_not_resent() {
+    let (base, arrivals) = refuse_once_server();
+    let client = link_client(base.clone());
+    let url = format!("{base}/x");
+    let err = run_async(client.send_with_retry(|| client.client.post(&url))).unwrap_err();
+    assert!(err.to_string().starts_with("HTTP 429"), "{err}");
+    assert_eq!(arrivals.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn rate_limit_write_with_an_idempotency_key_is_resent_after_the_pause() {
+    let (base, arrivals) = refuse_once_server();
+    let client = link_client(base.clone()).with_rate_limits(Duration::from_millis(50), Duration::from_secs(5));
+    let url = format!("{base}/x");
+    run_async(client.send_with_retry(|| client.client.put(&url).header("Idempotency-Key", "k-1")))
+        .expect("an idempotency key makes the repeat safe");
+    assert_eq!(arrivals.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn rate_limit_wait_doubles_from_the_floor_honours_retry_after_and_is_capped() {
+    let (floor, cap) = (RATE_FLOOR, RATE_CAP);
+    let no_jitter = |streak, hint| rate_limit_wait(streak, hint, floor, cap, 0.0);
+    assert_eq!(no_jitter(0, None), Duration::from_secs(2));
+    assert_eq!(no_jitter(1, None), Duration::from_secs(4));
+    assert_eq!(no_jitter(3, None), Duration::from_secs(16));
+    assert_eq!(no_jitter(30, None), cap, "doubling stops at the cap");
+    assert_eq!(
+        no_jitter(0, Some(10)),
+        Duration::from_secs(10),
+        "Retry-After above the floor"
+    );
+    assert_eq!(no_jitter(0, Some(1)), Duration::from_secs(2), "the floor still holds");
+    assert_eq!(no_jitter(0, Some(3600)), cap);
+    // Full jitter spreads a wait over base..2*base and never shortens it or passes the cap.
+    assert_eq!(rate_limit_wait(0, None, floor, cap, 1.0), Duration::from_secs(4));
+    assert_eq!(rate_limit_wait(5, None, floor, cap, 1.0), cap);
+    assert_eq!(rate_limit_wait(0, Some(30), floor, cap, 0.5), Duration::from_secs(45));
+}
+
+#[test]
+fn rate_limit_refusals_of_one_burst_count_once() {
+    let pause = RatePause::with_limits(Duration::from_secs(2), Duration::from_secs(60));
+    run_async(async {
+        for _ in 0..10 {
+            pause.refused(None);
+        }
+    });
+    assert_eq!(pause.state.lock().unwrap().streak, 1);
+    pause.answered();
+    assert_eq!(pause.state.lock().unwrap().streak, 0);
+}
+
+#[test]
+fn rate_limit_retries_after_429_only_for_safe_requests() {
+    let c = reqwest::Client::new();
+    let req = |b: reqwest::RequestBuilder| b.build().unwrap();
+    assert!(retries_after_429(&req(c.get("http://h/x"))));
+    for b in [c.post("http://h/x"), c.put("http://h/x"), c.delete("http://h/x")] {
+        assert!(!retries_after_429(&req(b)));
+    }
+    assert!(retries_after_429(&req(c
+        .post("http://h/x")
+        .header("Idempotency-Key", "k"))));
+}
+
 // ── transport / 5xx retries on a fake server ───────────────────────────────
 
 /// Serve each raw response in turn, one per connection (`None` = hang up), then stop. Returns the base URL
@@ -258,5 +385,24 @@ fn a_snapshot_whose_body_stalls_fails_in_bounded_time() {
         started.elapsed() < Duration::from_secs(5),
         "bounded: {:?}",
         started.elapsed()
+    );
+}
+
+#[test]
+fn get_file_rides_out_a_5xx_and_records_a_401() {
+    let (base, hits) = scripted_server(vec![Some(UNAVAILABLE), Some(OK_JSON)]);
+    let client = link_client(base);
+    run_async(client.get_file("f1")).expect("get_file retries a 503 like every typed GET");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    let base = one_shot_server(Some(
+        "HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\nno",
+    ));
+    let client = link_client(base);
+    let err = run_async(client.get_file("f1")).unwrap_err();
+    assert!(err.to_string().contains("401"), "{err}");
+    assert!(
+        client.link().snapshot().last_ok_at.is_some(),
+        "the 401 answer reaches the link monitor"
     );
 }

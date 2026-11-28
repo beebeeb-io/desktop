@@ -74,6 +74,9 @@ pub use client::ApiClient;
 mod auth;
 // LD-0113: the Backups root endpoints.
 mod backups;
+// Folder digests v1: `GET /api/v1/folder-digests`.
+mod digests;
+pub use digests::DigestsAnswer;
 mod files;
 mod search;
 mod shares;
@@ -254,6 +257,7 @@ mod tests {
         ApiClient::new(base, "tok".into(), [0u8; 32])
     }
 
+    mod bearer;
     mod errors;
     mod ids;
     mod link;

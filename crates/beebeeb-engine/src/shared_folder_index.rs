@@ -1,6 +1,6 @@
 //! Shared-folder index repair. All sealing and merging of encrypted pages uses
 //! core; the HTTP adapter sends only opaque bytes with the observed CAS version.
-use crate::{engine_bridge::EngineBridge, owner_keys};
+use crate::{engine_bridge::EngineBridge, owner_keys, owner_keys::PassInvites};
 use beebeeb_core::{
     kdf::MasterKey,
     search_index::{EncryptedShard, SearchIndex, ShardKeySource},
@@ -27,6 +27,16 @@ impl IndexRepairReport {
 
 impl EngineBridge {
     pub async fn repair_shared_folder_index(&self, folder_id: &str) -> anyhow::Result<IndexRepairReport> {
+        self.repair_shared_folder_index_in(folder_id, &PassInvites::default())
+            .await
+    }
+
+    /// One folder of a pass: `invites` is the pass's copy of the sent invites, read once for all its folders.
+    pub(crate) async fn repair_shared_folder_index_in(
+        &self,
+        folder_id: &str,
+        invites: &PassInvites,
+    ) -> anyhow::Result<IndexRepairReport> {
         let scope = self.owner_key_scope();
         scope.check()?;
         let dirty = self.db().shared_index_dirty_revision(folder_id)?;
@@ -48,7 +58,7 @@ impl EngineBridge {
                 return Ok(IndexRepairReport::default());
             }
         }
-        let key = match self.shared_folder_custody_key(folder_id).await {
+        let key = match self.shared_folder_custody_key_in(folder_id, invites).await {
             Ok(key) => {
                 // The provisional deferral must not outlive a repair that got
                 // its key. `revive_deferred_shared_index` already removed it if

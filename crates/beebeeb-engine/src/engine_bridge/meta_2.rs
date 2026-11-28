@@ -735,6 +735,9 @@ pub(super) fn held_only_for_kept(db: &StateDb, sync_root: &Path, dir: &Path, dep
     true
 }
 
+/// How far past the server's own time a row's time must sit before it is read as this PC's op-echo stamp.
+const STAMPED_NOW_GAP_SECS: i64 = 86_400;
+
 /// Apply one server metadata row during [`sync_tick`]'s recursive walk,
 /// running the same three-way decision the flat sweep used (new → cloud_only;
 /// local + remote-moved → conflict check; otherwise refresh metadata). On
@@ -868,6 +871,22 @@ pub(super) fn process_metadata_row(
                     // dc-136c: a row whose name could not be read is applied again from every list (the keys may
                     // have arrived since); its unchanged times say nothing about its name.
                     _ if remote_updated <= entry.remote_updated_at && !bridge.db().name_unreadable(file_id)? => {
+                        // An op echo stamps this PC's clock as the row's time (see `synthesize_op_row`), which is
+                        // later than the server's own. The snapshot is the server's word: a row whose time is that
+                        // stamp (no local write moved `modified_at` off it) takes the server's time, so the window
+                        // shows the real date, not "Just now".
+                        // Only a stamp days away from the server's time is corrected: a snapshot at a slightly
+                        // older time is the time rule's skip and leaves the row as it is.
+                        if remote_updated > 0
+                            && f["is_uploading"].as_bool() != Some(true)
+                            && entry.remote_updated_at - remote_updated > STAMPED_NOW_GAP_SECS
+                            && entry.modified_at == entry.remote_updated_at
+                        {
+                            let mut corrected = entry.clone();
+                            corrected.remote_updated_at = remote_updated;
+                            corrected.modified_at = remote_updated;
+                            bridge.db().upsert_file(&corrected)?;
+                        }
                         return Ok(Some((entry.path, entry.item_kind)));
                     }
                     _ => {}
@@ -909,6 +928,11 @@ pub(super) fn process_metadata_row(
 #[cfg(test)]
 #[path = "restore_elsewhere_tests.rs"]
 mod restore_elsewhere_tests;
+
+// dc-re-f: a row an op echo stamped "now" takes the server's date from the snapshot.
+#[cfg(test)]
+#[path = "just_now_dates_tests.rs"]
+mod just_now_dates_tests;
 
 // dc-136c: which server names are readable, and the retry of the unreadable ones when the keys change.
 #[cfg(test)]

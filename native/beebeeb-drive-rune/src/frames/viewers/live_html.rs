@@ -162,10 +162,8 @@ impl Conv {
                     self.pre = Some(String::new());
                 }
             }
-            "br" => {
-                if !close {
-                    self.piece("\n".into());
-                }
+            "br" if !close => {
+                self.piece("\n".into());
             }
             "strong" | "b" => self.bold = if close { self.bold.saturating_sub(1) } else { self.bold + 1 },
             "em" | "i" => self.italic = if close { self.italic.saturating_sub(1) } else { self.italic + 1 },

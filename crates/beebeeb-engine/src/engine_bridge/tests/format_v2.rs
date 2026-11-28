@@ -1002,13 +1002,13 @@ async fn a_failed_publish_after_complete_keeps_the_completion_and_is_retried_alo
 /// falls back to the local record.
 /// Mutant: the fallback on every 4xx (the first attempt then inits on a possibly stale record).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_row_read_that_was_rate_limited_fails_the_attempt_before_its_init() {
+async fn a_row_read_the_server_fails_fails_the_attempt_before_its_init() {
     let master_key = [186u8; 32];
     let (dir, sync_root, server, bridge) = rule3_setup(master_key);
     server.state.lock().unwrap().serve_downloads = true;
     let id = created(&bridge, &server, dir.path(), &sync_root, b"version one").await;
 
-    server.state.lock().unwrap().refuse_row_read_once = Some("429 Too Many Requests");
+    server.state.lock().unwrap().refuse_row_read_once = Some("500 Internal Server Error");
     fp_save(
         &bridge,
         dir.path(),

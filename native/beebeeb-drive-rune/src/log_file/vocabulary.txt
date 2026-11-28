@@ -1,6 +1,6 @@
-!
 # The words of every string literal and field name at the engine's and this crate's tracing calls, one per line,
 # sorted, lowercase. A test (vocabulary_sync.rs) fails, naming the words, when a log call's word is missing here.
+!
 $home
 +
 0x
@@ -28,6 +28,7 @@ accounts
 ack
 acknowledged
 acquire
+action
 activity
 add
 added
@@ -63,6 +64,7 @@ apply
 approved
 archived_legacy_state_dir
 are
+arrived
 as
 aside
 ask
@@ -71,6 +73,7 @@ asked_ms
 asking
 at
 at_ms
+at_root
 atomic
 attempt
 attempting
@@ -111,6 +114,7 @@ belong
 belongs
 beside
 best-effort
+between
 bind
 binding
 bit
@@ -118,6 +122,7 @@ bitmap
 blobs
 bootstrapping
 both
+branch
 breadcrumb
 bridge
 brought
@@ -141,6 +146,7 @@ candidate
 candidates
 cannot
 cap
+capped
 category
 cf
 cf_callback_info
@@ -251,6 +257,8 @@ decline
 declined
 decoded
 decoder
+decrypt
+decrypt_ms
 decrypted
 deferred
 degraded
@@ -264,6 +272,7 @@ descendant
 descending
 desktop
 dest
+detail
 device
 device_folder_id
 device_id
@@ -272,12 +281,16 @@ differ
 different
 differing
 differs
+digest
+digest_requests
+digests
 dir
 direct
 directory
 dirs
 dirs_listed
 disabled
+disagreeing
 discard
 discarded
 disk
@@ -291,6 +304,7 @@ download
 downloaded
 downloading
 drained
+drift
 driver
 dropped
 dropping
@@ -341,6 +355,7 @@ exclude
 exclusion
 existing
 exists
+exit
 exited
 expires_in
 explorer
@@ -354,6 +369,7 @@ falling
 feed
 fetch
 fetch_data_callback
+fetch_ms
 fetched
 fetches
 file
@@ -371,6 +387,7 @@ finder
 finished
 fired
 first
+first_ids
 first_pass
 flac
 flagged
@@ -381,6 +398,9 @@ folded
 folder
 folder_id
 folders
+folders_changed
+folders_from_cache
+folders_listed
 following
 follows
 for
@@ -405,6 +425,7 @@ further
 fuse
 gap
 gate
+generated
 generation
 getpwuid_r
 getthumbnail
@@ -458,9 +479,12 @@ in
 in-flight
 in-progress
 in-sync
+in_flux
 incoming
 index
 indexed_file_count
+ingest
+ingest_ms
 init
 initialized
 inside
@@ -523,6 +547,8 @@ list_by_status
 listed
 listening
 listing
+listing_requests
+lists
 live
 load
 local
@@ -574,6 +600,7 @@ missing
 mixed
 mode
 modifier
+more
 move
 moved
 moved_files
@@ -678,7 +705,9 @@ own-tree
 owner
 ownership
 pace
+paced
 page
+pages
 panic
 panicked
 parameters
@@ -693,6 +722,8 @@ pass
 passes
 password
 path
+paths
+pause
 paused
 payload
 pc
@@ -735,6 +766,7 @@ pre-upload
 presentation_read_failed
 presented
 preserving
+preview
 previews
 previous
 primary
@@ -764,6 +796,7 @@ provisional
 provisional_id
 prune
 prune_absent
+prune_ms
 pruned
 pulling
 pump
@@ -786,6 +819,7 @@ re-download
 re-materialise
 re-snapshot
 reach
+reached
 reaches
 reactivation
 read
@@ -793,6 +827,7 @@ read-only
 read_ms
 readable
 reader
+reading
 reads
 real
 reaps
@@ -849,6 +884,7 @@ requester
 requester_image
 requester_pid
 requesting
+requests
 required_length
 required_offset
 reset
@@ -861,6 +897,7 @@ resolving
 rest
 restart
 restarting
+restarts
 restore
 restore_bookkeeping_failed
 restored
@@ -905,6 +942,7 @@ scheduling
 scope
 sealed-key
 search
+search-index
 seeded
 seeding
 seen
@@ -956,7 +994,9 @@ size-resolve
 size_bytes
 sizes
 skipped
+skipped_gone
 skipping
+slides
 small
 smart
 snapshot
@@ -1039,6 +1079,7 @@ their
 theirs
 them
 there
+these
 they
 this
 thread
@@ -1065,6 +1106,7 @@ took
 top-level
 torn
 total
+total_ms
 transfer
 transfer_data
 transferred
@@ -1151,6 +1193,7 @@ was
 watch
 watcher
 watching
+way
 web
 went
 were
@@ -1165,6 +1208,7 @@ whose
 why
 will
 window
+window_secs
 windows
 wipe
 with

@@ -11,12 +11,14 @@
 //!   merged) and this device's folder (core's identity rule, the device manifest written on adoption and creation).
 
 pub mod device;
+pub mod digest_cache;
 pub mod host;
 pub mod kfm;
 pub mod layout;
 pub mod scheduler;
 pub mod sources;
 pub mod stop;
+pub mod tree_cache;
 
 use crate::backup_protect::{OwnBackupFolder, OwnBackups};
 use crate::state_db::StateDb;

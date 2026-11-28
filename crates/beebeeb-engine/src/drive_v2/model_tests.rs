@@ -591,3 +591,74 @@ fn drive_v2_sync_summary_phase() {
         (4, 3, 4, 3)
     );
 }
+
+/// system_files: desktop.ini / Thumbs.db rows already on the server are hidden from the listing, not deleted.
+#[test]
+fn system_files_are_hidden_from_listings_but_their_rows_stay() {
+    let f = fixture();
+    at(&f.db, "d1", "desktop.ini", None, false, true);
+    at(&f.db, "d2", "Thumbs.db", None, false, true);
+    at(&f.db, "keep", "report.pdf", None, false, true);
+    let listed: Vec<String> = model::list(&f.db, None, Sort::default(), false)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(listed, ["keep"]);
+    let (paged, total) = model::children_of(&f.db, None, Sort::default(), 0, 50).unwrap();
+    assert_eq!((paged.len(), total), (1, 1));
+    assert!(
+        f.db.get_file("d1").unwrap().is_some(),
+        "the row is hidden, never deleted"
+    );
+}
+
+/// Every HEIC/HEIF and camera RAW extension, in either case, maps to a mime the macOS ImageIO thumbnail decoder
+/// (native/beebeeb-drive-rune/src/engine_host/thumbs_mac.rs) accepts, and counts as a photo (Photos, the meter).
+#[test]
+fn raw_and_heic_names_get_the_mime_the_thumbnail_decoder_matches_and_count_as_photos() {
+    let table = [
+        ("heic", "image/heic"),
+        ("heif", "image/heif"),
+        ("dng", "image/x-adobe-dng"),
+        ("cr2", "image/x-canon-cr2"),
+        ("cr3", "image/x-canon-cr3"),
+        ("nef", "image/x-nikon-nef"),
+        ("arw", "image/x-sony-arw"),
+        ("raf", "image/x-fuji-raf"),
+        ("orf", "image/x-olympus-orf"),
+        ("rw2", "image/x-panasonic-rw2"),
+    ];
+    for (ext, mime) in table {
+        for name in [
+            format!("IMG_0001.{ext}"),
+            format!("IMG_0001.{}", ext.to_ascii_uppercase()),
+        ] {
+            assert_eq!(model::mime_for_name(&name), Some(mime), "{name}");
+            assert!(model::is_photo_or_video(&name), "{name} is a photo");
+            assert!(model::has_thumbnail(&name), "{name} has a thumbnail");
+            assert!(
+                matches!(
+                    model::storage_category(&format!("Camera/{name}"), &name, &[]),
+                    model::StorageCategory::Photos
+                ),
+                "{name} counts under Photos"
+            );
+        }
+    }
+    for name in ["notes.xyz", "raw.raw2", "photo.CRW3", "IMG_0001", ".cr2"] {
+        assert_eq!(model::mime_for_name(name), None, "{name} stays unknown");
+        assert!(!model::is_photo_or_video(name), "{name} is no photo");
+    }
+    assert_eq!(
+        model::mime_for_name("report.PDF"),
+        Some("application/pdf"),
+        "other extensions unchanged"
+    );
+    assert_eq!(
+        model::mime_for_name("clip.MOV"),
+        Some("video/quicktime"),
+        "other extensions unchanged"
+    );
+}

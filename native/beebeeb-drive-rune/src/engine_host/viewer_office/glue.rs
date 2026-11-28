@@ -141,6 +141,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             return state(ViewState::NoPreview(Reason::TooLarge));
         }
         let Some(helper) = (self.office.helper)() else {
+            crate::office_log::helper_not_started("not installed beside the app", "");
             return state(ViewState::Stopped { retried: true });
         };
         // Writable .docx / .xlsx / .pptx go to an editing session; everything else (read-only, no write right, an older

@@ -1,0 +1,12 @@
+# Wall-clock budget tests: kept out of the blocking PR gate, run by the non-blocking "Timing tests" job in ci.yml.
+# Each is marked #[ignore = "timing: ..."] in source. Format: <os> <crate dir> <test name filter>
+# os: linux or windows (the OS whose runner runs it). A new budget test is marked and listed here.
+linux crates/beebeeb-engine first_listing_of_42k_rows_is_whole_in_budget_and_reports_every_second
+linux crates/beebeeb-engine view_never_waits
+linux crates/beebeeb-engine batch_commits_once_open_max_time_whatever_its_rows
+windows crates/beebeeb-engine pre_operation_answer_p99_over_1000_deletes
+linux native/beebeeb-drive-rune budget_ten_thousand_lines
+linux native/beebeeb-drive-rune office_word_budget_a_caret_move_and_a_dirty_strip_fit_a_frame
+linux native/beebeeb-drive-rune office_sheets_budget_a_commit_at_the_cell_cap_fits_a_frame
+linux native/beebeeb-drive-rune office_sheets_budget_clone_and_frame_at_the_cell_cap_fit_a_frame
+linux native/beebeeb-drive-rune office_sheets_editing_keeps_the_frame_budget_at_the_cell_cap

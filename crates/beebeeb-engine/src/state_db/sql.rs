@@ -5,7 +5,7 @@ use super::*;
 /// R10 (spec 2026-10-06 §5.6): every table holding one account's data. `has_account_data` counts
 /// them and `clear_account_data` empties them. `every_table_is_classified_for_the_account_binding`
 /// fails when a new table is not listed here or in `DEVICE_TABLES`.
-pub(super) const ACCOUNT_TABLES: [&str; 27] = [
+pub(super) const ACCOUNT_TABLES: [&str; 29] = [
     "owned_key_records",
     "files",
     "operation_queue",
@@ -47,6 +47,10 @@ pub(super) const ACCOUNT_TABLES: [&str; 27] = [
     "backup_root",
     // Chunk format v2: the highest version counter this device wrote or authenticated per file (file ids): the account's.
     "file_version_counters",
+    // Folder digests (task 13): the server folder digests the sync drift check trusts (folder ids): the account's.
+    "remote_folder_digests",
+    // fd-18: the backups' folder digests and listings (folder ids, file ids, names): the account's.
+    "backup_digest_cache",
 ];
 
 /// Task 2191: a file row of unknown content (synced before task 1640: no agreed content and no
@@ -512,8 +516,8 @@ pub(super) fn record_file_change_conn<C: std::ops::Deref<Target = Connection>>(
     // The NEW parent is whatever the row says NOW. `parent_id` lives in the
     // files column (written by set_file_contract_state).
     let new_parent_id: Option<String> = conn
+        .prepare_cached("SELECT parent_id FROM files WHERE file_id = ?1")?
         .query_row(
-            "SELECT parent_id FROM files WHERE file_id = ?1",
             params![file_id],
             |row| row.get::<_, Option<String>>(0),
         )
@@ -529,21 +533,21 @@ pub(super) fn record_file_change_conn<C: std::ops::Deref<Target = Connection>>(
     // after asking File Provider to enumerate it — Finder received an empty
     // feed and missed every update.
     let recorded_at = now_secs();
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO fp_changes (seq, file_id, kind, old_parent_id, new_parent_id, recorded_at)
          VALUES (0, ?1, ?2, ?3, ?4, ?5)",
-        params![file_id, kind.as_str(), old_parent_id, new_parent_id, recorded_at],
-    )?;
+    )?
+    .execute(params![file_id, kind.as_str(), old_parent_id, new_parent_id, recorded_at])?;
     let seq = conn.last_insert_rowid();
-    conn.execute("UPDATE fp_changes SET seq = ?1 WHERE id = ?1", params![seq])?;
+    conn.prepare_cached("UPDATE fp_changes SET seq = ?1 WHERE id = ?1")?.execute(params![seq])?;
     // The anchor cursor tracks the log tip even before any consumer reads:
     // `list_file_changes` never rewinds it, so a poll that races a write
     // cannot lose changes.
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO fp_sync_anchor (domain_id, last_anchor) VALUES ('__default__', ?1)
          ON CONFLICT(domain_id) DO UPDATE SET last_anchor = MAX(last_anchor, excluded.last_anchor)",
-        params![seq],
-    )?;
+    )?
+    .execute(params![seq])?;
     Ok(())
 }
 
@@ -845,3 +849,4 @@ pub(super) fn has_table(conn: &Connection, table: &str) -> Result<bool> {
     let mut rows = stmt.query(params![table])?;
     Ok(rows.next()?.is_some())
 }
+

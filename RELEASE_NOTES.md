@@ -20,6 +20,24 @@
 - **Sign-out:** signing out clears what the app kept for your account on this PC.
 - **Window size:** the window stays inside your screen the first time you open it.
 - **Shared view:** the footer shows your own account and storage use.
+- **First load:** your file list appears faster when you open the app.
+- **Video:** video streams and plays in the app without a full download first.
+- **Video:** video plays in the app while it downloads, with a buffering indicator.
+- **Backup:** backup no longer lists your whole tree every 10 minutes.
+- **First load:** the app downloads your file list once at start.
+- **Loading:** a loading state shows while your files load, instead of "Nothing here yet".
+- **Paused sync:** when sync is paused, the app shows Resume.
+- **Sign-in:** a sign-in problem found on real accounts is fixed.
+- **Dates:** file dates show correctly.
+- **System files:** system files are hidden from your lists.
+- **Search, Trash and folders:** fixes to search, to Trash and to folders.
+- **Settings:** Settings fills wide windows.
+- **Trash:** the Trash row opens Trash.
+- **Sidebar:** the sidebar sizes include Backups.
+- **Thumbnails:** missing thumbnails are made when you open a folder, and Settings > Previews can repair them.
+- **Search:** search no longer floods the server after an error.
+- **Retry:** Beebeeb waits more gently before retrying after "too many requests".
+- **Photos:** RAW photo types are recognised.
 
 ### Verification
 

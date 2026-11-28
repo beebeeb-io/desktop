@@ -75,6 +75,7 @@ use super::os_controls::{NowPlaying, OsButton};
 use super::transport::LinkError;
 use super::video::VideoSurface;
 
+mod ranged;
 mod worker;
 
 #[cfg(test)]
@@ -274,6 +275,8 @@ pub struct PlayState {
     pub playing: bool,
     /// Waiting for bytes or the first frame (DW-1516 while the first 2 s buffer).
     pub buffering: bool,
+    /// How far the download is.
+    pub net: Net,
     /// The tag's title; before `Opened`, empty (the view shows the file's name).
     pub title: String,
     pub artist: String,
@@ -292,10 +295,97 @@ impl fmt::Debug for PlayState {
             .field("length_ms", &self.length_ms)
             .field("playing", &self.playing)
             .field("buffering", &self.buffering)
+            .field("net", &self.net)
             .field("reduced_quality", &self.reduced_quality)
             .field("refused", &self.refused)
             .field("no_sound", &self.no_sound)
             .finish_non_exhaustive()
+    }
+}
+
+/// The bytes a video needs fetched before it starts (or the whole file, when smaller).
+pub const START_BYTES: u64 = 8_000_000;
+/// A read slower than this is the network not keeping up: the player says it waits.
+pub const STALL_AFTER_MS: u64 = 500;
+
+/// How far the download is: what the buffering line, the start bar and the timeline's buffered range draw.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Net {
+    /// The file's size in bytes.
+    pub total: u64,
+    /// The furthest byte the helper has had.
+    pub fetched: u64,
+    /// The rate of the last read, bytes a second; 0 before one.
+    pub rate_bps: u64,
+    /// The last read was slower than [`STALL_AFTER_MS`].
+    pub stalled: bool,
+}
+
+impl Net {
+    pub fn new(total: u64) -> Net {
+        Net {
+            total,
+            ..Net::default()
+        }
+    }
+
+    /// One read of `len` bytes at `offset` that took `took_ms`.
+    pub fn record_read(&mut self, offset: u64, len: u32, took_ms: u64) {
+        self.fetched = self.fetched.max(offset.saturating_add(u64::from(len))).min(self.total.max(1));
+        let took = took_ms.max(1);
+        self.rate_bps = u64::from(len).saturating_mul(1000) / took;
+        self.stalled = took_ms >= STALL_AFTER_MS;
+    }
+
+    /// The bytes needed to start: [`START_BYTES`], or the whole file.
+    pub fn need(&self) -> u64 {
+        self.total.min(START_BYTES)
+    }
+
+    /// 0.0 to 1.0 of what the start needs.
+    pub fn start_part(&self) -> f32 {
+        part(self.fetched.min(self.need()), self.need())
+    }
+
+    /// 0.0 to 1.0 of the file fetched: the timeline's buffered range ends here.
+    pub fn buffered_part(&self) -> f32 {
+        part(self.fetched, self.total)
+    }
+
+    /// "Buffering 11 MB of 32 MB": fetched of what is needed to start.
+    pub fn buffering_line(&self) -> String {
+        format!("Buffering {} of {}", mb(self.fetched.min(self.need())), mb(self.need()))
+    }
+
+    /// "Waiting for the network (1.2 MB/s)" while a stall lasts, else `None`.
+    pub fn stall_line(&self) -> Option<String> {
+        self.stalled.then(|| {
+            if self.rate_bps == 0 {
+                "Waiting for the network".to_string()
+            } else {
+                format!("Waiting for the network ({}/s)", mb_rate(self.rate_bps))
+            }
+        })
+    }
+}
+
+fn part(of: u64, whole: u64) -> f32 {
+    if whole == 0 {
+        0.0
+    } else {
+        (of as f32 / whole as f32).clamp(0.0, 1.0)
+    }
+}
+
+fn mb(bytes: u64) -> String {
+    format!("{} MB", bytes / 1_000_000)
+}
+
+fn mb_rate(bps: u64) -> String {
+    if bps >= 1_000_000 {
+        format!("{:.1} MB", bps as f64 / 1e6)
+    } else {
+        format!("{} KB", bps / 1000)
     }
 }
 
@@ -557,6 +647,7 @@ impl Player {
             length_ms: item.length_ms,
             playing: true,
             buffering: true,
+            net: Net::default(),
             title: String::new(),
             artist: String::new(),
             reduced_quality: false,

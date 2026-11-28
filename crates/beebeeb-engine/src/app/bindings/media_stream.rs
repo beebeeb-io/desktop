@@ -96,6 +96,9 @@ pub const MEDIA_MAX_READ: u32 = 4 << 20;
 /// How often a fetch under way, or a read waiting for the read-ahead's fetch, asks whether it was cancelled or its
 /// session ended.
 const ASK_EVERY: Duration = Duration::from_millis(50);
+/// How long an open whose metadata read answered "not found" waits before it asks once more (the file list being
+/// rebuilt on this PC, or a folder above it being moved, answers that for a moment).
+const OPEN_AGAIN_AFTER: Duration = Duration::from_millis(750);
 /// How often the worker of an idle reader asks whether its session ended (a lock wipes the reader within this).
 const WATCH_EVERY: Duration = Duration::from_millis(250);
 /// What a chunk costs on the wire beyond its plaintext (nonce and tag), defined once in core.
@@ -255,6 +258,9 @@ struct Cache {
     in_flight: Option<u32>,
     /// The chunk a read is fetching itself now (the read-ahead does not fetch it too).
     reading: Option<u32>,
+    /// The chunk the tail fetch ([`MediaReader::start_tail_fetch`]) is fetching now: a read that needs it waits for
+    /// it, the read-ahead does not fetch it too, and a seek does not give it up.
+    tail: Option<u32>,
     job: Job,
 }
 
@@ -417,7 +423,19 @@ impl<C: CredentialStores> Engine<C> {
         let (origin, len, network) = match &local {
             Some(local) => (MediaOrigin::ThisPc, local.len, None),
             None => {
-                let network = (host.plan)()?;
+                let network = match (host.plan)() {
+                    // RE3-b: a "not found" while the file list is rebuilt is asked once more, a moment later.
+                    Err(OpenFileError::NotFound) => {
+                        tracing::warn!(branch = "metadata", "media open: not found, asked once more");
+                        std::thread::sleep(OPEN_AGAIN_AFTER);
+                        (host.plan)().inspect_err(|error| {
+                            if *error == OpenFileError::NotFound {
+                                tracing::warn!(branch = "metadata again", "media open: not found");
+                            }
+                        })?
+                    }
+                    other => other?,
+                };
                 (MediaOrigin::Beebeeb, network.len, Some(Arc::new(network)))
             }
         };
@@ -562,11 +580,15 @@ impl<C: CredentialStores> Engine<C> {
             .with(|db| Ok::<_, rusqlite::Error>((db.get_file(file_id)?, db.get_file_contract_state(file_id)?)))
             .map_err(refused)?
             .map_err(|_| OpenFileError::Failed)?;
+        // No row, or a row that is a folder: the file list is being rebuilt (the id was pressed as a file's).
+        // Beebeeb's version is read; its metadata says whether the file is there (RE3-b, which was "not found").
         let Some(entry) = entry else {
+            tracing::info!(branch = "no state row", "media open: read from Beebeeb");
             return Ok(None);
         };
         if entry.is_dir() {
-            return Err(OpenFileError::NotFound);
+            tracing::warn!(branch = "state row is a folder", "media open: read from Beebeeb");
+            return Ok(None);
         }
         let recorded_unsent = match entry.status {
             FileStatus::Local => false,
@@ -582,6 +604,11 @@ impl<C: CredentialStores> Engine<C> {
             Err(OpenFileError::TooLarge { size }) => size,
             Ok(LocalCopy::Opened(copy)) => copy.bytes.len() as u64,
             Ok(LocalCopy::NotHere | LocalCopy::Behind) => return Ok(None),
+            // The row went away (or became a folder) between the two reads of it: the list is being rebuilt.
+            Err(OpenFileError::NotFound) => {
+                tracing::warn!(branch = "local copy's row", "media open: read from Beebeeb");
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         if !self.acct.session_unchanged_since(session) {
@@ -794,10 +821,11 @@ impl MediaReader {
                     return Ok(take(chunk));
                 }
             }
-            if cache.in_flight != Some(index) {
+            if cache.in_flight != Some(index) && cache.tail != Some(index) {
                 break;
             }
-            // The read-ahead is fetching this very chunk: wait for it, asking the caller and the session meanwhile.
+            // The read-ahead or the tail fetch is fetching this very chunk: wait for it, asking the caller and the
+            // session meanwhile.
             if cancel.load(Ordering::SeqCst) {
                 return Err(MediaReadError::Cancelled);
             }
@@ -907,6 +935,80 @@ impl MediaReader {
             .is_ok();
     }
 
+    /// Starts fetching the chunk that holds the file's last byte on a thread of its own and returns at once (RE3-b),
+    /// so a player's first reads of the head run while the tail (a phone's `moov`) is fetched, not after it. A read
+    /// that needs that chunk waits for this fetch; the read-ahead leaves it alone; a seek does not give it up. Booked
+    /// against the budget like any fetch, kept in the cache like any chunk, stopped when the reader is dropped or
+    /// ended. Nothing for a copy on this PC (its reads are the disk's), an empty file, a one-chunk file (the head
+    /// read fetches it), or a chunk that is held or under way already. A failed fetch is left to the read that needs
+    /// the chunk: it fetches it itself and answers the refusal.
+    pub fn start_tail_fetch(&mut self) {
+        let Some(network) = self.network.clone() else {
+            return;
+        };
+        if self.len == 0 {
+            return;
+        }
+        let Ok(index) = u32::try_from((self.len - 1) / network.chunk_size) else {
+            return;
+        };
+        let Some(size) = network.chunk_len(index) else {
+            return;
+        };
+        if index == 0 {
+            return;
+        }
+        // The session watch runs before the chunk is fetched, as for every fetch of the reader.
+        self.start_worker(&network);
+        let cost = size.saturating_add(WIRE_OVERHEAD);
+        {
+            let mut cache = self.shared.lock();
+            if cache.ended.is_some()
+                || cache.closed
+                || cache.tail.is_some()
+                || cache.chunks.contains_key(&index)
+                || cache.in_flight == Some(index)
+                || cache.reading == Some(index)
+                || !cache.book(cost, self.budget())
+            {
+                return;
+            }
+            cache.tail = Some(index);
+        }
+        let (shared, cap) = (Arc::clone(&self.shared), self.cache_cap(&network));
+        let fetch_shared = Arc::clone(&shared);
+        let spawned = std::thread::Builder::new()
+            .name("media-tail".to_string())
+            .spawn(move || {
+                let shared = fetch_shared;
+                let stop = || {
+                    let cache = shared.lock();
+                    cache.closed || cache.ended.is_some()
+                };
+                let fetched = (network.fetch)(index, &stop);
+                let mut cache = shared.lock();
+                cache.tail = None;
+                match fetched {
+                    // Dropped (and wiped) by `insert` when the reader ended or closed meanwhile.
+                    Ok(bytes) => cache.insert(index, bytes, cap),
+                    Err(why) if sticky(why) => {
+                        drop(cache);
+                        shared.end(why);
+                        return;
+                    }
+                    Err(_) => {}
+                }
+                drop(cache);
+                shared.changed.notify_all();
+            });
+        if spawned.is_err() {
+            // No thread: the booking is given back, and the read fetches the chunk itself.
+            let mut cache = shared.lock();
+            cache.tail = None;
+            cache.fetched = cache.fetched.saturating_sub(cost);
+        }
+    }
+
     /// The decrypted bytes the reader holds now (a test watches an idle reader without reading).
     #[cfg(test)]
     fn cached_bytes(&self) -> u64 {
@@ -988,7 +1090,7 @@ fn read_ahead(shared: &Shared, network: &Network, unchanged: &(dyn Fn() -> bool 
         let index = cache.job.next;
         cache.job.next += 1;
         let generation = cache.job.generation;
-        if cache.chunks.contains_key(&index) || cache.reading == Some(index) {
+        if cache.chunks.contains_key(&index) || cache.reading == Some(index) || cache.tail == Some(index) {
             continue;
         }
         let Some(size) = network.chunk_len(index) else {

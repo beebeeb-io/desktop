@@ -46,6 +46,14 @@ impl ApiClient {
         Ok(self.get_typed_bulk("/api/v1/sync/snapshot").await?)
     }
 
+    /// [`Self::sync_snapshot`] for the backup pass: the same request with `X-Beebeeb-Origin: backup` (spec Amendment 8).
+    pub async fn sync_snapshot_for_backup(&self) -> anyhow::Result<crate::api_client::SyncSnapshot> {
+        let timeout = std::time::Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS);
+        Ok(self
+            .get_typed_bulk_headers("/api/v1/sync/snapshot", timeout, true)
+            .await?)
+    }
+
     /// `GET /api/v1/sync/ops?since={seq_id}` — every op with `seq_id > since`,
     /// oldest-first. The steady-state delta call: ONE request/tick replaces the
     /// old `1 + folders` full-tree re-walk. Same 429 backoff as `sync_snapshot`.
@@ -58,13 +66,11 @@ impl ApiClient {
     /// and to recover the encrypted name when the local mirror entry
     /// is sparse (e.g. fresh placeholder).
     pub async fn get_file(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(self.file_url(FileId::new(file_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        // Through `send_with_retry`: bounded 429/5xx backoff, and the answer (a 401 included) reaches the link
+        // monitor. The session token is one opaque server session with no refresh route, so a 401 here means the
+        // session itself ended.
+        let url = self.file_url(FileId::new(file_id));
+        let resp = self.send_with_retry(|| self.client.get(&url)).await?;
         Ok(resp.json().await?)
     }
 

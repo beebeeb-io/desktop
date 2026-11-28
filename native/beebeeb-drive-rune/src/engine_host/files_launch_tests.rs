@@ -4,8 +4,8 @@
 //! and asks `still` inside it, as the system's own do. Every name is invented; nothing is started for real.
 
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::*;

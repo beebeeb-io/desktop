@@ -173,7 +173,7 @@ fn step(offer: &PasswordOffer, f: &Form, t: &Theme) -> El {
 /// Continue: an empty field sends nothing and says so; otherwise the text moves out of the field into a wiping buffer
 /// and goes to the source, once. A press while one is checked does nothing.
 fn submit(ui: &mut AccountUi) -> Option<&'static str> {
-    if !offer(ui.source.as_deref()).is_some_and(|offer| !offer.checking) {
+    if offer(ui.source.as_deref()).is_none_or(|offer| offer.checking) {
         return None;
     }
     if ui.form.current.text.is_empty() {

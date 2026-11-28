@@ -334,12 +334,23 @@ pub fn guard_rows(
     };
     let mut summary = GuardSummary::default();
     let mut empty = Vec::new();
+    let mut left_alone: Vec<String> = Vec::new();
     for row in rows {
         if (control.stop)() {
             summary.stopped = true;
             break;
         }
-        guard_row(db, sync_root, row, view, mark, &clear, &mut summary, &mut empty)?;
+        guard_row(
+            db,
+            sync_root,
+            row,
+            view,
+            mark,
+            &clear,
+            &mut summary,
+            &mut empty,
+            &mut left_alone,
+        )?;
         summary.walked += 1;
         (control.progress)(summary.walked);
         if empty.len() >= GUARD_PROGRESS_EVERY {
@@ -348,6 +359,14 @@ pub fn guard_rows(
         }
     }
     summary.emptied += db.mark_no_fetched_content_many(&empty)?;
+    // One line per pass, not one per row (a start used to log 165 identical warnings).
+    if !left_alone.is_empty() {
+        tracing::info!(
+            count = left_alone.len(),
+            "guard: placeholders at these rows' paths are other files'; left alone"
+        );
+        tracing::debug!(first_ids = ?&left_alone[..left_alone.len().min(3)], "guard: first rows whose placeholder is another file's");
+    }
     Ok(summary)
 }
 
@@ -362,6 +381,7 @@ fn guard_row(
     clear: &dyn Fn(&str) -> anyhow::Result<()>,
     summary: &mut GuardSummary,
     empty: &mut Vec<String>,
+    left_alone: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     let Some(path) = crate::engine_bridge::EngineBridge::placeholder_path_under(sync_root, &row.path) else {
         return clear(&row.file_id);
@@ -385,7 +405,7 @@ fn guard_row(
         match ownership(db, &named, &row.file_id, &row.path) {
             Ownership::Own => {}
             Ownership::Other => {
-                tracing::warn!(file_id = %row.file_id, "guard: the placeholder at this row's path is another file's; it is left alone");
+                left_alone.push(row.file_id.clone());
                 return clear(&row.file_id);
             }
             Ownership::Unknown => {
@@ -799,6 +819,61 @@ mod tests {
         })
         .unwrap();
         assert_eq!(marks, 1, "b's own placeholder is marked");
+    }
+
+    /// A start with many rows whose path holds another file's placeholder logs one info line with the count, the
+    /// first three ids at debug, and no warning per row.
+    #[test]
+    fn re3_d_other_files_placeholders_log_one_line_with_the_count() {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let ids = ["b", "c", "d", "e", "f"];
+        let mut specs = vec![("a", "same.txt", FileStatus::Local)];
+        specs.extend(ids.iter().map(|id| (*id, "same.txt", FileStatus::Local)));
+        let (dir, db) = db_with(&specs);
+        db.record_local_baseline("a", 1, "hash").unwrap();
+        let root = dir.path().join("root");
+        let rows: Vec<GuardedRow> = db
+            .list_guarded()
+            .unwrap()
+            .into_iter()
+            .filter(|r| ids.contains(&r.file_id.as_str()))
+            .collect();
+        assert_eq!(rows.len(), 5);
+        let buffer: std::sync::Arc<Mutex<Vec<u8>>> = Default::default();
+        let writer = Capture(buffer.clone());
+        // A second live dispatcher keeps callsite interest uncached across test threads.
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let guard_default = tracing::subscriber::set_default(subscriber);
+        let view = |_: &Path| PlatformView::Placeholder {
+            on_disk: OnDisk::Wholly,
+            in_sync: true,
+            identity: Some("a".into()),
+        };
+        guard(&db, &root, &rows, &view, &mut |_: &Path| Ok(())).unwrap();
+        drop(guard_default);
+        let text = String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
+        assert!(!text.contains("WARN"), "no warning per row: {text}");
+        let infos: Vec<&str> = text.lines().filter(|l| l.contains(" INFO ")).collect();
+        assert_eq!(infos.len(), 1, "one info line: {text}");
+        assert!(infos[0].contains("count=5"), "{}", infos[0]);
+        let debugs: Vec<&str> = text.lines().filter(|l| l.contains(" DEBUG ")).collect();
+        assert_eq!(debugs.len(), 1, "{text}");
+        assert_eq!(debugs[0].matches("\"").count(), 6, "three ids: {}", debugs[0]);
     }
 
     #[test]

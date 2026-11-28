@@ -63,7 +63,15 @@ pub fn mime_for_name(name: &str) -> Option<&'static str> {
         "avif" => "image/avif",
         "bmp" => "image/bmp",
         "tif" | "tiff" => "image/tiff",
+        // Camera RAW: the mimes the macOS ImageIO thumbnail decoder (thumbs_mac.rs) matches.
         "dng" => "image/x-adobe-dng",
+        "cr2" => "image/x-canon-cr2",
+        "cr3" => "image/x-canon-cr3",
+        "nef" => "image/x-nikon-nef",
+        "arw" => "image/x-sony-arw",
+        "raf" => "image/x-fuji-raf",
+        "orf" => "image/x-olympus-orf",
+        "rw2" => "image/x-panasonic-rw2",
         "svg" => "image/svg+xml",
         "mp4" | "m4v" => "video/mp4",
         "mov" => "video/quicktime",
@@ -429,6 +437,12 @@ pub fn crumbs(db: &StateDb, folder: Option<&FileEntry>) -> Result<Vec<Crumb>, Dr
     Ok(chain)
 }
 
+/// A system file (`desktop.ini`, `Thumbs.db`, ...) is hidden from listings; its row stays.
+fn hidden_system_file(entry: &FileEntry) -> bool {
+    !entry.is_dir()
+        && crate::engine_bridge::is_system_file_name(entry.path.trim_matches('/').rsplit('/').next().unwrap_or(""))
+}
+
 /// `drive_list`: one folder's children from the copy on this PC, using the
 /// `idx_files_parent_id` index (task 2445). A 70k-row DB reads only one
 /// folder's children instead of every row.
@@ -443,6 +457,9 @@ pub fn list(db: &StateDb, folder_id: Option<&str>, sort: Sort, stale: bool) -> R
     for (entry, contract, child_count) in rows {
         // Shared-with-me roots have no parent; listed in Shared, not in Files.
         if want_parent.is_none() && contract.namespace == Namespace::SharedWithMe {
+            continue;
+        }
+        if hidden_system_file(&entry) {
             continue;
         }
         let path = entry.path.trim_matches('/').to_lowercase();
@@ -506,7 +523,7 @@ pub fn children_of(
         if want_parent.is_none() && contract.namespace == Namespace::SharedWithMe {
             continue;
         }
-        if backups.is_hidden(&entry.path) {
+        if backups.is_hidden(&entry.path) || hidden_system_file(entry) {
             continue;
         }
         let count = if entry.is_dir() { Some(*child_count) } else { None };
@@ -726,26 +743,53 @@ pub fn versions_from_payload(body: &serde_json::Value) -> Result<Vec<VersionEntr
     Ok(out)
 }
 
-/// Files, Photos and Backups bytes from the mirror (the meter's split). `used` and `quota` are the
-/// account's, from the server; the split is what this PC's copy knows.
-pub fn storage_split(db: &StateDb) -> Result<(i64, i64, i64), DriveError> {
-    let backups: Vec<String> = db
+/// What the storage meter and Insights count a file as. Defined once: both read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageCategory {
+    Files,
+    Photos,
+    Backups,
+}
+
+/// The Backups roots' paths, lowercase and without outer slashes, for [`storage_category`].
+pub fn backups_root_paths(db: &StateDb) -> Result<Vec<String>, DriveError> {
+    Ok(db
         .backups_roots()
         .map_err(DriveError::db)?
         .into_iter()
         .map(|(_, p)| p.trim_matches('/').to_lowercase())
         .filter(|p| !p.is_empty())
-        .collect();
+        .collect())
+}
+
+/// Anything under a Backups root is Backups; else a photo or video is Photos; else Files. `name` is the file's
+/// own name (the last part of `path`).
+pub fn storage_category(path: &str, name: &str, backups: &[String]) -> StorageCategory {
+    let path = path.trim_matches('/').to_lowercase();
+    if backups.iter().any(|b| path == *b || path.starts_with(&format!("{b}/"))) {
+        StorageCategory::Backups
+    } else if is_photo_or_video(name) {
+        StorageCategory::Photos
+    } else {
+        StorageCategory::Files
+    }
+}
+
+/// Files, Photos and Backups bytes from the mirror (the meter's split), over the same rows Insights counts
+/// (never a device's manifest in Backups). The three add up to Insights' local total.
+pub fn storage_split(db: &StateDb) -> Result<(i64, i64, i64), DriveError> {
+    let backups = backups_root_paths(db)?;
+    let tree = crate::backup_protect::BackupsTree::read(db);
     let (mut files, mut photos, mut backup_bytes) = (0i64, 0i64, 0i64);
-    for row in live_rows(db)?.iter().filter(|r| !r.is_dir()) {
-        let path = row.path.trim_matches('/').to_lowercase();
+    for row in live_rows(db)?
+        .iter()
+        .filter(|r| !r.is_dir() && !tree.is_hidden(&r.path))
+    {
         let size = row.size_bytes.max(0);
-        if backups.iter().any(|b| path == *b || path.starts_with(&format!("{b}/"))) {
-            backup_bytes += size;
-        } else if is_photo_or_video(&leaf_name(row)) {
-            photos += size;
-        } else {
-            files += size;
+        match storage_category(&row.path, &leaf_name(row), &backups) {
+            StorageCategory::Backups => backup_bytes += size,
+            StorageCategory::Photos => photos += size,
+            StorageCategory::Files => files += size,
         }
     }
     Ok((files, photos, backup_bytes))

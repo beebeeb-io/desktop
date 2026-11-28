@@ -87,6 +87,23 @@ impl PendingRecords {
     }
 }
 
+/// The sent invites (`GET /shares/invites/sent`) as one maintenance pass read them. Every folder of a pass reads its
+/// custody through its own [`Batch`]; without this each of them asked for the same list again.
+#[derive(Default)]
+pub(crate) struct PassInvites(std::sync::Mutex<Option<Vec<Value>>>);
+
+impl PassInvites {
+    fn get(&self) -> Option<Vec<Value>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set(&self, invites: &Option<Vec<Value>>) {
+        if invites.is_some() {
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = invites.clone();
+        }
+    }
+}
+
 #[derive(Default)]
 struct Batch {
     rows: HashMap<String, Value>,
@@ -696,9 +713,10 @@ impl crate::engine_bridge::EngineBridge {
         if (pending || !dirty.is_empty()) && self.db().claim_owned_key_maintenance(now)? {
             let _ = self.retry_owner_adoptions().await;
             scope.check()?;
+            let invites = PassInvites::default();
             for root in dirty {
                 // Durable markers retain failed or partial work for the next pass.
-                let _ = self.repair_shared_folder_index(&root).await;
+                let _ = self.repair_shared_folder_index_in(&root, &invites).await;
                 scope.check()?;
             }
         }
@@ -747,6 +765,16 @@ impl crate::engine_bridge::EngineBridge {
     }
 
     pub async fn prepare_owned_rows(&self, rows: &[Value]) -> anyhow::Result<Vec<PreparedOwnedRow>> {
+        self.prepare_owned_rows_reporting(rows, &mut |_| {}).await
+    }
+
+    /// RE-a: [`Self::prepare_owned_rows`], telling `progress` how many rows are done before each row (the first
+    /// listing's bar and log; the caller decides how often it reports).
+    pub async fn prepare_owned_rows_reporting(
+        &self,
+        rows: &[Value],
+        progress: &mut (dyn FnMut(usize) + Send),
+    ) -> anyhow::Result<Vec<PreparedOwnedRow>> {
         let scope = self.owner_key_scope();
         let master = MasterKey::from_bytes(*self.api().master_key());
         let mut batch = Batch::default();
@@ -759,7 +787,8 @@ impl crate::engine_bridge::EngineBridge {
         }
         let mut prepared = Vec::with_capacity(rows.len());
         let mut pending = PendingRecords::new(self.db());
-        for input in rows {
+        for (done, input) in rows.iter().enumerate() {
+            progress(done);
             scope.check()?;
             let Some(id) = input["id"].as_str().filter(|s| !s.is_empty()) else {
                 continue;
@@ -1019,10 +1048,21 @@ impl crate::engine_bridge::EngineBridge {
         Ok(confirmed)
     }
 
+    #[cfg(test)]
     pub(crate) async fn shared_folder_custody_key(&self, id: &str) -> anyhow::Result<Arc<FileKey>> {
+        self.shared_folder_custody_key_in(id, &PassInvites::default()).await
+    }
+
+    /// [`Self::shared_folder_custody_key`] inside a pass: the sent invites are read once for the whole pass.
+    pub(crate) async fn shared_folder_custody_key_in(&self, id: &str, invites: &PassInvites) -> anyhow::Result<Arc<FileKey>> {
         let scope = self.owner_key_scope();
-        let mut batch = Batch::default();
-        batch.custody(&scope, id).await?;
+        let mut batch = Batch {
+            invites: invites.get(),
+            ..Batch::default()
+        };
+        let asked = batch.custody(&scope, id).await;
+        invites.set(&batch.invites);
+        asked?;
         let custody = batch
             .custody
             .remove(id)
