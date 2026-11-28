@@ -659,34 +659,45 @@ mod turn_off_tests {
         assert_eq!(s.settings.finder.shown_kept(), None);
     }
 
-    /// Only macOS wires the Finder pane; the failed turn-off draws its red note with its button.
+    /// Only macOS wires the Finder pane; the failed turn-off draws its red note with its button. The scene's fixed
+    /// Ready page keeps the status row's buttons known; the work is read whatever the page.
     #[cfg(target_os = "macos")]
     #[test]
     fn settings_a_failed_turn_off_draws_a_note_with_try_again() {
-        let mut state = crate::init();
-        assert!(super::super::scene("DM-18-ready", &mut state));
-        state.settings.finder.page = None;
-        state.settings.finder.set_work(Work::TurnOffFailed("busy".into()));
-        let mut rt = rune::Runtime::new(
-            state,
-            crate::view,
-            (958.0, 998.0),
-            rune::Env {
-                system_dark: false,
-                scale: 2.0,
-            },
-        );
-        rt.frame(0.0);
-        rt.frame(0.016);
-        rt.settle_all();
-        rt.frame(0.016);
-        let has = |key: &str| {
-            rt.elements()
-                .iter()
-                .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+        let drawn = |work: Work| {
+            let mut state = crate::init();
+            assert!(super::super::scene("DM-18-ready", &mut state));
+            state.settings.finder.set_work(work);
+            let mut rt = rune::Runtime::new(
+                state,
+                crate::view,
+                (958.0, 998.0),
+                rune::Env {
+                    system_dark: false,
+                    scale: 2.0,
+                },
+            );
+            rt.frame(0.0);
+            rt.frame(0.016);
+            rt.settle_all();
+            rt.frame(0.016);
+            let has = |key: &str| {
+                rt.elements()
+                    .iter()
+                    .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+            };
+            (has("note-0"), has("btn-4"))
         };
-        assert!(has("note-0"), "the error shows");
         // Ready draws four buttons (Open in Finder, Repair…, Turn off, the Sync row's); Try again makes a fifth.
-        assert!(has("btn-4"), "with its Try again");
+        assert_eq!(
+            drawn(Work::Idle),
+            (false, false),
+            "no note and four buttons without a failure"
+        );
+        assert_eq!(
+            drawn(Work::TurnOffFailed("busy".into())),
+            (true, true),
+            "the error shows, with its Try again"
+        );
     }
 }
