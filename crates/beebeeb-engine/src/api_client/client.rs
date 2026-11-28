@@ -51,6 +51,17 @@ impl zeroize::ZeroizeOnDrop for ApiClient {}
 /// The longest a bulk GET may run in all, however steadily its body arrives.
 const BULK_GET_CEILING: Duration = Duration::from_secs(15 * 60);
 
+/// The longest the body of a 429 is waited for before the pause starts from the header alone.
+const RATE_BODY_WAIT: Duration = Duration::from_secs(2);
+
+/// The `retry_after` (whole seconds) a 429's JSON body names, if it names one.
+pub(super) fn body_retry_after(body: &str) -> Option<u64> {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let hint = value.get("retry_after")?;
+    hint.as_u64()
+        .or_else(|| hint.as_f64().filter(|secs| *secs >= 0.0).map(|secs| secs.ceil() as u64))
+}
+
 impl ApiClient {
     #[cfg(target_os = "windows")]
     pub fn credential_lifetime(&self) -> std::sync::Weak<()> {
@@ -388,6 +399,22 @@ impl ApiClient {
         http: &reqwest::Client,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> ApiResult<reqwest::Response> {
+        Self::check_status(self.send_paced(http, build).await?).await
+    }
+
+    /// One API request under the shared 429 pause, for a caller with status branches of its own (404 = absent, a
+    /// typed refusal): every answer that is not a 429 comes back unchecked. `build` must not add `Authorization`;
+    /// it is added here.
+    ///
+    /// The request waits for a running pause before it goes out. A 429 starts the pause from the larger of the
+    /// `Retry-After` header and the body's `retry_after`. A GET (or a write with an idempotency key) is then sent
+    /// again, up to `MAX_429_RETRIES` times; any other request is sent exactly once and its 429 is the error
+    /// (`DesktopApiError::HttpStatus`), as is the last 429 of a request that was sent again.
+    pub(super) async fn send_paced(
+        &self,
+        http: &reqwest::Client,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> ApiResult<reqwest::Response> {
         let mut attempt: u32 = 0;
         // Transport/5xx retries are counted apart from 429 retries; each class is bounded on its own.
         let mut transport_attempt: u32 = 0;
@@ -404,7 +431,7 @@ impl ApiClient {
                 Ok(resp) => resp,
                 Err(e) => {
                     if let Some(old) = held.take() {
-                        return Self::check_status(old).await;
+                        return Ok(old);
                     }
                     if let Some(wait) = transport_retry_decision(
                         transport_attempt,
@@ -429,15 +456,23 @@ impl ApiClient {
                 held = Some(resp);
                 continue;
             }
-            if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let status = resp.status();
+            if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
                 self.rate_pause.answered();
-                return Self::check_status(resp).await;
+                return Ok(resp);
             }
-            // 429: everyone waits; only a request that is safe to repeat is sent again.
-            self.rate_pause
-                .refused(header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str()));
+            // 429: everyone waits; only a request that is safe to repeat is sent again. The body is a few bytes of
+            // JSON; one that does not arrive must not hold the pause back.
+            let header = header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str());
+            let body = tokio::time::timeout(RATE_BODY_WAIT, resp.text())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
+            self.rate_pause.refused(header.max(body_retry_after(&body)));
             if !again_after_429 || attempt >= MAX_429_RETRIES {
-                return Self::check_status(resp).await;
+                let snippet: String = body.chars().take(300).collect();
+                return Err(DesktopApiError::HttpStatus { status, snippet });
             }
             attempt += 1;
         }

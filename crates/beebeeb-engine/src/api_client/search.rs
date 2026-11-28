@@ -22,12 +22,7 @@ impl ApiClient {
     /// skip the missing shard and let a later rebuild repair the cache.
     pub async fn get_search_shard(&self, bucket: u32, page: u32) -> anyhow::Result<Option<Vec<u8>>> {
         let url = self.search_shard_url(bucket, page);
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?;
+        let resp = self.send_paced(&self.client, || self.client.get(&url)).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -52,27 +47,23 @@ impl ApiClient {
             }
             .into());
         }
+        let url = self.search_shard_url(shard.bucket, shard.page);
         let resp = self
-            .client
-            .put(self.search_shard_url(shard.bucket, shard.page))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/octet-stream")
-            .body(shard.blob.clone())
-            .send()
+            .send_with_retry(|| {
+                self.client
+                    .put(&url)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(shard.blob.clone())
+            })
             .await?;
-        let resp = Self::check_status(resp).await?;
         Ok(resp.json::<SearchShardRef>().await?)
     }
 
     /// `DELETE /api/v1/search-index/shards/{bucket}/{page}` — idempotent stale
     /// shard removal. 204 and 404 both mean the coordinate is gone.
     pub async fn delete_search_shard(&self, bucket: u32, page: u32) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .delete(self.search_shard_url(bucket, page))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?;
+        let url = self.search_shard_url(bucket, page);
+        let resp = self.send_paced(&self.client, || self.client.delete(&url)).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(());
         }
