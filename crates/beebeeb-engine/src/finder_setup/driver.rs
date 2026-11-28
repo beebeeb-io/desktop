@@ -16,8 +16,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-// Read by the macOS clock and the driver's tests (through `super::*`).
-#[cfg(any(test, target_os = "macos"))]
+// Read only by the macOS `SystemClock` (`ports.rs`, through `super::*`); the tests use a fake clock.
+#[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::FutureExt as _;
