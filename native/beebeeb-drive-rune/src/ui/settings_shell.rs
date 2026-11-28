@@ -17,20 +17,20 @@
 //!
 //! Nothing here knows which panes exist or what a press does: a frame attaches `.on_press`.
 
-use crate::theme::tokens::{Theme, radius, type_};
-use rune::{Color, El, Icon, TextStyle, col, el, row};
+use crate::theme::tokens::{radius, type_, Theme};
+use rune::{col, el, row, Color, El, Icon, TextStyle};
 
 use super::kit;
-use crate::State;
 use crate::theme::icons_settings as ic;
+use crate::State;
 
 /// The settings sidebar is 224 pt wide on the board (the Drive sidebar is 220).
 pub const SIDEBAR_W: f32 = 224.0;
 /// A pane's column (`.mk-set-col`): at least this wide.
 pub const COLUMN_W: f32 = 540.0;
-/// The column grows with the window up to this readable maximum.
-pub const COLUMN_MAX_W: f32 = 880.0;
-/// A card is never narrower than this: two columns need room for two of them and the gap.
+/// A pane never shows more card columns than this, however wide the window is.
+pub const MAX_COLUMNS: usize = 4;
+/// A card is never narrower than this: n columns need room for n of them and the gaps between.
 pub const CARD_MIN_W: f32 = 420.0;
 /// The gap between a pane's children, in both directions.
 pub const FLOW_GAP: f32 = 14.0;
@@ -46,26 +46,53 @@ pub fn mark_lead() {
     LEAD.with(|l| l.set((l.get() + 1).min(2)));
 }
 
+/// The least width of a flow item in a column `column_w` wide: [`CARD_MIN_W`], and in a column
+/// with room for more than [`MAX_COLUMNS`] of those, just over a share of one more (in 16 pt
+/// steps, so a resize does not rebuild the pane at every point), so no more than
+/// [`MAX_COLUMNS`] fit side by side.
+fn item_min_w(column_w: f32) -> f32 {
+    let over = MAX_COLUMNS as f32 + 1.0;
+    if column_w < over * CARD_MIN_W + (over - 1.0) * FLOW_GAP {
+        return CARD_MIN_W;
+    }
+    ((column_w / over / 16.0).floor() + 1.0) * 16.0
+}
+
 /// A pane's column: the lead pieces (crumb, heading) stacked full width, then the rest in a
-/// row that wraps. Each flowing child sits in an item at least [`CARD_MIN_W` wide that grows,
-/// so a column wide enough for two items gives two, and a narrower one gives one. Order and
-/// whole children are kept. `min_w` is the column's floor (`COLUMN_W`).
+/// row that wraps. The column takes the whole content width. Each flowing child sits in an
+/// item at least [`CARD_MIN_W`] wide that grows, so the row holds as many items side by side as
+/// fit (854 pt: two, 1288 pt: three, 1722 pt: four) and never more than [`MAX_COLUMNS`]
+/// ([`item_min_w`], from the column's width in the last layout).
+/// Every item is one column wide, also alone in the last row: empty items after the last
+/// card take the columns it would otherwise stretch over.
+/// Order and whole children are kept. `min_w` is the column's floor (`COLUMN_W`).
 pub fn flow(children: Vec<El>, min_w: f32) -> El {
     let lead = LEAD.with(|l| l.replace(0)).min(children.len());
-    let mut column = col().key("set-col").w_full().min_w(min_w).max_w(COLUMN_MAX_W).gap(FLOW_GAP);
-    let mut cards = row().key("set-flow").w_full().flex_wrap().items_start().gap(FLOW_GAP);
+    let item_w = rune::memo::layout_with("set-col", |r| item_min_w(r[2])).unwrap_or(CARD_MIN_W);
+    let mut column = col().key("set-col").w_full().min_w(min_w).gap(FLOW_GAP);
+    // The gap between rows is each card item's bottom padding, taken back once under the last
+    // row: a row of only empty items is then 0 pt high and adds nothing.
+    let mut cards = row()
+        .key("set-flow")
+        .w_full()
+        .flex_wrap()
+        .items_start()
+        .gaps(0.0, FLOW_GAP)
+        .mb(-FLOW_GAP);
+    let item = |key: String| col().key(key).min_w(item_w).grow(1.0);
     for (i, child) in children.into_iter().enumerate() {
         if i < lead {
             column = column.child(child);
         } else {
             cards = cards.child(
-                col()
-                    .key(format!("set-item-{}", i - lead))
-                    .min_w(CARD_MIN_W)
-                    .grow(1.0)
+                item(format!("set-item-{}", i - lead))
+                    .pb(FLOW_GAP)
                     .child(child.w_full()),
             );
         }
+    }
+    for i in 0..MAX_COLUMNS - 1 {
+        cards = cards.child(item(format!("set-fill-{i}")).h(0.0));
     }
     column.child(cards)
 }
@@ -184,7 +211,7 @@ pub fn sidebar(back: El, sections: Vec<(&str, Vec<El>)>, foot: &str, t: &Theme) 
 }
 
 /// A pane (`.mk-set-main` > `.mk-set-col`): the ground, 22 pt above and 30 pt beside a
-/// 540 pt column whose children sit 14 pt apart. A pane taller than the window scrolls
+/// column (540 pt on the board, wider with the window) whose children sit 14 pt apart. A pane taller than the window scrolls
 /// (the board draws those frames taller than the window "so the whole section shows").
 pub fn pane(children: Vec<El>, t: &Theme) -> El {
     let column = flow(children, COLUMN_W);
@@ -263,7 +290,11 @@ pub const SETTINGS_ITEMS: &[(&str, &Icon, &str)] = &[
 pub const DRIVE_ITEMS: &[(&str, &Icon, &str)] = &[
     ("Storage", &ic::DATABASE, "DW-0712"),
     ("Backups", &ic::CLOCK, "DW-0737"),
-    (concat!("Sync and ", beebeeb_engine::file_manager!()), &ic::SYNC, "DW-0746"),
+    (
+        concat!("Sync and ", beebeeb_engine::file_manager!()),
+        &ic::SYNC,
+        "DW-0746",
+    ),
     ("Thumbnails and previews", &ic::IMAGE, "DW-0744"),
     ("Bandwidth", &ic::GAUGE, "DW-0785"),
 ];
@@ -272,7 +303,11 @@ pub const DRIVE_ITEMS: &[(&str, &Icon, &str)] = &[
 pub const DRIVE_ITEMS: &[(&str, &Icon, &str)] = &[
     ("Storage", &ic::DATABASE, "DW-0712"),
     ("Backups", &ic::CLOCK, "DW-0737"),
-    (concat!("Sync and ", beebeeb_engine::file_manager!()), &ic::SYNC, "DW-0746"),
+    (
+        concat!("Sync and ", beebeeb_engine::file_manager!()),
+        &ic::SYNC,
+        "DW-0746",
+    ),
     ("Beebeeb in Finder", &ic::FOLDER_TAB, "DM-18"),
     ("Thumbnails and previews", &ic::IMAGE, "DW-0744"),
     ("Bandwidth", &ic::GAUGE, "DW-0785"),
@@ -343,10 +378,7 @@ mod settings_flow_tests {
         let t = theme(false);
         let mut kids = vec![heading("Title", Some("A line under it."), &t)];
         for i in 0..5 {
-            kids.push(
-                settings_card::card(i, &t)
-                    .child(settings_card::head(i, &format!("Card {i}"), &t)),
-            );
+            kids.push(settings_card::card(i, &t).child(settings_card::head(i, &format!("Card {i}"), &t)));
         }
         row()
             .key("root")
@@ -357,7 +389,10 @@ mod settings_flow_tests {
     }
 
     fn at(content: f32) -> Runtime<()> {
-        let env = Env { system_dark: false, scale: 2.0 };
+        let env = Env {
+            system_dark: false,
+            scale: 2.0,
+        };
         let mut rt = Runtime::new((), view, (SIDEBAR_W + content, 900.0), env);
         rt.frame(0.0);
         rt.settle_all();
@@ -373,29 +408,39 @@ mod settings_flow_tests {
             .rect
     }
 
-    /// (column width, distinct card x positions) for a window whose content area is `content` wide.
+    /// (column width, cards side by side in the first row) for a window whose content area is
+    /// `content` wide.
     fn shape(content: f32) -> (f32, usize) {
         let rt = at(content);
         let col = rect(&rt, "set-col");
-        let mut xs: Vec<i32> = Vec::new();
+        let top = rect(&rt, "card-0")[1];
+        let mut beside = 0;
         for i in 0..5 {
             let c = rect(&rt, &format!("card-{i}"));
-            assert!(c[0] >= col[0] - 0.5 && c[0] + c[2] <= col[0] + col[2] + 0.5, "card {i} sticks out of the column at {content}");
+            assert!(
+                c[0] >= col[0] - 0.5 && c[0] + c[2] <= col[0] + col[2] + 0.5,
+                "card {i} sticks out of the column at {content}"
+            );
             assert!(c[2] >= CARD_MIN_W - 0.5, "card {i} is {} wide at {content}", c[2]);
             let h = rect(&rt, &format!("card-{i}-head"));
-            assert!(h[0] + h[2] <= c[0] + c[2] + 0.5 && h[1] + h[3] <= c[1] + c[3] + 0.5, "card {i} is cut at {content}");
-            let x = c[0].round() as i32;
-            if !xs.contains(&x) {
-                xs.push(x);
+            assert!(
+                h[0] + h[2] <= c[0] + c[2] + 0.5 && h[1] + h[3] <= c[1] + c[3] + 0.5,
+                "card {i} is cut at {content}"
+            );
+            if (c[1] - top).abs() < 0.5 {
+                beside += 1;
             }
         }
-        (col[2], xs.len())
+        (col[2], beside)
     }
 
     #[test]
     fn narrow_window_keeps_the_540_column() {
         let (w, cols) = shape(600.0);
-        assert!((COLUMN_W..=600.0 - 60.0 + 0.5).contains(&w) || (w - COLUMN_W).abs() < 0.5, "column {w}");
+        assert!(
+            (COLUMN_W..=600.0 - 60.0 + 0.5).contains(&w) || (w - COLUMN_W).abs() < 0.5,
+            "column {w}"
+        );
         assert_eq!(cols, 1);
         let (w, cols) = shape(540.0 + 60.0);
         assert!((w - 540.0).abs() < 0.5, "column {w}");
@@ -403,17 +448,186 @@ mod settings_flow_tests {
     }
 
     #[test]
-    fn column_grows_with_the_window_to_880() {
+    fn column_fills_the_window_up_to_four_cards() {
+        let need = |n: usize| n as f32 * CARD_MIN_W + (n - 1) as f32 * FLOW_GAP;
         // content area = window - sidebar; 30 pt either side
-        let (w, cols) = shape(1000.0 - SIDEBAR_W);
-        assert!((w - (1000.0 - SIDEBAR_W - 60.0)).abs() < 0.5, "1000: column {w}");
-        assert_eq!(cols, 1, "1000: one column");
-        let (w, cols) = shape(1600.0 - SIDEBAR_W);
-        assert!((w - 880.0).abs() < 0.5, "1600: column {w}");
-        assert_eq!(cols, 2, "1600: two columns");
-        let (w, cols) = shape(2500.0 - SIDEBAR_W);
-        assert!((w - 880.0).abs() < 0.5, "2500: column {w}");
-        assert_eq!(cols, 2, "2500: two columns");
+        let room = |window: f32| window - SIDEBAR_W - 60.0;
+        // Just under and at the room n cards need.
+        for n in 2..=MAX_COLUMNS {
+            assert_eq!(shape(need(n) + 60.0 - 2.0).1, n - 1);
+            assert_eq!(shape(need(n) + 60.0).1, n);
+        }
+        // 1600 leaves 1316 pt: three cards (1288 pt) fit, four (1722 pt) do not. From 2000 on:
+        // four, never five, and the column is as wide as the room at every width.
+        for (window, want) in [
+            (1000.0, 1),
+            (1400.0, 2),
+            (1600.0, 3),
+            (2010.0, 4),
+            (2440.0, 4),
+            (2500.0, 4),
+            (3400.0, 4),
+            (5000.0, 4),
+        ] {
+            let (w, cols) = shape(window - SIDEBAR_W);
+            assert!(
+                (w - room(window)).abs() < 0.5,
+                "{window}: column {w}, room {}",
+                room(window)
+            );
+            assert_eq!(cols, want, "{window}: columns");
+        }
+    }
+
+    #[test]
+    fn every_card_is_one_column_wide() {
+        for window in [1000.0_f32, 1400.0, 1600.0, 2010.0, 2500.0, 3400.0] {
+            let rt = at(window - SIDEBAR_W);
+            let col = rect(&rt, "set-col");
+            let cards: Vec<[f32; 4]> = (0..5).map(|i| rect(&rt, &format!("card-{i}"))).collect();
+            let cols = cards.iter().filter(|c| (c[1] - cards[0][1]).abs() < 0.5).count();
+            let one = (col[2] - (cols - 1) as f32 * FLOW_GAP) / cols as f32;
+            for (i, c) in cards.iter().enumerate() {
+                assert!(
+                    (c[2] - one).abs() < 0.5,
+                    "{window}: card {i} is {} wide, a column is {one}",
+                    c[2]
+                );
+            }
+            // The first row reaches the column's right edge.
+            let right = cards[cols - 1][0] + cards[cols - 1][2];
+            assert!(
+                (right - (col[0] + col[2])).abs() < 0.5,
+                "{window}: the row ends at {right}"
+            );
+        }
+    }
+
+    /// Five cards in four columns leave the fifth alone in the last row; in two columns too, and
+    /// in three there are two. None stretches over the empty columns.
+    #[test]
+    fn a_lone_last_card_keeps_the_column_width() {
+        for (window, in_last_row) in [(1400.0_f32, 1), (1600.0, 2), (2500.0, 1), (3400.0, 1)] {
+            let rt = at(window - SIDEBAR_W);
+            let first = rect(&rt, "card-0");
+            let last = rect(&rt, "card-4");
+            let lead = rect(&rt, &format!("card-{}", 5 - in_last_row));
+            assert!(last[1] > first[1] + 0.5, "{window}: the last card is in a later row");
+            assert!(
+                (last[1] - lead[1]).abs() < 0.5,
+                "{window}: {in_last_row} in the last row"
+            );
+            assert!(
+                (lead[0] - first[0]).abs() < 0.5,
+                "{window}: the last row starts at the column's left"
+            );
+            assert!(
+                (last[2] - first[2]).abs() < 0.5,
+                "{window}: last card {} wide, first {}",
+                last[2],
+                first[2]
+            );
+            let col = rect(&rt, "set-col");
+            assert!(
+                last[0] + last[2] < col[0] + col[2] - CARD_MIN_W,
+                "{window}: the last card leaves a column empty"
+            );
+        }
+    }
+
+    /// The empty items add no height: the flow ends 0 pt under its last card, at every width.
+    #[test]
+    fn empty_items_add_no_height() {
+        for window in [1000.0_f32, 1400.0, 1600.0, 2500.0, 3400.0] {
+            let rt = at(window - SIDEBAR_W);
+            let col = rect(&rt, "set-col");
+            let bottom = (0..5)
+                .map(|i| rect(&rt, &format!("card-{i}")))
+                .map(|c| c[1] + c[3])
+                .fold(f32::MIN, f32::max);
+            assert!(
+                (col[1] + col[3] - bottom).abs() < 0.5,
+                "{window}: column ends at {}, cards at {bottom}",
+                col[1] + col[3]
+            );
+        }
+    }
+
+    /// A pane of one card follows the same rule: the card is one column wide, not the window.
+    #[test]
+    fn a_single_card_is_one_column_wide() {
+        fn one(_: &(), _: &mut Cx<()>) -> El {
+            let t = theme(false);
+            let kids = vec![
+                heading("Title", None, &t),
+                settings_card::card(0, &t).child(settings_card::head(0, "Card", &t)),
+            ];
+            row()
+                .key("root")
+                .w_full()
+                .h_full()
+                .child(el().w(SIDEBAR_W).h_full())
+                .child(pane(kids, &t))
+        }
+        let mut rt = Runtime::new(
+            (),
+            one,
+            (2500.0, 900.0),
+            Env {
+                system_dark: false,
+                scale: 2.0,
+            },
+        );
+        rt.frame(0.0);
+        rt.settle_all();
+        rt.frame(0.0);
+        let col = rect(&rt, "set-col")[2];
+        let one = (col - 3.0 * FLOW_GAP) / 4.0;
+        assert!((col - (2500.0 - SIDEBAR_W - 60.0)).abs() < 0.5, "column {col}");
+        assert!(
+            (rect(&rt, "card-0")[2] - one).abs() < 0.5,
+            "card {}, a column is {one}",
+            rect(&rt, "card-0")[2]
+        );
+    }
+
+    /// Not a check: prints how long a switch to each settings pane takes to build and lay out
+    /// (a full-screen 16" window; no window, no paint), and the frame after it.
+    #[test]
+    #[ignore = "timing read-out: cargo test settings_shell -- --ignored --nocapture"]
+    fn pane_build_times() {
+        let env = Env {
+            system_dark: false,
+            scale: 2.0,
+        };
+        let mut state = crate::init();
+        crate::frames::settings::go(&mut state, "DW-0701");
+        let mut rt = Runtime::new(state, crate::view, (1728.0, 1080.0), env);
+        rt.frame(0.0);
+        // Twice round: the first visit of a pane also shapes its text for the first time.
+        for round in ["first", "again"] {
+            for frame in [
+                "DW-0751", "DW-0750", "DW-0791", "DW-0788", "DW-0746", "DW-0712", "DW-0783", "DW-0785", "DW-0790",
+                "DW-0744", "DM-18", "DW-A51", "DW-A52", "DW-A55", "DW-0737", "DW-0701",
+            ] {
+                let start = std::time::Instant::now();
+                rt.update(|s, _| crate::frames::settings::go(s, frame));
+                rt.frame(16.0);
+                let switch = start.elapsed();
+                let start = std::time::Instant::now();
+                rt.frame(16.0);
+                let title = rt
+                    .elements()
+                    .into_iter()
+                    .find(|e| e.key.as_deref() == Some("set-title"))
+                    .is_some();
+                println!(
+                    "{round} {frame} switch={switch:.1?} next={:.1?} elements={} pane={title}",
+                    start.elapsed(),
+                    rt.elements().len()
+                );
+            }
+        }
     }
 
     #[test]
@@ -426,6 +640,9 @@ mod settings_flow_tests {
             last = (c[1], c[0]);
         }
         let h = rect(&rt, "set-h");
-        assert!(rect(&rt, "card-0")[1] >= h[1] + h[3], "the heading stays above the cards");
+        assert!(
+            rect(&rt, "card-0")[1] >= h[1] + h[3],
+            "the heading stays above the cards"
+        );
     }
 }

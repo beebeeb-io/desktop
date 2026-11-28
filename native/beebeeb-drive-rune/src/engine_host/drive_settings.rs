@@ -98,6 +98,66 @@ pub use tools::SPEED_TEST_ON;
 #[path = "drive_settings_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+mod use_rows_tests {
+    use super::*;
+
+    fn share(name: &str, says: &str) -> KindShare {
+        KindShare {
+            name: name.into(),
+            says: says.into(),
+            share: 1.0,
+        }
+    }
+
+    /// Every kind the insights can name (`kind_name`: Backups, Media, Documents, Other) has its own title on Storage,
+    /// and only the true rest is "Other files" (RC23: Backups and Other were both "Other files").
+    #[test]
+    fn every_kind_the_engine_names_has_its_own_title() {
+        let roots = vec!["backups".to_string()];
+        let names: Vec<&str> = [
+            "Backups/Invented phone/Invented backed.jpg",
+            "Trip/Invented shot.jpg",
+            "Invented plan.pdf",
+            "Invented song.mp3",
+        ]
+        .iter()
+        .map(|path| kind_name(path, &roots))
+        .collect();
+        assert_eq!(names, ["Backups", "Media", "Documents", "Other"], "the engine's kinds");
+        let kinds: Vec<KindShare> = names.iter().map(|name| share(name, "1 GB \u{b7} 2 files")).collect();
+        let rows = use_rows(&kinds);
+        let titles: Vec<&str> = rows.iter().map(|(_, title, _)| *title).collect();
+        assert_eq!(titles, ["Backups", "Photos and media", "Documents", "Other files"]);
+        assert_eq!(rows.len(), kinds.len(), "a row for every kind");
+        for (i, title) in titles.iter().enumerate() {
+            assert!(!titles[..i].contains(title), "{title} is drawn twice");
+        }
+        assert!(
+            rows.iter().all(|(_, _, size)| size == "1 GB"),
+            "the size, without the count"
+        );
+        // Only "Other" is the rest.
+        for name in ["Backups", "Media", "Documents"] {
+            assert_ne!(use_row(name).1, "Other files", "{name}");
+        }
+    }
+
+    /// A kind this version does not know is the rest too, and the title is still drawn once.
+    #[test]
+    fn two_rows_never_share_a_title() {
+        let kinds = [
+            share("Other", "225 GB \u{b7} 9 files"),
+            share("Invented kind", "94.1 MB \u{b7} 3 files"),
+            share("Media", "5 MB \u{b7} 1 file"),
+        ];
+        let rows = use_rows(&kinds);
+        let titles: Vec<&str> = rows.iter().map(|(_, title, _)| *title).collect();
+        assert_eq!(titles, ["Other files", "Photos and media"]);
+        assert_eq!(rows[0].2, "225 GB");
+    }
+}
+
 /// How recently insights must have been read for `opened` not to ask again.
 /// How often Bandwidth's "Right now" reads the engine's newest transfer sample while the pane is shown.
 const RATE_EVERY: Duration = Duration::from_secs(2);
@@ -300,6 +360,8 @@ struct OnThisPc {
 enum Ask {
     /// The local sizes, the settings, Open at login and the folder tree.
     Read,
+    /// The account's use and its quota alone: Storage's bar, ahead of the insights' walk of the file list.
+    Usage,
     Insights,
     /// The Trash's item count, for Storage.
     Trash,
@@ -327,6 +389,8 @@ struct Job {
     account: String,
     session: SessionGeneration,
     generation: u64,
+    /// When it was asked: the worker says how long it waited behind the jobs before it.
+    asked: Instant,
 }
 
 enum Answer {
@@ -339,6 +403,8 @@ enum Answer {
     OpenAtLogin(Option<bool>),
     Keep(Keep),
     Insights(Insights, Option<(i64, i64)>),
+    /// The account's use and quota, read alone (`None`: Beebeeb did not say).
+    Usage(Option<(i64, i64)>),
     /// The Trash's item count (`None`: Beebeeb did not say).
     Trash(Option<u64>),
     /// A change that did not happen, in words the window says (P2-6).
@@ -576,6 +642,7 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             // The session of the press: read here, on the window's thread, before any worker runs.
             session: self.engine.session(),
             generation: self.generation,
+            asked: Instant::now(),
         };
         let sent = self.jobs.as_ref().is_some_and(|tx| tx.send(job).is_ok());
         if !sent {
@@ -615,18 +682,15 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
         if !mine || self.insights_at.is_none() {
             return Vec::new();
         }
-        data.kinds
-            .iter()
-            .map(|k| {
-                let (kind, title) = match k.name.as_str() {
-                    "Media" => (UseKind::Photos, "Photos and media"),
-                    "Documents" => (UseKind::Files, "Documents"),
-                    _ => (UseKind::Files, "Other files"),
-                };
-                let size = k.says.split(" \u{b7} ").next().unwrap_or_default().to_string();
-                (kind, title, size)
-            })
-            .collect()
+        use_rows(&data.kinds)
+    }
+
+    /// The account's use and quota alone, for Storage's bar: asked only while none is held, so the bar does not wait
+    /// for the insights' walk of the file list.
+    fn ask_usage(&mut self) {
+        if self.usage.is_none() {
+            self.send(Ask::Usage);
+        }
     }
 
     fn ask_insights(&mut self) {
@@ -637,6 +701,33 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             }
         }
     }
+}
+
+/// The Mac's row for a kind the insights name (`reads::kind_name`): each kind its own glyph and title. Only the true
+/// rest ("Other", and a name this version does not know) is "Other files".
+fn use_row(name: &str) -> (UseKind, &'static str) {
+    match name {
+        "Media" => (UseKind::Photos, "Photos and media"),
+        "Documents" => (UseKind::Files, "Documents"),
+        // Earlier copies of a device's files: the clock glyph.
+        "Backups" => (UseKind::Versions, "Backups"),
+        _ => (UseKind::Files, "Other files"),
+    }
+}
+
+/// Storage's rows from the insights' kinds, in their order (largest first), each with its size. Two rows never
+/// share a title: a second kind that would take a title already drawn is left out.
+fn use_rows(kinds: &[KindShare]) -> Vec<(UseKind, &'static str, String)> {
+    let mut rows: Vec<(UseKind, &'static str, String)> = Vec::new();
+    for k in kinds {
+        let (kind, title) = use_row(&k.name);
+        if rows.iter().any(|(_, drawn, _)| *drawn == title) {
+            continue;
+        }
+        let size = k.says.split(" \u{b7} ").next().unwrap_or_default().to_string();
+        rows.push((kind, title, size));
+    }
+    rows
 }
 
 impl<E: DriveEngine> EngineDriveSettings<E> {
@@ -724,7 +815,9 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
         account,
         session,
         generation,
+        asked,
     } = job;
+    let waited = asked.elapsed();
     let send = |answer| {
         let whose = still_for(engine, &account).then(|| account.clone());
         let _ = answers.send(Tagged {
@@ -734,16 +827,29 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
         });
     };
     let refuse = |words| send(Answer::Refused(words));
-    if !matches!(ask, Ask::Read | Ask::Insights | Ask::Trash | Ask::Bandwidth) && !still_for(engine, &account) {
+    let reads = matches!(ask, Ask::Read | Ask::Usage | Ask::Insights | Ask::Trash | Ask::Bandwidth);
+    if !reads && !still_for(engine, &account) {
         // The account that asked has left, or the vault is locked: nothing is changed for whoever is here now.
         log("drive settings: a change was not made (the account that asked is not signed in)");
         return refuse(CHANGE_LOCKED);
     }
     match ask {
-        Ask::Read => read_local(engine, platform, &account, &send),
+        Ask::Read => {
+            let started = Instant::now();
+            read_local(engine, platform, &account, &send);
+            took("the local sizes and the folder tree", waited, started);
+        }
+        Ask::Usage => {
+            let started = Instant::now();
+            let usage = still_for(engine, &account).then(|| engine.storage_info().ok()).flatten();
+            send(Answer::Usage(usage));
+            took("the use", waited, started);
+        }
         Ask::Insights => {
+            let started = Instant::now();
             let (insights, usage) = insights(engine, &account);
             send(Answer::Insights(insights, usage));
+            took("the insights", waited, started);
         }
         Ask::Trash => send(Answer::Trash(engine.trash_count(session).ok())),
         Ask::Pause(paused) => {
@@ -858,6 +964,16 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
     }
 }
 
+/// One line per Storage read: how long it waited behind the worker's earlier jobs, and how long it took itself. No
+/// name, path or figure of the account.
+fn took(what: &str, waited: Duration, started: Instant) {
+    log(format!(
+        "drive settings: {what} read in {} ms (waited {} ms for the worker)",
+        started.elapsed().as_millis(),
+        waited.as_millis()
+    ));
+}
+
 /// Free up space; `true` when it did not finish. A Mac (`system`): each materialised copy that is not kept goes
 /// cloud-only through the File Provider. Elsewhere: the engine's own.
 fn free_up<E: DriveEngine>(engine: &E, system: Option<&dyn super::macos_downloaded::Materialisation>) -> bool {
@@ -922,10 +1038,12 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             // Only what the open pane shows is read again for the new account.
             match self.open {
                 Some(Pane::Insights) => self.ask_insights(),
+                // The bar's figures first, then the rows by type, then what this PC holds.
                 Some(Pane::Storage) => {
-                    self.ask_local();
-                    self.ask_insights();
+                    self.ask_usage();
                     self.send(Ask::Trash);
+                    self.ask_insights();
+                    self.ask_local();
                 }
                 Some(Pane::Sync) => self.ask_local(),
                 Some(Pane::Bandwidth) => {
@@ -970,6 +1088,12 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
                 }
                 _ if !mine => {}
                 Answer::Trash(count) => self.trash = count,
+                // Read ahead of the insights: Storage draws its bar on this. The insights' own answer follows.
+                Answer::Usage(usage) => {
+                    if usage.is_some() {
+                        self.usage = usage;
+                    }
+                }
                 Answer::Bandwidth(read) => self.bandwidth = read,
                 Answer::Metered(read) => self.metered_pause = read,
                 Answer::OnThisPc(on_pc) => self.on_pc = on_pc,
@@ -1027,12 +1151,10 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         } else {
             self.previews.closed();
         }
-        // The local sizes and the folder tree: Sync and Storage show them.
-        if matches!(pane, Pane::Sync | Pane::Storage) {
-            self.ask_local();
-        }
-        // Storage also shows the account's use and its kinds (the insights' read) and the Trash's count.
+        // Storage shows the account's use (asked first and alone: its bar draws on that), the Trash's count, then the
+        // kinds (the insights' read).
         if pane == Pane::Storage {
+            self.ask_usage();
             self.send(Ask::Trash);
         }
         if matches!(pane, Pane::Insights | Pane::Storage) {
@@ -1040,6 +1162,11 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             if !fresh {
                 self.ask_insights();
             }
+        }
+        // The local sizes and the folder tree: Sync and Storage show them. After the insights on Storage: the walk
+        // reads a contract row per file, and the rows by type do not wait for it.
+        if matches!(pane, Pane::Sync | Pane::Storage) {
+            self.ask_local();
         }
         // Bandwidth is read when its pane opens (and after a change), never at launch.
         if pane == Pane::Bandwidth {
@@ -1302,6 +1429,10 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
 
     fn reload_insights(&mut self) {
         self.insights = Insights::Loading;
+        // Storage's Try again: the bar's figures first, as when the pane opens.
+        if self.open == Some(Pane::Storage) && !self.insights_reading {
+            self.ask_usage();
+        }
         self.ask_insights();
     }
 
