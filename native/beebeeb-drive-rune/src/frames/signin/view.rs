@@ -514,7 +514,11 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
     let mut c = au::column().child(back(t)).child(au::heading(
         "Sign in with another device",
         Some(
-            "On a phone or PC where you're signed in to any Beebeeb app, open Account, then Approve a sign-in. Scan this code with its camera, then type the code below.",
+            if cfg!(target_os = "macos") {
+                "On a phone or computer where you're signed in to any Beebeeb app, open Account, then Approve a sign-in. Scan this code with its camera, then type the code below."
+            } else {
+                "On a phone or PC where you're signed in to any Beebeeb app, open Account, then Approve a sign-in. Scan this code with its camera, then type the code below."
+            },
         ),
         false,
         t,

@@ -147,7 +147,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         ));
         list += 1;
     } else {
-        // Beebeeb cannot turn them back on itself: the one action opens Windows Settings.
+        // Beebeeb cannot turn them back on itself: the one action opens the OS's settings (Windows Settings, System Settings).
         let open = controls::button(
             0,
             &format!("Open {}", super::source::settings_app()),

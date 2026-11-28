@@ -175,7 +175,11 @@ fn player(ui: &Ui, viewing: &Viewing, seconds: u32, t: &Theme) -> El {
         // The board's own note on this bar: the system player draws the real controls on Windows.
         .child(kit::label(
             "ph-player-text-2",
-            "Windows draws the player controls",
+            if cfg!(target_os = "macos") {
+                "macOS draws the player controls"
+            } else {
+                "Windows draws the player controls"
+            },
             style::CAP,
             white.alpha(0.7),
         ))

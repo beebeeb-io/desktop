@@ -192,11 +192,11 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         k,
         Some(&icons::FACE),
         "App lock",
-        Some(concat!(
-            "Your PC's password works if ",
-            beebeeb_engine::unlock_name!(),
-            " doesn't"
-        )),
+        Some(if cfg!(target_os = "macos") {
+            concat!("Your Mac's password works if ", beebeeb_engine::unlock_name!(), " doesn't")
+        } else {
+            concat!("Your PC's password works if ", beebeeb_engine::unlock_name!(), " doesn't")
+        }),
         |key| vec![switch(key, "App lock", on, t, Ui::toggle_lock)],
         None,
         false,
@@ -241,11 +241,19 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         .child(setup::list(
             k,
             rows,
-            Some(concat!(
-                "Sync keeps running while the app is locked. ",
-                beebeeb_engine::file_manager!(),
-                " follows your PC's lock instead."
-            )),
+            Some(if cfg!(target_os = "macos") {
+                concat!(
+                    "Sync keeps running while the app is locked. ",
+                    beebeeb_engine::file_manager!(),
+                    " follows your Mac's lock instead."
+                )
+            } else {
+                concat!(
+                    "Sync keeps running while the app is locked. ",
+                    beebeeb_engine::file_manager!(),
+                    " follows your PC's lock instead."
+                )
+            }),
             t,
         ))
         .child(
@@ -606,15 +614,27 @@ fn explorer_added(k: &mut Keys, t: &Theme) -> El {
         .child(nav)
         .child(setup::note(
             k,
-            concat!(
-                "Anyone who can use ",
-                beebeeb_engine::device_word!(),
-                " while it's signed in can open these files in ",
-                beebeeb_engine::file_manager!(),
-                ". ",
-                beebeeb_engine::file_manager!(),
-                " follows Windows' lock, not Beebeeb's."
-            ),
+            if cfg!(target_os = "macos") {
+                concat!(
+                    "Anyone who can use ",
+                    beebeeb_engine::device_word!(),
+                    " while it's signed in can open these files in ",
+                    beebeeb_engine::file_manager!(),
+                    ". ",
+                    beebeeb_engine::file_manager!(),
+                    " follows your Mac's lock, not Beebeeb's."
+                )
+            } else {
+                concat!(
+                    "Anyone who can use ",
+                    beebeeb_engine::device_word!(),
+                    " while it's signed in can open these files in ",
+                    beebeeb_engine::file_manager!(),
+                    ". ",
+                    beebeeb_engine::file_manager!(),
+                    " follows Windows' lock, not Beebeeb's."
+                )
+            },
             type_::CAPTION,
             0.0,
             t,
@@ -661,10 +681,11 @@ fn explorer_adding(k: &mut Keys, t: &Theme) -> El {
 }
 
 /// DW-0280's banner title: Windows was asked and did not finish.
-const WINDOWS_REFUSED: &str = concat!(
-    "Windows didn't finish adding Beebeeb to ",
-    beebeeb_engine::file_manager!()
-);
+#[cfg(not(target_os = "macos"))]
+const WINDOWS_REFUSED: &str = concat!("Windows didn't finish adding Beebeeb to ", beebeeb_engine::file_manager!());
+/// The Mac's words for DW-0280's title: macOS was asked and did not finish.
+#[cfg(target_os = "macos")]
+const WINDOWS_REFUSED: &str = concat!("macOS didn't finish adding Beebeeb to ", beebeeb_engine::file_manager!());
 /// The banner's title when sync did not start, so Windows was never asked (`Explorer::NotSyncing`).
 const SYNC_DID_NOT_START: &str = concat!(
     "Sync didn't start on ",

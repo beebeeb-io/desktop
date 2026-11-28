@@ -5,7 +5,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The one sentence both viewers draw.
-pub const NEEDS_WINDOWS_UPDATE: &str = "This file can't be shown until Windows is updated.";
+pub const NEEDS_WINDOWS_UPDATE: &str = if cfg!(target_os = "macos") {
+    "This file can't be shown until macOS is updated."
+} else {
+    "This file can't be shown until Windows is updated."
+};
 
 static LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -44,7 +48,11 @@ mod tests {
     fn the_sentence_is_the_briefs() {
         assert_eq!(
             NEEDS_WINDOWS_UPDATE,
-            "This file can't be shown until Windows is updated."
+            if cfg!(target_os = "macos") {
+                "This file can't be shown until macOS is updated."
+            } else {
+                "This file can't be shown until Windows is updated."
+            }
         );
     }
 }

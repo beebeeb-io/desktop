@@ -69,7 +69,11 @@ pub(super) fn step(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         setup::item(
             k,
             Some(&icons::FACE),
-            "Saved by Windows",
+            if cfg!(target_os = "macos") {
+                "Saved by your Mac"
+            } else {
+                "Saved by Windows"
+            },
             Some(concat!(
                 "In Passwords or your password manager, behind ",
                 beebeeb_engine::unlock_name!()

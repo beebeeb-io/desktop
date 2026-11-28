@@ -448,11 +448,13 @@ pub fn drain_settings_intents(s: &mut State, tx: &mut Tx) -> bool {
                 tx.copy(text.clone());
                 s.settings.toast = Some("Copied");
             }
-            Intent::OpenWindowsNotificationSettings => open(s, web_pages::WINDOWS_NOTIFICATIONS),
+            Intent::OpenWindowsNotificationSettings => open(s, web_pages::OS_NOTIFICATIONS),
             // The settings window's own answers to Pause, Sync anyway and Repair (a toast over the pane).
             Intent::Show("DW-1204") => s.settings.toast = Some("Syncing paused"),
             Intent::Show("DW-1203") => s.settings.toast = Some("Syncing on this connection"),
-            Intent::Show("DW-1212") => s.settings.toast = Some(concat!("Repairing Beebeeb in ", beebeeb_engine::file_manager!(), "…")),
+            Intent::Show("DW-1212") => {
+                s.settings.toast = Some(concat!("Repairing Beebeeb in ", beebeeb_engine::file_manager!(), "…"))
+            }
             // The flyout follows the sync state that changed with the press; nothing else is opened for it.
             Intent::Show(frame) if crate::frames::settings::TRAY_FRAMES.contains(frame) => {}
             Intent::Show(_) => log("NotWired(Show)"),
@@ -494,3 +496,7 @@ mod tests;
 #[cfg(test)]
 #[path = "intents_cover_tests.rs"]
 mod cover_tests;
+
+#[cfg(test)]
+#[path = "mac_words_tests.rs"]
+pub(crate) mod mac_words_tests;

@@ -18,16 +18,17 @@ pub const TRY_AGAIN_KEY: &str = "gate-btn-0";
 pub const GET_HELP_KEY: &str = "gate-btn-1";
 pub const QUIT_KEY: &str = "gate-btn-2";
 
+/// The gate's line (and the tray's): the OS's key store did not answer.
+pub const NO_ANSWER: &str = if cfg!(target_os = "macos") {
+    "macOS didn't answer. Nothing syncs until it does."
+} else {
+    "Windows didn't answer. Nothing syncs until it does."
+};
+
 /// The block in the middle of the window.
 pub fn block(t: &Theme) -> El {
     let mut block = col().key("gate").w(super::NO_PLAN_W).items_center().gap(space::S8);
-    for child in head(
-        &ic::PADLOCK,
-        "Can't read your keys",
-        "Windows didn't answer. Nothing syncs until it does.",
-        true,
-        t,
-    ) {
+    for child in head(&ic::PADLOCK, "Can't read your keys", NO_ANSWER, true, t) {
         block = block.child(child);
     }
     let wide = |key: &str, label: &str, look| button(key, label, None, look, Size::Lg, t).w_full();
