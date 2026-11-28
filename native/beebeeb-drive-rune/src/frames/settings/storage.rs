@@ -50,9 +50,18 @@ fn kept_sub(mac: bool, which: Kept, used: &str, gb: u32) -> String {
     }
 }
 
-/// Storage has no answer of its own: its usage arrives with the insights. Loading while that is out, Failed
-/// (with a retry that really asks again) when it did not come, never a blank " used of ".
+/// Whether the bar has its two figures. Once it has, the pane draws: the bar and what this PC keeps do not wait
+/// for the insights, whose rows by type fill in when they arrive.
+fn use_known(st: &super::drive::Storage) -> bool {
+    !st.used.is_empty() && !st.total.is_empty()
+}
+
+/// Only while the use itself is unknown: Loading while the read is out, Failed (with a retry that really asks
+/// again) when it did not come, never a blank " used of ".
 fn unanswered(ui: &SettingsUi, st: &super::drive::Storage, t: &Theme) -> Option<El> {
+    if use_known(st) {
+        return None;
+    }
     let why = match ui.drive.insights() {
         Insights::Loading => {
             return Some(view_state(
@@ -63,8 +72,7 @@ fn unanswered(ui: &SettingsUi, st: &super::drive::Storage, t: &Theme) -> Option<
             ));
         }
         Insights::Failed(why) => why.as_str(),
-        _ if st.used.is_empty() || st.total.is_empty() => "Beebeeb could not read how much space you use.",
-        _ => return None,
+        _ => "Beebeeb could not read how much space you use.",
     };
     Some(view_state(
         ViewState::Failed {
@@ -370,10 +378,10 @@ mod tests {
         assert_eq!(said.iter().filter(|t| *t == "Change limit").count(), 1, "{said:?}");
     }
 
-    fn keys_with(insights: crate::frames::settings::drive::Insights) -> Vec<String> {
+    fn keys_of(drive: Box<dyn DriveSettings>) -> Vec<String> {
         let mut state = crate::init();
         assert!(crate::frames::settings::scene("DW-0712", &mut state));
-        state.settings.drive = Box::new(BoardDrive::new().with_insights(insights));
+        state.settings.drive = drive;
         let env = rune::Env {
             system_dark: false,
             scale: 2.0,
@@ -384,14 +392,50 @@ mod tests {
         rt.elements().into_iter().filter_map(|e| e.key).collect()
     }
 
+    fn keys_with(insights: Insights) -> Vec<String> {
+        keys_of(Box::new(BoardDrive::new().with_insights(insights)))
+    }
+
+    /// The use is known and the insights are still out (or did not come): the bar and both cards draw at once,
+    /// with no loading state and no row by type that was not read.
+    #[test]
+    fn storage_draws_the_bar_and_this_device_before_the_insights_arrive() {
+        for insights in [Insights::Loading, Insights::Failed("offline".into()), Insights::Empty] {
+            let keys = keys_with(insights.clone());
+            assert!(keys.iter().any(|k| k == "usage"), "{insights:?}: the bar");
+            assert!(
+                keys.iter().any(|k| k == "item-1-0-actions"),
+                "{insights:?}: what this device keeps"
+            );
+            assert!(!keys.iter().any(|k| k == "loading"), "{insights:?}: no loading state");
+            assert!(
+                !keys.iter().any(|k| k == "storage-failed-retry"),
+                "{insights:?}: no failed state"
+            );
+        }
+    }
+
+    /// The use itself is unknown: Loading while the read is out, Failed with a retry when it did not come, never a
+    /// blank figure.
     #[test]
     fn storage_says_loading_and_failed_never_a_blank_figure() {
-        use crate::frames::settings::drive::Insights;
-        let loading = keys_with(Insights::Loading);
-        assert!(loading.iter().any(|k| k == "loading") && !loading.iter().any(|k| k == "usage"));
-        let failed = keys_with(Insights::Failed("offline".into()));
-        assert!(failed.iter().any(|k| k == "storage-failed-retry") && !failed.iter().any(|k| k == "usage"));
-        let ready = keys_with(Insights::Empty);
-        assert!(ready.iter().any(|k| k == "usage"));
+        let mut blank = BoardDrive::new().storage();
+        assert!(use_known(&blank));
+        blank.total = String::new();
+        assert!(!use_known(&blank), "half a figure is no figure");
+        blank.used = String::new();
+        assert!(!use_known(&blank));
+
+        let t = crate::theme::tokens::theme(false);
+        let said = |insights: Insights| {
+            let ui = SettingsUi {
+                drive: Box::new(BoardDrive::new().with_insights(insights)),
+                ..SettingsUi::default()
+            };
+            unanswered(&ui, &blank, &t).is_some()
+        };
+        assert!(said(Insights::Loading));
+        assert!(said(Insights::Failed("offline".into())));
+        assert!(said(Insights::Empty), "no use read: could not load, never a blank bar");
     }
 }
