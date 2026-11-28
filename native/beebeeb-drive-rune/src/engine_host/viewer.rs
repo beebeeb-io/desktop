@@ -367,7 +367,9 @@ impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
             if !reveal {
                 return self.mac_open_with(file_id, super::open_with_apps::mac::Pick::Choose);
             }
-            let path = match self.elsewhere_path(file_id) {
+            // dm-100: the same checks as Open with, so a file shared with the account is never shown in Finder
+            // (ruling 1701); the press is refused before Finder is asked anything.
+            let path = match Self::mac_open_with_checks(&self.engine, file_id) {
                 Ok(path) => path,
                 Err(why) => return why,
             };
@@ -405,7 +407,7 @@ impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
         use super::open_with_apps::mac;
         // Each refusal is logged by its kind (never a name or an id); the page says it in words.
         match Self::mac_open_with_checks(&self.engine, file_id) {
-            Ok(()) => {}
+            Ok(_) => {}
             // Sync runs only once Beebeeb is in Finder: the press's thread waits for setup, or says why it ended.
             Err(Elsewhere::NeedsSync) if mac::setup_of(&super::finder_setup::view()) != mac::Setup::Ready => {
                 tracing::info!("open with: Finder is not set up yet; the open goes on to wait for it");
@@ -430,26 +432,44 @@ impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
         if started.is_ok() { Elsewhere::Opened } else { Elsewhere::Refused }
     }
 
-    /// The checks a Mac's Open with passes before anything is asked of Finder: [`Self::elsewhere_path_of`]'s, and the
-    /// file is one of the account's own. Each refusal is logged by its kind.
+    /// The checks a Mac's Open with and Show in Finder pass before anything is asked of Finder:
+    /// [`Self::elsewhere_path_of`]'s, and the file is one of the account's own ([`finder_hand_over`]). The path the
+    /// file opens from, or why not. Each refusal is logged by its kind.
     #[cfg(target_os = "macos")]
-    fn mac_open_with_checks(engine: &Engine<C>, file_id: &str) -> Result<(), Elsewhere> {
-        use crate::shell::platform::macos::macos_fp::open as finder;
-        if let Err(why) = Self::elsewhere_path_of(engine, file_id) {
-            match why {
-                Elsewhere::NeedsSync => tracing::warn!("open with: refused, sync is not running"),
-                _ => tracing::warn!("open with: refused, the file has no place to open from"),
-            }
-            return Err(why);
+    fn mac_open_with_checks(engine: &Engine<C>, file_id: &str) -> Result<std::path::PathBuf, Elsewhere> {
+        let path = Self::elsewhere_path_of(engine, file_id);
+        match &path {
+            Err(Elsewhere::NeedsSync) => tracing::warn!("finder: refused, sync is not running"),
+            Err(_) => tracing::warn!("finder: refused, the file has no place to open from"),
+            Ok(_) => {}
         }
-        let own = engine
-            .local_state_for_changes()
-            .and_then(|state| state.with(|db| finder::refuse_shared(db, file_id).is_ok()));
-        if !matches!(own, Ok(true)) {
-            tracing::warn!("open with: refused, not one of the account's own files");
-            return Err(Elsewhere::Refused);
+        finder_hand_over(path, file_id, |id| {
+            engine
+                .local_state_for_changes()
+                .and_then(|state| state.with(|db| beebeeb_engine::finder_show::item_namespace(db, id)))
+                .map_err(|_| "read item: no local state".to_string())
+                .and_then(|namespace| namespace)
+        })
+    }
+}
+
+/// Ruling 1701 for every hand-over of a viewer's file to Finder (Show in Finder and Open with alike): the place the
+/// file opens from (`found`, its own refusal passed on as it is), and only for one of the account's own rows
+/// (`namespace_of` reads the row, [`beebeeb_engine::finder_show::finder_may_show`]). A file shared with the account, a
+/// row that is not known and a read that failed are refused, so Finder is never asked about them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS hands a file to Finder
+fn finder_hand_over<T>(
+    found: Result<T, Elsewhere>,
+    file_id: &str,
+    namespace_of: impl FnOnce(&str) -> Result<Option<beebeeb_engine::state_db::Namespace>, String>,
+) -> Result<T, Elsewhere> {
+    let found = found?;
+    match beebeeb_engine::finder_show::finder_may_show(file_id, namespace_of) {
+        Ok(()) => Ok(found),
+        Err(_) => {
+            tracing::warn!("finder: refused, not one of the account's own files");
+            Err(Elsewhere::Refused)
         }
-        Ok(())
     }
 }
 
@@ -1700,5 +1720,49 @@ mod heic_open_tests {
         assert_eq!(heic_or_no_viewer("n.HEIC"), NoPreview::Heic);
         assert_eq!(heic_or_no_viewer("n.heif"), NoPreview::Heic);
         assert_eq!(heic_or_no_viewer("n.xyz"), NoPreview::NoViewer);
+    }
+}
+
+/// dm-100: Show in Finder from a viewer (and Open with) hands only the account's own file to Finder (ruling 1701).
+/// "viewers" in the name: the wave's done check (`cargo test viewers`) runs it.
+#[cfg(test)]
+mod viewers_finder_own_file_tests {
+    use super::*;
+    use beebeeb_engine::state_db::Namespace;
+
+    #[test]
+    fn show_in_finder_is_refused_for_a_shared_with_me_file_and_goes_on_for_an_own_file() {
+        let place = || Ok::<_, Elsewhere>("/Beebeeb/Notes/a.txt");
+        // Shared with the account: refused before Finder is asked, whatever place it has.
+        assert_eq!(
+            finder_hand_over(place(), "s1", |_| Ok(Some(Namespace::SharedWithMe))),
+            Err(Elsewhere::Refused)
+        );
+        assert_eq!(
+            finder_hand_over(place(), "namespace:shared_with_me", |_| panic!("no lookup")),
+            Err(Elsewhere::Refused)
+        );
+        // The account's own file: its place is shown.
+        for own in [Namespace::MyFiles, Namespace::Offline, Namespace::Conflicts] {
+            assert_eq!(
+                finder_hand_over(place(), "f1", |_| Ok(Some(own))),
+                Ok("/Beebeeb/Notes/a.txt")
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_row_or_a_failed_read_is_refused_and_a_missing_place_says_its_own_reason() {
+        let place = || Ok::<_, Elsewhere>(());
+        assert_eq!(finder_hand_over(place(), "gone", |_| Ok(None)), Err(Elsewhere::Refused));
+        assert_eq!(
+            finder_hand_over(place(), "f1", |_| Err("read item: boom".into())),
+            Err(Elsewhere::Refused)
+        );
+        // No place to open from (sync is off): that reason, and the row is not read.
+        assert_eq!(
+            finder_hand_over(Err::<(), _>(Elsewhere::NeedsSync), "f1", |_| panic!("no lookup")),
+            Err(Elsewhere::NeedsSync)
+        );
     }
 }
