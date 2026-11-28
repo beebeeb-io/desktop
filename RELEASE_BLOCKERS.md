@@ -15,7 +15,7 @@ No item blocks a release at present.
 A waived item is not a list item, so the release checks do not read it. Each entry keeps the item's text,
 the date and the maintainer's words.
 
-Waived 2026-11-28 by Guus Langelaar (desktop wave 40, PR #489): "that check is not needed". The three
+Waived 2026-11-28 by the maintainer (desktop wave 40, PR #489): "that check is not needed". The three
 [macOS] items below no longer block a macOS release.
 
 Waived [macOS] item 1: The macOS sign-out flow for Finder saves still waiting to upload shipped in 0.8.12 with 1 of its 12 device checks run (D1 passed; D2–D11 and D10b not run, waived for 0.8.12 only). No later desktop release ships until those cases pass on a signed build (spec `docs/specs/2026-10-10-macos-sign-out-waiting-writes.md` §13.4), or the maintainers waive again for that release.
