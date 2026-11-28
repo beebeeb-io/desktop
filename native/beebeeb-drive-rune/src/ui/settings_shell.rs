@@ -28,9 +28,10 @@ use crate::theme::icons_settings as ic;
 pub const SIDEBAR_W: f32 = 224.0;
 /// A pane's column (`.mk-set-col`): at least this wide.
 pub const COLUMN_W: f32 = 540.0;
-/// The column grows with the window up to this readable maximum.
-pub const COLUMN_MAX_W: f32 = 880.0;
-/// A card is never narrower than this: two columns need room for two of them and the gap.
+/// The column grows with the window up to this maximum: room for three cards and their gaps
+/// (1288 pt) and no fourth, so a full-screen window is filled instead of half empty.
+pub const COLUMN_MAX_W: f32 = 1300.0;
+/// A card is never narrower than this: n columns need room for n of them and the gaps between.
 pub const CARD_MIN_W: f32 = 420.0;
 /// The gap between a pane's children, in both directions.
 pub const FLOW_GAP: f32 = 14.0;
@@ -48,8 +49,9 @@ pub fn mark_lead() {
 
 /// A pane's column: the lead pieces (crumb, heading) stacked full width, then the rest in a
 /// row that wraps. Each flowing child sits in an item at least [`CARD_MIN_W` wide that grows,
-/// so a column wide enough for two items gives two, and a narrower one gives one. Order and
-/// whole children are kept. `min_w` is the column's floor (`COLUMN_W`).
+/// so the column holds as many items side by side as fit (854 pt: two, 1288 pt: three) and
+/// [`COLUMN_MAX_W`] stops it at three. Items in one row share its width equally.
+/// Order and whole children are kept. `min_w` is the column's floor (`COLUMN_W`).
 pub fn flow(children: Vec<El>, min_w: f32) -> El {
     let lead = LEAD.with(|l| l.replace(0)).min(children.len());
     let mut column = col().key("set-col").w_full().min_w(min_w).max_w(COLUMN_MAX_W).gap(FLOW_GAP);
@@ -184,7 +186,7 @@ pub fn sidebar(back: El, sections: Vec<(&str, Vec<El>)>, foot: &str, t: &Theme) 
 }
 
 /// A pane (`.mk-set-main` > `.mk-set-col`): the ground, 22 pt above and 30 pt beside a
-/// 540 pt column whose children sit 14 pt apart. A pane taller than the window scrolls
+/// column (540 pt on the board, wider with the window) whose children sit 14 pt apart. A pane taller than the window scrolls
 /// (the board draws those frames taller than the window "so the whole section shows").
 pub fn pane(children: Vec<El>, t: &Theme) -> El {
     let column = flow(children, COLUMN_W);
@@ -373,23 +375,24 @@ mod settings_flow_tests {
             .rect
     }
 
-    /// (column width, distinct card x positions) for a window whose content area is `content` wide.
+    /// (column width, cards side by side in the first row) for a window whose content area is
+    /// `content` wide.
     fn shape(content: f32) -> (f32, usize) {
         let rt = at(content);
         let col = rect(&rt, "set-col");
-        let mut xs: Vec<i32> = Vec::new();
+        let top = rect(&rt, "card-0")[1];
+        let mut beside = 0;
         for i in 0..5 {
             let c = rect(&rt, &format!("card-{i}"));
             assert!(c[0] >= col[0] - 0.5 && c[0] + c[2] <= col[0] + col[2] + 0.5, "card {i} sticks out of the column at {content}");
             assert!(c[2] >= CARD_MIN_W - 0.5, "card {i} is {} wide at {content}", c[2]);
             let h = rect(&rt, &format!("card-{i}-head"));
             assert!(h[0] + h[2] <= c[0] + c[2] + 0.5 && h[1] + h[3] <= c[1] + c[3] + 0.5, "card {i} is cut at {content}");
-            let x = c[0].round() as i32;
-            if !xs.contains(&x) {
-                xs.push(x);
+            if (c[1] - top).abs() < 0.5 {
+                beside += 1;
             }
         }
-        (col[2], xs.len())
+        (col[2], beside)
     }
 
     #[test]
@@ -403,17 +406,69 @@ mod settings_flow_tests {
     }
 
     #[test]
-    fn column_grows_with_the_window_to_880() {
+    fn column_follows_the_window_to_three_cards() {
+        // The room three cards need, and no fourth fits under the maximum.
+        let need = |n: usize| n as f32 * CARD_MIN_W + (n - 1) as f32 * FLOW_GAP;
+        assert!(need(3) <= COLUMN_MAX_W && COLUMN_MAX_W < need(4));
         // content area = window - sidebar; 30 pt either side
+        let room = |window: f32| window - SIDEBAR_W - 60.0;
         let (w, cols) = shape(1000.0 - SIDEBAR_W);
-        assert!((w - (1000.0 - SIDEBAR_W - 60.0)).abs() < 0.5, "1000: column {w}");
+        assert!((w - room(1000.0)).abs() < 0.5, "1000: column {w}");
         assert_eq!(cols, 1, "1000: one column");
+        // Just under and at the room two cards need.
+        assert_eq!(shape(need(2) + 60.0 - 2.0).1, 1);
+        assert_eq!(shape(need(2) + 60.0).1, 2);
+        let (w, cols) = shape(1400.0 - SIDEBAR_W);
+        assert!((w - room(1400.0)).abs() < 0.5, "1400: column {w}");
+        assert_eq!(cols, 2, "1400: two columns");
+        // 1600 leaves 1316 pt: three cards (1288 pt) fit.
         let (w, cols) = shape(1600.0 - SIDEBAR_W);
-        assert!((w - 880.0).abs() < 0.5, "1600: column {w}");
-        assert_eq!(cols, 2, "1600: two columns");
+        assert!((w - COLUMN_MAX_W).abs() < 0.5, "1600: column {w}");
+        assert_eq!(cols, 3, "1600: three columns");
         let (w, cols) = shape(2500.0 - SIDEBAR_W);
-        assert!((w - 880.0).abs() < 0.5, "2500: column {w}");
-        assert_eq!(cols, 2, "2500: two columns");
+        assert!((w - COLUMN_MAX_W).abs() < 0.5, "2500: column {w}");
+        assert_eq!(cols, 3, "2500: three columns, never four");
+    }
+
+    #[test]
+    fn cards_in_one_row_are_equally_wide() {
+        for window in [1400.0, 1600.0, 2500.0] {
+            let rt = at(window - SIDEBAR_W);
+            let cards: Vec<[f32; 4]> = (0..5).map(|i| rect(&rt, &format!("card-{i}"))).collect();
+            for pair in cards.windows(2) {
+                if (pair[0][1] - pair[1][1]).abs() < 0.5 {
+                    assert!((pair[0][2] - pair[1][2]).abs() < 0.5, "{window}: {} beside {}", pair[0][2], pair[1][2]);
+                }
+            }
+        }
+    }
+
+    /// Not a check: prints how long a switch to each settings pane takes to build and lay out
+    /// (a full-screen 16" window; no window, no paint), and the frame after it.
+    #[test]
+    #[ignore = "timing read-out: cargo test settings_shell -- --ignored --nocapture"]
+    fn pane_build_times() {
+        let env = Env { system_dark: false, scale: 2.0 };
+        let mut state = crate::init();
+        crate::frames::settings::go(&mut state, "DW-0701");
+        let mut rt = Runtime::new(state, crate::view, (1728.0, 1080.0), env);
+        rt.frame(0.0);
+        // Twice round: the first visit of a pane also shapes its text for the first time.
+        for round in ["first", "again"] {
+            for frame in [
+                "DW-0751", "DW-0750", "DW-0791", "DW-0788", "DW-0746", "DW-0712", "DW-0783", "DW-0785", "DW-0790",
+                "DW-0744", "DM-18", "DW-A51", "DW-A52", "DW-A55", "DW-0737", "DW-0701",
+            ] {
+                let start = std::time::Instant::now();
+                rt.update(|s, _| crate::frames::settings::go(s, frame));
+                rt.frame(16.0);
+                let switch = start.elapsed();
+                let start = std::time::Instant::now();
+                rt.frame(16.0);
+                let title = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("set-title")).is_some();
+                println!("{round} {frame} switch={switch:.1?} next={:.1?} elements={} pane={title}", start.elapsed(), rt.elements().len());
+            }
+        }
     }
 
     #[test]
