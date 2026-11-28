@@ -1,7 +1,7 @@
 //! Writer-provenance headers and the bounded 429 retry policy.
 //!
 //! Owns: the `X-Beebeeb-Client*` values every request carries and
-//! `retry_decision`'s backoff arithmetic. Must not: touch the network or the
+//! the 429 wait arithmetic (`rate_limit_wait_ms`). Must not: touch the network or the
 //! client's credentials. Tests: `api_client/tests/` (provenance and retry).
 
 use super::*;
@@ -50,10 +50,13 @@ pub(crate) fn provenance_headers() -> HeaderMap {
 
 // ── 429 backoff/retry tuning ───────────────────────────────────────────────────
 //
-// A 429 carries the server's window in `Retry-After`. The client waits that long
-// (plus 0-25 % jitter so clients do not return in step), up to
-// `RETRY_AFTER_MAX_SECS`. A longer hint, or a body with `error: "banned"`, is a
-// policy refusal: not waited out, the 429 is returned to the caller.
+// The client pause rule. A 429 pauses the whole client for
+// `rate_limit_wait_ms(streak, hint, jitter)`: the floor ladder (2, 4, 8, 16, 32,
+// 60 s by streak) or the server's `Retry-After`, whichever is longer, plus
+// 0-25 % jitter so clients do not return in step. A hint above
+// `RETRY_AFTER_MAX_SECS`, or a body with `error: "banned"`, is a policy refusal:
+// not waited out, the 429 is returned to the caller. `x-ratelimit-reset` is not
+// read: it describes another tier than the one that refused.
 
 /// Extra attempts after the first 429 (so up to 1 + this total requests).
 pub(super) const MAX_429_RETRIES: u32 = 4;
@@ -68,18 +71,42 @@ pub(super) const RETRY_JITTER_MAX_PCT: u64 = 25;
 /// window plus its maximum jitter (60 s + 25 %).
 pub(super) const RETRY_TOTAL_BUDGET_MS: u64 = RETRY_AFTER_MAX_SECS * 1000 * (100 + RETRY_JITTER_MAX_PCT) / 100;
 
-/// Backoff used when the server gives no usable hint (no Retry-After / reset).
-pub(super) const RETRY_DEFAULT_WAIT_SECS: u64 = 1;
+/// First step of the wait ladder, in ms (core's `RATE_LIMIT_WAIT_FLOOR_MS`).
+pub(super) const RATE_LIMIT_WAIT_FLOOR_MS: u64 = 2_000;
 
-/// What to do with a 429.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum RetryDecision {
-    /// Sleep this many milliseconds, then retry.
-    Wait(u64),
-    /// Out of attempts or budget: return the 429.
-    GiveUp,
-    /// The server asked for more than we wait, or banned us: return the 429.
-    Refuse,
+/// Top of the wait ladder, in ms (core's `RATE_LIMIT_WAIT_CAP_MS`).
+pub(super) const RATE_LIMIT_WAIT_CAP_MS: u64 = 60_000;
+
+/// How long a 429 pauses the client, in ms. The app's own copy of
+/// `beebeeb_core::retry::rate_limit_wait_ms`, with the same numbers; call core's
+/// once the pin has it.
+///
+/// - `streak` is 0 for the first 429 of a run of refusals.
+/// - `retry_after_seconds` is the server's hint, if any.
+/// - `jitter_permille` (0..=1000) scales the 0-25 % jitter.
+///
+/// Streaks 0..5 without a hint give 2, 4, 8, 16, 32, 60 s; `Retry-After: 60` gives 60-75 s.
+pub(super) fn rate_limit_wait_ms(streak: u32, retry_after_seconds: Option<u64>, jitter_permille: u32) -> u64 {
+    let ladder = RATE_LIMIT_WAIT_FLOOR_MS
+        .checked_shl(streak)
+        .filter(|ms| ms >> streak == RATE_LIMIT_WAIT_FLOOR_MS)
+        .map_or(RATE_LIMIT_WAIT_CAP_MS, |ms| ms.min(RATE_LIMIT_WAIT_CAP_MS));
+    let hinted = retry_after_seconds.unwrap_or(0).min(RETRY_AFTER_MAX_SECS) * 1000;
+    let base = ladder.max(hinted);
+    base + base * RETRY_JITTER_MAX_PCT * u64::from(jitter_permille.min(1000)) / 100_000
+}
+
+/// True when a 429 is a policy refusal (a ban, or a hint above
+/// `RETRY_AFTER_MAX_SECS`): never waited out, never retried.
+pub(super) fn is_policy_refusal(hint: Option<u64>, banned: bool) -> bool {
+    banned || hint.is_some_and(|secs| secs > RETRY_AFTER_MAX_SECS)
+}
+
+/// True when a call that already made `attempt` retries and slept `spent_ms`
+/// may sleep `wait_ms` more and try again: at most `MAX_429_RETRIES` retries,
+/// and a cumulative sleep within `RETRY_TOTAL_BUDGET_MS`.
+pub(super) fn may_retry(attempt: u32, spent_ms: u64, wait_ms: u64) -> bool {
+    attempt < MAX_429_RETRIES && spent_ms.saturating_add(wait_ms) <= RETRY_TOTAL_BUDGET_MS
 }
 
 /// True when a 429 body is the server's `{"error":"banned"}`.
@@ -100,9 +127,8 @@ pub(super) fn is_idempotent(method: &reqwest::Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::PUT | Method::DELETE | Method::OPTIONS)
 }
 
-/// Current UNIX time in seconds (for interpreting `x-ratelimit-reset`, which is
-/// an absolute epoch). Falls back to 0 on the (impossible) pre-epoch clock so
-/// the reset delta just reads as "0s" rather than panicking.
+/// Current UNIX time in seconds, for the link record. Falls back to 0 on the
+/// (impossible) pre-epoch clock rather than panicking.
 pub(super) fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -112,50 +138,11 @@ pub(super) fn now_unix_secs() -> u64 {
 
 /// Parse a header value as whole seconds (`u64`). Tolerant of surrounding
 /// whitespace; returns `None` if the header is absent or non-numeric (e.g. an
-/// HTTP-date `Retry-After`, which we don't try to parse — the default wait
+/// HTTP-date `Retry-After`, which we don't try to parse — the floor ladder
 /// covers that case).
 pub(super) fn header_secs(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<u64>().ok())
-}
-
-/// Pure backoff decision for a 429 response.
-///
-/// - `attempt` is the number of retries ALREADY made (0 on the first 429).
-/// - `spent_ms` is the cumulative milliseconds already slept for this call.
-/// - `retry_after` / `reset_in` are the server's hints (seconds), if any.
-/// - `banned` is true when the body said `error: "banned"`.
-/// - `jitter_pct` is the 0-25 % jitter to add (clamped to 25).
-///
-/// The wait is `max(retry_after, reset_in)` (default `RETRY_DEFAULT_WAIT_SECS`)
-/// plus jitter. A hint above `RETRY_AFTER_MAX_SECS` or a ban is `Refuse`. We
-/// give up at `MAX_429_RETRIES`, or when the wait would pass the total budget.
-pub(super) fn retry_decision(
-    attempt: u32,
-    spent_ms: u64,
-    retry_after: Option<u64>,
-    reset_in: Option<u64>,
-    banned: bool,
-    jitter_pct: u64,
-) -> RetryDecision {
-    let hint = match (retry_after, reset_in) {
-        (Some(a), Some(b)) => a.max(b),
-        (Some(a), None) => a,
-        (None, Some(b)) => b,
-        (None, None) => RETRY_DEFAULT_WAIT_SECS,
-    };
-    if banned || hint > RETRY_AFTER_MAX_SECS {
-        return RetryDecision::Refuse;
-    }
-    if attempt >= MAX_429_RETRIES {
-        return RetryDecision::GiveUp;
-    }
-    let base_ms = hint * 1000;
-    let wait_ms = base_ms + base_ms * jitter_pct.min(RETRY_JITTER_MAX_PCT) / 100;
-    if spent_ms.saturating_add(wait_ms) > RETRY_TOTAL_BUDGET_MS {
-        return RetryDecision::GiveUp;
-    }
-    RetryDecision::Wait(wait_ms)
 }

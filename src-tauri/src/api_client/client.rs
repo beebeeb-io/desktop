@@ -31,6 +31,10 @@ pub struct ApiClient {
     /// The 429 contract: while a 429 wait is running, every request of this client (and of the
     /// backup-pass clone, which shares it) waits for the same deadline before it is sent.
     pub(super) pause_until: std::sync::Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
+    /// How many pauses in a row this client (and the backup-pass clone) has started: the step of
+    /// the wait ladder. Back to 0 on the first answer that is not a 429. Written under the
+    /// `pause_until` lock when a pause starts.
+    pub(super) rate_streak: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Drop for ApiClient {
@@ -76,6 +80,7 @@ impl ApiClient {
             direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
             storage_client: std::sync::OnceLock::new(),
             pause_until: Default::default(),
+            rate_streak: Default::default(),
         }
     }
 
@@ -117,6 +122,7 @@ impl ApiClient {
             direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
             storage_client: std::sync::OnceLock::new(),
             pause_until: self.pause_until.clone(),
+            rate_streak: self.rate_streak.clone(),
         }
     }
 
@@ -296,8 +302,8 @@ impl ApiClient {
     // Unlike the sync-engine binary paths above, they go through
     // `get_typed` / `send_with_retry`, which:
     //   * retry on HTTP 429 (rate limit) — up to `MAX_429_RETRIES` extra
-    //     attempts — honouring `Retry-After` / `x-ratelimit-reset` for the
-    //     per-attempt wait (up to `RETRY_AFTER_MAX_SECS`, plus 0-25 % jitter) and bounding the
+    //     attempts — waiting the floor ladder or the server's `Retry-After`
+    //     (up to `RETRY_AFTER_MAX_SECS`), plus 0-25 % jitter, and bounding the
     //     CUMULATIVE wait at `RETRY_TOTAL_BUDGET_MS` so a hammered endpoint
     //     can't stall a view indefinitely. This makes a transient 429 (the prod
     //     account-data endpoints currently 429 under load) retry gracefully
@@ -314,17 +320,29 @@ impl ApiClient {
     }
 
     /// Internal: issue an arbitrary request (built by `build`) with bounded 429
-    /// backoff + retry, returning a 2xx response or a descriptive error.
-    ///
-    /// On a 429 we read the server's hint (`Retry-After` seconds or
-    /// `x-ratelimit-reset` epoch-seconds), sleep, and retry — up to `MAX_429_RETRIES` extra attempts and a total
-    /// sleep budget of `RETRY_TOTAL_BUDGET_MS`. A `Retry-After` above 60 s or
-    /// `error: "banned"` is returned at once as the 429. The final 429 (or a non-429
-    /// non-2xx at any point) is surfaced via `check_status`.
+    /// backoff + retry, returning a 2xx response or a descriptive error:
+    /// [`Self::send_paced`], then `check_status` on its answer.
     pub(super) async fn send_with_retry(
         &self,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> ApiResult<reqwest::Response> {
+        Self::check_status(self.send_paced(build).await?).await
+    }
+
+    /// Internal: issue the request built by `build` under the client pause rule. Every answer
+    /// that is not a 429 is returned unchecked, so a caller keeps its own status branches.
+    ///
+    /// The rule (the app's copy of `beebeeb_core::retry::rate_limit_wait_ms` does the numbers):
+    /// - every request waits for a running pause before it is sent;
+    /// - the hint is the larger of `Retry-After` and the body's `retry_after`;
+    /// - `error: "banned"` or a hint above 60 s is a policy refusal, returned at once as
+    ///   [`DesktopApiError::RateLimited`];
+    /// - any other 429 pauses the whole client for the floor ladder or the hint, plus 0-25 %
+    ///   jitter. A 429 that arrives while a pause runs joins it: no new pause, no doubling;
+    /// - only an idempotent request is sent again, at most `MAX_429_RETRIES` times and within
+    ///   `RETRY_TOTAL_BUDGET_MS` of sleep. Any other gets its 429 back as `HttpStatus`;
+    /// - the streak resets on the first answer that is not a 429.
+    pub(super) async fn send_paced(&self, build: impl Fn() -> reqwest::RequestBuilder) -> ApiResult<reqwest::Response> {
         let mut spent_ms: u64 = 0;
         let mut attempt: u32 = 0;
         loop {
@@ -347,13 +365,11 @@ impl ApiClient {
             };
             self.link.note_status(resp.status(), now_unix_secs() as i64);
             if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return Self::check_status(resp).await;
+                self.rate_streak.store(0, std::sync::atomic::Ordering::Relaxed);
+                return Ok(resp);
             }
-            // 429: decide whether (and how long) to wait before retrying.
             let status = resp.status();
             let retry_after = header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str());
-            let reset_in =
-                header_secs(resp.headers(), "x-ratelimit-reset").map(|epoch| epoch.saturating_sub(now_unix_secs()));
             // The body tells a ban from a window; a 429 body is a small error object.
             let body = resp.text().await.unwrap_or_default();
             let hint = match (retry_after, body_retry_after(&body)) {
@@ -361,33 +377,40 @@ impl ApiClient {
                 (a, b) => a.or(b),
             };
             let banned = is_banned_body(&body);
-            let jitter_pct = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=RETRY_JITTER_MAX_PCT);
-            let decision = retry_decision(attempt, spent_ms, hint, reset_in, banned, jitter_pct);
-            // Whatever the answer, the whole client holds off for the wait (capped at 60 s).
-            let wait_ms = match decision {
-                RetryDecision::Wait(ms) => ms,
-                _ => hint.unwrap_or(RETRY_DEFAULT_WAIT_SECS).saturating_mul(1000),
-            };
-            self.pause_for(wait_ms.min(RETRY_AFTER_MAX_SECS * 1000));
-            match decision {
-                // Only idempotent requests are replayed; a POST gets its 429 back.
-                RetryDecision::Wait(wait_ms) if idempotent => {
-                    spent_ms = spent_ms.saturating_add(wait_ms);
-                    attempt += 1;
-                }
-                RetryDecision::Refuse => {
-                    return Err(DesktopApiError::RateLimited {
-                        banned,
-                        retry_after: hint.or(reset_in),
-                    });
-                }
-                // Out of attempts/budget, or a non-idempotent request: return the 429.
-                RetryDecision::Wait(_) | RetryDecision::GiveUp => {
-                    let snippet: String = body.chars().take(300).collect();
-                    return Err(DesktopApiError::HttpStatus { status, snippet });
-                }
+            if is_policy_refusal(hint, banned) {
+                // Not waited out, but the whole client holds off (at most 60 s). No ladder step.
+                let hold_ms = hint.map_or(RATE_LIMIT_WAIT_FLOOR_MS, |secs| secs.saturating_mul(1000));
+                self.pause_for(hold_ms.min(RETRY_AFTER_MAX_SECS * 1000));
+                return Err(DesktopApiError::RateLimited { banned, retry_after: hint });
             }
+            // Whatever happens to this request, the whole client holds off.
+            let wait_ms = self.pause_after_429(hint);
+            // Only idempotent requests are replayed; a POST gets its 429 back.
+            if !idempotent || !may_retry(attempt, spent_ms, wait_ms) {
+                let snippet: String = body.chars().take(300).collect();
+                return Err(DesktopApiError::HttpStatus { status, snippet });
+            }
+            spent_ms = spent_ms.saturating_add(wait_ms);
+            attempt += 1;
         }
+    }
+
+    /// A 429 arrived: start the shared pause, or join the one that is running. Returns the
+    /// milliseconds until the pause ends. Only a 429 that starts a pause takes a ladder step, so
+    /// a burst of 429s for requests sent before the pause neither doubles it nor moves its end.
+    fn pause_after_429(&self, hint: Option<u64>) -> u64 {
+        use std::sync::atomic::Ordering;
+        let now = tokio::time::Instant::now();
+        let mut slot = self.pause_until.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(until) = slot.filter(|until| *until > now) {
+            return u64::try_from((until - now).as_millis()).unwrap_or(u64::MAX);
+        }
+        let streak = self.rate_streak.load(Ordering::Relaxed);
+        let jitter_permille = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=1000u32);
+        let wait_ms = rate_limit_wait_ms(streak, hint, jitter_permille);
+        self.rate_streak.store(streak.saturating_add(1), Ordering::Relaxed);
+        *slot = Some(now + Duration::from_millis(wait_ms));
+        wait_ms
     }
 
     /// Hold every request of this client until `wait_ms` from now (never shortens a longer pause).
