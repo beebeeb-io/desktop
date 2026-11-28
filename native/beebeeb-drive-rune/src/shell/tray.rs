@@ -226,7 +226,7 @@ pub fn tray_model_for(inputs: &TrayInputs, identity: AppIdentity) -> TrayModel {
         // Disabled while the app is not in File Explorer (DW-1215, DW-1216).
         item(
             MenuAction::OpenInFileExplorer,
-            "Open in File Explorer".into(),
+            concat!("Open in ", beebeeb_engine::file_manager!()).into(),
             inputs.signed_in && inputs.explorer_ready,
         ),
         MenuEntry::Separator,
@@ -482,7 +482,7 @@ mod tests {
             labels(&model),
             vec![
                 (&*format!("Open {name}"), true),
-                ("Open in File Explorer", true),
+                (concat!("Open in ", beebeeb_engine::file_manager!()), true),
                 ("Pause syncing", true),
                 ("Settings\u{2026}", true),
                 (&*format!("Quit {name}"), true)
@@ -511,7 +511,7 @@ mod tests {
             explorer_ready: false,
             ..signed_in()
         });
-        assert_eq!(labels(&model)[1], ("Open in File Explorer", false));
+        assert_eq!(labels(&model)[1], (concat!("Open in ", beebeeb_engine::file_manager!()), false));
     }
 
     #[test]
@@ -525,7 +525,7 @@ mod tests {
             labels(&model),
             vec![
                 (&*format!("Open {name}"), true),
-                ("Open in File Explorer", false),
+                (concat!("Open in ", beebeeb_engine::file_manager!()), false),
                 ("Pause syncing", false),
                 ("Settings\u{2026}", false),
                 (&*format!("Quit {name}"), true)

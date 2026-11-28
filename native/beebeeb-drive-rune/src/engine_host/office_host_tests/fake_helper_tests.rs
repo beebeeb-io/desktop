@@ -126,17 +126,55 @@ pub(super) fn wait_for(what: impl Fn() -> bool) -> bool {
     true
 }
 
-/// A runnable file called [`HELPER_EXE`] (a link to this test binary) in a directory of the test's own: were there an
+/// A runnable file called [`HELPER_EXE`] in a directory of the test's own that is not the helper: were there an
 /// unconfined way to start a helper, the host would start it. Not on Windows, where the sandbox would start it.
+///
+/// A link to this test binary where no sandbox exists (Linux): nothing is ever started. On a Mac the sandbox does
+/// start the file it is given and then asks the kernel whether it confined itself (dm-79), so the file there is one
+/// that does nothing and ends (`/usr/bin/true`): this test binary would run its tests again until it is ended.
 #[cfg(not(windows))]
 pub(super) fn runnable_helper(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("bb-office-host-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a directory for the test's helper");
     let helper = dir.join(HELPER_EXE);
-    let exe = std::env::current_exe().expect("the test binary");
-    std::os::unix::fs::symlink(exe, &helper).expect("a link to the test binary");
+    let exe = if cfg!(target_os = "macos") {
+        std::path::PathBuf::from("/usr/bin/true")
+    } else {
+        std::env::current_exe().expect("the test binary")
+    };
+    std::os::unix::fs::symlink(exe, &helper).expect("a link to a runnable file");
     helper
+}
+
+/// Whether the host has said how the start of [`runnable_helper`]'s file went.
+#[cfg(not(windows))]
+pub(super) fn start_was_answered(host: &OfficeHost) -> bool {
+    // On a Mac the start failed and may be tried again: the worker stays for that. Elsewhere it has ended.
+    !matches!(host.state(), OfficeState::Opening) && (cfg!(target_os = "macos") || host.worker_ended())
+}
+
+/// What the host says of [`runnable_helper`]'s file, which is never a confined helper. Where no sandbox exists
+/// (Linux): no sandbox, nothing was started. On a Mac: the file was started with nothing of the app's, did not confine
+/// itself, and was ended before it was handed a pipe or a byte of the document: a failed start, no helper.
+#[cfg(not(windows))]
+pub(super) fn assert_not_started_unconfined(host: &OfficeHost, what: &str) {
+    if cfg!(target_os = "macos") {
+        assert!(
+            matches!(
+                host.state(),
+                OfficeState::Stopped {
+                    why: super::Stop::Failed,
+                    ..
+                }
+            ),
+            "{what}: {:?}",
+            host.state()
+        );
+    } else {
+        assert_eq!(host.state(), OfficeState::NoPreview(super::NoPreview::NoSandbox), "{what}");
+    }
+    assert_eq!(host.helper_pid(), None, "{what}: no helper");
 }
 
 /// Removes what [`runnable_helper`] made.
@@ -238,6 +276,8 @@ impl Gate {
 #[derive(Default)]
 pub(super) struct Log {
     starts: AtomicUsize,
+    /// Every call of the starter's `start`, refused ones too (dm-84).
+    pub(super) start_calls: AtomicUsize,
     /// Helpers ended by an explicit kill, each counted once. Dropping a helper's handle ends it too (as the sandbox's
     /// `Child` does), but is not counted: a test that asks "killed?" sees only a kill somebody made.
     kills: AtomicUsize,
@@ -298,6 +338,8 @@ pub(super) struct Fake {
     failing_copy: bool,
     /// Every start fails with this sandbox error.
     start_error: Option<SandboxError>,
+    /// The first this many starts fail with the second (dm-84: the sandbox refused a start once).
+    refused_first: (usize, Option<SandboxError>),
 }
 
 impl Fake {
@@ -315,7 +357,15 @@ impl Fake {
             sections_asked: 0,
             failing_copy: false,
             start_error: None,
+            refused_first: (0, None),
         }
+    }
+
+    /// The first `n` starts fail with `error`; the ones after start as usual.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
+    pub(super) fn refusing_first(mut self, n: usize, error: SandboxError) -> Fake {
+        self.refused_first = (n, Some(error));
+        self
     }
 
     /// Every start fails with `error`, as the sandbox's refusal does.
@@ -437,7 +487,13 @@ impl Starter for Fake {
     }
 
     fn start(&mut self) -> Result<Link<FakeHelper>, SandboxError> {
+        let call = self.log.start_calls.fetch_add(1, SeqCst);
         if let Some(error) = self.start_error {
+            return Err(error);
+        }
+        if let (n, Some(error)) = self.refused_first
+            && call < n
+        {
             return Err(error);
         }
         if !self.start_delay.is_zero() {

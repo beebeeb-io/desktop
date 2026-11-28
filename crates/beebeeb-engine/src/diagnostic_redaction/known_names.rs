@@ -32,6 +32,11 @@ impl KnownNames {
         }
     }
 
+    /// The names, lowercase, longest first once [`finish`](Self::finish) has run.
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
     /// Sort longest first (so `Tax 2025` is replaced before `Tax`) and dedupe.
     pub fn finish(mut self) -> Self {
         self.names.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));

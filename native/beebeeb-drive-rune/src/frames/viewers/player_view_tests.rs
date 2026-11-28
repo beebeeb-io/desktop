@@ -122,6 +122,13 @@ fn video_view_letterboxes_to_fit() {
     assert_eq!(ask_size(0.0, 0.0), (1, 1));
 }
 
+/// The system's answer to an HEVC file it cannot decode: Windows names the Store extension, a Mac says it has none.
+const HEVC_HINT: &str = if cfg!(target_os = "macos") {
+    "this Mac doesn't have the decoder"
+} else {
+    "HEVC Video Extensions"
+};
+
 /// 5. A refusal names the FORMAT (never the file) and the cause; the table's own tests are in `refusal_text`.
 #[test]
 fn refusal_words_name_the_format() {
@@ -129,7 +136,7 @@ fn refusal_words_name_the_format() {
         refusal_words(&Refusal::NoDecoder("ProRes".into())),
         "This file uses ProRes, which Beebeeb doesn't support yet. Open it in another app."
     );
-    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains("HEVC Video Extensions"));
+    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains(HEVC_HINT));
     assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Aac)).contains("AAC"));
     assert!(refusal_words(&Refusal::NoSystemMedia(Codec::Aac)).contains("no media codecs"));
     assert!(refusal_words(&Refusal::CouldNotPlay).contains("damaged"));
@@ -164,9 +171,16 @@ fn no_sound_scene() -> Runtime<State> {
 fn no_sound_line_names_the_missing_track() {
     assert_eq!(
         no_sound_words(NoSound::Codec(Codec::Aac)),
-        "No sound: this PC has no decoder for AAC audio"
+        concat!(
+            "No sound: ",
+            beebeeb_engine::device_word!(),
+            " has no decoder for AAC audio"
+        )
     );
-    assert_eq!(no_sound_words(NoSound::Device), "Sound isn't available on this PC");
+    assert_eq!(
+        no_sound_words(NoSound::Device),
+        concat!("Sound isn't available on ", beebeeb_engine::device_word!())
+    );
     let rt = no_sound_scene();
     let words = rt
         .elements()
@@ -175,7 +189,11 @@ fn no_sound_line_names_the_missing_track() {
         .expect("the line is drawn");
     assert_eq!(
         words.text.as_deref(),
-        Some("No sound: this PC has no decoder for AAC audio")
+        Some(concat!(
+            "No sound: ",
+            beebeeb_engine::device_word!(),
+            " has no decoder for AAC audio"
+        ))
     );
 }
 
@@ -211,7 +229,10 @@ fn reduced_quality_is_said_in_the_details() {
         .into_iter()
         .find(|e| e.key.as_deref() == Some("detail-reduced") && !e.exiting)
         .expect("the details panel carries the line");
-    assert_eq!(line.text.as_deref(), Some("Reduced quality on this PC"));
+    assert_eq!(
+        line.text.as_deref(),
+        Some(concat!("Reduced quality on ", beebeeb_engine::device_word!()))
+    );
 }
 
 /// A source with one video and a player that counts how often the view asked for it.
@@ -361,11 +382,11 @@ fn hevc_words_do_not_ask_for_an_extension_while_the_switch_is_off() {
     assert!(!off.contains("Microsoft") && !off.contains("extension"));
     let aac = refusal_words_with(false, &Refusal::NoSystemDecoder(Codec::Aac));
     assert!(
-        !aac.contains("This PC can't"),
+        !aac.contains(concat!(beebeeb_engine::device_word_cap!(), " can't")),
         "the cause is Beebeeb's, not the PC's: {aac}"
     );
-    // With the switch on, the PC's own answer: what to install.
-    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains("HEVC Video Extensions"));
+    // With the switch on, the PC's own answer: what to install (a Mac: that it has no decoder).
+    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains(HEVC_HINT));
     // The app's own words follow the protocol's constant.
     assert_eq!(
         refusal_words(&Refusal::NoSystemDecoder(Codec::Hevc)),
@@ -391,7 +412,11 @@ fn the_details_flag_follows_the_players_state() {
 fn a_too_old_windows_says_so_in_the_media_view() {
     assert_eq!(
         refusal_words(&Refusal::NeedsWindowsUpdate),
-        "This file can't be shown until Windows is updated."
+        if cfg!(target_os = "macos") {
+            "This file can't be shown until macOS is updated."
+        } else {
+            "This file can't be shown until Windows is updated."
+        }
     );
 }
 
@@ -419,7 +444,8 @@ fn media_a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app(
         words.contains("HEVC (H.265)") && words.contains("doesn't have the decoder"),
         "{words}"
     );
-    assert!(words.contains("Microsoft Store"), "{words}");
+    // A Mac has no Microsoft Store to send a person to.
+    assert_eq!(words.contains("Microsoft Store"), !cfg!(target_os = "macos"), "{words}");
     assert!(words.contains("default app"), "{words}");
     assert!(
         !words.contains("yet"),

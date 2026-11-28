@@ -437,7 +437,7 @@ fn empty(list: ListState, t: &Theme) -> El {
             action: None,
         },
         ListState::OnItsWay => ViewState::Loading {
-            words: "Getting your photos ready. Your file list is downloading and being decrypted on this PC.",
+            words: concat!("Getting your photos ready. Your file list is downloading and being decrypted on ", beebeeb_engine::device_word!(), "."),
         },
         ListState::Failed => ViewState::Failed {
             key: "ph-empty",
@@ -473,6 +473,15 @@ fn unshowable_notice(t: &Theme) -> El {
 /// The notice's words (also the viewer's).
 pub use crate::frames::viewers::refusal_text::UNSHOWABLE;
 
+/// Dm-87: whether this system shows HEIC and RAW photos. macOS does (dm-81 decodes them), so Photos' notice that they
+/// can't be shown would be false there (RC16). The other systems keep the notice until they decode them.
+pub(crate) const DECODES_HEIC_AND_RAW: bool = cfg!(target_os = "macos");
+
+/// The notice is said only where the system cannot show such photos, and only when the view holds some.
+pub(crate) fn says_unshowable(decodes: bool, holds_unshowable: bool) -> bool {
+    !decodes && holds_unshowable
+}
+
 pub fn body(ui: &Ui, list: ListState, t: &Theme) -> El {
     let content = if ui.lines.is_empty() {
         empty(list, t)
@@ -502,7 +511,7 @@ pub fn body(ui: &Ui, list: ListState, t: &Theme) -> El {
             )
     };
     let mut body = col().key("ph-body").child(crate::ui::focus::pane(head(ui, t), "ph-head"));
-    if ui.source.holds_unshowable() {
+    if says_unshowable(DECODES_HEIC_AND_RAW, ui.source.holds_unshowable()) {
         body = body.child(unshowable_notice(t));
     }
     let mut body = body.child(content);

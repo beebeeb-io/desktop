@@ -28,7 +28,6 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -37,7 +36,7 @@ use zeroize::Zeroizing;
 use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
-use crate::api_client::{ApiClient, ChunkUnreachable};
+use crate::api_client::ChunkUnreachable;
 use crate::direct_download::DirectError;
 use crate::engine_bridge::{EngineBridge, EngineError, InMemoryOpen, error_http_status};
 use crate::state_db::FileStatus;
@@ -314,11 +313,36 @@ impl<C: CredentialStores> Engine<C> {
     /// A copy the local state says holds a change that is not sent yet, and that cannot be read now, is
     /// [`OpenFileError::CopyNotReadable`], never `NotHere`: the caller must not show the older version Beebeeb
     /// has as if it were the file.
+    ///
+    /// Dm-72: on a Mac the copy of a file kept there is Finder's (the File Provider's materialised item; the
+    /// engine's own folder holds none since dm-71). It is read by the same rules while it is in sync, and its
+    /// length is the synced size; anything else is asked of the engine's own folder as before.
     pub fn open_local_copy_in_memory(
         &self,
         file_id: &str,
         max_bytes: u64,
         cancel: &AtomicBool,
+    ) -> Result<LocalCopy, OpenFileError> {
+        self.open_local_copy(file_id, max_bytes, cancel, true)
+    }
+
+    /// [`Self::open_local_copy_in_memory`] of the copy in the engine's own folder only, never Finder's: for a
+    /// caller that goes on to read the file by its place in that folder (the media stream).
+    pub(crate) fn open_own_folder_copy_in_memory(
+        &self,
+        file_id: &str,
+        max_bytes: u64,
+        cancel: &AtomicBool,
+    ) -> Result<LocalCopy, OpenFileError> {
+        self.open_local_copy(file_id, max_bytes, cancel, false)
+    }
+
+    fn open_local_copy(
+        &self,
+        file_id: &str,
+        max_bytes: u64,
+        cancel: &AtomicBool,
+        finders: bool,
     ) -> Result<LocalCopy, OpenFileError> {
         let turn = self.acct.session_generation();
         // The row and whether its copy is behind, in one visit to the local state.
@@ -364,31 +388,57 @@ impl<C: CredentialStores> Engine<C> {
             OnThisPc::InSync => Ok(LocalCopy::NotHere),
             OnThisPc::NotSentYet => Err(OpenFileError::CopyNotReadable),
         };
-        let Some(path) = self.local_copy_path(&entry) else {
-            return not_read();
-        };
         // This process's own fetch of the file is refused until the read is over: a file that stops being
         // wholly on disk between the check and the open is not downloaded by the open.
         let _no_fetch = crate::no_fetch_scope::enter(&[file_id]);
         let still = || self.acct.session_unchanged_since(turn);
-        let mut tries = 0;
-        let bytes = loop {
-            let Some(length) = wholly_here(&path) else {
-                return not_read();
-            };
-            if length > max_bytes {
-                return Err(OpenFileError::TooLarge { size: length });
+        // The copy at `path`, read whole. `Ok(None)`: it is not wholly there, or could not be read.
+        let read_at = |path: &Path| -> Result<Option<Zeroizing<Vec<u8>>>, OpenFileError> {
+            let mut tries = 0;
+            loop {
+                let Some(length) = wholly_here(path) else {
+                    return Ok(None);
+                };
+                if length > max_bytes {
+                    return Err(OpenFileError::TooLarge { size: length });
+                }
+                match read_bounded(path, length, max_bytes, cancel, &still) {
+                    Ok(bytes) => return Ok(Some(bytes)),
+                    Err(ReadStopped::Refused(error)) => return Err(error),
+                    // It went away, or cannot be read, between the check and the read: the download is the way
+                    // for a copy in sync.
+                    Err(ReadStopped::Unreadable) => return Ok(None),
+                    // It is being written: its length is asked again, a few times. Then it could not be read for
+                    // now (never the version Beebeeb has in its place: this copy is the newer one).
+                    Err(ReadStopped::Grew) if tries < GREW_TRIES => tries += 1,
+                    Err(ReadStopped::Grew) => return Err(OpenFileError::CopyNotReadable),
+                }
             }
-            match read_bounded(&path, length, max_bytes, cancel, &still) {
-                Ok(bytes) => break bytes,
-                Err(ReadStopped::Refused(error)) => return Err(error),
-                // It went away, or cannot be read, between the check and the read: the download is the way
-                // for a copy in sync.
-                Err(ReadStopped::Unreadable) => return not_read(),
-                // It is being written: its length is asked again, a few times. Then it could not be read for
-                // now (never the version Beebeeb has in its place: this copy is the newer one).
-                Err(ReadStopped::Grew) if tries < GREW_TRIES => tries += 1,
-                Err(ReadStopped::Grew) => return Err(OpenFileError::CopyNotReadable),
+        };
+        // Dm-72: Finder's copy on a Mac, for a file in sync. One whose length is not the synced size is not read as
+        // the file (a change made in Finder reaches Beebeeb through the File Provider, never from here).
+        let mut finders_copy = None;
+        if finders && recorded == OnThisPc::InSync && crate::file_provider_port::local_copies_are_finders() {
+            let synced_size = u64::try_from(entry.size_bytes).ok();
+            let mut answer = Ok(None);
+            crate::file_provider_port::with_finder_copy(file_id, &mut |path| {
+                answer = match wholly_here(path) {
+                    Some(length) if Some(length) == synced_size => read_at(path),
+                    _ => Ok(None),
+                };
+            });
+            finders_copy = answer?.filter(|bytes| Some(bytes.len() as u64) == synced_size);
+        }
+        let bytes = match finders_copy {
+            Some(bytes) => bytes,
+            None => {
+                let Some(path) = self.local_copy_path(&entry) else {
+                    return not_read();
+                };
+                match read_at(&path)? {
+                    Some(bytes) => bytes,
+                    None => return not_read(),
+                }
             }
         };
         if !self.session_is_still(turn, &key) {
@@ -446,7 +496,7 @@ impl<C: CredentialStores> Engine<C> {
 /// of a sync-folder file has it (`engine_bridge::syncflow`). Not known is behind too: neither recorded, or fetches of
 /// more than one version (mixed: the bytes are none of them), is not provably the version Beebeeb has. A file at
 /// version 0 (never landed in Beebeeb) is never behind.
-fn copy_is_behind(db: &crate::state_db::StateDb, file_id: &str) -> rusqlite::Result<bool> {
+pub(super) fn copy_is_behind(db: &crate::state_db::StateDb, file_id: &str) -> rusqlite::Result<bool> {
     let Some(contract) = db.get_file_contract_state(file_id)? else {
         return Ok(true);
     };
@@ -584,7 +634,8 @@ impl<C: CredentialStores> Engine<C> {
         // The token and the key of the session that is in memory now, copied the way every other hand-over copies
         // them (`AccountRuntime::while_session_is`): under the engine's session-write lock, so never while a lock,
         // a sign-out or a sign-in is half done, and only while the generation is still `session`. Both are copies
-        // of their own, wiped when this call ends (inside the call's client; the key also in a `Zeroizing`). Then
+        // of their own in `Zeroizing`s, wiped when this call ends; the session's one client (`session_api`, dm-96)
+        // holds its own, wiped when the session moves on. Then
         // the account-bound handle (it answers nothing for a session the server ended, and nothing once the
         // session moved on).
         if self.acct.session.is_poisoned() {
@@ -593,13 +644,14 @@ impl<C: CredentialStores> Engine<C> {
         let (token, key) = self
             .acct
             .while_session_is(&self.writes, session, |current| {
-                (current.token.clone(), Zeroizing::new(current.master_key))
+                (Zeroizing::new(current.token.clone()), Zeroizing::new(current.master_key))
             })
             .ok_or(OpenFileError::NotSignedIn)?;
         let state = self.local_state_for_changes().map_err(refused)?;
         let fetched = state
             .with_shared(|db| {
-                let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
+                // The session's one client, shared with the Photos grid (dm-96): its TLS link, discovery and 429 pause.
+                let api = self.session_api(session, token, &key);
                 let bridge = EngineBridge::new(self.identity, db, api);
                 self.runtime.block_on(async {
                     let mut fetch = std::pin::pin!(bridge.open_in_memory(file_id, max_bytes, Some(progress)));

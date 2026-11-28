@@ -587,7 +587,8 @@ async fn run(
     let mut last_nudge_run: Option<std::time::Instant> = None;
     // Spec D11, D11b (task 1888): whether this engine run's first reconcile pass, with its key check and resume, has
     // committed. Until it has, the send phase's wake sends nothing.
-    #[cfg(not(target_os = "macos"))]
+    // F4 (macOS too): the pass then resumes the operations paused for `auth` after a tick that reached the server. A Mac
+    // does not wait on it before sending (the File Provider sends its own saves), so only the pass reads this.
     let mut reconciled_this_run = false;
     // S6: the kept files' step, for this engine run (one batch at a time, each failing file's backoff).
     #[cfg(not(target_os = "macos"))]
@@ -823,6 +824,16 @@ async fn run(
                 }
                 if awaiting_first_list {
                     awaiting_first_list = first_list_owed(&db);
+                    // dm-41 (macOS): the first full listing is in: one change per cloud-only file, then one signal,
+                    // so Finder lists the whole remote tree with the cloud badge.
+                    #[cfg(target_os = "macos")]
+                    if !awaiting_first_list {
+                        match db.record_first_listing_changes() {
+                            Ok(n) if n > 0 => signal_working_set_owing(&mut owed_working_set_signal, &db, "first_listing", &[]),
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(error = %e, "first-listing change rows failed"),
+                        }
+                    }
                     transfers.set_first_list(first_list_after_pull(
                         awaiting_first_list,
                         pulled.as_ref().is_ok_and(|tick| tick.reached_server),
@@ -856,7 +867,6 @@ async fn run(
                         // pull came back: `Ok` alone is also a swallowed `/sync/ops` failure (offline, a
                         // 5xx, a 401), which proves no token and leaves the rows the pass plans against stale.
                         let reconcile_started = std::time::Instant::now();
-                        #[cfg(not(target_os = "macos"))]
                         if tick.reached_server
                             && let Err(error) = bridge
                                 .reconcile_then_resume(&sync_root, &resume, &mut reconciled_this_run)
@@ -878,9 +888,10 @@ async fn run(
                         // freeing work, so it waits for the start-up guard's pass, as the stamp pass does (spec U4).
                         #[cfg(target_os = "windows")]
                         let stale_copies_allowed = crate::unknown_check::STARTUP_GUARD.allows_freeing();
-                        // macOS: the File Provider fetches on the working-set signal; the pass has nothing to do.
+                        // macOS (dm-72): the pass queues no fetch; it signals the File Provider once for a copy
+                        // behind its version, and the system fetches Finder's copy again.
                         #[cfg(not(target_os = "windows"))]
-                        let stale_copies_allowed = cfg!(not(target_os = "macos"));
+                        let stale_copies_allowed = true;
                         #[cfg(target_os = "windows")]
                         let mut stale_refetch = Vec::new();
                         if tick.reached_server && stale_copies_allowed {

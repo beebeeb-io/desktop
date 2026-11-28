@@ -40,6 +40,7 @@ pub mod drive_sidebar;
 pub mod sidebar;
 pub mod status_bar;
 pub mod status_line;
+pub mod sync;
 pub mod status_offline;
 pub mod switch;
 pub mod toast;

@@ -174,6 +174,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
         let started = thread::Builder::new().name("signin".into()).spawn(move || {
             for job in queue {
                 job(&for_worker);
+                super::finder_setup::session_changed();
             }
         });
         if started.is_err() {
@@ -545,6 +546,8 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
                 HelloResult::Verified => {
                     let still_asked = attempts[Wait::Hello as usize].load(Ordering::SeqCst) == attempt;
                     if still_asked && engine.unlock_screen_for(asked_for).is_ok() {
+                        // Touch ID is no sign-in job: report the session here so the Finder hold lifts.
+                        super::finder_setup::session_changed();
                         HelloOutcome::Succeeded(NextAfterSignIn::Drive)
                     } else {
                         // Late, or refused by core's rule: nothing opened, and the button works again.
@@ -816,7 +819,8 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
 }
 
 /// Opens one of our own addresses by the same OS call a file opens with: the address is one argument, never a
-/// command line. Only four schemes open (`https://`, `http://`, `mailto:`, `ms-settings:`); anything else is refused in
+/// command line. Only five schemes open (`https://`, `http://`, `mailto:`, `ms-settings:`, `x-apple.systempreferences:`);
+/// anything else is refused in
 /// every build. The addresses come from `shell::web_pages` only, never from the server, a file or a typed string.
 pub fn open_web_page(url: &str) -> Result<(), ()> {
     if !is_allowed_address(url) {
@@ -828,13 +832,19 @@ pub fn open_web_page(url: &str) -> Result<(), ()> {
         OPENED.with(|o| o.borrow_mut().push(url.to_string()));
         Ok(())
     }
-    #[cfg(not(test))]
+    // A Mac opens a web address through `NSWorkspace openURL` (`open_path` there is the Finder-location opener, which
+    // cannot open an address: Settings' web rows did nothing).
+    #[cfg(all(not(test), target_os = "macos"))]
+    {
+        crate::shell::platform::macos_open_url::open_url(url)
+    }
+    #[cfg(all(not(test), not(target_os = "macos")))]
     open_on_the_launch_worker(url, super::open_path)
 }
 
 /// The one launch worker the pages open on: the window's thread never waits for the launch lock. A
 /// page has no session (the sign-in page opens signed out), so its start compares none.
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, target_os = "macos"), allow(dead_code))]
 fn open_on_the_launch_worker(url: &str, start: super::files_launch::Start) -> Result<(), ()> {
     static PAGES: std::sync::LazyLock<super::launcher::Launcher> = std::sync::LazyLock::new(Default::default);
     PAGES.open(
@@ -855,11 +865,18 @@ thread_local! {
     pub(crate) static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Whether `url` starts with one of the four schemes the opener allows (https and http, mail, Windows Settings).
+/// Whether `url` starts with one of the five schemes the opener allows (https and http, mail, Windows Settings,
+/// macOS System Settings).
 pub fn is_allowed_address(url: &str) -> bool {
-    ["https://", "http://", "mailto:", "ms-settings:"]
-        .iter()
-        .any(|scheme| url.starts_with(scheme))
+    [
+        "https://",
+        "http://",
+        "mailto:",
+        "ms-settings:",
+        "x-apple.systempreferences:",
+    ]
+    .iter()
+    .any(|scheme| url.starts_with(scheme))
 }
 
 #[cfg(test)]

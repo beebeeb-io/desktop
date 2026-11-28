@@ -139,7 +139,11 @@ fn the_keystore_card_says_what_is_wrong_and_has_no_sign_out() {
     assert_eq!(says(&rt, "gate-title"), "Can't read your keys");
     assert_eq!(
         says(&rt, "gate-text"),
-        "Windows didn't answer. Nothing syncs until it does."
+        if cfg!(target_os = "macos") {
+            "macOS didn't answer. Nothing syncs until it does."
+        } else {
+            "Windows didn't answer. Nothing syncs until it does."
+        }
     );
     assert_eq!(says(&rt, "gate-btn-0-label"), "Try again");
     assert_eq!(says(&rt, "gate-btn-1-label"), "Get help");

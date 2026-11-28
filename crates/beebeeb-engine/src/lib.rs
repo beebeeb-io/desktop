@@ -12,6 +12,10 @@ compile_error!(
     "beebeeb-engine: test-support is for tests only; it is on in a release build (enable it under [dev-dependencies] only)"
 );
 
+// First, with #[macro_use]: the OS-word macros (device_word!, file_manager!…) are macro-expanded, so only textual
+// scope reaches them.
+#[macro_use]
+pub mod os_words;
 pub mod account;
 pub mod account_binding;
 pub mod account_dto;
@@ -46,7 +50,7 @@ pub mod file_ops;
 pub mod file_provider_port;
 pub mod folder_digest;
 pub mod finder_setup;
-#[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
+#[cfg(any(target_os = "windows", target_os = "macos", any(test, feature = "test-support")))]
 pub mod found_while_paused;
 pub mod free_up_space;
 pub mod held_queue;
@@ -75,7 +79,7 @@ pub mod name_alias;
 pub mod no_fetch_scope;
 pub mod operation_failure;
 pub mod os_state_reconcile;
-#[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
+#[cfg(any(target_os = "windows", target_os = "macos", any(test, feature = "test-support")))]
 pub mod own_data_proof;
 pub mod owner_keys;
 #[cfg(target_os = "windows")]

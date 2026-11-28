@@ -406,7 +406,7 @@ fn in_the_menu_tab_and_the_pointer_move_the_one_lit_item() {
     assert_eq!(rt.state.frames.shared.menu.as_ref().map(|m| m.hot), Some(3));
     assert_eq!(
         focused(&rt).as_deref(),
-        Some("mi-show-in-file-explorer"),
+        Some(format!("mi-show-in-{}", crate::ui::settings_shell::slug(beebeeb_engine::os_words::file_manager())).as_str()),
         "focus is on the lit item"
     );
     press(&mut rt, Key::Enter);
@@ -549,7 +549,7 @@ fn the_status_words_and_thumbnails_come_from_the_sources() {
             "Syncing 3 items".into()
         }
         fn summary(&self) -> String {
-            "1 on this PC".into()
+            concat!("1 on ", beebeeb_engine::device_word!()).into()
         }
     }
     let mut rt = runtime(super::scenes::dw_0508);
@@ -557,7 +557,7 @@ fn the_status_words_and_thumbnails_come_from_the_sources() {
     rt.state.frames.pc = Box::new(OtherPc);
     settle(&mut rt);
     assert_eq!(info(&rt, "status-text").text.as_deref(), Some("Syncing 3 items"));
-    assert_eq!(info(&rt, "status-details").text.as_deref(), Some("1 on this PC"));
+    assert_eq!(info(&rt, "status-details").text.as_deref(), Some(concat!("1 on ", beebeeb_engine::device_word!())));
 
     // A photo without a thumbnail draws the plain tile with a glyph, not the board's sample.
     use super::parts::table::{Kind, Thumb};
@@ -635,7 +635,7 @@ fn shared_with_me_details_and_preview() {
             ("Size".to_string(), "2.4 MB".to_string()),
             ("Shared on".to_string(), "27 Oct 2026".to_string()),
             ("From".to_string(), "Priya Shah".to_string()),
-            ("On this PC".to_string(), "Yes".to_string()),
+            (concat!("On ", beebeeb_engine::device_word!()).to_string(), "Yes".to_string()),
             ("Encrypted".to_string(), "Yes, end to end".to_string()),
         ]
     );

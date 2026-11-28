@@ -45,7 +45,10 @@ fn web_pages_open_by_name_from_the_table_and_an_unknown_name_opens_nothing() {
     rt.frame(1.0);
     assert_eq!(
         opened(),
-        vec!["https://app.beebeeb.io/settings/billing", "ms-settings:notifications"]
+        vec![
+            "https://app.beebeeb.io/settings/billing",
+            super::web_pages::OS_NOTIFICATIONS
+        ]
     );
     rt.update(|s, _| assert!(s.settings.take_intents().is_empty(), "the queue is empty"));
 }
@@ -290,11 +293,11 @@ fn the_gate_opening_says_what_unsaved_editing_this_pc_kept() {
     let rt = runtime_keeping(2);
     assert_eq!(rt.state.actions.toast, Some(Toast::KeptEdits(2)));
     let drawn = texts(&rt);
-    assert!(drawn.contains("Unsaved changes to 2 files were kept on this PC."), "{drawn}");
+    assert!(drawn.contains(beebeeb_engine::os_words::for_this_os("Unsaved changes to 2 files were kept on this PC.").as_str()), "{drawn}");
 
     let rt = runtime_keeping(1);
     assert_eq!(rt.state.actions.toast, Some(Toast::KeptEdits(1)));
-    assert!(texts(&rt).contains("Unsaved changes to a file were kept on this PC."));
+    assert!(texts(&rt).contains(beebeeb_engine::os_words::for_this_os("Unsaved changes to a file were kept on this PC.").as_str()));
 }
 
 #[test]

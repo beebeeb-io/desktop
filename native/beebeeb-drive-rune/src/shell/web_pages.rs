@@ -16,6 +16,14 @@ pub const TERMS_PAGE: &str = "https://beebeeb.io/legal/terms/";
 pub const PRIVACY_PAGE: &str = "https://beebeeb.io/legal/privacy/";
 /// Windows Settings › Notifications.
 pub const WINDOWS_NOTIFICATIONS: &str = "ms-settings:notifications";
+/// System Settings › Notifications on a Mac.
+pub const MAC_NOTIFICATIONS: &str = "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
+/// This OS's notification settings: the button on Settings' "Notifications are off" banner.
+pub const OS_NOTIFICATIONS: &str = if cfg!(target_os = "macos") {
+    MAC_NOTIFICATIONS
+} else {
+    WINDOWS_NOTIFICATIONS
+};
 
 /// Every name a frame may ask for, with its address. Names the frames use and this table lacks:
 /// `about-audits` (the site has no audits section: `repos/site/src/pages/security.astro` holds only

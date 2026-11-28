@@ -153,6 +153,14 @@ pub trait ViewerEngine: Send + Sync + 'static {
     /// Ask the system to open the file with its own app, from the account's folder on this PC. Never
     /// `Elsewhere::NotBound`.
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere;
+    /// The app chooser, then the file in the app picked (macOS). Default: not here.
+    fn choose_elsewhere(&self, _file_id: &str) -> Elsewhere {
+        Elsewhere::NotBound
+    }
+    /// The file shown in the file manager (macOS). Default: not here.
+    fn reveal_elsewhere(&self, _file_id: &str) -> Elsewhere {
+        Elsewhere::NotBound
+    }
     /// Wake the window's loop: an answer or progress is waiting.
     fn wake(&self);
     /// drive-complete-RS-d: the bytes of `file_id` were read for `session` (the copy here or the download). A picture
@@ -176,6 +184,18 @@ pub trait ViewerEngine: Send + Sync + 'static {
     }
     /// The audio files of the folder the file is in, for the session. Default: not read.
     fn media_queue(&self, _session: SessionGeneration, _file_id: &str) -> Option<viewer_media::MediaQueue> {
+        None
+    }
+    /// macOS (dm-74): whether the file's copy is Finder's to show: the account's own file (never one shared with it,
+    /// ruling 1701) while Beebeeb is set up in Finder. Reads the local state: a worker's. Default: no.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
+    fn in_finder(&self, _file_id: &str) -> bool {
+        false
+    }
+    /// How far a download of the whole file to this computer has come (done, total; a total of 0 is not known yet),
+    /// from the transfer board ([`Engine::downloads_for`]). A worker's. Default: not known.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS calls it
+    fn download_progress(&self, _session: SessionGeneration, _file_id: &str) -> Option<(u64, u64)> {
         None
     }
     fn edit_facts(&self, _session: SessionGeneration, _file_id: &str, _opening: u64) -> Option<EditFacts> {
@@ -312,6 +332,148 @@ impl<C: CredentialStores> LiveViewerEngine<C> {
     }
 }
 
+impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
+    /// The path the system opens the file from, or why not. A Mac goes through [`Self::mac_open_with_checks`].
+    #[cfg(not(target_os = "macos"))]
+    fn elsewhere_path(&self, file_id: &str) -> Result<std::path::PathBuf, Elsewhere> {
+        Self::elsewhere_path_of(&self.engine, file_id)
+    }
+
+    /// [`Self::elsewhere_path`] on the engine's handle alone (a Mac's Open with asks it again on its own thread).
+    fn elsewhere_path_of(engine: &Engine<C>, file_id: &str) -> Result<std::path::PathBuf, Elsewhere> {
+        if !engine.is_syncing() {
+            return Err(Elsewhere::NeedsSync);
+        }
+        let Ok(sync_root) = engine.sync_root() else {
+            return Err(Elsewhere::NeedsSync);
+        };
+        let path = engine.local_state_for_changes().and_then(|state| {
+            state.with(|db| {
+                // A folder is not a file to open from a viewer.
+                file_ops::resolve(db, file_id).ok().filter(|entry| !entry.is_dir())?;
+                super::path_the_system_opens(db, &sync_root, file_id).ok()
+            })
+        });
+        match path {
+            Ok(Some(path)) => Ok(path),
+            _ => Err(Elsewhere::Refused),
+        }
+    }
+
+    /// macOS: Finder with the file selected (`reveal` true) on a thread of its own, or the chooser and the app picked
+    /// (`reveal` false: [`Self::mac_open_with`]). Elsewhere: not here.
+    fn mac_elsewhere(&self, file_id: &str, reveal: bool) -> Elsewhere {
+        #[cfg(target_os = "macos")]
+        {
+            if !reveal {
+                return self.mac_open_with(file_id, super::open_with_apps::mac::Pick::Choose);
+            }
+            // dm-100: the same checks as Open with, so a file shared with the account is never shown in Finder
+            // (ruling 1701); the press is refused before Finder is asked anything.
+            let path = match Self::mac_open_with_checks(&self.engine, file_id) {
+                Ok(path) => path,
+                Err(why) => return why,
+            };
+            let engine = self.engine.clone();
+            let started = std::thread::Builder::new().name("viewer-elsewhere".into()).spawn(move || {
+                if super::open_with_apps::mac::reveal(&path).is_err() {
+                    log("viewer: the file was not shown in Finder");
+                }
+                engine.wake_host();
+            });
+            if started.is_ok() { Elsewhere::Opened } else { Elsewhere::Refused }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = reveal;
+            match self.elsewhere_path(file_id) {
+                Ok(_) => Elsewhere::NotBound,
+                Err(why) => why,
+            }
+        }
+    }
+
+    /// macOS (dm-73): Open with, on Finder's copy of the file (`open_with_apps::mac`): it is made present first, then
+    /// opened with the default app or the app picked. The checks every hand-over passes come first, under the
+    /// account-bound handle ([`Self::mac_open_with_checks`]: sync is on, a file, a kind that may be opened, and never
+    /// a shared-with-me row, which is not asked of the File Provider: ruling 1701). What happens after this returns
+    /// is said on the file's page (`unsupported::Note`) and logged.
+    ///
+    /// Dm-78: Finder setup that is not ready is no refusal here (RC13: setup was slow to start, and the press answered
+    /// at once with the words of a sync folder). The press's own thread waits for setup while the page says so, and
+    /// says a setup that ended without Finder with its reason, in a Mac's words. Sync starts with Finder setup, so
+    /// "sync is not running" while Finder is not ready goes there too; the checks are made again once Finder is.
+    #[cfg(target_os = "macos")]
+    fn mac_open_with(&self, file_id: &str, pick: super::open_with_apps::mac::Pick) -> Elsewhere {
+        use super::open_with_apps::mac;
+        // Each refusal is logged by its kind (never a name or an id); the page says it in words.
+        match Self::mac_open_with_checks(&self.engine, file_id) {
+            Ok(_) => {}
+            // Sync runs only once Beebeeb is in Finder: the press's thread waits for setup, or says why it ended.
+            Err(Elsewhere::NeedsSync) if mac::setup_of(&super::finder_setup::view()) != mac::Setup::Ready => {
+                tracing::info!("open with: Finder is not set up yet; the open goes on to wait for it");
+            }
+            Err(why) => return why,
+        }
+        let (engine, waker, turn) = (self.engine.clone(), self.engine.clone(), self.engine.session_turn());
+        let (board, checked) = (self.engine.clone(), self.engine.clone());
+        let started = mac::start(
+            file_id,
+            pick,
+            move || engine.session_turn() == turn,
+            move || waker.wake_host(),
+            // How far Finder's download is, from the transfer board (dm-75: the no-byte limit reads it).
+            move |id| {
+                let rows = board.downloads_for(turn).ok()?;
+                rows.into_iter().find(|row| row.file_id == id).map(|row| (row.done, row.total))
+            },
+            // The same checks once Finder is ready, on the press's own thread.
+            move |id| Self::mac_open_with_checks(&checked, id).is_ok(),
+        );
+        if started.is_ok() { Elsewhere::Opened } else { Elsewhere::Refused }
+    }
+
+    /// The checks a Mac's Open with and Show in Finder pass before anything is asked of Finder:
+    /// [`Self::elsewhere_path_of`]'s, and the file is one of the account's own ([`finder_hand_over`]). The path the
+    /// file opens from, or why not. Each refusal is logged by its kind.
+    #[cfg(target_os = "macos")]
+    fn mac_open_with_checks(engine: &Engine<C>, file_id: &str) -> Result<std::path::PathBuf, Elsewhere> {
+        let path = Self::elsewhere_path_of(engine, file_id);
+        match &path {
+            Err(Elsewhere::NeedsSync) => tracing::warn!("finder: refused, sync is not running"),
+            Err(_) => tracing::warn!("finder: refused, the file has no place to open from"),
+            Ok(_) => {}
+        }
+        finder_hand_over(path, file_id, |id| {
+            engine
+                .local_state_for_changes()
+                .and_then(|state| state.with(|db| beebeeb_engine::finder_show::item_namespace(db, id)))
+                .map_err(|_| "read item: no local state".to_string())
+                .and_then(|namespace| namespace)
+        })
+    }
+}
+
+/// Ruling 1701 for every hand-over of a viewer's file to Finder (Show in Finder and Open with alike): the place the
+/// file opens from (`found`, its own refusal passed on as it is), and only for one of the account's own rows
+/// (`namespace_of` reads the row, [`beebeeb_engine::finder_show::finder_may_show`]). A file shared with the account, a
+/// row that is not known and a read that failed are refused, so Finder is never asked about them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only macOS hands a file to Finder
+fn finder_hand_over<T>(
+    found: Result<T, Elsewhere>,
+    file_id: &str,
+    namespace_of: impl FnOnce(&str) -> Result<Option<beebeeb_engine::state_db::Namespace>, String>,
+) -> Result<T, Elsewhere> {
+    let found = found?;
+    match beebeeb_engine::finder_show::finder_may_show(file_id, namespace_of) {
+        Ok(()) => Ok(found),
+        Err(_) => {
+            tracing::warn!("finder: refused, not one of the account's own files");
+            Err(Elsewhere::Refused)
+        }
+    }
+}
+
 impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
     fn session_turn(&self) -> SessionGeneration {
         self.engine.session_turn()
@@ -352,34 +514,38 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
     /// is not opened for safety is refused, and the system is asked without a shell, after the handle answered.
     /// "Sync is off" and "refused" are two answers.
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere {
-        if !self.engine.is_syncing() {
-            return Elsewhere::NeedsSync;
+        // A Mac opens Finder's copy, made present first (dm-73): the launch worker's start takes a path, and a path
+        // is not a place the File Provider gave.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&self.launcher, self.open);
+            self.mac_open_with(file_id, super::open_with_apps::mac::Pick::Default)
         }
-        let Ok(sync_root) = self.engine.sync_root() else {
-            return Elsewhere::NeedsSync;
-        };
-        let path = self.engine.local_state_for_changes().and_then(|state| {
-            state.with(|db| {
-                // A folder is not a file to open from a viewer.
-                file_ops::resolve(db, file_id).ok().filter(|entry| !entry.is_dir())?;
-                super::path_the_system_opens(db, &sync_root, file_id).ok()
-            })
-        });
-        // `Opened` is "the system was asked": the start itself runs on the launch worker, for this session, and the
-        // window's thread never waits for the launch lock (R-OW1).
-        let Ok(Some(path)) = path else {
-            return Elsewhere::Refused;
-        };
-        let asked = self.launcher.open_for(
-            &self.engine,
-            self.open,
-            path,
-            "viewer: the file did not open in another app",
-        );
-        match asked {
-            Ok(()) => Elsewhere::Opened,
-            Err(()) => Elsewhere::Refused,
+        #[cfg(not(target_os = "macos"))]
+        {
+            let path = match self.elsewhere_path(file_id) {
+                Ok(path) => path,
+                Err(why) => return why,
+            };
+            let asked = self.launcher.open_for(
+                &self.engine,
+                self.open,
+                path,
+                "viewer: the file did not open in another app",
+            );
+            match asked {
+                Ok(()) => Elsewhere::Opened,
+                Err(()) => Elsewhere::Refused,
+            }
         }
+    }
+
+    fn choose_elsewhere(&self, file_id: &str) -> Elsewhere {
+        self.mac_elsewhere(file_id, false)
+    }
+
+    fn reveal_elsewhere(&self, file_id: &str) -> Elsewhere {
+        self.mac_elsewhere(file_id, true)
     }
 
     fn screen_open(&self) -> bool {
@@ -404,6 +570,26 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
 
     fn media_queue(&self, session: SessionGeneration, file_id: &str) -> Option<viewer_media::MediaQueue> {
         viewer_media::queue_of(&self.engine, session, file_id)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn in_finder(&self, file_id: &str) -> bool {
+        use crate::shell::platform::macos::macos_fp::open as finder;
+        if finder::not_ready_line(&super::finder_setup::view()).is_some() {
+            return false;
+        }
+        let own = self
+            .engine
+            .local_state_for_changes()
+            .and_then(|state| state.with(|db| finder::refuse_shared(db, file_id).is_ok()));
+        matches!(own, Ok(true))
+    }
+
+    fn download_progress(&self, session: SessionGeneration, file_id: &str) -> Option<(u64, u64)> {
+        let rows = self.engine.downloads_for(session).ok()?;
+        rows.into_iter()
+            .find(|row| row.file_id == file_id)
+            .map(|row| (row.done, row.total))
     }
 
     fn edit_facts(&self, session: SessionGeneration, file_id: &str, opening: u64) -> Option<EditFacts> {
@@ -654,10 +840,10 @@ pub(super) fn shows(name: &str) -> Shows {
     }
 }
 
-/// Whether the Office renderer's sandbox exists on this platform: `beebeeb-office-sandbox` has a module only on
-/// Windows today. Elsewhere a list's Open of an Office file goes to its own app.
+/// Whether the Office renderer's sandbox exists on this platform: `beebeeb-office-sandbox` has a module on Windows
+/// and on macOS (dm-79). Elsewhere a list's Open of an Office file goes to its own app.
 pub(super) const fn office_sandbox_here() -> bool {
-    cfg!(windows)
+    cfg!(any(windows, target_os = "macos"))
 }
 
 /// "Markdown" of "Markdown · 1.4 KB": the kind in a word, by the name.
@@ -969,10 +1155,24 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let media = self.media_body(session, opening.account.clone(), file_id, &facts.name, &facts.folders);
         // An Office file goes by its own route, before the viewer's kinds (`viewer_office`).
         let office = self.office_route(&facts.name);
+        // On a Mac a PDF whose helper does not run is Quick Look's (`viewer_pdf`'s macOS arm): no pages are kept here.
+        #[cfg(target_os = "macos")]
+        let pdf_by_macos = if shows == Shows::Pdf && office.is_none() && media.is_none() {
+            self.pdf_mac_begin(session, opening.account.clone(), file_id, &facts.name)
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let pdf_by_macos: Option<Body> = None;
+        if pdf_by_macos.is_some() {
+            opening.pages = None;
+        }
         let body = if let Some(route) = office {
             self.office_begin(route, &opening, &facts, recorded)
         } else if let Some(media) = media {
             media
+        } else if let Some(body) = pdf_by_macos {
+            body
         } else if shows == Shows::Nothing {
             Body::NotPreviewable(heic_or_no_viewer(&facts.name))
         } else if facts.size > IN_MEMORY_MAX {
@@ -1192,6 +1392,14 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                         opening.origin = content.origin;
                         opening.holds = true;
                         let body = content.body.take();
+                        // Dm-84: on a Mac a PDF whose helper could not start is Quick Look's (`viewer_pdf`'s macOS arm).
+                        #[cfg(target_os = "macos")]
+                        if matches!(body, Some(Body::Stopped(Stopped::HelperStopped))) && opening.pages.is_some() {
+                            opening.pages = None;
+                            let (session, account) = (opening.session, opening.account.clone());
+                            let name = opening.name.clone();
+                            return self.pdf_mac_start_failed(session, account, file_id, &name).or(body);
+                        }
                         if let (Some(pages), Some(Body::Pdf(doc))) = (&opening.pages, &body) {
                             *pages.doc.borrow_mut() = Some(doc.clone());
                         }
@@ -1289,6 +1497,20 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
             return Elsewhere::Refused;
         }
         self.engine.open_elsewhere(file_id)
+    }
+
+    fn choose_elsewhere(&mut self, file_id: &str) -> Elsewhere {
+        if self.current(file_id).is_none() {
+            return Elsewhere::Refused;
+        }
+        self.engine.choose_elsewhere(file_id)
+    }
+
+    fn reveal_elsewhere(&mut self, file_id: &str) -> Elsewhere {
+        if self.current(file_id).is_none() {
+            return Elsewhere::Refused;
+        }
+        self.engine.reveal_elsewhere(file_id)
     }
 
     fn previews(&self, name: &str) -> bool {
@@ -1499,5 +1721,49 @@ mod heic_open_tests {
         assert_eq!(heic_or_no_viewer("n.HEIC"), NoPreview::Heic);
         assert_eq!(heic_or_no_viewer("n.heif"), NoPreview::Heic);
         assert_eq!(heic_or_no_viewer("n.xyz"), NoPreview::NoViewer);
+    }
+}
+
+/// dm-100: Show in Finder from a viewer (and Open with) hands only the account's own file to Finder (ruling 1701).
+/// "viewers" in the name: the wave's done check (`cargo test viewers`) runs it.
+#[cfg(test)]
+mod viewers_finder_own_file_tests {
+    use super::*;
+    use beebeeb_engine::state_db::Namespace;
+
+    #[test]
+    fn show_in_finder_is_refused_for_a_shared_with_me_file_and_goes_on_for_an_own_file() {
+        let place = || Ok::<_, Elsewhere>("/Beebeeb/Notes/a.txt");
+        // Shared with the account: refused before Finder is asked, whatever place it has.
+        assert_eq!(
+            finder_hand_over(place(), "s1", |_| Ok(Some(Namespace::SharedWithMe))),
+            Err(Elsewhere::Refused)
+        );
+        assert_eq!(
+            finder_hand_over(place(), "namespace:shared_with_me", |_| panic!("no lookup")),
+            Err(Elsewhere::Refused)
+        );
+        // The account's own file: its place is shown.
+        for own in [Namespace::MyFiles, Namespace::Offline, Namespace::Conflicts] {
+            assert_eq!(
+                finder_hand_over(place(), "f1", |_| Ok(Some(own))),
+                Ok("/Beebeeb/Notes/a.txt")
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_row_or_a_failed_read_is_refused_and_a_missing_place_says_its_own_reason() {
+        let place = || Ok::<_, Elsewhere>(());
+        assert_eq!(finder_hand_over(place(), "gone", |_| Ok(None)), Err(Elsewhere::Refused));
+        assert_eq!(
+            finder_hand_over(place(), "f1", |_| Err("read item: boom".into())),
+            Err(Elsewhere::Refused)
+        );
+        // No place to open from (sync is off): that reason, and the row is not read.
+        assert_eq!(
+            finder_hand_over(Err::<(), _>(Elsewhere::NeedsSync), "f1", |_| panic!("no lookup")),
+            Err(Elsewhere::NeedsSync)
+        );
     }
 }

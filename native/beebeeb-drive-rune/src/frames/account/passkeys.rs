@@ -374,7 +374,7 @@ fn close_wiping(s: &mut State) {
 fn no_dialog(t: &Theme) -> El {
     kit::label(
         "note-1",
-        "Passkeys are not available on this PC.",
+        concat!("Passkeys are not available on ", beebeeb_engine::device_word!(), "."),
         fm::CAP,
         t.text_secondary,
     )

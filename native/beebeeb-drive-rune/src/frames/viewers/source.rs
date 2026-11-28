@@ -126,6 +126,10 @@ pub enum NoPreview {
     PdfUnreadable,
     /// A PDF with more pages than the viewer lists.
     PdfTooLong { pages: u32 },
+    /// The player refused the recording or video (no decoder, or no player here): the calm page with the other apps.
+    PlayerRefused,
+    /// An office document and the office helper cannot run here: the same page.
+    OfficeUnavailable,
 }
 
 /// What there is of one page of the open PDF.
@@ -252,6 +256,9 @@ pub enum Body {
     NoEditor,
     /// DW-1556, DW-1563, DW-1564: the Office viewer's state (a failure, opening, content missing).
     OfficeState(super::super::office::states::StateBody),
+    /// macOS (dm-74): the system's own view of the file (a player, Quick Look) inside the window.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // made only on macOS
+    Native(super::native_preview::NativeDoc),
 }
 
 /// The kind and its counts, never a word of the content, a name or a title.
@@ -271,6 +278,7 @@ impl fmt::Debug for Body {
             Body::Word(doc) => write!(f, "Word({doc:?})"),
             Body::NoEditor => f.write_str("NoEditor"),
             Body::OfficeState(b) => write!(f, "OfficeState({:?})", b.state),
+            Body::Native(doc) => write!(f, "Native({:?})", doc.kind),
             Body::Sheet(v) => write!(f, "Sheet({} cells)", v.cells.len()),
             Body::Deck(d) => write!(f, "Deck({} slides)", d.view.slides.len()),
             Body::Doc(d) => fmt::Debug::fmt(d, f),
@@ -674,6 +682,14 @@ pub trait ViewerSource {
     /// Open the file with the app the system has for it, from the place the engine keeps the account's files on
     /// this PC (never a decrypted copy made for the occasion).
     fn open_elsewhere(&mut self, _file_id: &str) -> Elsewhere {
+        Elsewhere::NotBound
+    }
+    /// The app chooser, then the file in the app picked (the unsupported page's "Open with another app…").
+    fn choose_elsewhere(&mut self, _file_id: &str) -> Elsewhere {
+        Elsewhere::NotBound
+    }
+    /// The file shown in the file manager (the unsupported page's "Show in Finder").
+    fn reveal_elsewhere(&mut self, _file_id: &str) -> Elsewhere {
         Elsewhere::NotBound
     }
     /// Whether a file of this name is shown HERE (decrypted and drawn). `false`: a list's Open leaves it to its
@@ -1085,7 +1101,7 @@ impl FixtureViewerSource {
                     size: "1.4 KB".into(),
                     facts: vec![
                         ("Changed", "Today, 09:20".into(), true),
-                        ("Changed on", "This PC".into(), false),
+                        ("Changed on", concat!(beebeeb_engine::device_word_cap!()).into(), false),
                         ("Where", "Files \u{203A} Documents".into(), false),
                         ("Version history", "3 versions".into(), true),
                         ("Encryption", "AES-256-GCM".into(), true),

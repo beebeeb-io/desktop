@@ -51,18 +51,18 @@ fn drawn(els: &[ElementInfo]) -> Vec<String> {
 type Make = fn(&Theme) -> El;
 const DOTS: [(Dot, Make); 5] = [
     (Dot::Green, |t| {
-        bar(Some(Dot::Green), Some("Up to date"), "4 on this PC", t)
+        bar(Some(Dot::Green), Some("Up to date"), beebeeb_engine::os_words::for_this_os("4 on this PC").as_str(), t)
     }),
     (Dot::Busy, |t| {
-        bar(Some(Dot::Busy), Some("Up to date"), "4 on this PC", t)
+        bar(Some(Dot::Busy), Some("Up to date"), beebeeb_engine::os_words::for_this_os("4 on this PC").as_str(), t)
     }),
     (Dot::Idle, |t| {
-        bar(Some(Dot::Idle), Some("Up to date"), "4 on this PC", t)
+        bar(Some(Dot::Idle), Some("Up to date"), beebeeb_engine::os_words::for_this_os("4 on this PC").as_str(), t)
     }),
     (Dot::Warn, |t| {
-        bar(Some(Dot::Warn), Some("Up to date"), "4 on this PC", t)
+        bar(Some(Dot::Warn), Some("Up to date"), beebeeb_engine::os_words::for_this_os("4 on this PC").as_str(), t)
     }),
-    (Dot::Red, |t| bar(Some(Dot::Red), Some("Up to date"), "4 on this PC", t)),
+    (Dot::Red, |t| bar(Some(Dot::Red), Some("Up to date"), beebeeb_engine::os_words::for_this_os("4 on this PC").as_str(), t)),
 ];
 
 fn expected(dot: Dot, t: &Theme) -> Color {
@@ -98,7 +98,7 @@ fn bar_has_the_keys_role_height_and_dot_colour_in_both_themes() {
             assert_eq!(b.fill, t.status_bar_bg);
             assert_eq!(get(&els, "status-dot").fill, expected(dot, &t), "{dot:?} dark={dark}");
             assert_eq!(get(&els, "status-text").text.as_deref(), Some("Up to date"));
-            assert_eq!(get(&els, "status-details").text.as_deref(), Some("4 on this PC"));
+            assert_eq!(get(&els, "status-details").text.as_deref(), Some(beebeeb_engine::os_words::for_this_os("4 on this PC").as_str()));
         }
     }
 }
@@ -177,11 +177,24 @@ fn the_delegates_draw_bars_tree() {
                 |t| bar(
                     Some(Dot::Green),
                     Some(UP_TO_DATE),
-                    "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only",
+                    beebeeb_engine::os_words::for_this_os("4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only").as_str(),
                     t
                 ),
                 dark
             )),
         );
+    }
+}
+
+#[test]
+fn a_paused_bar_offers_resume_and_no_other_bar_does() {
+    let paused = render(|t| bar(Some(Dot::Idle), Some(PAUSED), "", t), false);
+    assert_eq!(get(&paused, "status-text").text.as_deref(), Some("Paused"));
+    let resume = get(&paused, "status-resume");
+    assert_eq!(resume.text.as_deref(), Some("Resume"));
+    assert_eq!(resume.role, "button");
+    for word in [UP_TO_DATE, SYNCING, CHECKING, SYNC_STOPPED] {
+        let others = render(|t| bar(None, Some("x"), "", t), false);
+        assert!(find(&others, "status-resume").is_none(), "{word}");
     }
 }

@@ -7,12 +7,12 @@ use std::rc::Rc;
 
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
-use super::kinds::{Viewer, viewer_of};
-use super::source::{Body, FixtureViewerSource, Match, OpenError, OpenFile, Picture, ViewerSource, board};
-use super::{Intent, open_from, open_item, set_scene};
+use super::kinds::{viewer_of, Viewer};
+use super::source::{board, Body, FixtureViewerSource, Match, OpenError, OpenFile, Picture, ViewerSource};
+use super::{open_from, open_item, set_scene, Intent};
 use crate::shell::app::Screen;
 use crate::source::DriveItem;
-use crate::{State, init, view};
+use crate::{init, view, State};
 
 type Calls = Rc<RefCell<Vec<String>>>;
 
@@ -394,14 +394,18 @@ fn a_photos_actions_share_keep_offline_show_details_and_trash() {
     assert_eq!(words(&rt, "action-1-label"), "Offline");
     click(&mut rt, "action-1");
     assert_eq!(*calls.borrow(), [format!("offline {} true", board::RAW)]);
-    assert_eq!(words(&rt, "action-1-label"), "On this PC");
+    assert_eq!(
+        words(&rt, "action-1-label"),
+        concat!("On ", beebeeb_engine::device_word!())
+    );
     // Details: the panel with the RAW's facts (DW-1502); the photo stands alone beside it.
     click(&mut rt, "action-2");
     assert!(viewer(&rt).show_details);
     assert_eq!(words(&rt, "detail-lens-value"), "FE 35mm F1.4 GM");
     assert_eq!(words(&rt, "status-details"), "Space for Preview");
     assert!(!has(&rt, "gallery") && !has(&rt, "action-0"));
-    assert_eq!(info(&rt, "photo").target[2], 500.0);
+    // Task 67: the photo takes the room the panel leaves, no fixed 500 wide.
+    assert!(info(&rt, "photo").target[2] > 500.0);
     // Alt+Shift+P hides it again (DW-1501).
     press_with(
         &mut rt,
@@ -413,7 +417,7 @@ fn a_photos_actions_share_keep_offline_show_details_and_trash() {
         },
     );
     assert!(has(&rt, "gallery"));
-    assert_eq!(info(&rt, "photo").target[2], 600.0);
+    assert!(info(&rt, "photo").target[2] > 600.0, "the photo fills the stage");
 }
 
 #[test]
@@ -560,9 +564,7 @@ fn a_table_selects_a_cell_moves_it_and_sorts_by_a_column() {
     let amounts = |rt: &Runtime<State>| (0..8).map(|r| words(rt, &format!("csv-{r}-5"))).collect::<Vec<_>>();
     assert_eq!(
         amounts(&rt),
-        [
-            "0.00", "385.00", "440.00", "475.00", "617.50", "660.00", "665.00", "760.00"
-        ]
+        ["0.00", "385.00", "440.00", "475.00", "617.50", "660.00", "665.00", "760.00"]
     );
     assert_eq!(words(&rt, "csv-0-1"), "Studio", "a row moves whole");
     click(&mut rt, "csv-th-5");
@@ -838,7 +840,11 @@ fn an_archives_list_jumps_by_typed_names_and_keeps_its_keys() {
     let (mut rt, _) = recording(board::ZIP);
     typed(&mut rt, "s");
     typed(&mut rt, "e");
-    assert_eq!(viewer(&rt).media.entry, Some(3), "\"se\": selects-list.csv, by its name");
+    assert_eq!(
+        viewer(&rt).media.entry,
+        Some(3),
+        "\"se\": selects-list.csv, by its name"
+    );
     typed(&mut rt, "C");
     assert_eq!(viewer(&rt).media.entry, Some(3), "\"sec\" matches none: focus stays");
 }
@@ -921,6 +927,77 @@ fn home_and_end_go_to_the_first_and_last_photo_of_the_strip() {
 fn media_look_zoom_group_gap_is_one_pixel() {
     let rt = scene("DW-1506");
     let group = info(&rt, "zoom-group").rect;
-    let tools: f32 = ["tool-0", "tool-1", "tool-2"].iter().map(|k| info(&rt, k).rect[2]).sum();
-    assert_eq!(group[2], tools + 2.0 * 2.0 + 2.0 * 1.0, "padding 2 each side, gap 1 twice");
+    let tools: f32 = ["tool-0", "tool-1", "tool-2"]
+        .iter()
+        .map(|k| info(&rt, k).rect[2])
+        .sum();
+    assert_eq!(
+        group[2],
+        tools + 2.0 * 2.0 + 2.0 * 1.0,
+        "padding 2 each side, gap 1 twice"
+    );
+}
+
+/// Dm-87: an engine-like source that has rendered page 2 only (the board's picture of it); every other page is still
+/// being rendered.
+struct RenderedTwo(FixtureViewerSource, Calls);
+
+impl ViewerSource for RenderedTwo {
+    fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+        self.0.open(id)
+    }
+    fn poll(&mut self, id: &str) -> Option<Body> {
+        self.0.poll(id)
+    }
+    fn cancel(&mut self, _: &str) {}
+    fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+        self.0.retry(id)
+    }
+    fn picture(&self, id: &str, which: Picture) -> Option<rune::Pixels> {
+        self.1.borrow_mut().push(format!("picture {which:?}"));
+        self.0.picture(id, which)
+    }
+    fn page_state(&self, _: &str, page: u32) -> super::source::PageState {
+        if page == 2 {
+            super::source::PageState::Ready
+        } else {
+            super::source::PageState::Rendering
+        }
+    }
+}
+
+/// Dm-87 (RC16): the page strip showed blank white pages 1 and 2 while the page itself rendered. A thumbnail now
+/// shows the page's own picture once it is rendered, and a page still on its way is no white page; a thumbnail never
+/// asks the renderer for a page of its own.
+#[test]
+fn the_pdf_strip_shows_no_blank_thumbnails() {
+    use super::pdf::{ThumbFace, thumb_face};
+    use super::source::PageState;
+    let asked = std::cell::Cell::new(0);
+    let picture = || {
+        asked.set(asked.get() + 1);
+        Some(rune::Pixels::new())
+    };
+    assert!(matches!(thumb_face(PageState::Rendering, picture), ThumbFace::NotYet));
+    assert!(matches!(thumb_face(PageState::Failed, picture), ThumbFace::NotYet));
+    assert_eq!(asked.get(), 0, "a page that is not here is never asked for by its thumbnail");
+    assert!(matches!(thumb_face(PageState::Ready, picture), ThumbFace::Picture(_)));
+    assert!(matches!(thumb_face(PageState::LacksText, picture), ThumbFace::Picture(_)));
+    assert!(matches!(thumb_face(PageState::Ready, || None), ThumbFace::Plain));
+
+    let calls = Calls::default();
+    let mut state = init();
+    let source = RenderedTwo(FixtureViewerSource::new(), calls.clone());
+    assert!(open_from(&mut state, Box::new(source), board::PDF));
+    let mut rt = runtime_of(state, false);
+    rt.settle_all();
+    rt.frame(0.0);
+    assert!(has(&rt, "thumb-sidebar"));
+    assert!(has(&rt, "thumb-0-not-yet"), "page 1 is on its way: no white page");
+    assert!(has(&rt, "thumb-1-page") && !has(&rt, "thumb-1-not-yet"), "page 2 shows its picture");
+    let asked: Vec<String> = calls.borrow().clone();
+    assert!(
+        asked.iter().all(|call| call != "picture Page(3)" && call != "picture Page(4)"),
+        "thumbnails of pages not rendered ask nothing: {asked:?}"
+    );
 }

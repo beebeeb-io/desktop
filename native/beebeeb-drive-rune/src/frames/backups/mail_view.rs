@@ -195,7 +195,7 @@ pub fn page(mail: &Mail, over: bool, t: &Theme) -> (Vec<El>, usize, usize) {
         MailState::On => {
             children.push(head(
                 "Mail Backup is on",
-                &format!("Runs on this PC ({})", mail.pc),
+                &format!(concat!("Runs on ", beebeeb_engine::device_word!(), " ({})"), mail.pc),
                 Some(pill::pill("pill-0", "On", pill::Tone::Good, true, t)),
                 t,
             ));
@@ -241,7 +241,11 @@ pub fn page(mail: &Mail, over: bool, t: &Theme) -> (Vec<El>, usize, usize) {
             buttons += 1;
             children.push(head(
                 "Mail Backup is off",
-                "It runs on a PC: this one, once you turn it on.",
+                if cfg!(target_os = "macos") {
+                    "It runs on a Mac: this one, once you turn it on."
+                } else {
+                    "It runs on a PC: this one, once you turn it on."
+                },
                 Some(turn_on),
                 t,
             ));
@@ -271,7 +275,7 @@ pub fn page(mail: &Mail, over: bool, t: &Theme) -> (Vec<El>, usize, usize) {
             children.push(
                 kit::label(
                     "mail-note",
-                    "Mail Backup copies your mail accounts into a protected folder inside Backups, encrypted on this PC first. It reads your mail over IMAP; it never sends mail and never changes your mailbox.",
+                    concat!("Mail Backup copies your mail accounts into a protected folder inside Backups, encrypted on ", beebeeb_engine::device_word!(), " first. It reads your mail over IMAP; it never sends mail and never changes your mailbox."),
                     SUB,
                     t.text_tertiary,
                 )
@@ -301,7 +305,11 @@ pub fn page(mail: &Mail, over: bool, t: &Theme) -> (Vec<El>, usize, usize) {
                 } else {
                     "Backing up your mail"
                 },
-                "The first backup takes longest. You can use your PC as normal.",
+                if cfg!(target_os = "macos") {
+                    "The first backup takes longest. You can use your Mac as normal."
+                } else {
+                    "The first backup takes longest. You can use your PC as normal."
+                },
                 Some(pause),
                 t,
             ));
@@ -508,7 +516,7 @@ fn turn_on(list: usize, first_button: usize, t: &Theme) -> El {
         (
             &ic::MAIL,
             "Copies your mail into Beebeeb",
-            "Every message and attachment, encrypted on this PC first",
+            concat!("Every message and attachment, encrypted on ", beebeeb_engine::device_word!(), " first"),
         ),
         (
             &ic::PADLOCK,
@@ -517,7 +525,7 @@ fn turn_on(list: usize, first_button: usize, t: &Theme) -> El {
         ),
         (
             &ic::LAPTOP,
-            "Runs on this PC",
+            concat!("Runs on ", beebeeb_engine::device_word!()),
             "While it's on and awake; it catches up after sleep",
         ),
         (
@@ -614,7 +622,15 @@ fn account(ui: &BackupsUi, connection: &Connection, banners: usize, first_button
         // The refusal's notice takes this line's place (DW-1403).
         body.push(dialogs::caption(
             0,
-            "Connected over TLS. The password stays in Windows Credential Manager on this PC.",
+            if cfg!(target_os = "macos") {
+                concat!("Connected over TLS. The password stays in the Keychain on ", beebeeb_engine::device_word!(), ".")
+            } else {
+                concat!(
+                    "Connected over TLS. The password stays in Windows Credential Manager on ",
+                    beebeeb_engine::device_word!(),
+                    "."
+                )
+            },
             t,
         ));
     }

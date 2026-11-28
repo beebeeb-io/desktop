@@ -38,7 +38,6 @@ notify = "8"
 zeroize = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png", "gif", "bmp"] }
 png = "0.18"
-sysinfo = "0.38.4"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 webpki-roots = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "aws_lc_rs", "std"] }

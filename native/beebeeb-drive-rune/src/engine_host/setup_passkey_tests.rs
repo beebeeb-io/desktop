@@ -5,8 +5,8 @@
 //! One filter runs them all: `setup_add_passkey`.
 
 use super::*;
-use crate::frames::signin::setup::PasskeyStep;
 use crate::frames::signin::setup::source::PasskeyRefused;
+use crate::frames::signin::setup::PasskeyStep;
 
 /// What the person types into step 1's field.
 const TYPED: &str = "an invented one";
@@ -92,7 +92,12 @@ fn setup_add_passkey_step_one_stays_until_the_answer_arrives() {
     binds(&set, Ok(()));
     let (mut rt, engine) = on_step_one(set);
     // Step 1 is offered: its own words and its password field, never "not in this version".
-    assert!(says(&rt, "Saved by Windows") && says(&rt, "To confirm it's you."));
+    let saved_by = if cfg!(target_os = "macos") {
+        "Saved by your Mac"
+    } else {
+        "Saved by Windows"
+    };
+    assert!(says(&rt, saved_by) && says(&rt, "To confirm it's you."));
     assert!(!says(&rt, "This isn't in this version of Beebeeb yet"));
     // Windows' dialog stays open until this drops.
     let dialog = engine.passkey_held.lock().unwrap();

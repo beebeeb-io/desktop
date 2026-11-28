@@ -115,7 +115,7 @@ fn before_the_engines_first_report_the_flyout_says_checking_never_up_to_date() {
 #[test]
 fn the_gate_decides_before_anything_the_engine_reports_and_hides_every_name() {
     let empty_since = |name: &str| Changes::Empty {
-        text: format!("Changes show here once {name} syncs this PC."),
+        text: os(&format!("Changes show here once {name} syncs this PC.")),
     };
     let cases = [
         (
@@ -418,7 +418,7 @@ fn rows_say_what_happened_in_the_boards_words() {
                 "id-/Plans/2027/photo.heic",
                 "photo.heic",
                 Tile::Image,
-                done(format!("Uploaded from this PC {dot} 2027")),
+                done(os(&format!("Uploaded from this PC {dot} 2027"))),
                 "2 min",
                 false
             ),
@@ -426,7 +426,7 @@ fn rows_say_what_happened_in_the_boards_words() {
                 "id-/song.m4a",
                 "song.m4a",
                 Tile::Audio,
-                done(format!("Downloaded to this PC {dot} Files")),
+                done(os(&format!("Downloaded to this PC {dot} Files"))),
                 "3 h",
                 false
             ),
@@ -434,7 +434,7 @@ fn rows_say_what_happened_in_the_boards_words() {
                 "",
                 "old.md",
                 Tile::Trashed,
-                done("Moved to Trash on this PC".into()),
+                done(os("Moved to Trash on this PC")),
                 "Yesterday",
                 true
             ),
@@ -464,7 +464,7 @@ fn the_list_holds_50_rows_at_most_and_ends_only_when_it_is_full() {
     assert_eq!(
         snap(&ready()).changes,
         Changes::Empty {
-            text: "Changes show here once Hive syncs this PC.".into()
+            text: os("Changes show here once Hive syncs this PC.")
         },
         "no history yet"
     );
@@ -600,4 +600,58 @@ fn sync_anyway_is_offered_while_the_engine_holds_on_a_metered_connection() {
         ..ready()
     });
     assert!(matches!(lifted.status, Status::Syncing { .. }), "{:?}", lifted.status);
+}
+
+fn os(board: &str) -> String {
+    beebeeb_engine::os_words::for_this_os(board)
+}
+
+/// RC6: "Open in Finder" follows the macOS Finder setup's Ready state, locked or not.
+#[test]
+fn finder_ready_follows_the_macos_ready_state() {
+    assert!(!live::finder_ready(false, false));
+    assert!(live::finder_ready(false, true));
+    assert!(live::finder_ready(true, false));
+    let locked = snap(&Facts {
+        gate: Gate::Locked,
+        explorer_ready: live::finder_ready(false, true),
+        ..ready()
+    });
+    assert!(locked.explorer_ready);
+}
+
+/// Dm-68: a download the transfer board holds says how far it is, with its fraction for a bar.
+#[test]
+fn a_download_under_way_says_its_percent_and_bytes() {
+    assert_eq!(
+        live::downloading_so_far(5_347_737, 11_840_437),
+        "Downloading \u{00B7} 45% \u{00B7} 5.1 of 11.3 MB"
+    );
+    assert_eq!(
+        live::downloading_so_far(0, 2048),
+        "Downloading \u{00B7} 0% \u{00B7} 0 of 2 KB"
+    );
+    let local = Local {
+        moving: 1,
+        rows: vec![row(
+            "/IMGL1558.jpg",
+            ago(0),
+            RowKind::DownloadingSoFar {
+                done: 5_920_218,
+                total: 11_840_437,
+            },
+        )],
+        ..Local::default()
+    };
+    let Changes::Rows { rows, .. } = snap(&with_local(ready(), local)).changes else {
+        panic!("rows");
+    };
+    match &rows[0].what {
+        What::Moving { text, fraction, upload } => {
+            assert_eq!(text, "Downloading \u{00B7} 49% \u{00B7} 5.6 of 11.3 MB");
+            assert!(fraction.is_some_and(|f| (f - 0.5).abs() < 0.01));
+            assert!(!upload);
+        }
+        other => panic!("a moving row, got {other:?}"),
+    }
 }

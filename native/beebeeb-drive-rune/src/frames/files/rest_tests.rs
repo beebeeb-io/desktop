@@ -650,7 +650,7 @@ fn free_up_space_is_offered_where_there_is_a_copy_on_this_pc_and_makes_it_online
     let labels = menu_labels(&rt);
     let at = labels.iter().position(|l| l == "Free up space").expect("offered");
     assert_eq!(labels[at - 1], "Make available offline");
-    assert_eq!(labels[at + 1], "Show in File Explorer");
+    assert_eq!(labels[at + 1], beebeeb_engine::os_words::for_this_os("Show in File Explorer"));
     let item = rt
         .elements()
         .into_iter()
@@ -696,7 +696,7 @@ fn the_toolbars_last_icon_button_opens_the_folder_shown_in_file_explorer() {
     let button = info(&rt, "open-explorer");
     assert_eq!(
         (button.role, button.label.as_deref(), button.focusable),
-        ("button", Some("Open in File Explorer"), true)
+        ("button", Some(beebeeb_engine::os_words::for_this_os("Open in File Explorer").as_str()), true)
     );
     // After the details-panel button, before the rule and New.
     let x = |key: &str| info(&rt, key).rect[0];

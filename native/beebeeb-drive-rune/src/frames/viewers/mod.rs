@@ -44,10 +44,13 @@ mod office_icons;
 pub mod office_over;
 mod open_route;
 mod pdf;
+mod more_menu;
+pub mod native_preview;
 mod photo;
 mod settle;
 pub mod source;
 mod states;
+pub mod unsupported;
 mod style;
 mod table;
 mod text;
@@ -99,6 +102,10 @@ pub enum Intent {
     NewMenu,
     /// The system's "Open with" for this file, decrypted for the app the person picks.
     OpenInAnotherApp,
+    /// The unsupported page's "Open with another app…": the system's app chooser, then the file opens in the app picked.
+    ChooseApp,
+    /// The unsupported page's "Show in Finder".
+    ShowInFolder,
     /// DW-0407: share this file.
     Share,
     /// DW-0413: this file's versions.
@@ -119,6 +126,8 @@ pub enum Intent {
     EditInSheets,
     /// Move this file to Trash (a photo's Trash; Undo is the toast's, in Files).
     Trash,
+    /// Rename this file: Files' own rename of its row.
+    Rename,
     /// A command of the office editor (its name, as the control says it): the editor takes it.
     Office(&'static str),
 }
@@ -138,8 +147,8 @@ pub fn not_shown(why: OpenError) -> String {
     let reason = match why.stopped() {
         Some(source::Stopped::Gone) => "the file is gone",
         Some(source::Stopped::SessionEnded) => "the session ended",
-        Some(source::Stopped::NothingSynced) => "nothing has synced on this PC yet",
-        Some(source::Stopped::NotThisAccounts) => "this PC's data couldn't be confirmed as this account's",
+        Some(source::Stopped::NothingSynced) => concat!("nothing has synced on ", beebeeb_engine::device_word!(), " yet"),
+        Some(source::Stopped::NotThisAccounts) => concat!(beebeeb_engine::device_word!(), "'s data couldn't be confirmed as this account's"),
         // Signed out or locked: the shell's own gate says it.
         None => "Beebeeb is locked or signed out",
         Some(_) => "couldn't read it right now",
@@ -149,7 +158,7 @@ pub fn not_shown(why: OpenError) -> String {
 
 /// What "Open in another app…" says when the account's folder on this PC is not in sync now.
 pub const NEEDS_SYNC_ELSEWHERE: &str =
-    "Couldn't open it in another app. It opens from your Beebeeb folder, so sync has to be on for this PC.";
+    concat!("Couldn't open it in another app. It opens from your Beebeeb folder, so sync has to be on for ", beebeeb_engine::device_word!(), ".");
 
 /// What "Open in another app…" says when the file could not be opened there for another reason.
 pub const NOT_OPENED_ELSEWHERE: &str = "Couldn't open this file in another app.";
@@ -166,6 +175,7 @@ impl Intent {
             Intent::KeepOffline => "Available offline from here",
             Intent::EditInSheets => "Edit in Sheets",
             Intent::VersionHistory => "Version history",
+            Intent::Rename => "Rename",
             Intent::Office(command) => command,
             _ => return None,
         })
@@ -241,6 +251,10 @@ pub struct Ui {
     pub office: office::OfficeUi,
     /// The element that takes keyboard focus once this change is on screen.
     focus: Option<&'static str>,
+    /// The toolbar's "…" menu, while it is open (`more_menu.rs`).
+    pub more: Option<more_menu::Open>,
+    /// The "…" menu's Open with is under way, and the words the message last said of it (`more_menu.rs`).
+    more_open_with: Option<Option<String>>,
     intents: Vec<Intent>,
 }
 
@@ -281,6 +295,8 @@ impl Ui {
             toast: None,
             saved_at: None,
             focus: None,
+            more: None,
+            more_open_with: None,
             intents: Vec::new(),
         }
     }
@@ -355,6 +371,20 @@ impl Ui {
                 }
                 Elsewhere::NotBound => {}
             }
+        }
+        if matches!(intent, Intent::ChooseApp | Intent::ShowInFolder) {
+            let id = self.file.id.clone();
+            let answer = if intent == Intent::ChooseApp {
+                self.source.choose_elsewhere(&id)
+            } else {
+                self.source.reveal_elsewhere(&id)
+            };
+            self.toast = match answer {
+                Elsewhere::Opened => None,
+                Elsewhere::NeedsSync => Some(NEEDS_SYNC_ELSEWHERE.to_string()),
+                Elsewhere::Refused | Elsewhere::NotBound => Some(NOT_OPENED_ELSEWHERE.to_string()),
+            };
+            return;
         }
         // The shell's router takes it (`shell::intents::drain_viewer_intents`); while nothing there answers it,
         // the router's fallback says "Not built yet: <what>".
@@ -977,7 +1007,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             }
         }
     let Some(ui) = ui(s) else { return had || new_file };
-    let changed = ui.pump() | ui.refind();
+    let changed = ui.pump() | ui.refind() | ui.say_open_with();
     // An open text or note whose version is read: woken when the next read is due, not only by a press.
     if let Some(after) = ui.source.next_check() {
         tx.wake_after(after);
@@ -1160,6 +1190,7 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             let (tools, note, body) = (archive::tools(&t), archive::banner(doc, &t), archive::body(ui, &t));
             return chrome::window(s, cx, ui, head, tools, Some(note), body, &archive::status(), &t);
         }
+        Body::Native(doc) => return native_preview::window(s, cx, ui, doc, &t),
         _ => {}
     }
     let (body, status) = match (
@@ -1176,6 +1207,10 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
 /// left the file, and [`sync`] drops it here.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     sync(s);
+    // The toolbar's "…" menu is modal: while it is open it takes every key.
+    if ui(s).is_some_and(|ui| ui.more.is_some()) {
+        return more_menu::on_key(s, ev, tx);
+    }
     // A "not built yet" notice goes with the next key.
     if let Some(ui) = ui(s)
         && ui.toast.as_deref().is_some_and(|words| words.starts_with(NOT_BUILT)) {

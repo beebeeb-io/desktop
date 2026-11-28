@@ -2,14 +2,14 @@
 //! (DW-A46) and "We can't restore your keys" (DW-A25). No screen here offers a reset: Beebeeb
 //! cannot reset a password, and the only time the word appears is DW-A46 saying so.
 
-use rune::{El, col, el, row};
+use rune::{col, el, row, El};
 
 use super::view::actions;
-use super::{Intent, Ui, act, icons};
+use super::{act, icons, Intent, Ui};
 use crate::theme::scale::space;
-use crate::theme::tokens::{Theme, type_};
-use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone, type_au};
-use crate::ui::view_state::{ViewState, try_again, view_state};
+use crate::theme::tokens::{type_, Theme};
+use crate::ui::au::{self, type_au, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
+use crate::ui::view_state::{try_again, view_state, ViewState};
 use crate::ui::{au_entry, kit};
 
 fn back_to(label: &str, to: fn(&mut Ui), t: &Theme) -> El {
@@ -94,7 +94,11 @@ pub fn forgot(k: &mut Keys, doors: bool, t: &Theme) -> El {
                 k,
                 &icons::PHONE,
                 "I have another device signed in",
-                "Approve this PC from a device where you're already signed in. No phrase needed.",
+                concat!(
+                    "Approve ",
+                    beebeeb_engine::device_word!(),
+                    " from a device where you're already signed in. No phrase needed."
+                ),
                 "Sign in with another device",
                 ButtonKind::Outline,
                 Ui::ask_other_device,

@@ -6,7 +6,20 @@ use super::*;
 #[allow(clippy::large_enum_variant)]
 pub(super) enum HydrateOutcome {
     Reply(IpcResponse),
-    ClientGone,
+    /// The client hung up. `no_progress`: before it had been sent a single byte count, so the row still
+    /// reads "Downloading, 0.0 of N" in the app (the extension dropped the request, or never took it).
+    ClientGone {
+        no_progress: bool,
+    },
+}
+
+/// A hydrate whose client left before any progress went out leaves the row an error the person can see and retry
+/// from, not a quiet `CloudOnly` that looks as if nothing was asked. The hydrate's own guard has put the row back
+/// to `CloudOnly` by the time this runs (the future is dropped); a row in any other state is left as it is.
+pub(super) fn surface_dropped_hydrate(db: &crate::state_db::StateDb, file_id: &str) -> bool {
+    use crate::state_db::FileStatus;
+    db.set_status_if(file_id, FileStatus::CloudOnly, FileStatus::Error)
+        .unwrap_or(false)
 }
 
 /// Whether the client asked for `HydrateProgress` frames before the final reply
@@ -22,7 +35,11 @@ pub(super) enum ProgressReporting {
 
 impl ProgressReporting {
     pub(super) fn from_wire(progress: bool) -> Self {
-        if progress { Self::On } else { Self::Off }
+        if progress {
+            Self::On
+        } else {
+            Self::Off
+        }
     }
 
     pub(super) fn wanted(self) -> bool {
@@ -133,14 +150,19 @@ pub(super) async fn hydrate_over_ipc(
     let hydrate = bridge.hydrate_file_with_progress(file_id.as_str(), dest, &allowed_roots, progress_cb);
     tokio::pin!(hydrate);
 
+    let mut progress_sent = false;
+    let began = std::time::Instant::now();
+    let mut last_done: u64 = 0;
     let result = loop {
         tokio::select! {
             biased;
             result = &mut hydrate => break Some(result),
             Some((done, total)) = rx.recv() => {
+                last_done = done;
                 if write_frame(write_half, &IpcResponse::HydrateProgress { done, total }).await.is_err() {
                     break None;
                 }
+                progress_sent = true;
             }
             read = frames.fill_more() => {
                 // 0 / error = the peer closed. Bytes = a pipelined request,
@@ -167,6 +189,7 @@ pub(super) async fn hydrate_over_ipc(
             // frame always precedes the final reply, as the protocol promises
             // (`docs/IPC_PROTOCOL.md`: progress frames stream BEFORE the reply).
             while let Ok((done, total)) = rx.try_recv() {
+                last_done = done;
                 if write_frame(write_half, &IpcResponse::HydrateProgress { done, total })
                     .await
                     .is_err()
@@ -177,9 +200,10 @@ pub(super) async fn hydrate_over_ipc(
                         id_kind,
                         "IPC client went away while flushing the terminal hydrate progress frames"
                     );
-                    return HydrateOutcome::ClientGone;
+                    return HydrateOutcome::ClientGone { no_progress: false };
                 }
             }
+            log_hydrate_rate(file_id.as_str(), last_done, began.elapsed(), outcome.is_ok());
             match outcome {
                 Ok(()) => HydrateOutcome::Reply(IpcResponse::Ok {}),
                 Err(e) => HydrateOutcome::Reply(hydrate_failure_reply(file_id.as_str(), e)),
@@ -193,9 +217,28 @@ pub(super) async fn hydrate_over_ipc(
                 id_kind,
                 "IPC client went away mid-hydrate; hydration cancelled"
             );
-            HydrateOutcome::ClientGone
+            HydrateOutcome::ClientGone {
+                no_progress: !progress_sent,
+            }
         }
     }
+}
+
+/// One info line per Finder hydrate: bytes, time and rate (RC6: a 367 MB download took 9 min 35 s and nothing said
+/// where). The source (direct or API) and the parallel count are on the engine's own lines.
+pub(super) fn log_hydrate_rate(file_id: &str, bytes: u64, took: std::time::Duration, ok: bool) {
+    let (file_id, id_kind) = crate::engine_bridge::wire_id_fields(file_id);
+    let secs = took.as_secs_f64().max(0.001);
+    tracing::info!(
+        file_id,
+        id_kind,
+        source = "finder",
+        ok,
+        bytes,
+        millis = took.as_millis() as u64,
+        rate = %format!("{:.2} MB/s", bytes as f64 / 1_000_000.0 / secs),
+        "Finder hydrate finished"
+    );
 }
 
 /// The reply to a hydrate that failed: the extension's `fetchContents` fails
@@ -256,6 +299,31 @@ pub(super) fn hydrate_failure_category(error: &anyhow::Error) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hydrate_the_client_dropped_before_any_progress_shows_an_error_on_the_row() {
+        use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        let entry = |id: &str, status| FileEntry {
+            file_id: id.into(),
+            path: id.into(),
+            status,
+            size_bytes: 1,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        db.upsert_file(&entry("a", FileStatus::CloudOnly)).unwrap();
+        db.upsert_file(&entry("b", FileStatus::Local)).unwrap();
+        assert!(surface_dropped_hydrate(&db, "a"));
+        assert_eq!(db.get_file("a").unwrap().unwrap().status, FileStatus::Error);
+        // A row that is something else (here a finished local copy) is never touched.
+        assert!(!surface_dropped_hydrate(&db, "b"));
+        assert_eq!(db.get_file("b").unwrap().unwrap().status, FileStatus::Local);
+    }
 
     #[test]
     fn progress_reporting_round_trips_the_wire_flag() {

@@ -56,12 +56,14 @@ fn within(what: impl Fn() -> bool) -> bool {
     true
 }
 
-// The session test's stand-ins: each asks `still` inside the launch lock, counts that it asked, and starts only when
-// it held. Only that test uses them.
+// The session test's stand-ins: each counts that it was begun, asks `still` inside the launch lock, counts that it
+// asked, and starts only when it held. Only that test uses them.
+static MOVED_BEGUN: AtomicUsize = AtomicUsize::new(0);
 static MOVED_ASKED: AtomicUsize = AtomicUsize::new(0);
 static MOVED_STARTED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
 fn record_moved(kind: &'static str, still: &dyn Fn() -> bool) -> Result<(), ActionError> {
+    MOVED_BEGUN.fetch_add(1, SeqCst);
     launch::locked(|| {
         let now = still();
         MOVED_ASKED.fetch_add(1, SeqCst);
@@ -98,6 +100,7 @@ fn four_starts(tag: &str, between: impl FnOnce(&Set, tokio::runtime::Runtime)) -
         has_default_app: |_| true,
         app: Some(moved_app),
     };
+    MOVED_BEGUN.store(0, SeqCst);
     MOVED_ASKED.store(0, SeqCst);
     MOVED_STARTED.lock().unwrap().clear();
     let chooser = Chooser::open();
@@ -110,6 +113,13 @@ fn four_starts(tag: &str, between: impl FnOnce(&Set, tokio::runtime::Runtime)) -
     assert_eq!(set.source.show_in_file_explorer(std::slice::from_ref(&notes)), Ok(()));
     assert_eq!(set.source.open_in_file_explorer(None), Ok(()));
     assert_eq!(set.source.open_in_app(&notes, &app), Ok(()));
+    // The worker's Open (on a Mac, after its copy-to-open step, which a lock ends before any start) and the app's
+    // thread both wait for the lock before `between` moves anything; the other two wait their turn behind the Open.
+    assert!(
+        within(|| MOVED_BEGUN.load(SeqCst) == 2),
+        "two starts wait for the lock: {} of 2",
+        MOVED_BEGUN.load(SeqCst)
+    );
     between(&set, running);
     chooser.close();
     assert!(
@@ -239,8 +249,16 @@ fn a_session_end_empties_the_launch_queue() {
         started[0].1.ends_with("Invented notes.txt"),
         "the Open begun before the end"
     );
-    assert_eq!(started[1], ("open", root), "the press after it: Open in File Explorer");
-    assert_eq!(QUEUE_BEGUN.load(SeqCst), 2, "Show in File Explorer was never begun");
+    assert_eq!(
+        started[1],
+        ("open", root),
+        concat!("the press after it: Open in ", beebeeb_engine::file_manager!())
+    );
+    assert_eq!(
+        QUEUE_BEGUN.load(SeqCst),
+        2,
+        concat!("Show in ", beebeeb_engine::file_manager!(), " was never begun")
+    );
 }
 
 /// P3-2: Open With hands a file to another app only when the engine says it is kept AND its bytes are here, asked at

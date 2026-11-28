@@ -1,5 +1,6 @@
 //! Task 2446: the one-time name heal at tick level, when its forced re-snapshot keeps failing.
 
+#[cfg(not(target_os = "macos"))]
 use super::*;
 
 /// Off macOS the heal asks for a snapshot on every tick until one succeeds, and a failed re-snapshot ends the tick

@@ -39,12 +39,15 @@ pub mod flyout_window;
 pub mod host;
 pub mod identity;
 pub mod instance;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub mod macos_menu;
 pub mod intents;
 mod settings_open;
+mod settings_open_finder;
 mod settings_open_pages;
 mod settings_open_places;
 mod settings_show_in_files;
-mod viewer_intents;
+pub(crate) mod viewer_intents;
 pub(crate) mod viewer_save;
 pub mod placeholder;
 pub mod platform;
@@ -303,6 +306,12 @@ pub fn run() {
     {
         live.wire_first_run();
     }
+    // macOS: the Finder setup starts here, once (it was only ever reached by the Windows-only first run above).
+    if cfg!(target_os = "macos")
+        && let Some((_, live)) = &real_engine
+    {
+        live.start_finder_setup();
+    }
     let engine: Arc<dyn EngineActions> = match &real_engine {
         Some((opened, live)) => {
             host::log(format!("the engine is open; the stored session says {:?}", opened.gate));
@@ -447,10 +456,20 @@ pub fn run() {
     if !tooling {
         // The app outlives its window: closing it leaves the b running (DW-1231).
         main_app = main_app.keep_running().on_close(host::on_close).on_quit(host::on_quit);
+        // The macOS menu bar (§1): Edit and Window from rune, the app's own items from one table.
+        #[cfg(target_os = "macos")]
+        {
+            main_app = macos_menu::install(main_app, actions.tray_inputs().paused);
+        }
         flyout_app = flyout_app.keep_running();
         tray_tip_app = tray_tip_app.keep_running();
         if !show_window {
             main_app = main_app.windowless();
+            // A start with no window has no Dock icon (menu-bar-and-windows.md §3 rule 5).
+            #[cfg(target_os = "macos")]
+            {
+                main_app = main_app.accessory();
+            }
         }
     }
     let (main, flyout_handle, tray_tip_handle) = (main_app.handle(), flyout_app.handle(), tray_tip_app.handle());
@@ -472,6 +491,8 @@ pub fn run() {
         capture_file,
         hide_from_capture,
     };
+    #[cfg(target_os = "macos")]
+    let menu_actions = actions.clone();
     let (shell_actions, shell_platform) = (actions.clone(), platform.clone());
     let init_engine = real_engine
         .as_ref()
@@ -505,6 +526,9 @@ pub fn run() {
             Err(error) => host::log(format!("start at login was not checked ({error})")),
         }
         // Runs on the UI thread once the event loop is up, window or not.
+        // macOS: the app menu's pause item follows the engine's state (Resume Sync while paused).
+        #[cfg(target_os = "macos")]
+        macos_menu::follow_pause(main.clone(), menu_actions);
         main.update(|s, _| {
             s.shell.start_tray();
             s.shell.start_sync();
@@ -569,8 +593,17 @@ pub(crate) fn main_app(spec: AppSpec<State>) -> App<State> {
         .on_focus(|s: &mut State, focused, _| {
             crate::frames::signin::on_window_focus(s, focused);
             crate::frames::files::pins::on_focus(s, focused);
+            on_focus_activates(focused, crate::engine_host::finder_setup::on_app_activated);
         })
         .on_ime(on_ime)
+}
+
+/// The window got the keyboard: the app came forward, so Finder setup takes its one read-only check (dm-19). Losing
+/// the keyboard asks nothing.
+pub(crate) fn on_focus_activates(focused: bool, activated: impl FnOnce()) {
+    if focused {
+        activated();
+    }
 }
 
 /// The input method's text while no text field has the keyboard: the office editor's (its page, grid or slide has an
@@ -679,4 +712,17 @@ fn open_engine(
     platform::windows_verbs::register(identity, &opened.engine);
     let live = Arc::new(crate::engine_host::LiveEngine::new(&opened, messages));
     Ok((opened, live))
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::on_focus_activates;
+
+    #[test]
+    fn the_app_coming_forward_asks_finder_setup_for_its_check_and_leaving_does_not() {
+        let mut calls = 0;
+        on_focus_activates(true, || calls += 1);
+        on_focus_activates(false, || calls += 1);
+        assert_eq!(calls, 1);
+    }
 }

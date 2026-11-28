@@ -47,28 +47,28 @@ use crate::runner::EngineRunner;
 use crate::state_db::StateDb;
 use crate::state_paths;
 
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use std::path::PathBuf;
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use std::sync::Condvar;
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use std::time::Duration;
 
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use crate::account::SessionGeneration;
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use crate::api_client::ApiClient;
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use crate::app::owned_state::OwnedState;
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use crate::found_while_paused::{self, KeepResult, Recovery, Review};
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use crate::own_data_proof::{self, Listing, Outcome, Tally};
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use crate::signin::start;
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 use crate::sync_view::Start;
 
 /// dc-144b: what the window says once after a corrupt `state.db` was moved aside and the files listed again.
@@ -81,18 +81,18 @@ mod tests;
 
 /// How long the proof waits for the whole listing of this account's tree (the snapshot, then the trash, with the
 /// client's retries). A Lock or a sign-out does not wait for it: they stop the proof first.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// How long one request of the proof's listing may take. The snapshot is the whole tree in one response, so the app's
 /// 30 s per request would refuse a large tree on a slow link every time. Nobody waits on the proof.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub const PROOF_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long a Lock or a sign-out waits for its stopped proofs to let go of their client (one wait for them all). A
 /// stopped task is dropped at its next await; a database write it is in finishes first. One still alive after it is
 /// kept ([`ProofStop::Unconfirmed`]).
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
 /// What [`Engine::stop_proofs`] came to. The step that stopped them (a Lock, a sign-out, the close of a session the
@@ -100,7 +100,7 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 /// refuses every start while a proof that did not end is alive.
 #[must_use = "a stopped proof that did not end still holds the session's token and key"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(any(target_os = "windows", test, feature = "test-support")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos", test, feature = "test-support")), allow(dead_code))]
 pub(in crate::app) enum ProofStop {
     /// Every stopped proof let go of its client, or none ran.
     Ended,
@@ -111,28 +111,28 @@ pub(in crate::app) enum ProofStop {
 
 /// What Upload, Keep, the review and "Show in Explorer" say when this PC's local data is not the signed-in account's
 /// own, the session moved since the card was read, or nobody is signed in.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub const FOUND_WHILE_PAUSED_NOT_YOURS: &str =
     "Beebeeb couldn’t confirm these files belong to the account you’re signed in to, so nothing was changed.";
 
 /// What Keep says when it stopped part way (the database could not be written). Every item it moved is forgotten in
 /// its own transaction, or settled at the next start ([`Engine::settle_an_interrupted_keep`]).
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub const FOUND_WHILE_PAUSED_KEEP_STOPPED: &str = "Beebeeb couldn’t finish moving these files. Anything already moved is in “Beebeeb - not uploaded”; the rest stays where it is and isn’t uploaded.";
 
 /// What the card says when it cannot read the held changes. It reads them again at the next refresh; Upload waits for
 /// that read, since it sends only what the card showed.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub const FOUND_WHILE_PAUSED_REVIEW_FAILED: &str =
     "Beebeeb couldn’t read these changes, so nothing was uploaded or moved. It tries again in a moment.";
 
 /// What Upload says when the held changes could not be released: nothing changed.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub const FOUND_WHILE_PAUSED_UPLOAD_FAILED: &str =
     "Beebeeb couldn’t start uploading these files, so they’re still waiting. Try again.";
 
 /// What "Show in Explorer" says when the folder the last keep recorded is not there.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub const KEPT_FOLDER_GONE: &str = "Beebeeb can’t find the folder it moved them to. It may have been moved or renamed.";
 
 /// Every handle's seat, by its account runtime. A `Weak`, so the address a dropped handle leaves is never matched by
@@ -144,10 +144,10 @@ static SEATS: Mutex<Vec<(Weak<AccountRuntime>, Arc<Seat>)>> = Mutex::new(Vec::ne
 struct Seat {
     state: Mutex<SeatState>,
     /// Rung when the proof a refused start owes may run.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     wake: Condvar,
     /// [`Engine::serve_own_data_proofs`] ran for this handle.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     serving: AtomicBool,
 }
 
@@ -158,23 +158,23 @@ struct SeatState {
     /// dc-144b: a corrupt `state.db` was moved aside and a fresh one is made; the window has not said so yet.
     rebuilt: bool,
     /// The proof the last refused start owes; `ready` once that refusal is in the view.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     owed: Option<Owed>,
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     ready: bool,
     /// The turn a proof was asked for: one per turn. Freed when the proof got no answer.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     asked: Option<SessionGeneration>,
     /// The proofs on the runtime, for a Lock or a sign-out to stop.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     running: Vec<Running>,
     /// Stopped proofs that did not let go of their client within [`STOP_WAIT`]: no start while one is alive
     /// ([`Engine::local_data_for_start`]), and the next stop aborts and waits for them again.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     unconfirmed: Vec<Running>,
     /// How many stops ([`Engine::stop_proofs`]) this handle has had. A proof owed before the last one never reads a
     /// key: it is compared under this lock, in the same hold that reads the keys and registers the proof's task.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     stops: u64,
     #[cfg(test)]
     test: TestSeams,
@@ -190,7 +190,7 @@ struct Startup {
 
 /// A proof a refused start owes: the session turn its keys were read in, the folder it was asked to start in, and
 /// the seat's stop count then (a stop since ends it before it reads a key).
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 struct Owed {
     turn: SessionGeneration,
     sync_root: PathBuf,
@@ -198,7 +198,7 @@ struct Owed {
 }
 
 /// A proof's task, registered in the same hold of the seat lock that spawned it, so a stop never misses it.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 struct Running {
     abort: tokio::task::AbortHandle,
     /// Closed when the proof's task is dropped (it ended, or it was stopped), after its client ([`EndsAfterRelease`]).
@@ -208,13 +208,13 @@ struct Running {
 /// A proof's task: the proof, then the sender a stop waits on. A struct's fields are dropped in their declaration
 /// order, so the sender closes only once the proof, and with it every reference to the proof's client, is gone. (An
 /// `async` block's locals and captures have no order the language promises.)
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 struct EndsAfterRelease<F> {
     proof: std::pin::Pin<Box<F>>,
     _ended: tokio::sync::oneshot::Sender<()>,
 }
 
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 impl<F: std::future::Future> std::future::Future for EndsAfterRelease<F> {
     type Output = F::Output;
 
@@ -272,7 +272,7 @@ impl Seat {
     }
 }
 
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 impl Seat {
     /// The next proof that is owed and ready, waiting for one; `None` once `alive` says the handle is gone.
     fn next_owed(&self, alive: impl Fn() -> bool) -> Option<Owed> {
@@ -301,7 +301,7 @@ impl<C: CredentialStores> Engine<C> {
     /// a `Weak` to this handle and ends with it; a second call starts nothing. The native shell starts it once, beside
     /// [`Self::watch_session`]. Where no start is refused over local data a proof could settle, nothing is started.
     pub fn serve_own_data_proofs(self: &Arc<Self>) {
-        #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+        #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
         {
             let seat = self.own_data_seat();
             if seat.serving.swap(true, Ordering::SeqCst) {
@@ -326,7 +326,7 @@ impl<C: CredentialStores> Engine<C> {
     /// start read its keys in (the turn, read here under the step lock) and for its folder. The service runs it once
     /// the refusal is in the view ([`Self::wake_own_data_proofs`]). Returns the refusal unchanged.
     pub(in crate::app) fn proof_owed_on(&self, refused: SyncStartRefused, sync_root: &Path) -> SyncStartRefused {
-        #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+        #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
         if refused == SyncStartRefused::OtherAccountsData {
             let seat = self.own_data_seat();
             let mut state = lock(&seat.state);
@@ -337,7 +337,7 @@ impl<C: CredentialStores> Engine<C> {
             });
             state.ready = false;
         }
-        #[cfg(not(any(target_os = "windows", test, feature = "test-support")))]
+        #[cfg(not(any(target_os = "windows", target_os = "macos", test, feature = "test-support")))]
         let _ = sync_root;
         refused
     }
@@ -345,7 +345,7 @@ impl<C: CredentialStores> Engine<C> {
     /// `start_on`, after it wrote a refusal into the view: the proof that start owes may run now. Its word (an
     /// `IdentityUnknown`) is then never overwritten by the refusal it answers.
     pub(in crate::app) fn wake_own_data_proofs(&self) {
-        #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+        #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
         {
             let seat = self.own_data_seat();
             let mut state = lock(&seat.state);
@@ -374,7 +374,7 @@ impl<C: CredentialStores> Engine<C> {
     /// is either registered here (stopped and waited for) or reads no key at all. Never waits for the service thread
     /// itself, whose start after an adoption takes the step lock the caller holds.
     pub(in crate::app) async fn stop_proofs(&self) -> ProofStop {
-        #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+        #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
         {
             let seat = self.own_data_seat();
             let (proofs, wait) = {
@@ -406,13 +406,13 @@ impl<C: CredentialStores> Engine<C> {
             lock(&seat.state).unconfirmed.append(&mut alive);
             ProofStop::Unconfirmed
         }
-        #[cfg(not(any(target_os = "windows", test, feature = "test-support")))]
+        #[cfg(not(any(target_os = "windows", target_os = "macos", test, feature = "test-support")))]
         ProofStop::Ended
     }
 
     /// A stopped proof that did not let go of its client in time ([`ProofStop::Unconfirmed`]) is still alive. Forgets
     /// each one that let go since. Polls only, never waits.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     fn a_stopped_proof_is_alive(&self) -> bool {
         let seat = self.own_data_seat();
         let mut state = lock(&seat.state);
@@ -436,7 +436,7 @@ impl<C: CredentialStores> Engine<C> {
         sync_root: &Path,
         runner: &Option<EngineRunner>,
     ) {
-        #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+        #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
         if runner.is_some() {
             tracing::warn!("keep: a move a crash interrupted is not settled while sync runs");
         } else {
@@ -451,7 +451,7 @@ impl<C: CredentialStores> Engine<C> {
                 Err(_) => tracing::warn!("keep: a move a crash interrupted is settled at the next start"),
             }
         }
-        #[cfg(not(any(target_os = "windows", test, feature = "test-support")))]
+        #[cfg(not(any(target_os = "windows", target_os = "macos", test, feature = "test-support")))]
         let _ = (sync_root, runner);
         drop(data);
     }
@@ -537,7 +537,7 @@ impl<C: CredentialStores> Engine<C> {
         sync_root: &Path,
         session: &Identity,
     ) -> Result<LocalState, SyncStartRefused> {
-        #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+        #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
         if self.a_stopped_proof_is_alive() {
             return Err(SyncStartRefused::StopFinishing);
         }
@@ -572,7 +572,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 impl<C: CredentialStores> Engine<C> {
     /// The session read at `turn` is still the session, and this handle's account is still the active one.
     fn proof_still_current(&self, turn: SessionGeneration) -> bool {
@@ -937,12 +937,12 @@ impl<C: CredentialStores> Engine<C> {
 
 /// The proof's client: this session's, with a request time-out for a whole tree (Windows; elsewhere only tests run a
 /// proof, and their listing is their own).
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn proof_client(base: String, token: String, key: [u8; 32]) -> ApiClient {
     ApiClient::new(base, token, key).with_request_timeout(PROOF_REQUEST_TIMEOUT)
 }
 
-#[cfg(all(any(test, feature = "test-support"), not(target_os = "windows")))]
+#[cfg(all(any(test, feature = "test-support"), not(any(target_os = "windows", target_os = "macos"))))]
 fn proof_client(base: String, token: String, key: [u8; 32]) -> ApiClient {
     ApiClient::new(base, token, key)
 }
@@ -955,7 +955,7 @@ fn kept_folder_synced_by(sync_root: &Path) -> Option<String> {
     found_while_paused::synced_by(parent, &found_while_paused::cloud_synced_roots()).map(str::to_string)
 }
 
-#[cfg(all(any(test, feature = "test-support"), not(target_os = "windows")))]
+#[cfg(all(any(test, feature = "test-support", target_os = "macos"), not(target_os = "windows")))]
 fn kept_folder_synced_by(_sync_root: &Path) -> Option<String> {
     None
 }
@@ -966,12 +966,12 @@ fn today() -> String {
     found_while_paused::today()
 }
 
-#[cfg(all(any(test, feature = "test-support"), not(target_os = "windows")))]
+#[cfg(all(any(test, feature = "test-support", target_os = "macos"), not(target_os = "windows")))]
 fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -981,7 +981,7 @@ fn unix_now() -> i64 {
 
 /// The folder "Show in Explorer" opens: the dated folder the last keep recorded (`recorded`), only when it is a
 /// `YYYY-MM-DD` folder directly inside `Beebeeb - not uploaded` next to the Beebeeb folder, and is there.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 fn kept_folder_to_show(sync_root: &Path, recorded: rusqlite::Result<Option<String>>) -> Result<PathBuf, String> {
     let folder = PathBuf::from(
         recorded

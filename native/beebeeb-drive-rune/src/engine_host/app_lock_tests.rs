@@ -103,7 +103,10 @@ fn turning_it_off_asks_windows_hello_first_and_only_its_yes_is_written() {
         assert!(stored(&engine), "{result:?}");
         assert_eq!(
             source.notice(),
-            Some("App lock is still on: Windows Hello did not confirm it's you.")
+            Some(
+                beebeeb_engine::os_words::for_this_os("App lock is still on: Windows Hello did not confirm it's you.")
+                    .as_str()
+            )
         );
         assert!(source.notice_failed());
     }
@@ -146,7 +149,12 @@ fn a_pc_without_a_prompt_keeps_it_on_and_says_why() {
     assert!(stored(&engine));
     assert_eq!(
         source.notice(),
-        Some("App lock is still on: Windows Hello is not set up on this PC. Use your password instead.")
+        Some(
+            beebeeb_engine::os_words::for_this_os(
+                "App lock is still on: Windows Hello is not set up on this PC. Use your password instead."
+            )
+            .as_str()
+        )
     );
 }
 
@@ -203,7 +211,12 @@ fn the_menu_writes_lock_after_and_the_row_shows_it() {
     assert_eq!(delay(&source).as_deref(), Some("Immediately"));
     assert_eq!(
         source.notice(),
-        Some("The lock delay was not changed: Windows Hello did not confirm it's you.")
+        Some(
+            beebeeb_engine::os_words::for_this_os(
+                "The lock delay was not changed: Windows Hello did not confirm it's you."
+            )
+            .as_str()
+        )
     );
     // Verified: the engine writes it, and the row follows the engine's answer.
     source.set_lock_after("30 min");
@@ -250,7 +263,12 @@ fn a_longer_delay_on_a_pc_without_a_prompt_is_not_changed_and_says_why() {
     assert_eq!(stored_after(&engine), Some(LockAfter::Minutes5));
     assert_eq!(
         source.notice(),
-        Some("The lock delay was not changed: Windows Hello is not set up on this PC. Use your password instead.")
+        Some(
+            beebeeb_engine::os_words::for_this_os(
+                "The lock delay was not changed: Windows Hello is not set up on this PC. Use your password instead."
+            )
+            .as_str()
+        )
     );
     // A shorter one still works without it.
     source.set_lock_after("Immediately");
@@ -349,7 +367,10 @@ fn no_answer_after_cancel_reaches_the_app_lock() {
     assert!(stored(&engine));
     assert_eq!(
         source.notice(),
-        Some("App lock is still on: Windows Hello did not confirm it's you.")
+        Some(
+            beebeeb_engine::os_words::for_this_os("App lock is still on: Windows Hello did not confirm it's you.")
+                .as_str()
+        )
     );
     // A yes that arrives after the page went, with no prompt up any more, writes nothing either.
     source.set_app_lock(false);

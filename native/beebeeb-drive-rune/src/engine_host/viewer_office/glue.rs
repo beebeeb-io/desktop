@@ -13,10 +13,28 @@ type Read = Result<(SessionGeneration, Zeroizing<Vec<u8>>), OpenFileError>;
 pub(crate) type Opener = Box<dyn Fn(&Path, OfficeKind, Zeroizing<Vec<u8>>, Wake) -> OfficeView + Send>;
 
 /// Starts an editing session on the bytes (the app's: [`OfficeView::open_edit`]; a test's fake).
-pub(crate) type EditOpener = Box<dyn Fn(&Path, EditKind, Zeroizing<Vec<u8>>, Wake, Option<ScratchStore>) -> OfficeView + Send>;
+pub(crate) type EditOpener =
+    Box<dyn Fn(&Path, EditKind, Zeroizing<Vec<u8>>, Wake, Option<ScratchStore>) -> OfficeView + Send>;
 
 /// Starts a new document from a template (the app's: [`OfficeView::new_doc`]; a test's fake).
 pub(crate) type NewOpener = Box<dyn Fn(&Path, EditKind, Template, Wake, Option<ScratchStore>) -> OfficeView + Send>;
+
+/// On a Mac: asks the sandbox to start the helper at this path. `Err`: the sandbox's own fixed text, never a path.
+#[cfg(target_os = "macos")]
+pub(crate) type MacSandbox = Box<dyn Fn(&Path) -> Result<(), String> + Send>;
+
+/// The app's [`MacSandbox`]: whether the sandbox crate can start a confined helper here, asked WITHOUT starting one
+/// (dm-84). RC15 asked by starting the helper and ending it at once: launchd then holds back the next start of a
+/// service whose process ran for less than 10 s, so the document's own start right after it waited past its bound and
+/// was refused ("not confined (no handshake)", 10 s after "the service is used", on both first opens). A start the
+/// sandbox refuses for the document itself shows the file in Quick Look ([`EngineViewerSource::mac_start_failed`]).
+#[cfg(all(target_os = "macos", not(test)))]
+fn mac_sandbox_starts(_helper: &Path) -> Result<(), String> {
+    use beebeeb_office_sandbox::{Limits, Sandbox};
+    Sandbox::new(Limits::default())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
 
 /// Which types open in the editor when the file may be changed. The rest open in the viewer, as before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +73,16 @@ pub(crate) struct Office {
     pub(crate) edits: EditShips,
     /// Where the helper is (`office_host::helper_exe`).
     pub(crate) helper: fn() -> Option<PathBuf>,
+    /// On a Mac: whether the sandbox starts the helper (the app's: [`mac_sandbox_starts`]; a test's fake). Asked once
+    /// for this source, at the first Office file opened with the helper beside the app.
+    #[cfg(target_os = "macos")]
+    pub(crate) mac_sandbox: MacSandbox,
+    /// What `mac_sandbox` said. `None`: not asked yet.
+    #[cfg(target_os = "macos")]
+    pub(super) mac_sandbox_said: Option<bool>,
+    /// How many times the refusal was written to the log (once, however many files are opened).
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) mac_refusals_logged: usize,
     pub(crate) opener: Opener,
     pub(crate) edit_opener: EditOpener,
     pub(crate) new_opener: NewOpener,
@@ -68,9 +96,20 @@ impl Default for Office {
         Office {
             on: OFFICE_VIEWER_ON,
             ships: OFFICE_SHIPS,
+            // On a Mac too (dm-79, dm-80): the helper's route is reached there only after the sandbox started it
+            // (`office_begin`'s macOS arm), so a writable document then opens in the editor, as on Windows.
             edit_on: super::super::office_sandbox_here(),
             edits: EditShips::SHIPPED,
             helper: office_host::helper_exe,
+            // The tests' sources never start a process: theirs says yes, and a test of the route sets its own.
+            #[cfg(all(target_os = "macos", not(test)))]
+            mac_sandbox: Box::new(mac_sandbox_starts),
+            #[cfg(all(target_os = "macos", test))]
+            mac_sandbox: Box::new(|_| Ok(())),
+            #[cfg(target_os = "macos")]
+            mac_sandbox_said: None,
+            #[cfg(all(test, target_os = "macos"))]
+            mac_refusals_logged: 0,
             opener: Box::new(OfficeView::open),
             edit_opener: Box::new(OfficeView::open_edit),
             new_opener: Box::new(OfficeView::new_doc),
@@ -99,6 +138,10 @@ pub(super) struct Shown {
     pub(super) inbox: Option<mpsc::Receiver<Read>>,
     pub(super) view: Option<OfficeView>,
     pub(super) ended: bool,
+    /// On a Mac: the document opened (a page, a sheet or a slide came). Until then a stop is a start that failed, and
+    /// Quick Look shows the file (dm-84).
+    #[cfg(target_os = "macos")]
+    pub(super) mac_opened: bool,
 }
 
 impl Shown {
@@ -132,6 +175,25 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         self.office_left();
         let kept = facts.on_this_pc.is_some() && self.engine.is_syncing();
         let state = |state| Body::OfficeState(StateBody::new(state, kept));
+        // On a Mac the helper is in the bundle (dm-80) and runs only inside the sandbox (dm-79). While that sandbox
+        // starts it, the file goes the helper's way below, as on Windows. Without the helper, or when the sandbox
+        // refused the start (said once in the log), Quick Look previews the document, in its own service: before the
+        // route's own answers, so a type the viewer does not ship (.ppt) is shown too. A type Quick Look does not
+        // show gets the page with the other apps, never a helper that cannot start.
+        #[cfg(target_os = "macos")]
+        {
+            let helper = (self.office.helper)();
+            if !helper.as_deref().is_some_and(|helper| self.mac_helper_starts(helper)) {
+                if let Some(body) =
+                    self.mac_begin(opening.session, opening.account.clone(), &opening.file_id, &facts.name)
+                {
+                    return body;
+                }
+                if helper.is_some() {
+                    return helper_missing(kept);
+                }
+            }
+        }
         let kind = match route {
             OfficeRoute::Shows(kind) => kind,
             OfficeRoute::NoPreview(_) => return state(ViewState::NoPreview(Reason::UnsupportedType)),
@@ -142,7 +204,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         }
         let Some(helper) = (self.office.helper)() else {
             crate::office_log::helper_not_started("not installed beside the app", "");
-            return state(ViewState::Stopped { retried: true });
+            return helper_missing(kept);
         };
         // Writable .docx / .xlsx / .pptx go to an editing session; everything else (read-only, no write right, an older
         // format) to the viewer, as before. The version must have been read, as the text editor's.
@@ -156,7 +218,9 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         // A document made here has no version until its upload lands, and is this PC's own until then: the editor too.
         .filter(|_| {
             let made_here = self.office_made_here(&opening.file_id, opening.session);
-            opening.edit.is_some_and(|facts| facts.can_write && (facts.version > 0 || made_here))
+            opening
+                .edit
+                .is_some_and(|facts| facts.can_write && (facts.version > 0 || made_here))
         });
         // The file a New document just made opens on the bytes it was made from, never on its copy on this PC.
         let made = self
@@ -215,13 +279,36 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             cancel,
             edit,
             // A document made here is edited from the version its upload becomes: a new file's first.
-            base: opening.edit.map_or(0, |facts| facts.version.max(i64::from(edit.is_some()))),
+            base: opening
+                .edit
+                .map_or(0, |facts| facts.version.max(i64::from(edit.is_some()))),
             restored_base: None,
             inbox: Some(inbox),
             view: None,
             ended: false,
+            #[cfg(target_os = "macos")]
+            mac_opened: false,
         });
         state(ViewState::Opening)
+    }
+
+    /// On a Mac: whether the sandbox starts the helper. Asked once for this source; a refusal is logged once, with the
+    /// sandbox's fixed text.
+    #[cfg(target_os = "macos")]
+    pub(in crate::engine_host::viewer) fn mac_helper_starts(&mut self, helper: &Path) -> bool {
+        if let Some(said) = self.office.mac_sandbox_said {
+            return said;
+        }
+        let said = (self.office.mac_sandbox)(helper);
+        if let Err(reason) = &said {
+            crate::office_log::helper_not_started("the sandbox refused; Quick Look shows Office files", reason);
+            #[cfg(test)]
+            {
+                self.office.mac_refusals_logged += 1;
+            }
+        }
+        self.office.mac_sandbox_said = Some(said.is_ok());
+        said.is_ok()
     }
 
     /// The poll's Office arm. `None`: no Office file of this id is open here (the rest of the poll runs).
@@ -292,9 +379,52 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             }
         }
         let body = shown.view.as_mut().and_then(OfficeView::poll);
+        #[cfg(target_os = "macos")]
+        {
+            let was_opening = !shown.mac_opened;
+            shown.mac_opened |= matches!(&body, Some(body) if !matches!(body, Body::OfficeState(_)));
+            if was_opening
+                && mac_start_failed(body.as_ref())
+                && let Some(body) = self.mac_start_failed(file_id)
+            {
+                return Some(Some(body));
+            }
+        }
         // The editor's save, once its bytes are here.
         self.office_pump_save(file_id);
         Some(body)
+    }
+
+    /// Dm-84, on a Mac: the helper of the Office file open now could not start (the sandbox refused it twice, or it
+    /// stopped before the document opened). Quick Look shows the document instead, as it does when there is no
+    /// helper (dm-74, 80(c)), with one line in the log; never the page that says the viewer stopped. The helper and
+    /// what it held go first. A type Quick Look does not show gets the page with the other apps. Try again on that
+    /// page opens the file anew, so the editor is tried again.
+    #[cfg(target_os = "macos")]
+    pub(in crate::engine_host::viewer) fn mac_start_failed(&mut self, file_id: &str) -> Option<Body> {
+        let name = self
+            .open
+            .as_ref()
+            .filter(|opening| opening.file_id == file_id)
+            .map(|opening| opening.name.clone())?;
+        let shown = self.office.shown.as_mut().filter(|shown| shown.file_id == file_id)?;
+        let (session, account, edit) = (shown.session, shown.account.clone(), shown.edit.is_some());
+        let kept = shown.kept;
+        // The helper ends and what it held goes, as `Shown::end`, but the opening's cancel stays: it is Quick Look's
+        // opening from here, and a set cancel would end its work.
+        shown.inbox = None;
+        if let Some(mut view) = shown.view.take() {
+            view.close(CloseWhy::Closed);
+        }
+        shown.ended = true;
+        crate::office_log::helper_not_started(
+            "the helper could not start; macOS shows the file",
+            if edit { "edit" } else { "view" },
+        );
+        Some(
+            self.mac_begin(session, account, file_id, &name)
+                .unwrap_or_else(|| helper_missing(kept)),
+        )
     }
 
     /// The Office file of `file_id`, while its session is the session.
@@ -367,7 +497,13 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// The bytes of a document just made are for that file's own open, no other.
     pub(in crate::engine_host::viewer) fn office_forget_made_but(&mut self, file_id: &str) {
-        if self.office.work.made_on.as_ref().is_some_and(|made| made.file_id != file_id) {
+        if self
+            .office
+            .work
+            .made_on
+            .as_ref()
+            .is_some_and(|made| made.file_id != file_id)
+        {
             self.office.work.made_on = None;
         }
     }
@@ -376,6 +512,47 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     pub(in crate::engine_host::viewer) fn office_left(&mut self) {
         if let Some(mut shown) = self.office.shown.take() {
             shown.end(CloseWhy::Closed);
+        }
+    }
+}
+
+/// Dm-84, on a Mac: the body a poll gave says the helper could not start, or stopped before the document opened (the
+/// caller knows it had not opened): Quick Look shows the file then. A helper that said the file itself cannot be shown
+/// (password, damaged, too large, another type) is not this.
+#[cfg(target_os = "macos")]
+fn mac_start_failed(body: Option<&Body>) -> bool {
+    matches!(
+        body,
+        Some(Body::OfficeState(StateBody {
+            state: ViewState::Stopped { .. } | ViewState::NoPreview(Reason::NotOnThisComputer),
+            ..
+        }))
+    )
+}
+
+/// The body when the helper is not there. Windows ships it, so its absence is a failure (Stopped). On a Mac the helper
+/// may be absent or refused by the sandbox (nothing is parsed unconfined): Quick Look shows the document then
+/// (`office_begin`'s macOS arm, dm-70, dm-80), and only a document Quick Look does not show reaches this: a plain
+/// "no preview here" with the other apps (task 63's page), never a failure.
+pub(super) fn helper_missing(kept: bool) -> Body {
+    if cfg!(target_os = "macos") {
+        // Task 63's page: Open with the default app / another app / Show in Finder.
+        Body::NotPreviewable(crate::frames::viewers::source::NoPreview::OfficeUnavailable)
+    } else {
+        Body::OfficeState(StateBody::new(ViewState::Stopped { retried: true }, kept))
+    }
+}
+
+#[cfg(test)]
+mod helper_missing_tests {
+    use super::*;
+
+    #[test]
+    fn missing_helper_is_no_preview_on_macos_and_stopped_elsewhere() {
+        if cfg!(target_os = "macos") {
+            assert!(matches!(helper_missing(true), Body::NotPreviewable(_)));
+        } else {
+            assert!(matches!(helper_missing(true), Body::OfficeState(_)));
         }
     }
 }

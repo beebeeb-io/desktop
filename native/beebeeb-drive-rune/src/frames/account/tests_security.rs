@@ -314,7 +314,7 @@ fn a_refused_sign_out_stays_on_the_confirm_and_says_why() {
     assert_eq!(rt.state.account.dialog, None);
     tab_to(&mut rt, "item-3-0");
     key(&mut rt, Key::Enter);
-    assert!(says(&rt, "dlg-text-0").starts_with("This signs out Drive on this PC only."));
+    assert!(says(&rt, "dlg-text-0").starts_with(&beebeeb_engine::os_words::for_this_os("This signs out Drive on this PC only.")));
 }
 
 /// A sign-out that is out: the confirm says so, takes no press and no Esc, and nothing is shown as signed out.

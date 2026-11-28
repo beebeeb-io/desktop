@@ -179,12 +179,12 @@ fn the_board_copy_of_each_frame_is_drawn() {
     assert_eq!(text(&rt, "ph-tile-0-2-badge-label"), "0:24");
     assert_eq!(
         text(&rt, "status-details"),
-        "Photos from Anna's iPhone, Old iPhone and iPad \u{00B7} none from this PC"
+        concat!("Photos from Anna's iPhone, Old iPhone and iPad \u{00B7} none from ", beebeeb_engine::device_word!())
     );
     assert_eq!(text(&runtime("DW-0602"), "ph-bulk-count"), "3 photos \u{00B7} 42 MB");
     let menu = runtime("DW-0603");
-    assert_eq!(text(&menu, "ph-menu-item-3-shortcut"), "Ctrl+Plus");
-    assert_eq!(text(&menu, "ph-menu-item-4-shortcut"), "Ctrl\u{2212}");
+    assert_eq!(text(&menu, "ph-menu-item-3-shortcut"), concat!(beebeeb_engine::primary_key!(), "Plus"));
+    assert_eq!(text(&menu, "ph-menu-item-4-shortcut"), if cfg!(target_os = "macos") { "\u{2318}\u{2212}" } else { "Ctrl\u{2212}" });
     let open = runtime("DW-0605");
     assert_eq!(text(&open, "ph-seg-1-label"), "Original \u{00B7} 30.9 MB");
     assert_eq!(
@@ -195,14 +195,14 @@ fn the_board_copy_of_each_frame_is_drawn() {
         text(&runtime("DW-0605b"), "ph-seg-1-label"),
         "Original \u{00B7} 12.4 of 30.9 MB"
     );
-    assert_eq!(text(&runtime("DW-0608"), "ph-act-1-label"), "On this PC");
+    assert_eq!(text(&runtime("DW-0608"), "ph-act-1-label"), concat!("On ", beebeeb_engine::device_word!()));
     assert_eq!(
         text(&runtime("DW-0609"), "ph-item-0-3-value"),
         "9504 \u{00D7} 6336, 30.9 MB"
     );
     assert_eq!(
         text(&runtime("DW-0611"), "status-details"),
-        "Streaming \u{00B7} decrypted on this PC as it plays"
+        concat!("Streaming \u{00B7} decrypted on ", beebeeb_engine::device_word!(), " as it plays")
     );
 }
 
@@ -394,7 +394,7 @@ fn selecting_checks_counts_trashes_and_undoes() {
     key(&mut rt, Key::Command('z'), true);
     assert!(
         rt.state.photos.toast.is_none() && has(&rt, "ph-tile-0-6"),
-        "Ctrl+Z brings it back"
+        concat!(beebeeb_engine::primary_key!(), "Z brings it back")
     );
 
     click(&mut rt, "ph-select");
@@ -448,7 +448,7 @@ fn the_open_photo_actions() {
 
     click(&mut rt, "ph-act-1");
     assert_eq!(rt.state.photos.toast, Some(Toast::Kept));
-    assert_eq!(text(&rt, "ph-act-1-label"), "On this PC");
+    assert_eq!(text(&rt, "ph-act-1-label"), concat!("On ", beebeeb_engine::device_word!()));
     click(&mut rt, "ph-act-1");
     assert_eq!(rt.state.photos.take_intents(), vec![Intent::OfferRemoveFromPc(harbour)]);
 
@@ -679,13 +679,13 @@ fn ctrl_click_checks_a_photo_and_starts_selecting() {
         ..Mods::default()
     }));
     click(&mut rt, "ph-tile-0-4");
-    assert!(rt.state.photos.selecting, "Ctrl+click starts selecting");
+    assert!(rt.state.photos.selecting, concat!(beebeeb_engine::primary_key!(), "click starts selecting"));
     assert_eq!(rt.state.photos.selected.len(), 1);
     assert!(rt.state.photos.viewer.is_none());
     click(&mut rt, "ph-tile-0-2");
     assert_eq!(rt.state.photos.selected.len(), 2);
     click(&mut rt, "ph-tile-0-4");
-    assert_eq!(rt.state.photos.selected.len(), 1, "a second Ctrl+click unchecks");
+    assert_eq!(rt.state.photos.selected.len(), 1, concat!("a second ", beebeeb_engine::primary_key!(), "click unchecks"));
     // Without Ctrl a click on the grid (not selecting) checks nothing.
     rt.physical_input(rune::PhysicalInput::Modifiers(Mods::default()));
     press(&mut rt, Key::Escape);

@@ -218,9 +218,9 @@ fn a_working_set_signal_that_meets_a_busy_gate_reports_the_drop_and_the_debt_car
     });
 }
 
-/// The tick loop signals through the owing wrapper only, at four named sites: revoked shared content,
-/// the queue step's one signal, a queue step that failed (the tick's remote applies), and a failed tick that
-/// owes a debt. A fifth call fails here, so no signal bypasses the debt. The queue step's two sites are in
+/// The tick loop signals through the owing wrapper only, at five named sites: revoked shared content,
+/// the queue step's one signal, a queue step that failed (the tick's remote applies), a failed tick that
+/// owes a debt, and the first listing's changes (in the tick, paying the debt like the others). A sixth call fails here, so no signal bypasses the debt. The queue step's two sites are in
 /// `queue_step`, which has two callers: the tick, and the send phase's wake while a sign-out's phase is armed
 /// (spec 2026-10-10 §6.2), which passes no remote applies. A third caller fails here too. A failed tick reaches
 /// the first site (it runs before the tick, in every iteration) and the fourth; a delivered signal pays the debt,
@@ -246,14 +246,15 @@ fn every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper() {
     let squeezed = squeeze(production);
     assert_eq!(
         squeezed.matches("signal_working_set_owing(").count() - squeezed.matches("fnsignal_working_set_owing(").count(),
-        4,
-        "four call sites"
+        5,
+        "five call sites"
     );
     for site in [
         "signal_working_set_owing(&mut owed_working_set_signal, &db, \"shared_roots_changed\", &outcome.removed_shared_file_ids)",
         "signal_working_set_owing(owed_working_set_signal, db, reason, &ids)",
         "signal_working_set_owing(owed_working_set_signal, db, \"remote_changes_applied\", applied)",
         "signal_working_set_owing(owed_working_set_signal, db, \"owed_debt\", &[])",
+        "signal_working_set_owing(&mut owed_working_set_signal, &db, \"first_listing\", &[])",
     ] {
         assert_eq!(squeezed.matches(&squeeze(site)).count(), 1, "the site {site}");
     }

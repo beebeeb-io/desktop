@@ -53,7 +53,11 @@ fn offline_only_files_that_are_not_on_this_pc_are_dimmed_and_say_why() {
     assert_eq!(text(&rt, "status-text"), "Offline");
     assert_eq!(
         text(&rt, "status-details"),
-        "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 need a connection"
+        concat!(
+            "4 on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} 3 available offline \u{00B7} 4 need a connection"
+        )
     );
     let count = |status: &str| items.iter().filter(|i| i.pc_status.as_deref() == Some(status)).count();
     assert_eq!(

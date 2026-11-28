@@ -145,7 +145,7 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
         "backup codes",
         "Nothing to do",
         " of 7",
-        "anyone using this PC",
+        &beebeeb_engine::os_words::for_this_os("anyone using this PC"),
     ] {
         assert!(!says_anywhere(&rt, sample), "a sample or a guess shows: {sample}");
     }
@@ -154,8 +154,8 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
     // the test waits on that answer, then reads the engine's values (on, and the delay with nothing stored: five
     // minutes, decision 2519), never a sample's.
     wait_for(&mut rt, "app lock's answer", |rt| has(rt, "item-1-0-switch"));
-    assert_eq!(text(&rt, "item-1-0-sub"), "Windows Hello · locks again after");
-    assert!(!says_anywhere(&rt, "anyone using this PC"));
+    assert_eq!(text(&rt, "item-1-0-sub"), beebeeb_engine::os_words::for_this_os("Windows Hello · locks again after"));
+    assert!(!says_anywhere(&rt, &beebeeb_engine::os_words::for_this_os("anyone using this PC")));
     assert!(has(&rt, "item-1-0-pop"), "the time choice: the away lock acts on it");
     assert!(
         shows(&rt, "Locks again after, 5 min"),

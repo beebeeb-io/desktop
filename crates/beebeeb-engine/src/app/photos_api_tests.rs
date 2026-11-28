@@ -625,3 +625,73 @@ fn large_library_reads_without_a_query_per_photo() {
     assert!(statements > 0, "the instrument: the trace saw the read");
     assert!(statements <= 10, "library ran {statements} statements for 8,816 photos");
 }
+
+/// Dm-72: on a Mac a kept photo's copy is Finder's (the engine's own folder holds none since dm-71): the lookup
+/// answers it, and its bytes are read from there. A photo that is online only has none, whatever Finder shows at its
+/// place; a copy over the limit has none; and after a newer version came in, Finder's older copy is not the picture
+/// until the system has fetched it again. Nothing is asked of Beebeeb.
+#[test]
+fn dm72_on_a_mac_a_kept_photos_copy_is_finders_and_an_online_only_photo_has_none() {
+    use crate::file_provider_port::{FinderCopiesPort, with_finder_copies};
+    let fake = fake("finders");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    let (dir, db) = local_state(&engine, &fake.first);
+    let session = engine.session_turn();
+    let finder = dir.path().join("Finder");
+    std::fs::create_dir_all(&finder).unwrap();
+    let (kept, online_only) = (finder.join("Invented shot.heic"), finder.join("Invented harbour.jpg"));
+    std::fs::write(&kept, b"the kept photo's bytes").unwrap();
+    std::fs::write(&online_only, b"").unwrap();
+    let port = Arc::new(FinderCopiesPort::default());
+    port.put(PHONE_SHOT, &kept);
+    port.put(HARBOUR, &online_only);
+    const LIMIT: u64 = 1 << 20;
+
+    // Not a Mac: the engine's own folder holds no copy of it.
+    assert!(
+        engine
+            .local_picture_copy_for(session, PHONE_SHOT, LIMIT)
+            .unwrap()
+            .is_none()
+    );
+    with_finder_copies(port.clone(), || {
+        let copy = engine
+            .local_picture_copy_for(session, PHONE_SHOT, LIMIT)
+            .unwrap()
+            .expect("Finder's copy of the kept photo");
+        assert_eq!(copy.version, 400);
+        assert_eq!(
+            &**copy.read().expect("read from Finder's copy"),
+            b"the kept photo's bytes"
+        );
+        assert!(
+            engine
+                .local_picture_copy_for(session, HARBOUR, LIMIT)
+                .unwrap()
+                .is_none(),
+            "online only: no copy"
+        );
+        assert!(
+            engine.local_picture_copy_for(session, PHONE_SHOT, 4).unwrap().is_none(),
+            "over the limit"
+        );
+        // Another device's version came in: Finder's copy is the older one.
+        let mut contract = db.get_file_contract_state(PHONE_SHOT).unwrap().unwrap();
+        contract.current_version = 2;
+        contract.local_base_version = 1;
+        contract.local_hash = Some("an-older-versions-hash".into());
+        db.set_file_contract_state(&contract).unwrap();
+        assert!(
+            engine
+                .local_picture_copy_for(session, PHONE_SHOT, LIMIT)
+                .unwrap()
+                .is_none(),
+            "behind: not read as the current version"
+        );
+        // Finder evicted it meanwhile: the copy handed out before reads nothing.
+        std::fs::remove_file(&kept).unwrap();
+        assert!(copy.read().is_none());
+    });
+    assert_eq!(fake.api.requests().len(), 0, "nothing is asked of Beebeeb");
+}

@@ -728,6 +728,7 @@ pub use macos_staging::{StagedContents, StagingDir, StagingDirRefusal, WriteCont
 pub use macos_staging::{ContentsRefusal, open_staged_contents};
 
 mod server;
+pub use server::peer_connected;
 pub use server::serve_ipc;
 #[cfg(any(test, feature = "test-support"))]
 pub use server::serve_ipc_at;

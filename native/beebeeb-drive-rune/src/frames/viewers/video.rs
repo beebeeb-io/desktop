@@ -534,7 +534,12 @@ pub fn status(ui: &Ui) -> Status {
         return Status {
             dot: Dot::Green,
             text: super::details::DECRYPTED_HERE.into(),
-            details: "Streaming \u{00B7} decrypted on this PC as it plays".into(),
+            details: concat!(
+                "Streaming \u{00B7} decrypted on ",
+                beebeeb_engine::device_word!(),
+                " as it plays"
+            )
+            .into(),
         };
     }
     states::status(&Body::NotPreviewable(NoPreview::NoViewer), ui.origin()).unwrap_or(Status {

@@ -1,14 +1,14 @@
 //! Notifications (DW-0750): which alerts Beebeeb sends on this PC; and notifications turned
 //! off for Beebeeb in Windows (DW-0750b): said at the top, the choices kept and dimmed.
 
-use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::Theme;
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Trailing};
 use crate::ui::settings_notice as notices;
 use crate::ui::settings_shell as shell;
-use rune::{El, el};
+use crate::State;
+use rune::{el, El};
 
 use super::source::ReadState;
 use super::{Intent, SettingsUi};
@@ -27,7 +27,11 @@ pub const NOT_SAVED: &str = "Couldn't change the notification setting. Nothing c
 /// A timeout, a transport error mid-flight, or an unreadable 2xx: the change may have landed. Over when the
 /// check is: its answer is said in its place ([`SAVED`], [`NOT_SAVED`]), or the pane says it could not check.
 pub const UNKNOWN: &str = "Couldn't confirm the change. Checking what the server has.";
-pub const PC_NOT_SAVED: &str = "Couldn't save the notification setting on this PC.";
+pub const PC_NOT_SAVED: &str = concat!(
+    "Couldn't save the notification setting on ",
+    beebeeb_engine::device_word!(),
+    "."
+);
 /// A read failed. The panes say that themselves (the rows, Recent's card, [`NOT_READ`] over the pane), so this
 /// is drawn only where nothing else changes: "Try again" pressed under [`UNCONFIRMED`], and failing again.
 pub const NOT_LOADED: &str = "Couldn't load your notifications. Try again in a moment.";
@@ -133,7 +137,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             vec![lists::item_with(
                 list,
                 0,
-                &Item::new(Some(&ic::BELL), "Allow notifications").sub("Also controlled in Windows Settings"),
+                &Item::new(Some(&ic::BELL), "Allow notifications")
+                    .sub(format!("Also controlled in {}", super::source::settings_app())),
                 vec![switch],
                 t,
             )],
@@ -142,15 +147,24 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         ));
         list += 1;
     } else {
-        // Beebeeb cannot turn them back on itself: the one action opens Windows Settings.
-        let open = controls::button(0, "Open Windows Settings", None, Emphasis::Plain, t)
-            .on_press(|s: &mut State| s.settings.ask(Intent::OpenWindowsNotificationSettings));
+        // Beebeeb cannot turn them back on itself: the one action opens the OS's settings (Windows Settings, System Settings).
+        let open = controls::button(
+            0,
+            &format!("Open {}", super::source::settings_app()),
+            None,
+            Emphasis::Plain,
+            t,
+        )
+        .on_press(|s: &mut State| s.settings.ask(Intent::OpenWindowsNotificationSettings));
         children.push(controls::banner_toned(
             0,
             true,
             &ic::BELL,
             "Notifications are off",
-            "Turned off for Beebeeb in Windows Settings. Nothing below arrives until they're on.",
+            &format!(
+                "Turned off for Beebeeb in {}. Nothing below arrives until they're on.",
+                super::source::settings_app()
+            ),
             Some(open),
             t,
         ));
@@ -171,9 +185,9 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     list += 1;
 
     let security = if n.allowed_in_windows {
-        "Always on"
+        "Always on".to_string()
     } else {
-        "Off in Windows"
+        format!("Off in {}", super::source::os_name())
     };
     children.push(lists::list(
         list,
@@ -182,7 +196,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             list,
             0,
             &Item::new(Some(&ic::SHIELD), "New sign-ins and security changes")
-                .trailing(Trailing::Value(security.into())),
+                .trailing(Trailing::Value(security)),
             t,
         )],
         Some("These can't be turned off here, so you always hear if someone else gets in."),

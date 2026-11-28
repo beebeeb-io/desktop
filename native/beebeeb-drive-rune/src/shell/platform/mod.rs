@@ -20,7 +20,13 @@ pub mod packet_text;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_open_url;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_panels;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_preview;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -177,10 +183,20 @@ pub trait Platform: Send + Sync {
     ) -> Result<Box<dyn ControlServer>, ServeError>;
     /// Hands one request to the running instance and waits at most `timeout` for its answer.
     fn send_control(&self, identity: AppIdentity, request: &Request, timeout: Duration) -> Delivery;
+    /// macOS: the File Provider bridge the engine signals Finder through; `None` on a platform without one.
+    fn file_provider(&self) -> Option<Arc<dyn beebeeb_engine::file_provider_port::FileProviderPort>> {
+        None
+    }
     /// Opens the OS's own folder picker (DW-0738: Windows draws it) with `title`, showing where `start` is.
     /// BLOCKS until the person closed it: a worker's call, never the window's thread. `Ok(None)`: closed
     /// without a folder. The folder is the person's own: shown to them, never logged.
+    #[allow(clippy::needless_return)] // the return ends the macOS branch; the other OSes have the tail below
     fn pick_folder(&self, _title: &str, _start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
+        #[cfg(target_os = "macos")]
+        {
+            return macos_panels::pick_folder(_title, _start, "pick_folder").map_err(PlatformError::Os);
+        }
+        #[cfg(not(target_os = "macos"))]
         Err(PlatformError::NotBuilt("the folder picker"))
     }
     /// Opens the OS's own file picker for one picture this PC decodes, in `start` (photo previews' "Choose
@@ -192,7 +208,13 @@ pub trait Platform: Send + Sync {
     /// that folder exists. BLOCKS until the person closed it: a worker's call, never the window's thread; asked
     /// modeless like `pick_folder`, and its answer is handed over only for the session of the press
     /// ([`SaveAnswer::for_session`]). The path is shown to the person, never logged.
+    #[allow(clippy::needless_return)] // the return ends the macOS branch; the other OSes have the tail below
     fn pick_save_path(&self, _suggested_name: &str, _start: std::path::PathBuf) -> SaveAnswer {
+        #[cfg(target_os = "macos")]
+        {
+            return macos_panels::pick_save_path(_suggested_name, _start, "save_folder");
+        }
+        #[cfg(not(target_os = "macos"))]
         SaveAnswer::Failed
     }
     /// Opens the OS's Share sheet (Windows: `IDataTransferManagerInterop::ShowShareUIForWindow`) for the file at
@@ -240,6 +262,9 @@ pub fn current() -> Arc<dyn Platform> {
     }
     #[cfg(target_os = "macos")]
     {
+        // Once per process, before the engine reads a backup folder: reopen the picked folders' sandbox scopes.
+        static SCOPES: std::sync::Once = std::sync::Once::new();
+        SCOPES.call_once(macos_panels::resolve_backup_folders);
         Arc::new(macos::MacPlatform)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -291,7 +316,7 @@ mod save_share_tests {
 }
 
 /// On the platforms that are stubs, every call says so instead of pretending.
-#[cfg(all(test, not(windows)))]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::super::tray::{TrayInputs, tray_model};
     use super::*;
@@ -306,14 +331,18 @@ mod tests {
         ));
         assert!(matches!(platform.autostart_enabled(), Err(PlatformError::NotBuilt(_))));
         assert!(matches!(platform.set_autostart(true), Err(PlatformError::NotBuilt(_))));
-        assert!(matches!(
-            platform.serve_control(AppIdentity::Test, Arc::new(|_| Reply::Ok)),
-            Err(ServeError::NotBuilt(_))
-        ));
-        assert_eq!(
-            platform.send_control(AppIdentity::Test, &Request::Show, Duration::from_millis(1)),
-            Delivery::Unreachable
-        );
+        // macOS has a control channel (`macos_control.rs`, tested there in a temp folder).
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(matches!(
+                platform.serve_control(AppIdentity::Test, Arc::new(|_| Reply::Ok)),
+                Err(ServeError::NotBuilt(_))
+            ));
+            assert_eq!(
+                platform.send_control(AppIdentity::Test, &Request::Show, Duration::from_millis(1)),
+                Delivery::Unreachable
+            );
+        }
         assert!(!platform.name().is_empty());
         let shown = PlatformError::NotBuilt("the b").to_string();
         assert_eq!(shown, "not built yet: the b");

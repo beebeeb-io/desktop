@@ -4,7 +4,7 @@
 //! and the session rule: a figure and a sort belong to the session and the account they were read or set under.
 //! Every name is invented.
 
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use beebeeb_engine::account_binding::Identity;
@@ -13,7 +13,7 @@ use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
-use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
+use beebeeb_engine::test_api::fake_account::{account_handler, FakeAccount, TEST_PHRASE};
 use beebeeb_engine::test_api::{FakeApi, Handler, Request};
 use chrono::TimeZone;
 use serde_json::Value;
@@ -21,8 +21,8 @@ use zeroize::Zeroizing;
 
 use super::*;
 use crate::engine_host::EngineFilesSource;
-use crate::frames::files::SortBy;
 use crate::frames::files::source::FilesSource;
+use crate::frames::files::SortBy;
 
 const PASSWORD: &str = "an invented password for the figures";
 const WAIT: Duration = Duration::from_secs(30);
@@ -74,7 +74,11 @@ fn world(tag: &str) -> World {
         } else {
             req.bearer() == Some(second_token.as_str())
         };
-        if theirs { two(req) } else { one(req) }
+        if theirs {
+            two(req)
+        } else {
+            one(req)
+        }
     }));
     let (host, _messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
@@ -372,7 +376,7 @@ fn changed_within_the_last_minute_reads_just_now() {
     assert_eq!(
         changed_label(&item("2026-11-14T12:00:01Z"), now),
         None,
-        "ahead of this PC's clock"
+        concat!("ahead of ", beebeeb_engine::device_word!(), "'s clock")
     );
     assert_eq!(changed_label(&item(""), now), None);
     assert_eq!(changed_label(&item("yesterday"), now), None);

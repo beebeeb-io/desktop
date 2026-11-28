@@ -34,9 +34,9 @@ pub const COLUMNS: [Column; 5] = [
     Column::new("date", "Date changed", Width::Fixed(COL_DATE_W)),
     Column::new("size", "Size", Width::Fixed(COL_SIZE_W)).align(Align::End),
     Column::new("shared", "Shared", Width::Fixed(COL_SHARED_W)),
-    Column::new("pc", "PC", Width::Fixed(COL_PC_W))
+    Column::new("pc", if cfg!(target_os = "macos") { "Mac" } else { "PC" }, Width::Fixed(COL_PC_W))
         .align(Align::Center)
-        .spoken("On this PC"),
+        .spoken(concat!("On ", beebeeb_engine::device_word!())),
 ];
 
 /// A row's name never narrower than this: about 24 characters of its 13 pt name (7 pt each) beside its 22 pt tile

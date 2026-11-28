@@ -59,7 +59,7 @@ impl Filter {
     pub fn label(self, problems: usize) -> String {
         match self {
             Filter::All => "All".into(),
-            Filter::ThisPc => "This PC".into(),
+            Filter::ThisPc => concat!(beebeeb_engine::device_word_cap!()).into(),
             Filter::OtherDevices => "Other devices".into(),
             Filter::Problems => format!("Problems \u{00B7} {problems}"),
         }
@@ -94,7 +94,7 @@ pub struct RowMenu {
 }
 
 /// The row menu's items, in the board's order.
-pub const MENU_ITEMS: [&str; 3] = ["Open", "Show in File Explorer", "Remove from this PC"];
+pub const MENU_ITEMS: [&str; 3] = ["Open", concat!("Show in ", beebeeb_engine::file_manager!()), concat!("Remove from ", beebeeb_engine::device_word!())];
 
 /// Task 2530: the question a problem's way out asks first (`settle.rs`): which problem, its name, and the answers its
 /// row lists (the two-versions answers, Keep both first; or Remove from the list alone).
@@ -206,6 +206,21 @@ impl Ui {
 
     pub fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
         self.source.kept()
+    }
+
+    /// How a kept item's copy comes down, or that it failed (dm-68).
+    pub fn copy_state(&self, id: &str) -> Option<source::CopyState> {
+        self.source.copy_state(id)
+    }
+
+    /// The kept files coming down now: `(files, bytes done, bytes of them)` (dm-68).
+    pub fn downloading(&self) -> Option<(u32, u64, u64)> {
+        self.source.downloading()
+    }
+
+    /// Try again on a kept item whose copy failed.
+    pub fn try_keep_again(&mut self, id: &str) {
+        self.source.try_keep_again(id);
     }
 
     pub fn today(&self) -> chrono::NaiveDate {
@@ -394,7 +409,7 @@ impl Ui {
 }
 
 /// What the window says when something a row asked for did not happen. Fixed sentences: never a name.
-pub const NOT_SHOWN: &str = "Couldn't show this in File Explorer.";
+pub const NOT_SHOWN: &str = concat!("Couldn't show this in ", beebeeb_engine::file_manager!(), ".");
 pub const NOT_OPENED: &str = "Couldn't open this.";
 
 /// Carries out what the two sections asked for and cannot do themselves, in the order asked: `true` when something

@@ -741,7 +741,20 @@ pub(super) async fn bootstrap_from_snapshot(
     if asked_meanwhile {
         tracing::info!("a re-snapshot asked for while the list was on its way is served by this list");
     }
+    // dm-52: macOS gets the same rule with its counted request: the value seen now (after the fetch, before the
+    // ingest) is served by this list and cleared once it is applied; a request made during the apply raises the
+    // counter past it and survives, as does everything when the ingest fails.
+    #[cfg(target_os = "macos")]
+    let served_meanwhile = bridge.db().peek_resnapshot_request()?;
+    #[cfg(target_os = "macos")]
+    if served_meanwhile.is_some() {
+        tracing::info!("a re-snapshot asked for while the list was on its way is served by this list");
+    }
     let ingested = ingest_snapshot(bridge, sync_root, snapshot, now_secs, conflicts, &mut progress).await;
+    #[cfg(target_os = "macos")]
+    if let (Some(seen), Ok(_)) = (served_meanwhile, &ingested) {
+        bridge.db().clear_resnapshot_request(seen)?;
+    }
     #[cfg(not(target_os = "macos"))]
     if asked_meanwhile && ingested.is_err() {
         bridge.db().request_resnapshot()?;

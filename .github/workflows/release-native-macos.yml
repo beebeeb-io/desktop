@@ -1,0 +1,317 @@
+name: Desktop release (native macOS)
+
+# Publishes the native macOS build to the v2 channel manifest (desktop/v2/<channel>.json). macOS is NEVER built here:
+# scripts/macos/release-macos-local.sh builds, signs and notarises on a Mac and uploads the dmg and the updater
+# tarball to the GitHub release desktop-v<version>. This workflow takes those uploaded artefacts, signs the tarball
+# with the native line's updater key, verifies it against the baked public key, writes the darwin-aarch64 entry into
+# the channel manifest (keeping the Windows entries, native-channel-manifest.mjs --existing), signs and verifies the
+# manifest, and publishes.
+#
+# Its own GitHub environment, `desktop-release-macos`, holds the updater key as the secrets UPDATER_V2_PRIVATE_KEY and
+# UPDATER_V2_PRIVATE_KEY_PASSWORD. Secrets appear only in `env:` of the step that uses them, never on a command line.
+# It shares the concurrency group of release-native-windows.yml: both write the same channel file, one at a time.
+# It fails closed while RELEASE_BLOCKERS.md lists a macOS item.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose uploaded macOS artefacts are published, desktop-v0.9.0 or later
+        required: true
+        type: string
+      tarball_sha256:
+        description: SHA-256 (64 hex) of the notarised Beebeeb.app.tar.gz, printed by release-macos-local.sh after step 9
+        required: true
+        type: string
+      channel:
+        description: v2 channel manifest to publish
+        required: true
+        default: alpha
+        type: choice
+        options:
+          - alpha
+          - beta
+          - stable
+
+permissions: {}
+
+jobs:
+  gate:
+    name: Gate (inputs, ref, blockers)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.inputs.outputs.version }}
+    steps:
+      - name: Validate tag and channel
+        id: inputs
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          TARBALL_SHA256: ${{ inputs.tarball_sha256 }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARBALL_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::tarball_sha256 must be 64 lowercase hex characters."
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^desktop-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Tag '$RELEASE_TAG' must look like desktop-v0.9.0."
+            exit 1
+          fi
+          version="${RELEASE_TAG#desktop-v}"
+          IFS=. read -r major minor _ <<< "$version"
+          if (( major == 0 && minor < 9 )); then
+            echo "::error::$version is a 0.8.x (Tauri) version; this workflow publishes native builds, 0.9.0 and later."
+            exit 1
+          fi
+          case "$RELEASE_CHANNEL" in
+            alpha|beta|stable) ;;
+            *) echo "::error::Channel '$RELEASE_CHANNEL' must be alpha, beta, or stable."; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the ref rules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse a ref that is not a release ref
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          bash scripts/native-release-ref-check.sh --self-test
+          bash scripts/native-release-ref-check.sh ref "$REF"
+
+      - name: Refuse another updater public key than the pinned one
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '8e8ab5cb63a9e1e467135a79dabb9dd9f58895f547a078fd7d61a24244ad3284  crates/beebeeb-updater/keys/updater-v2.pub' | sha256sum --check --strict
+
+      - name: Refuse while RELEASE_BLOCKERS.md lists a macOS item
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc=0
+          items="$(bash scripts/release-blockers-check.sh macos)" || rc=$?
+          if [[ $rc -ne 0 && $rc -ne 1 ]]; then
+            echo "::error::release-blockers-check.sh exited $rc (expected 0 or 1). Refusing the release. See docs/RELEASING.md."
+            exit 1
+          fi
+          if [[ $rc -eq 1 || -n "$items" ]]; then
+            echo "$items"
+            echo "::error file=RELEASE_BLOCKERS.md::RELEASE_BLOCKERS.md lists release blockers binding macOS. See docs/RELEASING.md."
+            exit 1
+          fi
+
+  publish-manifest:
+    name: Sign and publish the macOS entry
+    needs: gate
+    runs-on: ubuntu-latest
+    environment: desktop-release-macos
+    # Shared with release-native-windows.yml (publish-manifest): both rewrite the same channel file, so one at a time.
+    concurrency:
+      group: desktop-native-publish-manifest
+      cancel-in-progress: false
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VER: ${{ needs.gate.outputs.version }}
+      CHANNEL: ${{ inputs.channel }}
+      TAG: ${{ inputs.tag }}
+      TARBALL_SHA256: ${{ inputs.tarball_sha256 }}
+      PUBLISH_TARGET: ${{ vars.DESKTOP_RELEASE_PUBLISH_TARGET || 'dir:releases-repo' }}
+    steps:
+      # Scripts, the signer and the public key come from the dispatched commit; the tag is never checked out.
+      - name: Checkout the dispatched commit (scripts, signer, public key)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: desktop-src
+
+      - name: Refuse a tag that is not on this release ref or has no published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$(git -C desktop-src rev-parse HEAD)" != "$HEAD_SHA" ]]; then
+            echo "::error::the checkout is not the dispatched commit $HEAD_SHA."
+            exit 1
+          fi
+          tag_sha="$(bash desktop-src/scripts/native-release-ref-check.sh tag desktop-src "$TAG" "$HEAD_SHA")"
+          mkdir -p work
+          gh api "repos/$REPO/releases/tags/$TAG" > work/release.json
+          if [[ "$(jq -r '.draft' work/release.json)" != "false" || "$(jq -r '.tag_name' work/release.json)" != "$TAG" ]]; then
+            echo "::error::$TAG has no published GitHub release."
+            exit 1
+          fi
+          echo "$TAG is $tag_sha, in the history of $HEAD_SHA, with a published release"
+
+      - name: Checkout releases repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          repository: beebeeb-io/releases
+          ref: main
+          token: ${{ secrets.RELEASES_PUSH_TOKEN }}
+          persist-credentials: false
+          path: releases-repo
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Install signer dependencies (no key in this step)
+        working-directory: desktop-src/scripts/updater-signer
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      # The notarised tarball dm-15's local script uploaded. It is stored as Beebeeb.app.tar.gz; the manifest names
+      # it Beebeeb_<version>_aarch64.app.tar.gz, which is also the name the signature binds.
+      - name: Fetch the uploaded tarball and the release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          jq -r '.body // ""' work/release.json > work/notes.md
+          want="Beebeeb_${VER}_aarch64.app.tar.gz"
+          src=""
+          for name in "$want" "Beebeeb.app.tar.gz"; do
+            id=$(jq -r --arg name "$name" '.assets[] | select(.name == $name and .state == "uploaded" and .size > 0) | .id' work/release.json | head -n1)
+            if [[ -n "$id" ]]; then
+              gh api "repos/$REPO/releases/assets/$id" -H 'Accept: application/octet-stream' > "work/src.tar.gz"
+              src="$name"
+              break
+            fi
+          done
+          if [[ -z "$src" ]]; then
+            echo "::error::$TAG has no uploaded $want (or Beebeeb.app.tar.gz). Run scripts/macos/release-macos-local.sh first."
+            exit 1
+          fi
+          mkdir -p work/mac
+          mv work/src.tar.gz "work/mac/$want"
+          test -s "work/mac/$want"
+          # Refuse before any signing when the asset is not the tarball the notarised build made.
+          actual="$(sha256sum "work/mac/$want" | cut -d' ' -f1)"
+          if [[ "$actual" != "$TARBALL_SHA256" ]]; then
+            rm -f "work/mac/$want"
+            echo "::error::$src on $TAG has sha256 $actual, not the dispatched $TARBALL_SHA256. Refusing to sign."
+            exit 1
+          fi
+          echo "tarball sha256 matches the dispatched hash: $actual"
+
+      # This step runs the signer and nothing else: the key reaches it through the environment only.
+      - name: Sign the tarball with the updater key
+        working-directory: desktop-src
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATER_V2_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.UPDATER_V2_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" || -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "::error::UPDATER_V2_PRIVATE_KEY and UPDATER_V2_PRIVATE_KEY_PASSWORD must be secrets of the desktop-release-macos environment."
+            exit 1
+          fi
+          ./scripts/updater-signer/node_modules/.bin/tauri signer sign "../work/mac/Beebeeb_${VER}_aarch64.app.tar.gz" > /dev/null
+
+      - name: Verify the tarball signature against the baked public key
+        working-directory: desktop-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="Beebeeb_${VER}_aarch64.app.tar.gz"
+          pub=crates/beebeeb-updater/keys/updater-v2.pub
+          test -s "../work/mac/$name.sig"
+          node scripts/native-channel-manifest.mjs --verify "../work/mac/$name" --sig "../work/mac/$name.sig" --signed-name "$name" --pubkey "$pub"
+
+      # Keeps the Windows entries of the manifest already published for this version (--existing).
+      - name: Write the darwin-aarch64 entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$CHANNEL" in
+            stable) file=stable.json ;;
+            beta) file=beta.json ;;
+            alpha) file=alpha.json ;;
+            *) echo "::error::bad channel '$CHANNEL'"; exit 1 ;;
+          esac
+          name="Beebeeb_${VER}_aarch64.app.tar.gz"
+          mkdir -p "stage/desktop/v2" "stage/desktop/artifacts/$VER"
+          existing=()
+          if [[ -s "releases-repo/desktop/v2/$file" ]]; then
+            existing=(--existing "releases-repo/desktop/v2/$file")
+          fi
+          node desktop-src/scripts/native-channel-manifest.mjs --version "$VER" --channel "$CHANNEL" \
+            --mac-artifact "work/mac/$name" --mac-sig "work/mac/$name.sig" --notes work/notes.md \
+            --pubkey desktop-src/crates/beebeeb-updater/keys/updater-v2.pub "${existing[@]}" --out "stage/desktop/v2/$file"
+          cp "work/mac/$name" "stage/desktop/artifacts/$VER/$name"
+          echo "MANIFEST_FILE=$file" >> "$GITHUB_ENV"
+
+      - name: Sign the manifest
+        working-directory: desktop-src
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATER_V2_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.UPDATER_V2_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" || -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "::error::UPDATER_V2_PRIVATE_KEY and UPDATER_V2_PRIVATE_KEY_PASSWORD must be secrets of the desktop-release-macos environment."
+            exit 1
+          fi
+          ./scripts/updater-signer/node_modules/.bin/tauri signer sign "../stage/desktop/v2/$MANIFEST_FILE" > /dev/null
+
+      - name: Verify the manifest's signature against the committed v2 key
+        working-directory: desktop-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="../stage/desktop/v2/$MANIFEST_FILE"
+          pub=crates/beebeeb-updater/keys/updater-v2.pub
+          test -s "$manifest.sig"
+          node scripts/check-updater-signature-key.mjs --pubkey-file "$pub" --sig "$manifest.sig"
+          node scripts/check-updater-signature-key.mjs --pubkey-file "$pub" --manifest "$manifest"
+          node scripts/native-channel-manifest.mjs --verify "$manifest" --sig "$manifest.sig" --signed-name "$MANIFEST_FILE" --pubkey "$pub"
+
+      - name: Publish the staged files
+        shell: bash
+        env:
+          AWS_ENDPOINT_URL: ${{ vars.DESKTOP_RELEASE_S3_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.DESKTOP_RELEASE_S3_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DESKTOP_RELEASE_S3_SECRET }}
+        run: |
+          set -euo pipefail
+          bash desktop-src/scripts/publish-release-files.sh --self-test
+          bash desktop-src/scripts/publish-release-files.sh stage "$PUBLISH_TARGET"
+
+      - name: Commit and push to releases repo
+        if: ${{ startsWith(env.PUBLISH_TARGET, 'dir:') }}
+        working-directory: releases-repo
+        shell: bash
+        env:
+          RELEASES_PUSH_TOKEN: ${{ secrets.RELEASES_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          # shellcheck disable=SC2016
+          git config credential.helper '!f() { echo username=x-access-token; echo "password=$RELEASES_PUSH_TOKEN"; }; f'
+          git remote set-url origin "https://github.com/beebeeb-io/releases.git"
+          git add "desktop/v2/$MANIFEST_FILE" "desktop/v2/$MANIFEST_FILE.sig" "desktop/artifacts/$VER"
+          if git diff --cached --quiet; then
+            echo "desktop/v2/$MANIFEST_FILE already up to date"
+          else
+            git commit -m "desktop: publish native macOS $CHANNEL manifest $TAG"
+            git push
+          fi

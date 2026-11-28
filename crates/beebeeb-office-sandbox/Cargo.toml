@@ -15,6 +15,11 @@ autotests = false
 #     `windows-sys` family, nothing else);
 #   - there is no way to start the helper unconfined through this crate: no feature, no `cfg`, no hidden function.
 #     On an operating system without a sandbox module `Sandbox::spawn` returns `SandboxError::Unsupported`.
+#   - macOS (src/macos.rs) adds no dependency: the system calls are declared by hand, so no lockfile of the four
+#     crates that name this one changes. The helper confines itself (`helper::confine`, first call of its `main`) and
+#     the app asks the kernel before it hands out the pipes. An app inside the App Sandbox starts no child: its helper
+#     is its XPC service (src/macos_xpc.rs), which the system starts in an App Sandbox of its own; the app checks the
+#     kernel's answers and the service's signature (exactly one entitlement) before it hands anything over.
 
 [target.'cfg(windows)'.dependencies]
 # The version the engine and updater lockfiles already hold (0.61.2); raw bindings, no code of its own.

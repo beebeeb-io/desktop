@@ -57,9 +57,12 @@ pub fn refusal(identity: &EngineIdentity, registered: &Registration, root: &Path
                 "The folder \u{201c}{folder}\u{201d} is already the sync folder of {owner}. Nothing was changed. Choose another folder."
             ))
         }
-        Registration::Unreadable => Some(format!(
-            "Windows could not say whose sync folder \u{201c}{folder}\u{201d} is. Nothing was changed. Try again, or choose another folder."
-        )),
+        Registration::Unreadable => {
+            let os = if cfg!(target_os = "macos") { "macOS" } else { "Windows" };
+            Some(format!(
+                "{os} could not say whose sync folder \u{201c}{folder}\u{201d} is. Nothing was changed. Try again, or choose another folder."
+            ))
+        }
     }
 }
 

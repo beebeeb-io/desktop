@@ -685,7 +685,7 @@ const DELETE_NOTICE_SUB: &str = "Other devices shows what Beebeeb has.";
 /// The line under a refused change of a folder.
 const NOTHING_CHANGED: &str = "Nothing was changed.";
 /// The line under what a move to Trash did, said in the section (its words say what changed).
-const LIST_SHOWS: &str = "This PC's list shows what is backed up now.";
+const LIST_SHOWS: &str = concat!(beebeeb_engine::device_word_cap!(), "'s list shows what is backed up now.");
 
 /// How long a refusal stays in the section.
 const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);

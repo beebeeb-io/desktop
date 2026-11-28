@@ -11,7 +11,10 @@
 //!   step run, then +2, +4, +8, … at most every 64 runs, in memory for this engine run.
 //! - **Linux:** a `HydrateFile` op (reason [`KEPT_REASON`]) into an empty place; the queue runs it at the limit and
 //!   retries it by its own rule.
-//! - **macOS:** nothing (the File Provider fetches).
+//! - **macOS:** nothing of the engine's own, and no `HydrateFile` op (dm-71, dm-72): a kept file's one copy is
+//!   Finder's, and the system fetches it (the keep asks it to, the item's content policy keeps it, and a new version
+//!   comes by the stale pass's signal, `stale_copies.rs`). A fetch queued here was a second copy in the hidden state
+//!   folder and a download beside the system's.
 
 use super::*;
 use std::sync::Mutex;
@@ -194,6 +197,10 @@ impl EngineBridge {
     /// and backed off, so it never holds back the files behind it. It never downloads. Returns how many it queued.
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     pub fn queue_kept_fetches(&self, sync_root: &Path, state: &KeptRefetch) -> Result<usize, EngineError> {
+        // Dm-72: where the system's own fetch brings a kept file's bytes (a Mac), none is queued here.
+        if kept_bytes_come_by_the_systems_fetch() {
+            return Ok(0);
+        }
         let mut queued = 0;
         for kept in self.kept_refetch_plan(sync_root, state, Vec::new())? {
             let empty =
@@ -368,6 +375,21 @@ mod tests {
         assert_eq!(with_extra.len(), KEPT_REFETCH_PER_TICK + 1, "the extra beside the cap");
         assert_eq!(with_extra[0], extra, "the extra first");
         assert_eq!(ids(&with_extra).iter().filter(|id| *id == "k05").count(), 1, "once");
+    }
+
+    /// Dm-72: by the Mac rule (the system's fetch brings a kept file's bytes) the step queues no fetch of its own.
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    #[test]
+    fn dm72_kept_by_the_mac_rule_the_step_queues_no_engine_fetch() {
+        let (dir, bridge) = bridge();
+        kept(&bridge, "a");
+        system_fetch_for_test(true);
+        let on_a_mac = bridge.queue_kept_fetches(dir.path(), &KeptRefetch::default());
+        system_fetch_for_test(false);
+        assert_eq!(on_a_mac.unwrap(), 0, "nothing queued");
+        assert!(bridge.db.list_operations_for_file("a").unwrap().is_empty());
+        let elsewhere = bridge.queue_kept_fetches(dir.path(), &KeptRefetch::default());
+        assert_eq!(elsewhere.unwrap(), 1, "Linux keeps its queued fetch");
     }
 
     /// S6 R6: a file whose fetch failed once is fetched at the next step run; a fetch that lands clears its backoff.

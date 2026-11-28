@@ -366,7 +366,7 @@ pub(super) fn apply_save_name_and_parent_conn<C: std::ops::Deref<Target = Connec
 /// [`StateDb::delete_file`] on an open connection or transaction.
 /// Task 2267, "Keep on this PC only": the queued operations acting on the rows `ids` (their own row or the folder they
 /// act in), and the staged copies they hold (payload and resume paths), sorted, once each.
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 pub(super) fn keep_ops_conn(conn: &Connection, ids: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let mut ops: Vec<(String, Option<String>)> = Vec::new();
     let mut stmt =

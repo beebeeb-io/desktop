@@ -14,14 +14,14 @@
 //!
 //! Must not: log a name, a password, a token or a server's words; keep what was typed.
 
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::account_actions_api::{ActionError, StepUpGrant};
 use beebeeb_engine::app::{CredentialStores, Engine};
 use zeroize::Zeroizing;
 
-use super::{Stamp, account_of, log, stamp};
+use super::{account_of, log, stamp, Stamp};
 use crate::frames::account::source::{NameAnswer, NameWhy, Password, Purpose, Refused, SignOutAnswer, StepUp};
 
 /// A confirmation of the server is good for this long here (the server's own is shorter or equal).
@@ -165,11 +165,29 @@ impl<C: CredentialStores + 'static> Actions<C> {
             &self.sign_out_end.0,
             asked_as.clone(),
             move |engine| {
-                if discard_unsaved {
+                // DW-S02 under Q1 (sign-out-and-lock.md §1 without the keep and purge): the Finder location goes
+                // FIRST (keeps unsynced files), then the confirmed engine stop, the local data kept, the Keychain
+                // clear and, last, the server revoke: all inside the engine's sign-out. A removal that cannot be
+                // confirmed does not stop the sign-out. Where no reconciler runs this is a no-op.
+                // Unsaved edits refuse the engine's sign-out: then the location stays (the person is still signed in).
+                if sign_out_refused_for_unsaved(discard_unsaved, crate::engine_host::office_host::unsaved_count()) {
+                    return Err(ActionError::UnsavedEdits);
+                }
+                let removed = crate::engine_host::finder_setup::sign_out();
+                if let Err(message) = &removed {
+                    log(format!(
+                        "account: the Finder removal before the sign-out was not confirmed ({message})"
+                    ));
+                }
+                let result = if discard_unsaved {
                     engine.sign_out_discarding_unsaved_for(session)
                 } else {
                     engine.sign_out_for(session)
-                }
+                };
+                // The session as it is now: signed out, nothing to see; refused (unsaved edits, a session that moved
+                // on), the keys are still here and the edge brings the location back (ruling T3-2).
+                crate::engine_host::finder_setup::session_changed();
+                result
             },
         );
         if !started {
@@ -318,5 +336,27 @@ impl<C: CredentialStores + 'static> Actions<C> {
     #[cfg(test)]
     pub(super) fn held(&self) -> usize {
         self.confirmations.len()
+    }
+}
+
+/// The engine refuses a sign-out while an editor holds unsaved edits (unless discarded): the Finder location must
+/// not be removed before that answer, or the person stays signed in with Finder gone.
+fn sign_out_refused_for_unsaved(discard_unsaved: bool, unsaved_editors: usize) -> bool {
+    !discard_unsaved && unsaved_editors > 0
+}
+
+#[cfg(test)]
+mod finder_order_tests {
+    use super::sign_out_refused_for_unsaved;
+
+    #[test]
+    fn unsaved_edits_refuse_before_the_finder_removal_and_discard_goes_through() {
+        assert!(sign_out_refused_for_unsaved(false, 1));
+        assert!(!sign_out_refused_for_unsaved(true, 1));
+        assert!(!sign_out_refused_for_unsaved(false, 0));
+        let src = include_str!("account_actions.rs");
+        let check = src.find("sign_out_refused_for_unsaved(discard_unsaved").unwrap();
+        let removal = src.find("finder_setup::sign_out()").unwrap();
+        assert!(check < removal, "the unsaved check comes before the Finder removal");
     }
 }

@@ -18,7 +18,7 @@ use crate::ui::{banner, button, dialog, kit};
 
 /// Remove from the list's question (the contract's words).
 pub const REMOVE_TITLE: &str = "Remove this change?";
-pub const REMOVE_WORDS: &str = "This PC no longer has its bytes. The file on Beebeeb stays as it is.";
+pub const REMOVE_WORDS: &str = concat!(beebeeb_engine::device_word_cap!(), " no longer has its bytes. The file on Beebeeb stays as it is.");
 
 /// The two-versions question's title.
 pub const KEEP_TITLE: &str = "Two versions";
@@ -27,12 +27,12 @@ pub const KEEP_TITLE: &str = "Two versions";
 pub fn keep_line(exit: Exit) -> Option<&'static str> {
     Some(match exit {
         Exit::KeepBoth => {
-            "Keep both saves this PC's version next to the original, with this PC's name and the time added."
+            concat!("Keep both saves ", beebeeb_engine::device_word!(), "'s version next to the original, with ", beebeeb_engine::device_word!(), "'s name and the time added.")
         }
         Exit::KeepOther => {
-            "Keeping the other one keeps the version in Beebeeb and puts this PC's version in Changes not sent, in Beebeeb's app data."
+            concat!("Keeping the other one keeps the version in Beebeeb and puts ", beebeeb_engine::device_word!(), "'s version in Changes not sent, in Beebeeb's app data.")
         }
-        Exit::KeepThisPcs => "Keeping this PC's sends it as the newest version; the other stays in the file's history.",
+        Exit::KeepThisPcs => concat!("Keeping ", beebeeb_engine::device_word!(), "'s sends it as the newest version; the other stays in the file's history."),
         Exit::TryAgain | Exit::RemoveFromList => return None,
     })
 }
@@ -42,7 +42,7 @@ pub fn label(exit: Exit) -> &'static str {
     match exit {
         Exit::KeepBoth => "Keep both",
         Exit::KeepOther => "Keep the other",
-        Exit::KeepThisPcs => "Keep this PC's",
+        Exit::KeepThisPcs => concat!("Keep ", beebeeb_engine::device_word!(), "'s"),
         Exit::RemoveFromList => "Remove from the list",
         Exit::TryAgain => "Try again",
     }

@@ -492,7 +492,12 @@ impl EngineBridge {
                 size_bytes: None,
                 text: None,
                 unavailable_reason: Some(
-                    "On this PC the file's name leads to a different file, so it is not shown.".to_string(),
+                    concat!(
+                        "On ",
+                        device_word!(),
+                        " the file's name leads to a different file, so it is not shown."
+                    )
+                    .to_string(),
                 ),
             };
         }

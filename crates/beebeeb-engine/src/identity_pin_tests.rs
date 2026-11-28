@@ -82,8 +82,8 @@ const LITERALS_ALLOWED: &[(&str, &[&str], &str)] = &[
     ),
     (
         "crates/beebeeb-engine/src/finder_setup/error.rs",
-        &["io.beebeeb.app", "io.beebeeb.bridge"],
-        "two in-process NSError-style domain labels: tags an error is classified by, never a name anything is \
+        &["io.beebeeb.bridge"],
+        "one bridge NSError-style domain label: a tag an error is classified by, never a name anything is \
          stored or registered under",
     ),
     (
@@ -133,6 +133,21 @@ const LITERALS_ALLOWED: &[(&str, &[&str], &str)] = &[
         "the name of the first list of commands (DW-1232: Beebeeb, File, Edit): the brand, for both builds",
     ),
     (
+        "native/beebeeb-drive-rune/src/shell/macos_menu.rs",
+        &["Beebeeb"],
+        "the name of the macOS menu bar's first menu (`APP`): the brand, for both builds",
+    ),
+    (
+        "native/beebeeb-drive-rune/src/shell/platform/macos_fp/lifecycle_log.rs",
+        &["Beebeeb"],
+        "the folder name under ~/Library/Logs for the lifecycle log: the brand, for both builds",
+    ),
+    (
+        "native/beebeeb-drive-rune/src/shell/platform/macos_autostart.rs",
+        &["io.beebeeb.app.plist"],
+        "the 0.8.x LaunchAgent file name to find and remove (legacy, only ever the real build's)",
+    ),
+    (
         "native/beebeeb-drive-rune/src/ui/kit.rs",
         &["Beebeeb"],
         "the logo's accessibility label (the brand, for both builds)",
@@ -154,7 +169,7 @@ const NAMING_ALLOWED: [(&str, usize, &str); 3] = [
     ),
     (
         "native/beebeeb-drive-rune/src/shell/identity.rs",
-        28,
+        30,
         "the native identity's two variants and `AppIdentity::engine`, the one bridge to the engine's values; \
          `engine_identity()` hands production code `CURRENT`'s",
     ),
@@ -162,10 +177,15 @@ const NAMING_ALLOWED: [(&str, usize, &str); 3] = [
 
 /// Rule 2b's allow-list: engine test code that names `REAL` on purpose, `(file, namings, why)`. Everything else in
 /// the engine's tests runs on `TEST`.
-const TEST_REAL_ALLOWED: [(&str, usize, &str); 18] = [
+const TEST_REAL_ALLOWED: [(&str, usize, &str); 19] = [
+    (
+        "crates/beebeeb-engine/src/config/paths.rs",
+        2,
+        "the default sync root suggestion is asserted against REAL's user-facing folder name (macOS container-relative, elsewhere the home folder)",
+    ),
     (
         "crates/beebeeb-engine/src/backup/device.rs",
-        7,
+        8,
         "the device name and folder adoption differ by build: REAL's salt, suffix and legacy-folder adoption are asserted against TEST's",
     ),
     (

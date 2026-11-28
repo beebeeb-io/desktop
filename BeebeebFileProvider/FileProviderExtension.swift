@@ -449,6 +449,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
     }
 
+    // dm-54 `existingItem` and dm-89 `resolveMayAlreadyExist` live in MayAlreadyExist.swift (size ratchet).
+
     func createItem(
         basedOn itemTemplate: NSFileProviderItem,
         fields: NSFileProviderItemFields,
@@ -481,6 +483,28 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             // the person edited it. The template's identifier is the item the delete was for,
             // and its content version is the base of the edit (REPL.h:462-470).
             let deletionConflicted = options.contains(.deletionConflicted)
+            // dm-54/dm-89: a reimport or re-enumeration replays creates for items the server already
+            // has. A folder, or a file with the server's bytes, is the server's item; a file that
+            // differs is uploaded as a new version of it, never dropped.
+            if options.contains(.mayAlreadyExist),
+               let replayed = try Self.resolveMayAlreadyExist(
+                   parent: itemTemplate.parentItemIdentifier, filename: itemTemplate.filename, kind: kind, contents: url,
+                   list: { try self.ipc.enumerate(containerIdentifier: $0) },
+                   queueNewVersion: { existing in
+                       try self.ipc.queueModifyItem(
+                           itemIdentifier: NSFileProviderItemIdentifier(existing.identifier),
+                           parentIdentifier: itemTemplate.parentItemIdentifier, filename: existing.filename, kind: .file,
+                           contentsURL: url, contentType: contentType?.identifier,
+                           baseVersionIdentifier: existing.contentVersion ?? existing.versionIdentifier,
+                           changedFields: .contents
+                       )
+                   }
+               ) {
+                completionHandler(replayed.item, [], replayed.shouldFetchContent, replayed.error)
+                if let error = replayed.error { noteFailure(error) } else { signalErrorResolvedIfPending() }
+                progress.completedUnitCount = 1
+                return progress
+            }
             let result = try ipc.queueCreateItem(
                 parentIdentifier: itemTemplate.parentItemIdentifier,
                 filename: itemTemplate.filename,
@@ -717,17 +741,46 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 } else {
                     observer.finishEnumerating(upTo: nil)
                 }
-            } catch BeebeebIPCError.daemonUnavailable where containerIdentifier == .rootContainer {
-                // Task 1701: the old fallback enumerated the synthetic
-                // namespace roots so the sidebar kept its shape while the
-                // daemon was down. There are no synthetic roots any more —
-                // an unreachable daemon means an honestly EMPTY listing, not
-                // a fake one.
-                observer.finishEnumerating(upTo: nil)
+            } catch BeebeebIPCError.daemonUnavailable {
+                // dm-41/dm-54: an unreachable daemon is NOT an empty container, at the root or below it.
+                // Report a retryable error so the system asks again when the daemon is back.
+                observer.finishEnumeratingWithError(Self.rootListingError())
             } catch {
                 observer.finishEnumeratingWithError(error)
             }
         }
+    }
+
+    /// dm-41: an unreachable daemon at the root is a retryable error, never an empty success.
+    static func rootListingError() -> Error {
+        NSFileProviderError(.serverUnreachable)
+    }
+
+    /// dm-41: the daemon answers "sync anchor expired" for an anchor from another database (0.8.x replica, fresh
+    /// state.db). The system must list again, and the stale materialized filter and anchor must not survive it.
+    static func isAnchorExpired(_ error: Error) -> Bool {
+        if case BeebeebIPCError.daemonRejected(let message) = error {
+            // dm-54: the engine prefixes every ListChanges failure with "sync anchor expired", but only the
+            // state db's real expiry carries the "(expired)" marker; a transient database error must not
+            // force a full re-list.
+            let lower = message.lowercased()
+            return lower.contains("sync anchor expired") && lower.contains("(expired)")
+        }
+        return false
+    }
+
+    static func changesError(_ error: Error, stateURL: URL? = WorkingSetStore.stateURL()) -> Error {
+        guard isAnchorExpired(error) else {
+            // dm-54: any other failure is retryable (the system asks again), never a forced re-list.
+            if case BeebeebIPCError.daemonRejected = error {
+                return NSFileProviderError(.serverUnreachable)
+            }
+            return error
+        }
+        if let stateURL {
+            WorkingSetStore.reset(at: stateURL)
+        }
+        return NSFileProviderError(.syncAnchorExpired)
     }
 
     private static let resumeTokenPrefix = "beebeeb-page:"
@@ -868,7 +921,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     )
                 }
             } catch {
-                observer.finishEnumeratingWithError(error)
+                observer.finishEnumeratingWithError(Self.changesError(error))
             }
         }
     }

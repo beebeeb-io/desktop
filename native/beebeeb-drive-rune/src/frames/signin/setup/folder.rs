@@ -5,14 +5,14 @@
 //! No frame gate: a UI test and a look at the headless render instead (as the contract says of the refusal modal).
 
 use rune::tok::Family;
-use rune::{El, TextStyle, col};
+use rune::{col, El, TextStyle};
 
 use super::source::{FolderAsk, FolderSaid};
 use super::view::{actions, ghost, primary};
-use super::{Step, Ui, act, icons};
-use crate::ui::view_state::{ViewState, try_again, view_state};
-use crate::theme::tokens::{Theme, type_};
+use super::{act, icons, Step, Ui};
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::au::{self, ButtonState, Keys, Tone};
+use crate::ui::view_state::{try_again, view_state, ViewState};
 use crate::ui::{kit, setup};
 
 /// The folder as the PC writes it: mono, as every path the app shows.
@@ -23,11 +23,19 @@ pub fn said(why: FolderSaid) -> (&'static str, &'static str) {
     match why {
         FolderSaid::Network => (
             "That folder is on the network",
-            "Beebeeb's folder has to be on this PC. Choose a folder on one of its drives.",
+            concat!("Beebeeb's folder has to be on ", beebeeb_engine::device_word!(), ". Choose a folder on one of its drives."),
         ),
         FolderSaid::System => (
-            "That folder belongs to Windows",
-            "A drive itself and the folders of Windows and its programs can't be Beebeeb's folder. Choose another folder.",
+            if cfg!(target_os = "macos") {
+                "That folder belongs to macOS"
+            } else {
+                "That folder belongs to Windows"
+            },
+            if cfg!(target_os = "macos") {
+                "A disk itself and the folders of macOS and its apps can't be Beebeeb's folder. Choose another folder."
+            } else {
+                "A drive itself and the folders of Windows and its programs can't be Beebeeb's folder. Choose another folder."
+            },
         ),
         FolderSaid::Home => (
             "That folder holds everything of yours",
@@ -47,11 +55,15 @@ pub fn said(why: FolderSaid) -> (&'static str, &'static str) {
             "Nothing was changed. Try again, or choose another folder.",
         ),
         FolderSaid::NotAFullPath => (
-            "That isn't a folder on this PC",
-            "Choose a folder on one of this PC's drives.",
+            concat!("That isn't a folder on ", beebeeb_engine::device_word!()),
+            concat!("Choose a folder on one of ", beebeeb_engine::device_word!(), "'s drives."),
         ),
         FolderSaid::NoPicker => (
-            "Windows' folder picker didn't open",
+            if cfg!(target_os = "macos") {
+                "The folder picker didn't open"
+            } else {
+                "Windows' folder picker didn't open"
+            },
             "Nothing was changed. Try again, or use the suggested folder.",
         ),
     }
@@ -59,8 +71,11 @@ pub fn said(why: FolderSaid) -> (&'static str, &'static str) {
 
 /// The words of the state "sync started, but the folder could not be written to the settings".
 const UNSAVED_TITLE: &str = "Couldn't save your folder choice";
-const UNSAVED_TEXT: &str =
-    "Sync is running in the folder you chose, but this PC didn't keep the choice. Your files are safe.";
+const UNSAVED_TEXT: &str = concat!(
+    "Sync is running in the folder you chose, but ",
+    beebeeb_engine::device_word!(),
+    " didn't keep the choice. Your files are safe."
+);
 const UNSAVED_BANNER_TITLE: &str = "Beebeeb's settings couldn't be written";
 const UNSAVED_BANNER_TEXT: &str =
     "Try again in a moment. Until it is saved, Beebeeb may use another folder after a restart.";
@@ -139,7 +154,11 @@ pub fn ask(ask: &FolderAsk, k: &mut Keys, t: &Theme) -> El {
     setup::column()
         .child(au::heading(
             "Choose where Beebeeb's folder goes",
-            Some("Your files show up in this folder, and in File Explorer. Nothing syncs until you choose."),
+            Some(concat!(
+                "Your files show up in this folder, and in ",
+                beebeeb_engine::file_manager!(),
+                ". Nothing syncs until you choose."
+            )),
             false,
             t,
         ))
@@ -160,7 +179,11 @@ pub fn not_yet(step: Step, k: &mut Keys, t: &Theme) -> El {
     setup::column()
         .child(au::heading(
             step.label(),
-            Some("This isn't in this version of Beebeeb yet. Nothing is turned on, and nothing is changed on this PC."),
+            Some(concat!(
+                "This isn't in this version of Beebeeb yet. Nothing is turned on, and nothing is changed on ",
+                beebeeb_engine::device_word!(),
+                "."
+            )),
             false,
             t,
         ))
@@ -172,7 +195,12 @@ pub fn not_yet(step: Step, k: &mut Keys, t: &Theme) -> El {
 pub fn backup_loading(k: &mut Keys, t: &Theme) -> El {
     setup::column()
         .child(au::heading("Back up your folders", None, false, t))
-        .child(view_state(ViewState::Loading { words: "Looking at the folders on this PC\u{2026}" }, t))
+        .child(view_state(
+            ViewState::Loading {
+                words: concat!("Looking at the folders on ", beebeeb_engine::device_word!(), "\u{2026}"),
+            },
+            t,
+        ))
         .child(
             actions()
                 .child(primary(k, "Turn on backup", ButtonState::Disabled, t, Ui::go_on))
@@ -190,7 +218,11 @@ pub fn backup_failed(k: &mut Keys, t: &Theme) -> El {
             ViewState::Failed {
                 key: "backup-failed",
                 title: "Couldn\u{2019}t read your folders",
-                why: "Beebeeb couldn\u{2019}t read the folders on this PC. Nothing is turned on.",
+                why: concat!(
+                    "Beebeeb couldn\u{2019}t read the folders on ",
+                    beebeeb_engine::device_word!(),
+                    ". Nothing is turned on."
+                ),
                 retry: Some(retry),
             },
             t,
@@ -199,7 +231,11 @@ pub fn backup_failed(k: &mut Keys, t: &Theme) -> El {
 }
 
 /// What step 3 says when the read worked and found nothing: only what is true (this app cannot add folders).
-pub const BACKUP_NONE: &str = "Beebeeb found no folders it can back up on this PC. Nothing is turned on.";
+pub const BACKUP_NONE: &str = concat!(
+    "Beebeeb found no folders it can back up on ",
+    beebeeb_engine::device_word!(),
+    ". Nothing is turned on."
+);
 
 /// Step 3 when the read worked and this PC has no folder to offer: said as that, with a way on.
 pub fn backup_none(k: &mut Keys, t: &Theme) -> El {

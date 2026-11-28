@@ -18,7 +18,7 @@
 //!
 //! Must not: log a password, a passkey's name or id, or a server's words; draw a row of an earlier session.
 
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
@@ -29,9 +29,9 @@ use chrono::{DateTime, Utc};
 use zeroize::Zeroizing;
 
 use super::log;
-use super::stamp::{Stamp, stamp};
-use crate::frames::account::Pane;
+use super::stamp::{stamp, Stamp};
 use crate::frames::account::source::{PaneState, Passkey, Password, Refused};
+use crate::frames::account::Pane;
 use crate::frames::signin::source::PasskeyOutcome;
 
 /// What the pane holds is not read again, when it opens, for this long.
@@ -50,7 +50,11 @@ const WRONG: &str = "Incorrect password. Nothing was changed.";
 const OFFLINE: &str = "Beebeeb can't be reached. Nothing was changed.";
 const CANCELLED: &str = "Adding the passkey was cancelled. Nothing was changed.";
 const SLOW_DOWN: &str = "Too many tries. Wait a moment, then try again. Nothing was changed.";
-const NO_DIALOG: &str = "Passkeys are not available on this PC. Nothing was changed.";
+const NO_DIALOG: &str = concat!(
+    "Passkeys are not available on ",
+    beebeeb_engine::device_word!(),
+    ". Nothing was changed."
+);
 
 /// What a change asked of the engine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,7 +148,8 @@ fn passkey_of(row: &PasskeyRow) -> Passkey {
 /// The name a new passkey is given: the person is not asked (the system's dialog says where it is saved), so it
 /// says what it is and when it was made; Rename changes it later.
 pub(crate) fn new_name() -> String {
-    format!("Windows PC, {}", chrono::Local::now().format("%-d %b %Y"))
+    let device = if cfg!(target_os = "macos") { "Mac" } else { "Windows PC" };
+    format!("{device}, {}", chrono::Local::now().format("%-d %b %Y"))
 }
 
 impl<C: CredentialStores + 'static> PasskeyCalls<C> {
@@ -533,7 +538,7 @@ pub fn host_window() -> Option<isize> {
         use windows_sys::Win32::Foundation::{HWND, LPARAM};
         use windows_sys::Win32::System::Threading::GetCurrentProcessId;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            EnumWindows, GW_OWNER, GetForegroundWindow, GetWindow, GetWindowThreadProcessId, IsWindowVisible,
+            EnumWindows, GetForegroundWindow, GetWindow, GetWindowThreadProcessId, IsWindowVisible, GW_OWNER,
         };
 
         fn pid_of(hwnd: HWND) -> u32 {

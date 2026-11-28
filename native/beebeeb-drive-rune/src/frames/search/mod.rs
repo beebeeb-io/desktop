@@ -181,8 +181,8 @@ impl SearchUi {
 /// The reason under "not available" while this PC's local state is another account's (Photos' words, for Search):
 /// the title, then the line. No account's name, email or count.
 pub const NOT_THIS_ACCOUNTS: (&str, &str) = (
-    "This PC holds another account\u{2019}s files",
-    "Search shows your files once this PC has synced with your account.",
+    concat!(beebeeb_engine::device_word_cap!(), " holds another account\u{2019}s files"),
+    concat!("Search shows your files once ", beebeeb_engine::device_word!(), " has synced with your account."),
 );
 
 /// What the content area shows.

@@ -143,9 +143,9 @@ fn each_filter_lists_the_boards_changes() {
 fn a_click_on_a_filter_narrows_the_list_and_checks_its_tab() {
     let mut rt = runtime(scenes::dw_1301, false);
     assert_eq!(text(&rt, "seg-0-problems-3-label"), "Problems \u{00B7} 3");
-    click(&mut rt, "seg-0-this-pc");
+    click(&mut rt, &format!("seg-0-{}", crate::ui::settings_shell::slug(beebeeb_engine::os_words::device_word_cap())));
     assert_eq!(rt.state.this_pc.filter, Filter::ThisPc);
-    assert!(rt.state.this_pc.changes().iter().all(|c| c.origin.label() == "This PC"));
+    assert!(rt.state.this_pc.changes().iter().all(|c| c.origin.label() == os("This PC")));
     assert!(!has(&rt, "problems-bar"));
     click(&mut rt, "seg-0-problems-3");
     assert_eq!(rt.state.this_pc.filter, Filter::Problems);
@@ -254,7 +254,7 @@ fn available_offline_lists_what_is_kept_with_its_total() {
     assert_eq!(text(&rt, "item-count"), "3 items \u{00B7} 1.4 GB");
     assert_eq!(
         text(&rt, "status-details"),
-        "3 available offline \u{00B7} 1.4 GB on this PC"
+        os("3 available offline \u{00B7} 1.4 GB on this PC")
     );
     assert_eq!(text(&rt, "row-0-size"), "1.4 GB");
     assert_eq!(text(&rt, "row-1-size"), "27.8 MB");
@@ -290,7 +290,7 @@ fn the_row_menu_opens_from_the_keyboard_and_removes_the_copy() {
     assert_eq!(info(&rt, "menu").role, "menu");
     assert_eq!(
         info(&rt, "menu-item-2").label.as_deref(),
-        Some("Remove from this PC")
+        Some(os("Remove from this PC").as_str())
     );
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
@@ -305,19 +305,21 @@ fn the_row_menu_opens_from_the_keyboard_and_removes_the_copy() {
 /// DW-0715 (no menu) the section's own. Each frame reads as the board draws it.
 #[test]
 fn the_status_line_under_the_row_menu_reads_as_dw_1306_draws_it() {
-    const FILES: &str = "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only";
-    const SECTION: &str = "3 available offline \u{00B7} 1.4 GB on this PC";
+    // The Files frame's own sample line (frames/files draws it): its words are that frame's, so either form is right.
+    let board_files = "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only";
+    let files = |shown: String| shown == board_files || shown == os(board_files);
+    let section = os("3 available offline \u{00B7} 1.4 GB on this PC");
     for dark in [false, true] {
         let mut rt = runtime(scenes::dw_1306, dark);
         assert!(has(&rt, "menu"));
-        assert_eq!(text(&rt, "status-details"), FILES, "DW-1306, dark {dark}");
+        assert!(files(text(&rt, "status-details")), "DW-1306, dark {dark}");
         assert_eq!(text(&rt, "status-text"), "Up to date");
         assert_eq!(count(&rt, "status-details", ""), 1, "one status line, never two");
         press(&mut rt, Key::Escape);
         assert!(!has(&rt, "menu"));
         assert_eq!(
             text(&rt, "status-details"),
-            SECTION,
+            section,
             "DW-0715 again once the menu closes"
         );
     }
@@ -548,7 +550,7 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     open_ask(&mut rt);
     assert!(has(&rt, "dlg"), "the ask is on screen");
     assert_eq!(info(&rt, "dlg").role, "dialog");
-    assert_eq!(text(&rt, "dlg-title"), "Remove all from this PC?");
+    assert_eq!(text(&rt, "dlg-title"), os("Remove all from this PC?"));
     assert_eq!(
         text(&rt, "dlg-sub"),
         "3 items will be online only. Nothing is deleted from Beebeeb."
@@ -696,14 +698,14 @@ fn with_state(section: super::Section, source: Box<dyn ThisPcSource>, prepare: f
 #[test]
 fn without_lists_each_section_says_why_and_never_that_the_pc_is_empty() {
     let cases = [
-        (Standing::Reading, "Reading this PC", "loading-words"),
-        (Standing::Unreadable, "Couldn't read this PC", "unreadable-title"),
-        (Standing::AnotherAccounts, "Not available for this account", "another-account-title"),
+        (Standing::Reading, os("Reading this PC"), "loading-words"),
+        (Standing::Unreadable, os("Couldn't read this PC"), "unreadable-title"),
+        (Standing::AnotherAccounts, os("Not available for this account"), "another-account-title"),
     ];
     for (standing, title, key) in cases {
         for section in [super::Section::SyncHistory, super::Section::AvailableOffline] {
             let rt = with_source(section, Box::new(NoLists(standing)));
-            assert_eq!(text(&rt, key), title, "{standing:?} in {section:?}");
+            assert_eq!(text(&rt, key), title.as_str(), "{standing:?} in {section:?}");
             // Only a failed read has a Try again.
             assert_eq!(has(&rt, "unreadable-retry"), standing == Standing::Unreadable);
             for said in rt.elements().iter().filter_map(|e| e.text.clone()) {
@@ -727,7 +729,7 @@ fn without_lists_each_section_says_why_and_never_that_the_pc_is_empty() {
 
 #[test]
 fn a_real_pc_never_draws_the_boards_sample_status_line() {
-    const SAMPLE: &str = "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only";
+    let sample = os("4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only");
     // Nothing kept, and kept items with the row menu open: the two places the board keeps Files' sample counts.
     let rt = with_source(super::Section::AvailableOffline, Box::new(NoLists(Standing::Ready)));
     assert_eq!(text(&rt, "status-details"), "Nothing available offline");
@@ -735,7 +737,7 @@ fn a_real_pc_never_draws_the_boards_sample_status_line() {
     rt.update(|s, _| s.this_pc.open_menu(0, (430.0, 190.0)));
     rt.frame(0.0);
     assert!(has(&rt, "menu"));
-    assert_ne!(text(&rt, "status-details"), SAMPLE);
+    assert_ne!(text(&rt, "status-details"), sample);
     assert!(text(&rt, "status-details").starts_with("3 available offline"));
 }
 
@@ -1181,4 +1183,34 @@ fn a_kept_file_opens_through_open_file() {
     rt.state.this_pc.ask(Intent::Open(file.clone()));
     poll(&mut rt);
     assert_eq!(*calls.lock().unwrap(), [Call::OpenDefault(file)]);
+}
+
+fn os(board: &str) -> String {
+    beebeeb_engine::os_words::for_this_os(board)
+}
+
+/// Dm-68: a kept item's row says how far its copy is, a failed one says so with Try again.
+#[test]
+fn available_offline_rows_show_progress_and_a_failure_with_try_again() {
+    let mut rt = runtime(scenes::dm_68, false);
+    assert_eq!(text(&rt, "row-0-date"), "5 of 12 files \u{00B7} 45%");
+    assert_eq!(text(&rt, "row-1-date"), "50% \u{00B7} 5.6 of 11.3 MB");
+    assert_eq!(info(&rt, "row-0-bar").role, "progressbar");
+    assert!(has(&rt, "row-1-bar-fill"));
+    assert_eq!(text(&rt, "row-2-date"), "Download failed");
+    assert!(has(&rt, "row-2-retry"));
+    click(&mut rt, "row-2-retry");
+    assert!(!has(&rt, "row-2-retry"), "the failure goes once it is tried again");
+    // The other two keep their bars.
+    assert!(has(&rt, "row-0-bar"));
+    // The status line says how many files come down and how far, not the kept total as if it were here.
+    assert_eq!(text(&rt, "status-details"), "Downloading 2 files \u{00B7} 11.3 of 30.3 MB");
+}
+
+/// Dm-68: with nothing coming down the status line names what is kept, as before.
+#[test]
+fn the_status_line_names_the_kept_total_when_nothing_comes_down() {
+    let rt = runtime(scenes::dw_0715, false);
+    assert!(text(&rt, "status-details").contains("available offline"));
+    assert_eq!(super::offline::downloading_words((1, 5_347_737, 11_840_437)), "Downloading 1 file \u{00B7} 5.1 of 11.3 MB");
 }

@@ -5,11 +5,11 @@
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 use super::source::{
-    BUNDLED_SAMPLE_PNG, Explorer, FixtureSetupSource, PreviewFormat, PreviewSize, Script, SetupSource,
+    Explorer, FixtureSetupSource, PreviewFormat, PreviewSize, Script, SetupSource, BUNDLED_SAMPLE_PNG,
 };
-use super::{Answered, CompareMode, Intent, SHEET, Setting, Step, Ui, scene};
+use super::{scene, Answered, CompareMode, Intent, Setting, Step, Ui, SHEET};
 use crate::shell::app::Event;
-use crate::{State, init, view};
+use crate::{init, view, State};
 
 #[path = "folder_tests.rs"]
 mod folder_tests;
@@ -23,9 +23,15 @@ const FRAMES: [(&str, &str); 11] = [
     ("DW-0203", "Back up your folders"),
     ("DW-0204", "Thumbnails and previews"),
     ("DW-0209", "Thumbnails and previews"),
-    ("DW-0206", "Beebeeb is in File Explorer"),
-    ("DW-0206b", "Adding Beebeeb to File Explorer"),
-    ("DW-0280", "Couldn't add Beebeeb to File Explorer"),
+    ("DW-0206", concat!("Beebeeb is in ", beebeeb_engine::file_manager!())),
+    (
+        "DW-0206b",
+        concat!("Adding Beebeeb to ", beebeeb_engine::file_manager!()),
+    ),
+    (
+        "DW-0280",
+        concat!("Couldn't add Beebeeb to ", beebeeb_engine::file_manager!()),
+    ),
     ("DW-0207", "Stay informed"),
     ("DW-0281", "Open Beebeeb when you log in"),
     ("DW-0208", "You're set up"),
@@ -397,12 +403,15 @@ fn file_explorer_failing_offers_try_again_and_a_way_on() {
     assert_eq!(info(&rt, "explorer-failed").role, "group");
     assert_eq!(
         info(&rt, "side-status").text.as_deref(),
-        Some("Couldn't add Beebeeb to File Explorer")
+        Some(beebeeb_engine::os_words::for_this_os("Couldn't add Beebeeb to File Explorer").as_str())
     );
     // Try again: the fixture's second registration works, and setup goes on at this step (DW-0206).
     click(&mut rt, "explorer-failed-retry");
     assert_eq!(ui_step(&mut rt), Step::Explorer);
-    assert_eq!(info(&rt, "title").text.as_deref(), Some("Beebeeb is in File Explorer"));
+    assert_eq!(
+        info(&rt, "title").text.as_deref(),
+        Some(concat!("Beebeeb is in ", beebeeb_engine::file_manager!()))
+    );
     let mut rt = runtime("DW-0280");
     click(&mut rt, "btn-0");
     assert_eq!(ui_step(&mut rt), Step::Notifications);
@@ -609,7 +618,10 @@ fn setup_add_passkey_each_refusal_says_its_line_and_step_one_stays_skippable() {
         ),
         (
             PasskeyRefused::NotOnThisPc,
-            "Passkeys are not available on this PC. Nothing was changed.",
+            &*Box::leak(
+                beebeeb_engine::os_words::for_this_os("Passkeys are not available on this PC. Nothing was changed.")
+                    .into_boxed_str(),
+            ),
         ),
         (
             PasskeyRefused::NotAdded,
@@ -667,18 +679,16 @@ fn setup_add_passkey_an_empty_password_is_asked_for_in_the_field() {
         ..Script::default()
     });
     let mut rt = runtime_at(ui_, 2.0, false);
-    assert!(
-        rt.elements()
-            .iter()
-            .any(|e| !e.exiting && e.text.as_deref() == Some("To confirm it's you."))
-    );
+    assert!(rt
+        .elements()
+        .iter()
+        .any(|e| !e.exiting && e.text.as_deref() == Some("To confirm it's you.")));
     click(&mut rt, "btn-0");
     assert_eq!(ui_step(&mut rt), Step::Passkey);
-    assert!(
-        rt.elements()
-            .iter()
-            .any(|e| !e.exiting && e.text.as_deref() == Some("Enter your password to confirm it's you."))
-    );
+    assert!(rt
+        .elements()
+        .iter()
+        .any(|e| !e.exiting && e.text.as_deref() == Some("Enter your password to confirm it's you.")));
     assert_eq!(count(&rt, "passkey-refused"), 0);
     assert_eq!(focused(&rt).as_deref(), Some(super::PASSWORD_KEY));
 }

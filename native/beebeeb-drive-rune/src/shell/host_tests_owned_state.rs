@@ -8,6 +8,7 @@
 //! real start and its refusal run in the engine crate's `the_local_state_follows_the_account` test.
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use beebeeb_engine::account_binding::Identity;
 use beebeeb_engine::app::{Engine, EngineConfig, LocalStateRefused, SyncStartRefused};
@@ -150,6 +151,23 @@ fn sign_in(engine: &Engine<MemoryCredentials>, account: &FakeAccount, phrase: &s
     assert_eq!(engine.gate(), EngineGate::Ready);
 }
 
+/// Settles until the root the opened gate asked for has answered. The shell reads it on its `files-read` worker
+/// (`FolderReads`), so a loaded runner can answer after more frames than a fixed count of settles: the list was seen
+/// empty, with no error, before its answer came.
+fn settle_until_read(rt: &mut Runtime<State>) {
+    settle(rt);
+    let until = Instant::now() + Duration::from_secs(10);
+    while rt.state.folder_reads.pending.is_some() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+        settle(rt);
+    }
+    assert!(
+        rt.state.folder_reads.pending.is_none(),
+        "the gate's folder read never answered"
+    );
+    settle(rt);
+}
+
 /// The first account's local state stays on this PC after its sign-out. The second account, signed in and
 /// unlocked, is shown the refusal and nothing of the first account: not in the window's elements (text or label),
 /// not in the flyout, not in a source's answer. The first account, back, has its list again.
@@ -250,7 +268,7 @@ fn another_accounts_local_state_is_refused_and_nothing_of_it_is_shown() {
 
     // The first account: its list, its flyout rows. (The control: the needles ARE drawn when they may be.)
     sign_in(&engine, &first, TEST_PHRASE);
-    settle(&mut rt);
+    settle_until_read(&mut rt);
     assert_eq!(engine.local_state_refusal(), None);
     assert_eq!(names(&rt), [FOLDER, FILE]);
     assert_eq!(rt.state.list_error, None);
@@ -286,8 +304,7 @@ fn another_accounts_local_state_is_refused_and_nothing_of_it_is_shown() {
 
     // The second account, signed in and unlocked: the refusal, and nothing of the first account.
     sign_in(&engine, &second, OTHER_PHRASE);
-    settle(&mut rt);
-    settle(&mut rt);
+    settle_until_read(&mut rt);
     assert_eq!(rt.state.shell.app.gate(), GateState::Ready);
     assert_eq!(engine.local_state_refusal(), Some(LocalStateRefused::OtherAccount));
     assert_eq!(drive.list(None).err(), Some(SourceError::NotThisAccounts));
@@ -315,8 +332,7 @@ fn another_accounts_local_state_is_refused_and_nothing_of_it_is_shown() {
     settle(&mut rt);
     assert_nothing_of_the_first(&rt, "after the second account's sign-out");
     sign_in(&engine, &first, TEST_PHRASE);
-    settle(&mut rt);
-    settle(&mut rt);
+    settle_until_read(&mut rt);
     assert_eq!(engine.local_state_refusal(), None);
     assert_eq!(rt.state.list_error, None);
     assert_eq!(names(&rt), [FOLDER, FILE], "the first account's list is back");

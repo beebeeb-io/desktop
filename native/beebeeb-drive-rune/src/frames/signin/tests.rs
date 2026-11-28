@@ -8,13 +8,13 @@ use std::rc::Rc;
 use rune::{Env, Key, KeyEvent, Mods, Runtime, TextEdit};
 
 use super::source::{
-    CodeKind, DeviceStatus, FixtureSignInSource, GateState, HelloOutcome, NextAfterSignIn, Script, SharedSession,
-    SignInEvent, SignInProblem, SignInSource, board,
+    board, CodeKind, DeviceStatus, FixtureSignInSource, GateState, HelloOutcome, NextAfterSignIn, Script,
+    SharedSession, SignInEvent, SignInProblem, SignInSource,
 };
-use super::{EMAIL_KEY, FIRST_BUTTON_KEY, HelloFailure, Intent, PASSWORD_KEY, Screen, TITLE_KEY, Ui, scene};
+use super::{scene, HelloFailure, Intent, Screen, Ui, EMAIL_KEY, FIRST_BUTTON_KEY, PASSWORD_KEY, TITLE_KEY};
 use crate::shell::app::Event;
 use crate::ui::{au, kit};
-use crate::{State, init, view};
+use crate::{init, view, State};
 
 const BUILT: [(&str, &str); 15] = [
     ("DW-A01", "Welcome to Beebeeb Drive"),
@@ -286,7 +286,7 @@ fn windows_hello_is_asked_every_time_and_its_answers_are_frames() {
     assert_eq!(info(&rt, "banner-0").role, "alert");
     assert_eq!(
         info(&rt, "btn-0-label").text.as_deref(),
-        Some("Try Windows Hello again")
+        Some(beebeeb_engine::os_words::for_this_os("Try Windows Hello again").as_str())
     );
     let mut rt6 = runtime("DW-A06");
     assert_eq!(info(&rt6, "banner-0").role, "status", "cancelling is not an error");
@@ -676,7 +676,7 @@ fn a_failed_windows_hello_puts_focus_on_try_again() {
         assert!(deliver(&mut rt, &queue, SignInEvent::Hello(outcome)));
         assert_eq!(
             info(&rt, "btn-0-label").text.as_deref(),
-            Some("Try Windows Hello again")
+            Some(beebeeb_engine::os_words::for_this_os("Try Windows Hello again").as_str())
         );
         assert_eq!(focused(&rt).as_deref(), Some(FIRST_BUTTON_KEY), "{outcome:?}");
     }

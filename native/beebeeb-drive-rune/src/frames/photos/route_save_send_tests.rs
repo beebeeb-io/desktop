@@ -197,7 +197,8 @@ fn save_to_pc_asks_the_panel_with_the_photos_name_and_saves_the_file() {
     let mut rt = window(None);
     rt.update(|s, tx| save_to_pc(s, tx, platform.clone(), saver.clone(), A));
     for _ in 0..200 {
-        if !saver.saved.lock().unwrap().is_empty() {
+        // The saver records the call before it writes: wait for the file, not only the record.
+        if !saver.saved.lock().unwrap().is_empty() && dest.exists() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));

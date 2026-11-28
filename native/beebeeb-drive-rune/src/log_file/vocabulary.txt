@@ -1,6 +1,6 @@
+!
 # The words of every string literal and field name at the engine's and this crate's tracing calls, one per line,
 # sorted, lowercase. A test (vocabulary_sync.rs) fails, naming the words, when a log call's word is missing here.
-!
 $home
 +
 0x
@@ -29,6 +29,7 @@ ack
 acknowledged
 acquire
 action
+active
 activity
 add
 added
@@ -86,6 +87,7 @@ authenticated
 auto-resolving
 auto_resolve_keep_both
 av1
+available
 away
 back
 backed-up
@@ -104,6 +106,7 @@ bases
 batch
 be
 beat
+became
 because
 beebeeb
 beebeeb-sync
@@ -120,6 +123,7 @@ binding
 bit
 bitmap
 blobs
+bookmarks
 bootstrapping
 both
 branch
@@ -169,6 +173,7 @@ child
 chosen
 chunk
 chunk_count
+chunks
 claims
 claims_cleared
 class
@@ -214,6 +219,7 @@ connected
 connection
 content
 content_unknown
+contents_checked
 context
 continued
 continuing
@@ -251,6 +257,7 @@ database
 dated
 db
 db_ms
+debt
 decision
 declared
 decline
@@ -267,6 +274,7 @@ dehydrated
 delete
 delete_count
 deleted
+delivered
 depth
 descendant
 descending
@@ -294,10 +302,12 @@ disagreeing
 discard
 discarded
 disk
+dismissed
 dispatch
 dispatched
 dnxhd
 does
+domain
 done
 down
 download
@@ -383,10 +393,13 @@ filename
 files
 final
 finalization
+find
 finder
+finish
 finished
 fired
 first
+first-listing
 first_ids
 first_pass
 flac
@@ -429,6 +442,7 @@ generated
 generation
 getpwuid_r
 getthumbnail
+given
 given-up
 go
 goes
@@ -454,6 +468,7 @@ held_for_review
 held_key_replaced
 helper
 helper_ms
+here
 hevc
 hit
 holds
@@ -538,6 +553,7 @@ legacy_state_dir
 len
 length
 let
+lifecycle
 lifetime
 limit
 limits
@@ -556,14 +572,17 @@ local_id
 local_prunable
 locally-removed
 locally-renamed
+location
 lock
 locked
+log
 longer
 longest_ms
 longest_rows
 looked
 lookup
 loop
+mac
 machine
 macos
 made
@@ -576,12 +595,14 @@ marking
 marks
 match
 matched
+materialise
 materialized
 max
 max_attempts
 max_bytes
 max_new_uploads
 may
+mb
 meanwhile
 media
 merged
@@ -591,6 +612,7 @@ metadata
 mid-hydrate
 migrated
 migration
+millis
 min
 mine
 mints
@@ -607,6 +629,7 @@ moved_files
 moved_items
 moved_legacy_device_identity
 moved_legacy_lock
+moving
 mp2
 mp3
 mpeg2
@@ -649,6 +672,12 @@ notify_conflict
 notify_quota_warning
 notify_sync_complete
 now
+nscocoaerrordomain
+nsfileprovidererrordomain
+nsosstatuserrordomain
+nsposixerrordomain
+nsurlerrordomain
+nsworkspace
 null
 null-envelope
 object
@@ -660,6 +689,7 @@ offset
 ok
 old
 old_version
+older
 on
 on-demand
 on_disk_whole
@@ -710,6 +740,7 @@ page
 pages
 panic
 panicked
+parallel
 parameters
 parent
 parent_id
@@ -765,6 +796,7 @@ post-queue
 pre-upload
 presentation_read_failed
 presented
+preserved
 preserving
 preview
 previews
@@ -813,6 +845,7 @@ raised
 ran
 range
 ranges
+rate
 rc
 re-bootstrapping
 re-download
@@ -839,6 +872,7 @@ receiver
 reconcile
 reconcile_os_state
 reconcile_placeholder_state
+reconciler
 record
 recorded
 records
@@ -855,6 +889,7 @@ refusing
 register
 registered
 registration
+reimport
 rejected
 rejecting
 relative
@@ -871,6 +906,7 @@ removing
 ren
 rename
 renamed
+reopened
 repair
 replaced
 replacement
@@ -901,6 +937,7 @@ restarts
 restore
 restore_bookkeeping_failed
 restored
+result
 resume
 resumed
 ret
@@ -932,6 +969,7 @@ same_payload
 sandbox
 save
 saved
+says
 scaffold
 scaffold_dropped
 scaffolded
@@ -943,6 +981,7 @@ scope
 sealed-key
 search
 search-index
+secs
 seeded
 seeding
 seen
@@ -964,6 +1003,7 @@ setting
 settings
 settled
 settling
+setup
 several
 shard
 shards
@@ -1000,6 +1040,7 @@ slides
 small
 smart
 snapshot
+so
 socket
 something
 sound
@@ -1117,9 +1158,11 @@ trashing
 tree
 tried
 tries
+trigger
 true_size_bytes
 trying
 ttl
+turn-off
 turned
 turned_off
 type
@@ -1129,6 +1172,7 @@ unavailable
 unchanged
 under
 undone
+unexpected
 unfinished
 uninstall
 unjournalled
@@ -1184,6 +1228,7 @@ vp8
 vp9
 w2
 w3
+wait
 waiting
 waits
 walk
@@ -1198,6 +1243,7 @@ web
 went
 were
 what
+when
 where
 which
 while

@@ -983,6 +983,46 @@ fn a_too_old_windows_needs_a_windows_update() {
     assert_eq!(host.helper_pid(), None);
 }
 
+/// Dm-84 (RC15): a start the sandbox refused is tried once more at once on a Mac, and the document opens on that
+/// second start; nothing else waits for a Try again.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refused_start_is_tried_once_more_and_the_document_opens() {
+    let registry = Registry::new();
+    let refusal = SandboxError::NotConfined("no handshake");
+    let fake = Fake::new(|link| serve(link, &[LETTER])).refusing_first(1, refusal);
+    let (mut host, log, _) = open_fake(fake, &registry, DocKind::Docx);
+    let mut events = Vec::new();
+    assert!(until_open(&mut host, &mut events));
+    assert!(matches!(host.state(), OfficeState::Pages { .. }), "{:?}", host.state());
+    // Refused once, started once more.
+    assert_eq!(log.start_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(log.starts(), 1, "one helper runs");
+}
+
+/// Dm-84: a start refused twice is not tried a third time: the window hears "could not start" (and a Mac shows the
+/// file in Quick Look, `viewer_office/glue.rs`), with the one Try again left.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_start_refused_twice_stops_with_failed() {
+    let registry = Registry::new();
+    let refusal = SandboxError::NotConfined("the kernel reports no sandbox");
+    let fake = Fake::new(|link| serve(link, &[LETTER])).failing_start(refusal);
+    let (mut host, log, _) = open_fake(fake, &registry, DocKind::Docx);
+    let mut events = Vec::new();
+    let ended = |host: &OfficeHost, _: &[Event]| !matches!(host.state(), OfficeState::Opening);
+    assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());
+    assert_eq!(
+        &host.state(),
+        &OfficeState::Stopped {
+            why: Stop::Failed,
+            can_retry: true
+        }
+    );
+    assert_eq!(log.start_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(log.starts(), 0);
+}
+
 #[cfg(not(windows))]
 #[test]
 fn no_sandbox_no_helper() {
@@ -991,10 +1031,10 @@ fn no_sandbox_no_helper() {
     let registry = Registry::new();
     let mut host = OfficeHost::open_in(&registry, &exe, DocKind::Docx, Zeroizing::new(doc()), noop_wake());
     let mut events = Vec::new();
-    let ended = |host: &OfficeHost, _: &[Event]| host.worker_ended() && !matches!(host.state(), OfficeState::Opening);
-    assert!(pump(&mut host, &mut events, ended), "{:?}", host.state());
-    assert_eq!(&host.state(), &OfficeState::NoPreview(NoPreview::NoSandbox));
-    assert_eq!(host.helper_pid(), None);
+    let answered = |host: &OfficeHost, _: &[Event]| start_was_answered(host);
+    assert!(pump(&mut host, &mut events, answered), "{:?}", host.state());
+    assert_not_started_unconfined(&host, "a file that is not a confined helper");
+    assert_eq!(pages_of(&events), 0, "nothing of the document was drawn");
     remove_runnable_helper(&exe);
 }
 
@@ -1187,6 +1227,28 @@ fn a_real_confined_helper_renders_page_one() {
 
 /// A named rule from two sizes to one.
 type Case = (&'static str, fn(u32, u32) -> u32);
+
+/// Drive-macos-92: a picture's helper answers `Opened` (one page), as a PDF's does: the worker takes it, and page 0
+/// can be asked. Without the arm in `kind_has_pages` every HEIC thumbnail ended as `Stop::Protocol`.
+#[test]
+fn picture_kind_opens_as_one_page_and_its_helper_is_not_killed() {
+    let registry = Registry::new();
+    let sizes = [PageSize { w_pt: 64.0, h_pt: 32.0 }];
+    let kind = DocKind::Picture(office::PictureKind::Heic);
+    let (mut host, log, _) = open_fake(Fake::new(move |link| serve(link, &sizes)), &registry, kind);
+    let mut events = Vec::new();
+    assert!(until_open(&mut host, &mut events), "no answer within 2 s");
+    assert_eq!(
+        &host.state(),
+        &OfficeState::Pages {
+            pages: 1,
+            sizes: sizes.to_vec()
+        }
+    );
+    assert_eq!(log.kills(), 0, "the helper stays for the page");
+    assert!(host.request_page(0, 1.0, None).is_some(), "page 0 can be asked");
+    assert!(pump_for(&mut host, &mut events, WITHIN, |_, events| pages_of(events) == 1), "{:?}", host.state());
+}
 
 /// RC2-3: a PDF's helper answers `Opened` (pages), as a document's does. The worker took that answer for Word and
 /// slides only, so every PDF ended as `Stop::Protocol` and its helper was killed before a page was asked.

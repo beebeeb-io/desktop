@@ -81,8 +81,21 @@ impl StateDb {
     #[cfg(target_os = "macos")]
     #[track_caller]
     pub(super) fn request_resnapshot_conn(conn: &Connection) -> Result<()> {
-        // RE3-e: who asked, by call site. At debug: on macOS a waiting upload asks on every pass.
-        tracing::debug!(at = %std::panic::Location::caller(), "re-snapshot requested");
+        // RE3-e: who asked, by call site. Info once (when none is pending); debug after: on macOS a waiting
+        // upload asks on every pass.
+        let at = std::panic::Location::caller();
+        let pending: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sync_state WHERE key = ?1)",
+                params![Self::NEEDS_RESNAPSHOT_KEY],
+                |row| row.get(0),
+            )
+            .unwrap_or(true);
+        if pending {
+            tracing::debug!(%at, "re-snapshot requested");
+        } else {
+            tracing::info!(%at, "re-snapshot requested");
+        }
         conn.execute(
             "INSERT INTO sync_state (key, value) VALUES (?1, '1')
              ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
@@ -240,7 +253,7 @@ impl StateDb {
     /// Returns the number of rows touched (a row updated for both status and pin
     /// counts the affected-row total across both statements). Empty input is a
     /// fast `Ok(0)` with no transaction opened.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn reconcile_os_state(
         &self,
         deltas: &[(String, Option<FileStatus>, Option<PinState>)],
@@ -449,6 +462,7 @@ impl StateDb {
         let tip: i64 = conn.query_row("SELECT COALESCE((SELECT MAX(seq) FROM fp_changes), 0)", [], |row| {
             row.get(0)
         })?;
+        check_anchor_not_ahead(&conn, since, tip)?;
         if tip <= since {
             // Up to date: echo the caller's anchor (or nil at genesis) and
             // deliver nothing. The anchor must not move — a stable anchor on a
@@ -500,6 +514,10 @@ impl StateDb {
                     )
                 })?,
         };
+        let tip_now: i64 = conn.query_row("SELECT COALESCE((SELECT MAX(seq) FROM fp_changes), 0)", [], |row| {
+            row.get(0)
+        })?;
+        check_anchor_not_ahead(&conn, since, tip_now)?;
         let mut stmt = conn.prepare(
             "SELECT seq, file_id, kind, old_parent_id, new_parent_id
              FROM fp_changes WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
@@ -542,6 +560,27 @@ impl StateDb {
         // Full page: there may be more — resume from the last delivered seq.
         let next = changes.last().map(|change| change.seq).unwrap_or(since);
         Ok(Some((changes, Some(anchor_bytes(next)))))
+    }
+    /// dm-41: one `Modified` change for every cloud-only row that has no change in the log yet, so a
+    /// replica that re-lists (or a fresh state.db) hears about the whole remote tree, not just what changed
+    /// after its anchor. Idempotent: rows already in the log are skipped. Returns how many rows it wrote.
+    #[cfg(any(target_os = "macos", test, feature = "test-support"))]
+    pub fn record_first_listing_changes(&self) -> Result<usize> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT file_id FROM files WHERE status = 'cloud_only'
+                 AND file_id NOT IN (SELECT file_id FROM fp_changes)",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for id in &ids {
+            record_file_change_conn(&tx, id, FpChangeKind::Modified, None)?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
     }
     /// Delete consumed change rows recorded before `before_epoch` (the sweep
     /// runs on a delay so a slow replica can still page through recent
@@ -760,5 +799,58 @@ impl StateDb {
         }
         tx.commit()?;
         Ok(ops.len())
+    }
+}
+
+/// dm-41: an anchor ahead of everything this database ever issued came from another database (a replica left
+/// over from 0.8.x, or a state.db made fresh): answer "sync anchor expired" so the system lists again. The
+/// high-water mark is the larger of the log tip and the persistent cursor, so a swept log never expires a
+/// current anchor.
+fn check_anchor_not_ahead(conn: &rusqlite::Connection, since: i64, tip: i64) -> Result<()> {
+    let cursor: i64 = conn
+        .query_row(
+            "SELECT last_anchor FROM fp_sync_anchor WHERE domain_id = '__default__'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    if since > tip.max(cursor) {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "fp sync anchor is ahead of this database (expired)".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod resnapshot_served_tests {
+    use super::*;
+
+    /// dm-52: the request seen after the list arrived is cleared once it is applied (no second bootstrap);
+    /// one made during the apply raises the counter past it and survives.
+    #[test]
+    fn a_request_during_the_listing_is_served_and_one_during_apply_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = StateDb::open(dir.path().join("state.db")).unwrap();
+        // Tick start: nothing pending. The request lands during the listing.
+        assert_eq!(db.peek_resnapshot_request().unwrap(), None);
+        db.request_resnapshot().unwrap();
+        // After the fetch, before the ingest: this list serves it.
+        let served = db.peek_resnapshot_request().unwrap().unwrap();
+        // A second request during the apply.
+        db.request_resnapshot().unwrap();
+        db.clear_resnapshot_request(served).unwrap();
+        assert!(
+            db.peek_resnapshot_request().unwrap().is_some(),
+            "a request made during apply survives"
+        );
+
+        // Without one during apply, the clear leaves nothing: no second bootstrap.
+        let db2 = StateDb::open(dir.path().join("state2.db")).unwrap();
+        db2.request_resnapshot().unwrap();
+        let served = db2.peek_resnapshot_request().unwrap().unwrap();
+        db2.clear_resnapshot_request(served).unwrap();
+        assert_eq!(db2.peek_resnapshot_request().unwrap(), None);
     }
 }

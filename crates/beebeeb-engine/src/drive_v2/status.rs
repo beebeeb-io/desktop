@@ -197,7 +197,7 @@ pub fn reason_for(change: &UnsentChange) -> Option<&'static str> {
     if let Some(block) = change.blocked {
         return Some(match block {
             "superseded" => "A newer version is already in Beebeeb.",
-            _ => "The copy to upload is gone from this PC.",
+            _ => concat!("The copy to upload is gone from ", device_word!(), "."),
         });
     }
     if change.parked {
@@ -205,7 +205,7 @@ pub fn reason_for(change: &UnsentChange) -> Option<&'static str> {
     }
     Some(match change.group.as_str() {
         "gave_up" => "Stopped after 5 tries.",
-        "not_marked_synced" => "Uploaded, but this PC couldn’t mark it as synced.",
+        "not_marked_synced" => concat!("Uploaded, but ", device_word!(), " couldn’t mark it as synced."),
         "storage_full" | "quota" => "Not enough space in your Beebeeb.",
         "signed_out" | "auth" => "Waiting for you to sign in.",
         "waiting_for_folder" => "Waiting for its folder to upload.",
@@ -239,25 +239,25 @@ fn parked_words(park: Option<&str>, exits: &[Exit]) -> &'static str {
             "Not sent: this file changed in Beebeeb before this change reached it. Choose which version to keep. Nothing was lost."
         }
         Some("stale_base") => {
-            "Not sent: this file changed in Beebeeb before this change reached it. Your copy stays on this PC. Nothing was lost."
+            concat!("Not sent: this file changed in Beebeeb before this change reached it. Your copy stays on ", device_word!(), ". Nothing was lost.")
         }
         Some("permission_denied") => {
-            "Not sent: this account can no longer change this file in Beebeeb. Your change stays on this PC. Nothing was lost."
+            concat!("Not sent: this account can no longer change this file in Beebeeb. Your change stays on ", device_word!(), ". Nothing was lost.")
         }
         Some("predecessor_lost") => {
-            "Not sent: Beebeeb lost track of the change made before this one. Your change stays on this PC. Nothing was lost."
+            concat!("Not sent: Beebeeb lost track of the change made before this one. Your change stays on ", device_word!(), ". Nothing was lost.")
         }
         Some("predecessor_parked") => {
-            "Waiting: an earlier change to this file on this PC has to be sent first. Nothing was lost."
+            concat!("Waiting: an earlier change to this file on ", device_word!(), " has to be sent first. Nothing was lost.")
         }
         Some("rekey_failed") => {
             "Not sent: Beebeeb couldn’t prepare this change after the file was created. Nothing was lost."
         }
         Some("payload_missing") => {
-            "This PC no longer has the bytes of this change, so it can’t be sent. The file on Beebeeb is as it was."
+            concat!(device_word_cap!(), " no longer has the bytes of this change, so it can’t be sent. The file on Beebeeb is as it was.")
         }
         Some("base_unknown") => {
-            "Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on this PC. Nothing was lost."
+            concat!("Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on ", device_word!(), ". Nothing was lost.")
         }
         _ => "Beebeeb couldn’t apply this change. Nothing was lost.",
     }
@@ -400,14 +400,18 @@ pub fn sync_problems(queue: &[UnsentChange]) -> Vec<SyncProblem> {
 fn held_reason(reason: &str) -> &'static str {
     match reason {
         "base_unknown" => {
-            "Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on this PC. Nothing was lost."
+            concat!(
+                "Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on ",
+                device_word!(),
+                ". Nothing was lost."
+            )
         }
-        _ => "Not sent: this PC is holding this change back.",
+        _ => concat!("Not sent: ", device_word!(), " is holding this change back."),
     }
 }
 
 /// The one row for every `content_unknown` file.
-const UNCHECKED_WORDS: &str = "Not sent until they are checked: this PC has no record of what these files held when they last synced, so it can’t tell whether any was changed. Nothing to do now. Nothing was lost.";
+const UNCHECKED_WORDS: &str = concat!("Not sent until they are checked: ", device_word!(), " has no record of what these files held when they last synced, so it can’t tell whether any was changed. Nothing to do now. Nothing was lost.");
 
 /// Task 2524: what the engine holds and does not send, as problems so it never looks synced: one per held edit whose
 /// base is unknown (id `held:<file id>`), and ONE summary row for the `content_unknown` files (id

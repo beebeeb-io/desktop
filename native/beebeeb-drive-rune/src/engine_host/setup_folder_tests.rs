@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use super::*;
 use crate::frames::global::sync_off::{Refused, SyncOff};
 use crate::frames::signin::setup::source::FolderSaid;
-use folder::{Found, PICKER_TITLE, start_now};
+use folder::{start_now, Found, PICKER_TITLE};
 
 const PICKED: &str = "/invented/disk/Cloud";
 
@@ -676,7 +676,10 @@ fn the_window_asks_for_the_folder_and_says_why_one_was_not_taken() {
     fixture.set_gate_for_scene(ShellGate::FirstRun);
     wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
     wait_for(&mut rt, "the folder was read", |rt| {
-        says(rt, "isn't in File Explorer yet")
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("isn't in File Explorer yet").as_str(),
+        )
     });
     assert!(!says(&rt, "Adding"), "nothing is being added while no folder is chosen");
     to_file_explorer(&mut rt);
@@ -700,11 +703,19 @@ fn the_window_asks_for_the_folder_and_says_why_one_was_not_taken() {
     *engine.rule.lock().unwrap() = Ok(());
     press(&mut rt, "Use this folder");
     wait_for(&mut rt, "the choice was taken", |rt| {
-        says(rt, "Adding Beebeeb to File Explorer")
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("Adding Beebeeb to File Explorer").as_str(),
+        )
     });
     assert_eq!(first_run.chosen_for(&engine.stamp()), Some(PathBuf::from(SUGGESTED)));
     engine.set(Start::Running, EngineExplorer::Added);
-    wait_for(&mut rt, "added", |rt| says(rt, "is in File Explorer"));
+    wait_for(&mut rt, "added", |rt| {
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("is in File Explorer").as_str(),
+        )
+    });
 }
 
 /// "Skip setup" before a folder was chosen: the last page says File Explorer is off.
@@ -715,7 +726,10 @@ fn skipping_before_a_folder_was_chosen_claims_no_file_explorer() {
     fixture.set_gate_for_scene(ShellGate::FirstRun);
     wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
     wait_for(&mut rt, "the folder was read", |rt| {
-        says(rt, "isn't in File Explorer yet")
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("isn't in File Explorer yet").as_str(),
+        )
     });
     rt.update(|s, _| {
         if let Some(ui) = s.setup.as_mut() {
@@ -723,7 +737,10 @@ fn skipping_before_a_folder_was_chosen_claims_no_file_explorer() {
         }
     });
     wait_for(&mut rt, "the last page", |rt| says(rt, "You're set up"));
-    assert!(says(&rt, "File Explorer, Off"));
+    assert!(says(
+        &rt,
+        beebeeb_engine::os_words::for_this_os("File Explorer, Off").as_str()
+    ));
 }
 
 /// Contract S2 (ruling Q3): a start that is refused in the first run opens the same refusal modal, once, over the
@@ -736,12 +753,18 @@ fn a_refused_start_shows_the_modal_in_the_first_run_and_another_folder_can_be_ch
     fixture.set_gate_for_scene(ShellGate::FirstRun);
     wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
     wait_for(&mut rt, "the folder was read", |rt| {
-        says(rt, "isn't in File Explorer yet")
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("isn't in File Explorer yet").as_str(),
+        )
     });
     to_file_explorer(&mut rt);
     press(&mut rt, "Use this folder");
     wait_for(&mut rt, "the choice was taken", |rt| {
-        says(rt, "Adding Beebeeb to File Explorer")
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("Adding Beebeeb to File Explorer").as_str(),
+        )
     });
 
     // The start is refused: the folder is another app's sync folder.
@@ -761,7 +784,13 @@ fn a_refused_start_shows_the_modal_in_the_first_run_and_another_folder_can_be_ch
         rt.find("sync-off").is_some() && rt.state.shell.app.dialog().is_some(),
         "the modal's card is drawn over the first-run window"
     );
-    assert!(says(&rt, "Beebeeb in File Explorer"), "the first run is behind it");
+    assert!(
+        says(
+            &rt,
+            beebeeb_engine::os_words::for_this_os("Beebeeb in File Explorer").as_str()
+        ),
+        "the first run is behind it"
+    );
     for _ in 0..5 {
         rt.frame(0.1);
     }
@@ -786,7 +815,10 @@ fn a_refused_start_shows_the_modal_in_the_first_run_and_another_folder_can_be_ch
 
     // The step behind it says sync did not start, and offers another folder: none was kept.
     wait_for(&mut rt, "sync did not start", |rt| {
-        says(rt, "Sync didn't start on this PC")
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("Sync didn't start on this PC").as_str(),
+        )
     });
     platform
         .picks
@@ -812,12 +844,18 @@ fn the_window_says_a_folder_that_was_not_saved_and_never_added() {
     fixture.set_gate_for_scene(ShellGate::FirstRun);
     wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
     wait_for(&mut rt, "the folder was read", |rt| {
-        says(rt, "isn't in File Explorer yet")
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("isn't in File Explorer yet").as_str(),
+        )
     });
     to_file_explorer(&mut rt);
     press(&mut rt, "Use this folder");
     wait_for(&mut rt, "the choice was taken", |rt| {
-        says(rt, "Adding Beebeeb to File Explorer")
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("Adding Beebeeb to File Explorer").as_str(),
+        )
     });
     *engine.writes.lock().unwrap() = Err(SetupRefused::Settings);
     start_now(&*engine, &Mutex::new(None), &first_run);
@@ -825,7 +863,10 @@ fn the_window_says_a_folder_that_was_not_saved_and_never_added() {
     wait_for(&mut rt, "the unsaved folder", |rt| {
         says(rt, "Couldn't save your folder choice")
     });
-    assert!(!says(&rt, "is in File Explorer"));
+    assert!(!says(
+        &rt,
+        beebeeb_engine::os_words::for_this_os("is in File Explorer").as_str()
+    ));
     assert!(says(&rt, "Continue for now"));
     // Sync does not run: the step shows what the engine says.
     engine.set(
@@ -840,7 +881,12 @@ fn the_window_says_a_folder_that_was_not_saved_and_never_added() {
     });
     *engine.writes.lock().unwrap() = Ok(());
     press(&mut rt, "Try again");
-    wait_for(&mut rt, "saved", |rt| says(rt, "is in File Explorer"));
+    wait_for(&mut rt, "saved", |rt| {
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("is in File Explorer").as_str(),
+        )
+    });
     assert!(!says(&rt, "Couldn't save your folder choice"));
     assert_eq!(engine.kept.lock().unwrap().clone(), [PathBuf::from(SUGGESTED)]);
 }
@@ -853,7 +899,10 @@ fn a_pick_after_a_working_start_changes_nothing_and_says_so() {
     fixture.set_gate_for_scene(ShellGate::FirstRun);
     wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
     wait_for(&mut rt, "the folder was read", |rt| {
-        says(rt, "isn't in File Explorer yet")
+        says(
+            rt,
+            beebeeb_engine::os_words::for_this_os("isn't in File Explorer yet").as_str(),
+        )
     });
     to_file_explorer(&mut rt);
     // A start worked (the question was still up on the screen).

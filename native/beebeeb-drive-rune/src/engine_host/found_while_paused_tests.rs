@@ -211,7 +211,7 @@ fn an_engine_refusal_is_shown_in_its_own_words_and_nothing_else_happens() {
     let mut source = read(&engine);
     *engine.refuse.lock().unwrap() = Some(NOT_YOURS.into());
     source.upload();
-    settle(&mut source, |c| c.busy.is_none());
+    settle(&mut source, |c| c.busy.is_none() && c.said.is_some());
     assert_eq!(source.card.said.as_deref(), Some(NOT_YOURS));
     assert!(source.card.kept.is_none());
 }

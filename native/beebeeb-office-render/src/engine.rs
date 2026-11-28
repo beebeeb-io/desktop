@@ -129,6 +129,7 @@ impl Engine for Office {
             DocKind::Xlsx => sheets(eng::Workbook::open(eng::SheetKind::Xlsx, bytes, &limits).map_err(open_code)?),
             DocKind::Xls => sheets(eng::Workbook::open(eng::SheetKind::Xls, bytes, &limits).map_err(open_code)?),
             DocKind::Pdf => Box::new(pdf::open(bytes)?),
+            DocKind::Picture(picture) => Box::new(crate::picture::open(picture, bytes)?),
         };
         Ok(opened)
     }

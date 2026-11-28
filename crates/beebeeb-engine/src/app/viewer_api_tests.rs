@@ -1168,3 +1168,39 @@ fn a_trashed_file_this_computer_never_synced_opens_in_memory_and_nothing_about_i
 
 #[path = "viewer_chain_tests.rs"]
 mod chain;
+
+/// Dm-72: on a Mac a kept file's one copy is Finder's (the engine's own folder holds none since dm-71): the viewer
+/// reads it from there, with Beebeeb out of reach. A copy whose length is not the synced size is not read as the
+/// file, and the media stream's lookup (it reads by the place in the engine's own folder) never answers Finder's.
+#[test]
+fn dm72_on_a_mac_a_kept_file_opens_from_finders_copy() {
+    use crate::file_provider_port::{FinderCopiesPort, with_finder_copies};
+    let fake = fake("finders");
+    // A closed loopback port: nothing can be downloaded.
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let (_dir, _own_folder, _db) = with_folder(&engine, &fake.first, FileStatus::Local, None);
+    let finder = tempfile::tempdir().unwrap();
+    let finders_copy = finder.path().join("Invented note.txt");
+    std::fs::write(&finders_copy, note_text()).unwrap();
+    let port = Arc::new(FinderCopiesPort::default());
+    port.put(NOTE, &finders_copy);
+
+    // Not a Mac: the engine's own folder holds no copy.
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)));
+    with_finder_copies(port.clone(), || {
+        let copy = opened(local(&engine, NOTE, NO_LIMIT));
+        assert_eq!(&*copy.bytes, &note_text()[..]);
+        assert_eq!(copy.copy, OnThisPc::InSync);
+        assert!(matches!(
+            engine.open_own_folder_copy_in_memory(NOTE, NO_LIMIT, &AtomicBool::new(false)),
+            Ok(LocalCopy::NotHere)
+        ));
+        // Finder's copy with another length is not the synced file: Beebeeb's version is what is shown.
+        std::fs::write(&finders_copy, b"shorter").unwrap();
+        assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)));
+        // An item Finder does not hold: as before.
+        std::fs::remove_file(&finders_copy).unwrap();
+        assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)));
+    });
+}

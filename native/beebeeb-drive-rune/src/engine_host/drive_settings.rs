@@ -132,8 +132,8 @@ pub const INSIGHTS_LOCKED: &str = "Unlock Beebeeb to see where your storage goes
 
 /// What the window says when a change the person asked for did not happen. Fixed sentences.
 pub const KEEP_NOT_SYNCING: &str = "Sync isn't running, so the folders were not changed.";
-pub const KEEP_FAILED: &str = "Couldn't change what is kept on this PC. Try again.";
-pub const FREE_UP_FAILED: &str = "Couldn't free up space on this PC. Try again.";
+pub const KEEP_FAILED: &str = concat!("Couldn't change what is kept on ", beebeeb_engine::device_word!(), ". Try again.");
+pub const FREE_UP_FAILED: &str = concat!("Couldn't free up space on ", beebeeb_engine::device_word!(), ". Try again.");
 pub const PAUSE_FAILED: &str = "Couldn't pause or resume sync. Try again.";
 pub const OPEN_AT_LOGIN_FAILED: &str = "Couldn't change Open at login. Try again.";
 /// A change asked while no one is signed in with the vault open, or by an account that has left since.
@@ -829,7 +829,7 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
             }
         },
         Ask::FreeUp => {
-            if engine.free_up_space().is_err() {
+            if free_up(engine, super::macos_downloaded::system()) {
                 log("drive settings: free up space did not finish");
                 refuse(FREE_UP_FAILED);
             }
@@ -855,6 +855,16 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, os: Os, answers: &mp
             }
             read_local(engine, platform, &account, &send);
         }
+    }
+}
+
+/// Free up space; `true` when it did not finish. A Mac (`system`): each materialised copy that is not kept goes
+/// cloud-only through the File Provider. Elsewhere: the engine's own.
+fn free_up<E: DriveEngine>(engine: &E, system: Option<&dyn super::macos_downloaded::Materialisation>) -> bool {
+    match system {
+        Some(source) => super::macos_downloaded::copies(engine, source)
+            .map_or(true, |copies| super::macos_downloaded::evict_all(source, &copies) > 0),
+        None => engine.free_up_space().is_err(),
     }
 }
 

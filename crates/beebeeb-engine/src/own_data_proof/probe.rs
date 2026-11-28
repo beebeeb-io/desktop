@@ -76,7 +76,7 @@ pub fn listing_from_status(status: Option<u16>) -> Listing {
 /// This account's tree as the proof reads it (self-review F2): the snapshot, which lists only what is not in the trash,
 /// and the trash listing, so a row the person trashed on the server while sync was refused is still found in the tree.
 /// Either one unread is a listing that did not answer.
-#[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
+#[cfg(any(target_os = "windows", target_os = "macos", any(test, feature = "test-support")))]
 pub fn listing_of(
     snapshot: anyhow::Result<crate::api_client::SyncSnapshot>,
     trashed: anyhow::Result<Vec<serde_json::Value>>,

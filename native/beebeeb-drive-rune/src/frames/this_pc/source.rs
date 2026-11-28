@@ -34,7 +34,7 @@ pub enum Origin {
 impl Origin {
     pub fn label(&self) -> &str {
         match self {
-            Origin::ThisPc => "This PC",
+            Origin::ThisPc => concat!(beebeeb_engine::device_word_cap!()),
             Origin::Phone(name) | Origin::Tablet(name) => name,
             Origin::SharedFolder => "Shared folder",
         }
@@ -199,10 +199,32 @@ pub enum KeptStatus {
 impl KeptStatus {
     pub fn label(self) -> &'static str {
         match self {
+            // Dm-68: a Mac says where the copy is ("On this Mac"); the Windows board (DW-0715) keeps "Up to date".
+            KeptStatus::UpToDate if cfg!(target_os = "macos") => concat!("On ", beebeeb_engine::device_word!()),
             KeptStatus::UpToDate => "Up to date",
-            KeptStatus::NotOnPcYet => "Not on this PC yet",
+            KeptStatus::NotOnPcYet => concat!("Not on ", beebeeb_engine::device_word!(), " yet"),
         }
     }
+}
+
+/// How far a kept item's copy has come, for its row (dm-68).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeptProgress {
+    /// Bytes of the copies running now.
+    pub done: u64,
+    pub total: u64,
+    /// A folder's files on this PC of all it holds: `(n, m)`.
+    pub files: Option<(u32, u32)>,
+    /// Hundredths of the whole, 0..=100: bytes for a file; files (a running one counted by its bytes) for a folder.
+    pub percent: u8,
+}
+
+/// What a kept item's row says of its copy (dm-68): none while it needs no say (here, or waiting to start).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CopyState {
+    Running(KeptProgress),
+    /// A file of it failed to come down.
+    Failed,
 }
 
 /// What a kept item holds: a folder's item count, or the folder a file is in.
@@ -303,6 +325,17 @@ pub trait ThisPcSource {
     fn kept_count(&self) -> usize {
         self.kept().len()
     }
+    /// How a kept item's copy is coming down, or that it failed (dm-68). `None`: nothing to say of it.
+    fn copy_state(&self, _id: &str) -> Option<CopyState> {
+        None
+    }
+    /// Try a failed copy again: keep the item once more (dm-68).
+    fn try_keep_again(&mut self, _id: &str) {}
+    /// The kept files coming down now, for the status line (dm-68): `(files, bytes done, bytes of them)`. `None`
+    /// while none runs.
+    fn downloading(&self) -> Option<(u32, u64, u64)> {
+        None
+    }
     /// Stop keeping one item here; it stays in Beebeeb and becomes online only.
     fn remove_from_pc(&mut self, id: &str);
     /// Stop keeping every item here.
@@ -315,6 +348,16 @@ pub struct FixtureSource {
     history: Vec<Change>,
     problems: Vec<Change>,
     kept: Vec<Kept>,
+    /// How each kept item's copy stands (dm-68), by id; a sample says nothing unless a scene sets it.
+    copies: std::collections::HashMap<String, CopyState>,
+}
+
+impl FixtureSource {
+    /// A scene of a copy coming down, or failed, on the kept item `id`.
+    pub fn with_copy(mut self, id: &str, state: CopyState) -> Self {
+        self.copies.insert(id.to_string(), state);
+        self
+    }
 }
 
 fn day(d: u32, m: u32) -> NaiveDate {
@@ -499,6 +542,7 @@ impl FixtureSource {
             history,
             problems,
             kept: Self::board_kept(),
+            copies: Default::default(),
         }
     }
 
@@ -569,7 +613,7 @@ impl FixtureSource {
                 "p-notes",
                 "09:50",
                 "Notes.md",
-                "This PC no longer has the bytes of this change, so it can\u{2019}t be sent. The file on Beebeeb is as it was.",
+                concat!(beebeeb_engine::device_word_cap!(), " no longer has the bytes of this change, so it can\u{2019}t be sent. The file on Beebeeb is as it was."),
                 vec![Exit::RemoveFromList],
             ),
         ];
@@ -595,6 +639,7 @@ impl FixtureSource {
     pub fn nothing_kept() -> FixtureSource {
         FixtureSource {
             kept: Vec::new(),
+            copies: Default::default(),
             ..Self::synced()
         }
     }
@@ -636,6 +681,36 @@ impl ThisPcSource for FixtureSource {
 
     fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
         std::borrow::Cow::Borrowed(&self.kept)
+    }
+
+    fn copy_state(&self, id: &str) -> Option<CopyState> {
+        self.copies.get(id).cloned()
+    }
+
+    /// A sample counts what its scene set: a folder's running copies as one file each is not known, so one per item.
+    fn downloading(&self) -> Option<(u32, u64, u64)> {
+        let running: Vec<&KeptProgress> = self
+            .kept
+            .iter()
+            .filter_map(|k| match self.copies.get(&k.id) {
+                Some(CopyState::Running(p)) => Some(p),
+                _ => None,
+            })
+            .collect();
+        (!running.is_empty()).then(|| {
+            (
+                running.len() as u32,
+                running.iter().map(|p| p.done).sum(),
+                running.iter().map(|p| p.total).sum(),
+            )
+        })
+    }
+
+    /// A sample's retry works at once: the failure goes.
+    fn try_keep_again(&mut self, id: &str) {
+        if self.copies.get(id) == Some(&CopyState::Failed) {
+            self.copies.remove(id);
+        }
     }
 
     fn remove_from_pc(&mut self, id: &str) {

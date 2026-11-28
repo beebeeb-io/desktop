@@ -14,6 +14,44 @@ pub enum ThemeChoice {
     Dark,
 }
 
+/// The OS a sentence is worded for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Os {
+    Windows,
+    Mac,
+    Other,
+}
+
+impl Os {
+    pub const fn this() -> Os {
+        if cfg!(target_os = "windows") {
+            Os::Windows
+        } else if cfg!(target_os = "macos") {
+            Os::Mac
+        } else {
+            Os::Other
+        }
+    }
+}
+
+/// The OS's own name as a sentence says it: "Windows" / "macOS" / "your system".
+pub fn os_name() -> &'static str {
+    match Os::this() {
+        Os::Windows => "Windows",
+        Os::Mac => "macOS",
+        Os::Other => "your system",
+    }
+}
+
+/// The app where the OS's settings live: "Windows Settings" / "System Settings" / "your system settings".
+pub fn settings_app() -> &'static str {
+    match Os::this() {
+        Os::Windows => "Windows Settings",
+        Os::Mac => "System Settings",
+        Os::Other => "your system settings",
+    }
+}
+
 impl ThemeChoice {
     pub const ALL: [ThemeChoice; 3] = [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark];
 
@@ -27,8 +65,17 @@ impl ThemeChoice {
 
     /// What the choice does, as the Theme row says it (DW-0787).
     pub fn says(self) -> &'static str {
+        self.says_on(Os::this())
+    }
+
+    /// [`Self::says`] in one OS's words (the System choice names the OS it follows).
+    pub fn says_on(self, os: Os) -> &'static str {
         match self {
-            Self::System => "Follows Windows.",
+            Self::System => match os {
+                Os::Windows => "Follows Windows.",
+                Os::Mac => "Follows macOS.",
+                Os::Other => "Follows the system.",
+            },
             Self::Light => "Always light.",
             Self::Dark => "Always dark.",
         }
@@ -207,7 +254,11 @@ impl OlderChannel {
     /// The row's words where no release notes open (the app never shows an older version's notes: DW-0789b's
     /// button would offer it): what this PC runs, without a pointer to notes that are not there.
     pub fn runs_from(&self) -> String {
-        format!("This PC runs {}, from the {} channel.", self.runs, self.from.label())
+        format!(
+            concat!(beebeeb_engine::device_word_cap!(), " runs {}, from the {} channel."),
+            self.runs,
+            self.from.label()
+        )
     }
 }
 
@@ -470,7 +521,11 @@ impl BoardSettings {
                     released: "4 Nov 2026".into(),
                     lines: vec![
                         "Bandwidth limits apply straight away, without pausing sync.".into(),
-                        "Sync history keeps 30 days on every PC.".into(),
+                        if cfg!(target_os = "macos") {
+                            "Sync history keeps 30 days on every computer.".into()
+                        } else {
+                            "Sync history keeps 30 days on every PC.".into()
+                        },
                         "A file badge no longer stays on Uploading after the upload finished.".into(),
                     ],
                     press: Press::Restart,
@@ -608,20 +663,28 @@ fn board_notifications() -> Notifications {
                 ],
             ),
             (
-                "Sync on this PC".into(),
+                concat!("Sync on ", beebeeb_engine::device_word!()).into(),
                 vec![
                     alert("Sync stopped", "When files couldn't upload", true),
                     alert("Files need a decision", "When a file changed in two places", true),
                     alert(
                         "Sync finished",
-                        "When everything on this PC has synced. Off by default",
+                        concat!(
+                            "When everything on ",
+                            beebeeb_engine::device_word!(),
+                            " has synced. Off by default"
+                        ),
                         false,
                     ),
-                    alert("Space on this PC", "When downloaded files near their limit", true),
+                    alert(
+                        concat!("Space on ", beebeeb_engine::device_word!()),
+                        "When downloaded files near their limit",
+                        true,
+                    ),
                 ],
             ),
             (
-                "Backups on this PC".into(),
+                concat!("Backups on ", beebeeb_engine::device_word!()).into(),
                 vec![
                     alert("Backup finished", "When a backup completes", false),
                     alert("Backup needs attention", "Such as a folder that can't be read", true),

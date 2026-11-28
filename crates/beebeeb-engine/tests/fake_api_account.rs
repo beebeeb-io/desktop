@@ -17,6 +17,7 @@ use std::sync::{Arc, OnceLock};
 use beebeeb_engine::app::{Engine, EngineConfig};
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
+#[cfg(not(target_os = "macos"))]
 use beebeeb_engine::signin::gate::GateState;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 #[cfg(not(target_os = "macos"))]
@@ -25,6 +26,7 @@ use beebeeb_engine::state_paths;
 use beebeeb_engine::test_api::FakeApi;
 use beebeeb_engine::test_api::fake_account::{FakeAccount, assert_loopback, require_loopback, test_account};
 
+#[cfg(not(target_os = "macos"))]
 use zeroize::Zeroizing;
 
 // ── Shared setup (once per process) ─────────────────────────────────────────────
@@ -32,6 +34,7 @@ use zeroize::Zeroizing;
 struct TestHarness {
     /// Held so the fake account outlives the tests; never read.
     _account: Arc<FakeAccount>,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     phrase: String,
     fake: FakeApi,
     state_dir: PathBuf,

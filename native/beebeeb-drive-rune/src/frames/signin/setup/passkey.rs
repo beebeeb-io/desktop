@@ -2,15 +2,15 @@
 //! password). The board draws the step without the password field, without a waiting state and without a refusal
 //! line; all three are drawn here with the board's own parts and Settings › Passkeys' words (`FRAMES.md`).
 
-use rune::{El, el};
+use rune::{el, El};
 
 use super::source::PasskeyRefused;
 use super::view::{actions, ghost, primary};
-use super::{PASSWORD_KEY, PasskeyStep, Ui, icons};
-use crate::State;
-use crate::theme::tokens::{Theme, type_};
+use super::{icons, PasskeyStep, Ui, PASSWORD_KEY};
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::au::{self, ButtonState, FieldSpec, FieldState, Keys};
 use crate::ui::setup;
+use crate::State;
 
 /// Why the passkey was not added, in Settings › Passkeys' own words (`engine_host/passkeys.rs`, the toast of the
 /// same refusal). A missing password is said by the field, not by a line.
@@ -21,7 +21,11 @@ pub(super) fn refused_words(why: PasskeyRefused) -> Option<&'static str> {
         PasskeyRefused::Cancelled => "Adding the passkey was cancelled. Nothing was changed.",
         PasskeyRefused::Offline => "Beebeeb can't be reached. Nothing was changed.",
         PasskeyRefused::TooManyTries => "Too many tries. Wait a moment, then try again. Nothing was changed.",
-        PasskeyRefused::NotOnThisPc => "Passkeys are not available on this PC. Nothing was changed.",
+        PasskeyRefused::NotOnThisPc => concat!(
+            "Passkeys are not available on ",
+            beebeeb_engine::device_word!(),
+            ". Nothing was changed."
+        ),
         PasskeyRefused::NotAdded => "The passkey was not added. Nothing was changed.",
     })
 }
@@ -65,8 +69,15 @@ pub(super) fn step(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         setup::item(
             k,
             Some(&icons::FACE),
-            "Saved by Windows",
-            Some("In Passwords or your password manager, behind Windows Hello"),
+            if cfg!(target_os = "macos") {
+                "Saved by your Mac"
+            } else {
+                "Saved by Windows"
+            },
+            Some(concat!(
+                "In Passwords or your password manager, behind ",
+                beebeeb_engine::unlock_name!()
+            )),
             |_| Vec::new(),
             None,
             false,

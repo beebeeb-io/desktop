@@ -174,7 +174,7 @@ fn names_and_roles_of_dw_0802_results() {
     );
     assert_eq!(node(&rt, "row-1")["description"], "In Documents \u{203A} Legal");
     assert!(states(&node(&rt, "row-0")).contains(&"selected".into()));
-    assert_eq!(info(&rt, "col-pc-cell").label.as_deref(), Some("On this PC"));
+    assert_eq!(info(&rt, "col-pc-cell").label.as_deref(), Some(concat!("On ", beebeeb_engine::device_word!())));
     assert_eq!(text(&rt, "col-shared"), "Where");
     assert_eq!(text(&rt, "row-1-dash"), "Documents \u{203A} Legal");
     let pane = info(&rt, "detail-pane");
@@ -273,7 +273,7 @@ fn a_window_that_ships_or_runs_on_the_engine_never_shows_the_sample_as_results()
     state.frames.find = SearchUi::first(false);
     let mut rt = window(state);
     press(&mut rt, Key::Command('f'), CTRL);
-    assert!(rt.state.frames.find.open, "Ctrl+F opens search");
+    assert!(rt.state.frames.find.open, concat!(beebeeb_engine::primary_key!(), "F opens search"));
     assert_eq!(focused(&rt).as_deref(), Some(SEARCH_KEY));
     assert_eq!(
         text(&rt, "search-unavailable-title"),
@@ -355,6 +355,27 @@ fn esc_with_words_closes_search_and_another_section_ends_it() {
     settle(&mut rt);
     assert!(!super::is_open(&rt.state), "Photos ends search");
     assert!(rt.state.search.text.is_empty());
+}
+
+/// macOS: a Cmd+F search (cmd only, no ctrl) ends on Esc and on a section change like a Ctrl+F one.
+#[test]
+fn cmd_f_search_ends_on_esc_and_on_a_section_change() {
+    use crate::shell::app::{Event, Route, Section};
+    const CMD: Mods = Mods { cmd: true, ..NONE };
+    let mut state = init();
+    state.frames.find.source = Box::new(BoardSearch::new());
+    let mut rt = window(state);
+    rt.poll = Some(crate::shell::host::poll);
+    press(&mut rt, Key::Command('f'), CMD);
+    type_text(&mut rt, "contr");
+    assert_eq!(text(&rt, "folder-title"), "Search");
+    press(&mut rt, Key::Escape, NONE);
+    assert!(!super::is_open(&rt.state), "Esc ends a Cmd+F search");
+    press(&mut rt, Key::Command('f'), CMD);
+    type_text(&mut rt, "contr");
+    crate::shell::host::dispatch(&mut rt.state, Event::Navigate(Route::section(Section::Photos)));
+    settle(&mut rt);
+    assert!(!super::is_open(&rt.state), "a section change ends a Cmd+F search");
 }
 
 #[test]
@@ -683,7 +704,7 @@ fn the_toolbars_open_in_file_explorer_asks_the_shell() {
     let mut rt = window(state);
     let button = info(&rt, "open-explorer");
     assert_eq!(button.role, "button");
-    assert_eq!(button.label.as_deref(), Some("Open in File Explorer"));
+    assert_eq!(button.label.as_deref(), Some(beebeeb_engine::os_words::for_this_os("Open in File Explorer").as_str()));
     let before = engine.calls().len();
     click(&mut rt, "open-explorer");
     assert_eq!(&engine.calls()[before..], [FixtureCall::OpenInFileExplorer]);

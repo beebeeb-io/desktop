@@ -416,16 +416,38 @@ static const int64_t BeebeebScopeSafetySeconds = 60;
 //
 // `promptsUserIfNeeded = NO`: the completion handler "will not be invoked until the user dismisses any
 // such UI" (NSWorkspace.h:155-158), and a wait that a dialog can hold back is not a wait this bridge can bound.
+//
+// dm-84 (83's rule for the page's buttons, now for the Files list's double-click too): RC15's double-click on an .eps
+// started Illustrator and the list said "Couldn't open", because a big app answers after the 5 s. An app the system
+// handed the file to opened it, whatever error it also answered, and so did the file's app when it was not running
+// before this open and runs when the wait ends (it is still starting with the file). Only an error with no app, or a
+// silence with nothing started, is a refusal. A swallowed error is logged with its domain and code.
+// The rule above as a pure function, so a test holds it (`engine_host/mod.rs`): 0 = opened, -1 = refused.
+// `answered`: the completion handler came within the wait; `handed`: it named an app; `has_error`: it carried an
+// error; `ran_before`/`runs_now`: the file's app ran before the open / runs when the wait ended.
+int beebeeb_open_outcome(int answered, int handed, int has_error, int ran_before, int runs_now) {
+    if (!answered) {
+        return (!ran_before && runs_now) ? 0 : -1;
+    }
+    return (!has_error || handed) ? 0 : -1;
+}
+
 static int BeebeebOpenURLAndWait(NSURL *url, BeebeebFpError *out_error) {
     BeebeebScope *scope = [[BeebeebScope alloc] initWithURL:url];
     NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
     configuration.promptsUserIfNeeded = NO;
     configuration.addsToRecentItems = NO;
+    // The app that opens this kind of file, and whether it ran before this open (a file URL only).
+    NSURL *app_url = url.isFileURL ? [[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:url] : nil;
+    NSString *app_id = app_url == nil ? nil : [NSBundle bundleWithURL:app_url].bundleIdentifier;
+    BOOL ran_before = app_id != nil && [NSRunningApplication runningApplicationsWithBundleIdentifier:app_id].count > 0;
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     __block NSError *found_error = nil;
+    __block BOOL handed = NO;
     [[NSWorkspace sharedWorkspace] openURL:url configuration:configuration
                          completionHandler:^(NSRunningApplication *application, NSError *error) {
         found_error = error;
+        handed = application != nil;
         [scope stop];
         dispatch_semaphore_signal(semaphore);
     }];
@@ -435,10 +457,21 @@ static int BeebeebOpenURLAndWait(NSURL *url, BeebeebFpError *out_error) {
     });
     long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, BeebeebOpenTimeoutSeconds * NSEC_PER_SEC));
     if (wait_result != 0) {
+        BOOL runs_now = app_id != nil && [NSRunningApplication runningApplicationsWithBundleIdentifier:app_id].count > 0;
+        if (beebeeb_open_outcome(0, 0, 0, ran_before, runs_now) == 0) {
+            NSLog(@"open: no answer within %llds; the file's app was started with it and is still starting: opened",
+                  (long long)BeebeebOpenTimeoutSeconds);
+            return 0;
+        }
         BeebeebFillBridgeError(BeebeebBridgeOpenTimeout, @"Timed out waiting for LaunchServices to open the URL", out_error);
         return -1;
     }
     if (found_error != nil) {
+        if (beebeeb_open_outcome(1, handed, 1, ran_before, 0) == 0) {
+            NSLog(@"open: the app was handed the file; the system also answered %@ %ld: opened",
+                  found_error.domain, (long)found_error.code);
+            return 0;
+        }
         BeebeebFillError(found_error, out_error);
         return -1;
     }
@@ -536,6 +569,36 @@ int beebeeb_reveal_scoped_url(void *handle, BeebeebFpError *out_error) {
             [scope stop];
         });
         return 1;
+    }
+}
+
+// dm-72: the app's own read of Finder's copy of an item (a kept file's one copy on a Mac). `handle` is the scoped
+// URL beebeeb_fp_resolve_item returned; it stays the caller's (released by beebeeb_release_url_handle as before).
+// Writes the URL's path and starts its security scope: the sandbox lets this process read there only between this
+// call and beebeeb_fp_end_item_access. It makes no File Provider call and opens nothing. Returns: 1 = path written
+// and the scope started (the caller MUST call beebeeb_fp_end_item_access with the same handle), 0 = path written,
+// no scope was granted (a read may be refused), -1 = no path (no handle, not a file URL, or the buffer is too small).
+int beebeeb_fp_begin_item_access(void *handle, char *path_buffer, unsigned long path_buffer_len) {
+    @autoreleasepool {
+        if (handle == NULL || path_buffer == NULL || path_buffer_len == 0) {
+            return -1;
+        }
+        NSURL *url = (__bridge NSURL *)handle;
+        const char *fs_path = url.isFileURL ? url.fileSystemRepresentation : NULL;
+        if (fs_path == NULL || strlen(fs_path) >= path_buffer_len) {
+            return -1;
+        }
+        strlcpy(path_buffer, fs_path, path_buffer_len);
+        return [url startAccessingSecurityScopedResource] ? 1 : 0;
+    }
+}
+
+// dm-72: ends the scope beebeeb_fp_begin_item_access started (only after it returned 1). Does not release the handle.
+void beebeeb_fp_end_item_access(void *handle) {
+    @autoreleasepool {
+        if (handle != NULL) {
+            [(__bridge NSURL *)handle stopAccessingSecurityScopedResource];
+        }
     }
 }
 
@@ -653,6 +716,227 @@ int beebeeb_fp_signal_working_set(BeebeebFpError *out_error) {
         long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
         if (wait_result != 0) {
             BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out signaling the Beebeeb File Provider working set", out_error);
+            return -1;
+        }
+        if (found_error != nil) {
+            BeebeebFillError(found_error, out_error);
+            return -1;
+        }
+        return 0;
+    }
+}
+
+// dm-41: ask the system to forget what it knows below the root and list the whole tree again
+// (reimportItemsBelowItemWithIdentifier: root). Called once when the db identity or app generation
+// changes. Returns: 0 = asked (or domain not registered: nothing to reimport), -1 = error.
+int beebeeb_fp_reimport(BeebeebFpError *out_error) {
+    @autoreleasepool {
+        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+        if (manager == nil) {
+            return 0;
+        }
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block NSError *found_error = nil;
+        [manager reimportItemsBelowItemWithIdentifier:NSFileProviderRootContainerItemIdentifier
+                                    completionHandler:^(NSError *error) {
+            found_error = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        if (wait_result != 0) {
+            BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out asking the Beebeeb File Provider to reimport", out_error);
+            return -1;
+        }
+        if (found_error != nil) {
+            BeebeebFillError(found_error, out_error);
+            return -1;
+        }
+        return 0;
+    }
+}
+
+// dm-65: Settings > Storage > "Downloaded files", and (dm-75) the marks of the rows. The items the system holds on
+// disk for this domain (materialised), one per line as "<item identifier>\t<bytes>"; a folder has no size and is left
+// out.
+// dm-83: the list comes in pages, and every page is read. RC14 read the first page only, and a file Finder had
+// downloaded itself was not in it. Rust drives the pages (`macos_downloaded::read_all`), so the loop is tested: open
+// the enumerator once, ask one page at a time with the page the last one named, close it at the end.
+@interface BeebeebMaterialisedObserver : NSObject <NSFileProviderEnumerationObserver>
+@property(nonatomic, strong) NSMutableString *lines;
+@property(nonatomic, assign) int count;
+@property(nonatomic, strong) NSData *nextPage;
+@property(nonatomic, strong) NSError *error;
+@property(nonatomic, strong) dispatch_semaphore_t done;
+@end
+@implementation BeebeebMaterialisedObserver
+- (void)didEnumerateItems:(NSArray<id<NSFileProviderItem>> *)updatedItems {
+    for (id<NSFileProviderItem> item in updatedItems) {
+        NSNumber *size = nil;
+        if ([item respondsToSelector:@selector(documentSize)]) {
+            size = item.documentSize;
+        }
+        if (size == nil || item.itemIdentifier.length == 0) {
+            continue;
+        }
+        [self.lines appendFormat:@"%@\t%llu\n", item.itemIdentifier, size.unsignedLongLongValue];
+        self.count += 1;
+    }
+}
+- (void)finishEnumeratingUpToPage:(NSFileProviderPage)nextPage {
+    // nil: this was the last page.
+    self.nextPage = nextPage;
+    dispatch_semaphore_signal(self.done);
+}
+- (void)finishEnumeratingWithError:(NSError *)error {
+    self.error = error;
+    dispatch_semaphore_signal(self.done);
+}
+@end
+
+// The enumerator of the materialised items, as a retained handle the caller passes to every page and then to
+// beebeeb_fp_materialised_close. NULL: the domain is not registered (no manager), nothing to list.
+void *beebeeb_fp_materialised_open(void) {
+    @autoreleasepool {
+        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+        if (manager == nil) {
+            return NULL;
+        }
+        id<NSFileProviderEnumerator> enumerator = [manager enumeratorForMaterializedItems];
+        if (enumerator == nil) {
+            return NULL;
+        }
+        return (void *)CFBridgingRetain(enumerator);
+    }
+}
+
+// One page. `page`/`page_len`: the page the last one named (length 0: the first page). The page's lines go into
+// `buffer` (bounded); the page that follows into `next` (`*next_len` 0: this was the last). Returns the number of
+// items on the page (fewer lines than that in `buffer` means it was too small), or -1 (out_error set; also when the
+// next page does not fit `next`).
+int beebeeb_fp_materialised_page(void *handle,
+                                 const unsigned char *page,
+                                 unsigned long page_len,
+                                 char *buffer,
+                                 unsigned long buffer_len,
+                                 unsigned char *next,
+                                 unsigned long next_cap,
+                                 unsigned long *next_len,
+                                 BeebeebFpError *out_error) {
+    @autoreleasepool {
+        if (next_len != NULL) {
+            *next_len = 0;
+        }
+        if (handle == NULL || next_len == NULL) {
+            BeebeebFillBridgeError(BeebeebBridgeManagerUnavailable, @"no enumerator handle given", out_error);
+            return -1;
+        }
+        id<NSFileProviderEnumerator> enumerator = (__bridge id<NSFileProviderEnumerator>)handle;
+        NSFileProviderPage start = page_len == 0 ? NSFileProviderInitialPageSortedByDate
+                                                 : [NSData dataWithBytes:page length:page_len];
+        BeebeebMaterialisedObserver *observer = [[BeebeebMaterialisedObserver alloc] init];
+        observer.lines = [NSMutableString string];
+        observer.done = dispatch_semaphore_create(0);
+        [enumerator enumerateItemsForObserver:observer startingAtPage:start];
+        long wait_result = dispatch_semaphore_wait(observer.done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        if (wait_result != 0) {
+            BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out listing the downloaded items", out_error);
+            return -1;
+        }
+        if (observer.error != nil) {
+            BeebeebFillError(observer.error, out_error);
+            return -1;
+        }
+        NSData *following = observer.nextPage;
+        if (following.length > 0) {
+            if (next == NULL || following.length > next_cap) {
+                BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"The next page of the downloaded items is too long", out_error);
+                return -1;
+            }
+            memcpy(next, following.bytes, following.length);
+            *next_len = following.length;
+        }
+        BeebeebCopyString(observer.lines, buffer, buffer_len);
+        return observer.count;
+    }
+}
+
+// Ends the enumeration and lets go of the handle beebeeb_fp_materialised_open gave.
+void beebeeb_fp_materialised_close(void *handle) {
+    @autoreleasepool {
+        if (handle == NULL) {
+            return;
+        }
+        id<NSFileProviderEnumerator> enumerator = (id<NSFileProviderEnumerator>)CFBridgingRelease(handle);
+        if ([enumerator respondsToSelector:@selector(invalidate)]) {
+            [enumerator invalidate];
+        }
+    }
+}
+
+// dm-65: make ONE item cloud-only again (evictItemWithIdentifier:), the call Finder's "Remove Download" makes.
+// Returns 0 = evicted (or domain not registered), -1 (out_error set).
+int beebeeb_fp_evict_item(const char *identifier, BeebeebFpError *out_error) {
+    @autoreleasepool {
+        if (identifier == NULL || identifier[0] == 0) {
+            BeebeebFillBridgeError(BeebeebBridgeNoIdentifier, @"no item identifier given", out_error);
+            return -1;
+        }
+        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+        if (manager == nil) {
+            return 0;
+        }
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block NSError *found_error = nil;
+        [manager evictItemWithIdentifier:[NSString stringWithUTF8String:identifier]
+                       completionHandler:^(NSError *error) {
+            found_error = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        if (wait_result != 0) {
+            BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out making an item cloud-only", out_error);
+            return -1;
+        }
+        if (found_error != nil) {
+            BeebeebFillError(found_error, out_error);
+            return -1;
+        }
+        return 0;
+    }
+}
+
+// dm-71: keep ONE item on this Mac through the system: ask it to download the item now
+// (requestDownloadForItemWithIdentifier:, the whole file). The extension's fetchContents is then the one download;
+// the item's content policy (downloadEagerlyAndKeepDownloaded while it is kept) keeps the copy.
+// dm-75: this is the ONE request every open makes too (the viewer, Open with, the list's Open; Rust's
+// `macos_fp::materialise`). The request is a scheduling hint ("at the earliest convenient time",
+// NSFileProviderManager.h, macOS 13.0+), so the Rust side also reads the file and waits until it is no longer
+// dataless. A domain with no manager is an error now, never "asked": nothing was asked, and a caller that waits for
+// the file must hear that.
+// Returns 0 = the system took the request, -1 (out_error set).
+int beebeeb_fp_request_download(const char *identifier, BeebeebFpError *out_error) {
+    @autoreleasepool {
+        if (identifier == NULL || identifier[0] == 0) {
+            BeebeebFillBridgeError(BeebeebBridgeNoIdentifier, @"no item identifier given", out_error);
+            return -1;
+        }
+        NSFileProviderManager *manager = [NSFileProviderManager managerForDomain:BeebeebDomain()];
+        if (manager == nil) {
+            BeebeebFillBridgeError(BeebeebBridgeManagerUnavailable,
+                                   @"File Provider manager is unavailable for the Beebeeb domain", out_error);
+            return -1;
+        }
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        __block NSError *found_error = nil;
+        [manager requestDownloadForItemWithIdentifier:[NSString stringWithUTF8String:identifier]
+                                       requestedRange:NSMakeRange(NSNotFound, 0)
+                                    completionHandler:^(NSError *error) {
+            found_error = error;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        long wait_result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+        if (wait_result != 0) {
+            BeebeebFillBridgeError(BeebeebBridgeSignalTimeout, @"Timed out asking for an item's download", out_error);
             return -1;
         }
         if (found_error != nil) {

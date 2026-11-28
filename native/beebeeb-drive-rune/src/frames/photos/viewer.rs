@@ -109,7 +109,7 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
 /// The status line's words for an open item.
 pub fn status(viewing: &Viewing) -> String {
     match viewing.kind {
-        Kind::Video(_) => "Streaming \u{00B7} decrypted on this PC as it plays".into(),
+        Kind::Video(_) => concat!("Streaming \u{00B7} decrypted on ", beebeeb_engine::device_word!(), " as it plays").into(),
         Kind::Photo => format!(
             "Photo {} of {} \u{00B7} \u{2190} \u{2192} for the next one",
             thousands(viewing.position.0),
@@ -175,7 +175,11 @@ fn player(ui: &Ui, viewing: &Viewing, seconds: u32, t: &Theme) -> El {
         // The board's own note on this bar: the system player draws the real controls on Windows.
         .child(kit::label(
             "ph-player-text-2",
-            "Windows draws the player controls",
+            if cfg!(target_os = "macos") {
+                "macOS draws the player controls"
+            } else {
+                "Windows draws the player controls"
+            },
             style::CAP,
             white.alpha(0.7),
         ))
@@ -314,7 +318,6 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         } else {
             shown.name.clone()
         })
-        .size(600.0, 400.0)
         .radius(4.0);
     let whole = if viewer.original == Original::Whole {
         ui.source.original(viewer.id)
@@ -322,8 +325,16 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         None
     };
     photo = match whole.or_else(|| ui.source.thumbnail(viewer.id, Shape::Preview)) {
-        Some(pixels) => photo.pixels_fit(&pixels, SurfaceFit::Fit),
-        None => photo.fill(white.alpha(0.07)),
+        Some(pixels) => {
+            let (w, h) = pixels.size();
+            // The largest box at the picture's own aspect the stage allows (task 67: no fixed cap; it follows the
+            // window and the details panel).
+            photo
+                .aspect_fit(w.max(1) as f32 / h.max(1) as f32)
+                .pixels_fit(&pixels, SurfaceFit::Fill)
+        }
+        // No picture yet: a placeholder at the board's drawing size.
+        None => photo.size(600.0, 400.0).fill(white.alpha(0.07)),
     };
     // A video the shell's player is playing: its frames on the stage, the bar working (Space and the button
     // play and pause), a refusal in the bar's place.
@@ -405,7 +416,7 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
             .center()
             .child(act(0, "Share", &icons::SHARE).on_press(|s: &mut State| s.photos.open_share()))
             .child(
-                act(1, if kept { "On this PC" } else { "Offline" }, &icons::OFFLINE)
+                act(1, if kept { concat!("On ", beebeeb_engine::device_word!()) } else { "Offline" }, &icons::OFFLINE)
                     .on_press(|s: &mut State| s.photos.press_offline()),
             )
             .child(act(2, "Details", &icons::INFO).on_press(|s: &mut State| s.photos.open_details()))

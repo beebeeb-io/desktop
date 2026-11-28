@@ -56,12 +56,16 @@ use chrono::{NaiveDate, TimeZone};
 
 use super::log;
 use crate::frames::this_pc::source::{
-    Change, Contains, Exit, Kept, KeptStatus, Kind, Origin, Pumped, Reason, Standing, ThisPcSource, What,
+    Change, Contains, CopyState, Exit, Kept, KeptProgress, KeptStatus, Kind, Origin, Pumped, Reason, Standing, ThisPcSource, What,
 };
 
 #[cfg(test)]
 #[path = "this_pc_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "this_pc_progress_tests.rs"]
+mod progress_tests;
 
 #[cfg(test)]
 #[path = "this_pc_engine_tests.rs"]
@@ -92,6 +96,10 @@ pub(crate) fn source_when<E: ThisPcEngine>(on: bool, engine: Arc<E>) -> Box<dyn 
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
 /// How long after a read answered "not now" the next one is asked.
 const RETRY_AFTER: Duration = Duration::from_secs(1);
+/// While a kept copy comes down, how often the rows read its progress.
+const PROGRESS_EVERY: Duration = Duration::from_millis(700);
+/// While a kept item is not on this PC yet and nothing runs, how often the rows look for it to start.
+const WAITING_EVERY: Duration = Duration::from_secs(3);
 /// How far back the history goes (the board: "kept on this PC only", 30 days).
 const HISTORY_DAYS: i64 = 30;
 /// How many queued changes are read (the 0.8 app's Sync history reads as many).
@@ -102,18 +110,32 @@ const EVENTS: usize = 200;
 
 /// What the window says when a change the person asked for did not happen. Fixed sentences: never a name or an
 /// engine's words.
-pub const NOT_SYNCING: &str = "Sync isn't running, so nothing was removed from this PC.";
-pub const NOT_REMOVED: &str = "Couldn't remove every item from this PC. Try again.";
+pub const NOT_SYNCING: &str = concat!("Sync isn't running, so nothing was removed from ", beebeeb_engine::device_word!(), ".");
+pub const NOT_REMOVED: &str = concat!("Couldn't remove every item from ", beebeeb_engine::device_word!(), ". Try again.");
+pub const NOT_KEPT_AGAIN: &str = concat!("Couldn't try again just now. Sync isn't running or ", beebeeb_engine::device_word!(), " couldn't be read.");
 pub const NOT_RETRIED: &str = "Couldn't try every item again.";
 /// Task 2530: what a way out of a parked change did, or why it did nothing. Fixed sentences.
 pub const SETTLE_MOVED: &str = "This change moved since you saw it. Nothing was changed.";
-pub const SETTLE_NOT_KEPT: &str = "Couldn't keep this PC's version, so nothing was changed.";
-pub const SETTLE_BYTES_HERE: &str = "This PC has the bytes of this change, so it wasn't removed.";
+pub const SETTLE_NOT_KEPT: &str = concat!("Couldn't keep ", beebeeb_engine::device_word!(), "'s version, so nothing was changed.");
+pub const SETTLE_BYTES_HERE: &str = concat!(beebeeb_engine::device_word_cap!(), " has the bytes of this change, so it wasn't removed.");
 pub const SETTLE_FAILED: &str = "Couldn't do that. The change is still listed.";
-pub const SETTLED_KEPT_OTHER: &str = "This PC's version is in Changes not sent, in Beebeeb's app data.";
-pub const SETTLED_KEPT_BOTH: &str = "This PC's version is queued as a new file next to the original.";
-pub const SETTLED_SENT_AGAIN: &str = "This PC's version is queued to be sent.";
+pub const SETTLED_KEPT_OTHER: &str = concat!(beebeeb_engine::device_word_cap!(), "'s version is in Changes not sent, in Beebeeb's app data.");
+pub const SETTLED_KEPT_BOTH: &str = concat!(beebeeb_engine::device_word_cap!(), "'s version is queued as a new file next to the original.");
+pub const SETTLED_SENT_AGAIN: &str = concat!(beebeeb_engine::device_word_cap!(), "'s version is queued to be sent.");
 pub const SETTLED_REMOVED: &str = "Removed from the list. The file on Beebeeb is as it was.";
+
+/// Dm-71: keep offline on a Mac goes through the File Provider only. The pin (the engine's, which on a Mac queues no
+/// fetch of its own) makes the item's content policy "keep downloaded"; this asks the system to fetch it now, by the
+/// bridge's pin call. The extension's fetch is the one download and the one copy on disk.
+#[cfg(all(target_os = "macos", not(test)))]
+mod macos_keep {
+    /// `false`: the system refused (a folder is one it may refuse: its files are fetched by their own content
+    /// policy). Dm-75: the one request the viewer and Open with make too (`materialise::request_download`). Waits up
+    /// to ten seconds: a worker's.
+    pub(super) fn ask_for_download(id: &str) -> bool {
+        crate::shell::platform::macos::macos_fp::materialise::request_download(id).is_ok()
+    }
+}
 
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is a state database in a folder of
 /// its own.
@@ -132,6 +154,11 @@ pub trait ThisPcEngine: Send + Sync + 'static {
     fn change_local_state<T>(&self, change: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused>;
     /// Sync runs for this handle. May wait: a worker's.
     fn syncing(&self) -> bool;
+    /// The copies coming down now: `(file id, done, total)`, read from the engine's transfer board. A double that has
+    /// no board answers none.
+    fn downloads(&self, _session: SessionGeneration) -> Vec<(String, u64, u64)> {
+        Vec::new()
+    }
     /// Keep an item on this PC, or stop keeping it, bound to `session`, the one of the press: nothing is changed once the engine's session
     /// moved on. Blocks: a worker's.
     fn set_kept_for(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), String>;
@@ -162,6 +189,11 @@ impl<C: CredentialStores> ThisPcEngine for Engine<C> {
     fn change_local_state<T>(&self, change: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
         Engine::local_state_for_changes(self).and_then(|state| state.with(change))
     }
+    fn downloads(&self, session: SessionGeneration) -> Vec<(String, u64, u64)> {
+        self.downloads_for(session)
+            .map(|rows| rows.into_iter().map(|r| (r.file_id, r.done, r.total)).collect())
+            .unwrap_or_default()
+    }
     fn syncing(&self) -> bool {
         self.is_syncing()
     }
@@ -191,6 +223,11 @@ pub(crate) struct Snapshot {
     /// chosen against: `(queue id, exits, version)`. A settle asks only what this lists.
     pub settles: Vec<(String, Vec<Exit>, Option<i64>)>,
     pub kept: Vec<Kept>,
+    /// Per kept item (top-most), the files it holds and their state at the read: what a row's progress counts.
+    pub kept_files: std::collections::HashMap<String, Vec<(String, FileStatus)>>,
+    /// The copies coming down when the read was made, by file id: `(done, total)` bytes. Asked of the engine's transfer
+    /// board (never of the database), so a row's bar moves while the copy runs.
+    pub downloads: std::collections::HashMap<String, (u64, u64)>,
 }
 
 /// How many of each, never a name, a place or an id: a snapshot that reaches a log line or a failed assertion says
@@ -247,6 +284,8 @@ enum Ask {
     Read,
     Retry(Vec<String>),
     Release(Vec<String>),
+    /// Dm-68: Try again on a kept item whose copy failed: keep it once more.
+    Keep(String),
     /// Task 2530: one way out of one parked change, against the version its row was read at.
     Settle {
         problem: String,
@@ -429,6 +468,15 @@ fn run<E: ThisPcEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
                 Some(NOT_RETRIED)
             }
         },
+        Ask::Keep(id) => {
+            let kept = engine.syncing() && owns_state(engine, &whose) && engine.set_kept_for(whose.session, &id, true).is_ok();
+            // Dm-71: on a Mac the kept bytes come by the system's one fetch; it is asked for it now.
+            #[cfg(all(target_os = "macos", not(test)))]
+            if kept && !macos_keep::ask_for_download(&id) {
+                log("this pc: the system was not asked for a kept item's download (it fetches it at its next look)");
+            }
+            (!kept).then_some(NOT_KEPT_AGAIN)
+        }
         Ask::Release(ids) => {
             if !engine.syncing() {
                 log("this pc: not removed from this PC: sync does not run");
@@ -528,10 +576,19 @@ fn read_for<E: ThisPcEngine>(engine: &E, whose: &Whose) -> Result<Snapshot, NoRe
         return Err(NoRead::NotNow);
     }
     match engine.local_state(|db| read(db, chrono::Utc::now().timestamp())) {
-        Ok(read) => read.map_err(|_| {
-            log("this pc: the local history could not be read");
-            NoRead::Unreadable
-        }),
+        Ok(read) => read
+            .map(|mut snapshot| {
+                snapshot.downloads = engine
+                    .downloads(whose.session)
+                    .into_iter()
+                    .map(|(id, done, total)| (id, (done, total)))
+                    .collect();
+                snapshot
+            })
+            .map_err(|_| {
+                log("this pc: the local history could not be read");
+                NoRead::Unreadable
+            }),
         Err(LocalStateRefused::NothingSynced) => Ok(Snapshot::default()),
         Err(refused) if refused.not_this_accounts() => Err(NoRead::AnotherAccounts),
         // Signed out, locked, ended or changing: not a failure to read, and not this answer's to say.
@@ -609,12 +666,15 @@ pub(crate) fn read(db: &StateDb, now: i64) -> Result<Snapshot, String> {
     history.extend(problems.iter().filter(|(at, _)| *at >= since || *at == 0).cloned());
     history.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
 
+    let (kept, kept_files) = kept(db, &backups)?;
     Ok(Snapshot {
         history: history.into_iter().map(|(_, c)| c).collect(),
         problems: problems.into_iter().map(|(_, c)| c).collect(),
         retryable,
         settles,
-        kept: kept(db, &backups)?,
+        kept,
+        kept_files,
+        downloads: Default::default(),
     })
 }
 
@@ -719,7 +779,7 @@ pub(crate) fn kind_of(name: &str, folder: bool) -> Kind {
 
 /// The top-most kept items; "Up to date" only when every file in it is on this PC. One query: the kept rows only
 /// (a kept folder's contents are kept too, so its count and its status come from the same rows).
-fn kept(db: &StateDb, backups: &BackupsTree) -> Result<Vec<Kept>, String> {
+fn kept(db: &StateDb, backups: &BackupsTree) -> Result<(Vec<Kept>, KeptFiles), String> {
     let rows: Vec<(FileEntry, bool, beebeeb_engine::drive_v2::dto::DriveItem)> = db
         .kept_rows()
         .map_err(|_| "kept")?
@@ -742,21 +802,34 @@ fn kept(db: &StateDb, backups: &BackupsTree) -> Result<Vec<Kept>, String> {
         let path = e.path.trim_start_matches('/');
         for (at, _) in path.match_indices('/') {
             if let Some(ok) = all_local.get_mut(&path[..=at]) {
-                *ok &= e.status == FileStatus::Local;
+                *ok &= finder_status(&e.file_id, &e.status) == FileStatus::Local;
             }
         }
     }
-    Ok(status::offline_entries(&rows)
+    let mut files: KeptFiles = std::collections::HashMap::new();
+    let list = status::offline_entries(&rows)
         .into_iter()
         .filter_map(|entry| {
             let row = *by_id.get(entry.item.id.as_str())?;
+            files.insert(
+                row.file_id.clone(),
+                if row.is_dir() {
+                    let prefix = format!("{}/", row.path.trim_matches('/'));
+                    rows.iter()
+                        .filter(|(e, _, _)| !e.is_dir() && e.path.trim_start_matches('/').starts_with(&prefix))
+                        .map(|(e, _, _)| (e.file_id.clone(), finder_status(&e.file_id, &e.status)))
+                        .collect()
+                } else {
+                    vec![(row.file_id.clone(), finder_status(&row.file_id, &row.status))]
+                },
+            );
             let here = if row.is_dir() {
                 all_local
                     .get(&format!("{}/", row.path.trim_matches('/')))
                     .copied()
                     .unwrap_or(true)
             } else {
-                row.status == FileStatus::Local
+                finder_status(&row.file_id, &row.status) == FileStatus::Local
             };
             Some(Kept {
                 id: entry.item.id.clone(),
@@ -774,7 +847,71 @@ fn kept(db: &StateDb, backups: &BackupsTree) -> Result<Vec<Kept>, String> {
                 },
             })
         })
-        .collect())
+        .collect();
+    Ok((list, files))
+}
+
+/// Dm-75: a kept file's state as Available offline counts it. On a Mac that is Finder's real state (the system's
+/// list of materialised items, `macos_downloaded::finder_state`): a file Finder holds no bytes of is not on this
+/// Mac yet whatever the engine records, and one Finder holds is. A file on its way, and every file elsewhere or
+/// until the system has answered, keeps the engine's state.
+fn finder_status(file_id: &str, status: &FileStatus) -> FileStatus {
+    #[cfg(target_os = "macos")]
+    match (status, super::macos_downloaded::finder_state::here(file_id)) {
+        (FileStatus::Local, Some(false)) => return FileStatus::CloudOnly,
+        (FileStatus::CloudOnly, Some(true)) => return FileStatus::Local,
+        _ => {}
+    }
+    let _ = file_id;
+    status.clone()
+}
+
+/// Per kept item, its files and their state at the read.
+type KeptFiles = std::collections::HashMap<String, Vec<(String, FileStatus)>>;
+
+/// What the row of kept item `id` says of its copy: how far the running downloads have come, or that one failed. `None`
+/// while it needs no say (here already, or not started).
+pub(crate) fn copy_state(snapshot: &Snapshot, id: &str) -> Option<CopyState> {
+    let files = snapshot.kept_files.get(id)?;
+    if files.iter().any(|(_, status)| *status == FileStatus::Error) {
+        return Some(CopyState::Failed);
+    }
+    let running: Vec<(u64, u64)> = files
+        .iter()
+        .filter_map(|(file, _)| snapshot.downloads.get(file).copied())
+        .collect();
+    if running.is_empty() {
+        return None;
+    }
+    let (done, total) = running.iter().fold((0u64, 0u64), |(d, t), (rd, rt)| (d + rd, t + rt));
+    let fraction_of = |d: u64, t: u64| if t == 0 { 0.0 } else { (d as f64 / t as f64).clamp(0.0, 1.0) };
+    let m = files.len() as u32;
+    let here = files.iter().filter(|(file, status)| *status == FileStatus::Local && !snapshot.downloads.contains_key(file)).count() as u32;
+    let is_folder = snapshot.kept.iter().any(|k| k.id == id && k.kind == Kind::Folder);
+    let (files_count, percent) = if is_folder {
+        let partial: f64 = running.iter().map(|(d, t)| fraction_of(*d, *t)).sum();
+        (Some((here, m)), (((here as f64 + partial) / m as f64) * 100.0) as u8)
+    } else {
+        (None, (fraction_of(done, total) * 100.0) as u8)
+    };
+    Some(CopyState::Running(KeptProgress { done, total, files: files_count, percent: percent.min(100) }))
+}
+
+/// The kept files the transfer board has coming down at the read: `(files, bytes done, bytes of them)`, each file
+/// once (a kept folder's files are its own). `None` while none runs: the status line then names what is kept.
+pub(crate) fn downloading(snapshot: &Snapshot) -> Option<(u32, u64, u64)> {
+    let mut seen = std::collections::HashSet::new();
+    let (mut files, mut done, mut total) = (0u32, 0u64, 0u64);
+    for (file, _) in snapshot.kept_files.values().flatten() {
+        if let Some((d, t)) = snapshot.downloads.get(file)
+            && seen.insert(file.as_str())
+        {
+            files += 1;
+            done += (*d).min(*t);
+            total += *t;
+        }
+    }
+    (files > 0).then_some((files, done, total))
 }
 
 impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
@@ -848,6 +985,23 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
         if self.retry_at.is_some_and(|at| at <= Instant::now()) && !self.reading && self.current() {
             self.retry_at = None;
             self.ask_read();
+        }
+        // A copy comes down (or a kept item still waits to): read again for its bar and for the moment it lands. The
+        // board is the engine's, so no pulse reaches this window for it. Only while the section is held and open.
+        if !self.reading && self.current() {
+            let every = self.held().and_then(|held| {
+                if !held.downloads.is_empty() {
+                    Some(PROGRESS_EVERY)
+                } else if held.kept.iter().any(|k| k.status == KeptStatus::NotOnPcYet) {
+                    Some(WAITING_EVERY)
+                } else {
+                    None
+                }
+            });
+            if every.is_some_and(|every| self.read_at.is_none_or(|at| at.elapsed() >= every)) {
+                self.ask_read();
+            }
+            pumped.busy |= every.is_some();
         }
         pumped.busy |= self.retry_at.is_some();
         pumped.busy |= self.pending.load(Ordering::SeqCst) > 0;
@@ -944,6 +1098,21 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
 
     fn kept(&self) -> std::borrow::Cow<'_, [Kept]> {
         std::borrow::Cow::Borrowed(self.held().map_or(&[][..], |s| &s.kept[..]))
+    }
+
+    fn copy_state(&self, id: &str) -> Option<CopyState> {
+        copy_state(self.held()?, id)
+    }
+
+    fn downloading(&self) -> Option<(u32, u64, u64)> {
+        downloading(self.held()?)
+    }
+
+    fn try_keep_again(&mut self, id: &str) {
+        let listed = self.held().is_some_and(|s| s.kept.iter().any(|k| k.id == id));
+        if listed {
+            self.send(Ask::Keep(id.to_string()));
+        }
     }
 
     /// The count the sidebar draws, without a copy of the list.

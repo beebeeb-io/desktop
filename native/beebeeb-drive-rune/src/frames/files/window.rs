@@ -17,7 +17,7 @@ pub fn pc_summary(s: &State) -> String {
     if s.listing.items.is_empty() {
         // The whole account is empty (DW-0114), or this folder is (DW-1106).
         return if s.listing.folder.id.is_none() {
-            "Nothing on this PC yet".to_string()
+            concat!("Nothing on ", beebeeb_engine::device_word!(), " yet").to_string()
         } else {
             "Nothing in this folder yet".to_string()
         };
@@ -31,7 +31,11 @@ pub fn pc_summary(s: &State) -> String {
     };
     let grouped = |n: usize| super::protected::grouped(i64::try_from(n).unwrap_or(i64::MAX));
     let counts = format!(
-        "{} on this PC \u{00B7} {} available offline \u{00B7} {} online only",
+        concat!(
+            "{} on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} {} available offline \u{00B7} {} online only"
+        ),
         grouped(count("on_this_pc")),
         grouped(count("available_offline")),
         grouped(count("online_only"))
@@ -187,11 +191,17 @@ fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
             "toast",
             "Moved to Trash",
             Lead::None,
-            Some(toast_button("Undo Ctrl+Z", "Undo", Some("Ctrl+Z"), undo, t)),
+            Some(toast_button(
+                concat!("Undo ", beebeeb_engine::primary_key!(), "Z"),
+                "Undo",
+                Some(crate::frames::files::key_label("Z")),
+                undo,
+                t,
+            )),
             t,
         ),
         Toast::Duplicated => plain("Duplicated", Lead::Check),
-        Toast::Keeping => plain("Keeping on this PC", Lead::None),
+        Toast::Keeping => plain(concat!("Keeping on ", beebeeb_engine::device_word!()), Lead::None),
         Toast::UploadCancelled => plain("Upload cancelled. The copy is in the Recycle Bin.", Lead::None),
         Toast::LinkCopied => plain("Link copied", Lead::Check),
         Toast::ReadOneAtATime => plain(Toast::READ_ONE_AT_A_TIME, Lead::Warn),
@@ -200,7 +210,10 @@ fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
             &crate::frames::office::edit::recovery::unlocked_words(usize::from(count), None).unwrap_or_default(),
             Lead::Warn,
         ),
-        Toast::FreedUp => plain("Freed up space on this PC", Lead::Check),
+        Toast::FreedUp => plain(
+            concat!("Freed up space on ", beebeeb_engine::device_word!()),
+            Lead::Check,
+        ),
         Toast::Failed(action, why) => toast::toast_with(
             "toast",
             &Toast::failure(action, why),
@@ -266,9 +279,17 @@ fn empty_folder(root: bool, t: &Theme) -> El {
         "Nothing here yet",
         // The board's two sentences: a new account's Files (DW-0114), an empty folder (DW-1106).
         if root {
-            "Add files or photos. They're encrypted on this PC before they upload."
+            concat!(
+                "Add files or photos. They're encrypted on ",
+                beebeeb_engine::device_word!(),
+                " before they upload."
+            )
         } else {
-            "Add files or photos, and they're encrypted on this PC before they upload."
+            concat!(
+                "Add files or photos, and they're encrypted on ",
+                beebeeb_engine::device_word!(),
+                " before they upload."
+            )
         },
         t,
     )
@@ -285,7 +306,7 @@ fn empty_folder(root: bool, t: &Theme) -> El {
             )
             .child(kit::label(
                 "empty-hint",
-                "or drop files here from File Explorer",
+                concat!("or drop files here from ", beebeeb_engine::file_manager!()),
                 empty::CAP,
                 t.text_tertiary,
             )),

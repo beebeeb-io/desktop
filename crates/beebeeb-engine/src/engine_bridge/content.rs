@@ -260,7 +260,7 @@ pub fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
 /// Normalize the legacy JSON transport envelope, without decryption or format fallback.
 pub fn content_frame(bytes: &[u8]) -> Result<Vec<u8>, EngineError> {
     if let Ok(blob) = serde_json::from_slice::<EncryptedBlob>(bytes) {
-        if !(blob.nonce.len() == 12) {
+        if blob.nonce.len() != 12 {
             return Err(anyhow::anyhow!("invalid chunk envelope").into());
         };
         let mut frame = blob.nonce;

@@ -253,6 +253,45 @@ pub(crate) fn start(bytes: Zeroizing<Vec<u8>>) -> Box<dyn Renderer> {
     tests::stand_in(bytes)
 }
 
+/// On a Mac the helper draws a PDF only when it is beside the app and the sandbox starts it (dm-79, dm-80; asked once
+/// for the source, with the Office files: `mac_helper_starts`). Otherwise Quick Look shows the PDF, in its own
+/// service, as it shows a .docx then: never the page that says there is no viewer. The refusal is said once in the
+/// log, by the same ask.
+#[cfg(target_os = "macos")]
+impl<E: super::ViewerEngine> super::EngineViewerSource<E> {
+    /// The body when Quick Look shows this PDF. `None`: the helper draws it (the worker's route, as on Windows), or
+    /// Quick Look does not show the type here.
+    pub(super) fn pdf_mac_begin(
+        &mut self,
+        session: beebeeb_engine::account::SessionGeneration,
+        account: Option<String>,
+        file_id: &str,
+        name: &str,
+    ) -> Option<crate::frames::viewers::source::Body> {
+        let helper = (self.office.helper)();
+        if helper.as_deref().is_some_and(|helper| self.mac_helper_starts(helper)) {
+            return None;
+        }
+        let shower = self.mac_shows_itself(name)?;
+        self.mac_begin_with(shower, session, account, file_id, name)
+    }
+
+    /// Dm-84 (RC15): the helper was asked to draw the PDF and could not start (or stopped before the document
+    /// opened). Quick Look shows it then, as when there is no helper (80(c)), with one line in the log; never the page
+    /// that says the viewer stopped. `None`: Quick Look does not show it here (the caller keeps its own page).
+    pub(super) fn pdf_mac_start_failed(
+        &mut self,
+        session: beebeeb_engine::account::SessionGeneration,
+        account: Option<String>,
+        file_id: &str,
+        name: &str,
+    ) -> Option<crate::frames::viewers::source::Body> {
+        let shower = self.mac_shows_itself(name)?;
+        tracing::warn!("viewer: the helper could not start; macOS shows the file");
+        self.mac_begin_with(shower, session, account, file_id, name)
+    }
+}
+
 /// What find reads: the bytes until the first find, the document after it.
 enum Text {
     Bytes(Zeroizing<Vec<u8>>),

@@ -36,6 +36,10 @@ use edit::Mode;
 use held::Held;
 use restart::Cadence;
 
+/// Whether a start the sandbox refused (`NotConfined`) is tried once more before the window hears of it: on a Mac,
+/// where the system starts the helper as the app's XPC service (dm-84).
+const RETRY_REFUSED_START: bool = cfg!(target_os = "macos");
+
 /// Starts the worker of one document on a thread of its own. `false` when no thread could be made: the worker, and
 /// the bytes in it, are dropped (wiped).
 #[allow(clippy::too_many_arguments)] // the worker's whole start in one call; a parameter struct would only rename them
@@ -344,7 +348,16 @@ impl<S: Starter> Worker<S> {
         if !self.shared.park(Box::new(std::mem::replace(&mut self.doc, Doc::Gone))) {
             return;
         }
-        let started = self.starter.start();
+        let started = match self.starter.start() {
+            // Dm-84: on a Mac a start the sandbox refused is tried once more at once, with every check again: RC15's
+            // first start was refused while the system was still starting the service. The refused one is ended
+            // (and its process waited for) before the second connects.
+            Err(error @ sandbox::SandboxError::NotConfined(_)) if RETRY_REFUSED_START => {
+                crate::office_log::helper_not_started("the sandbox refused; started once more", &error.to_string());
+                self.starter.start()
+            }
+            started => started,
+        };
         self.doc = self
             .shared
             .unpark()
@@ -758,7 +771,11 @@ impl<S: Starter> Worker<S> {
 
     fn kind_has_pages(&self) -> bool {
         // A PDF has pages too (RC2-3): without it the helper's `Opened` was "not what was asked", and every PDF failed.
-        matches!(self.kind, DocKind::Docx | DocKind::Doc | DocKind::Pptx | DocKind::Pdf)
+        // A picture (drive-macos-92) is one page too.
+        matches!(
+            self.kind,
+            DocKind::Docx | DocKind::Doc | DocKind::Pptx | DocKind::Pdf | DocKind::Picture(_)
+        )
     }
 
     /// The answer to the oldest request: it must be the kind that request takes, then pass its check.

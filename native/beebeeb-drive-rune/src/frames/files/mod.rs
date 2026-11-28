@@ -5,6 +5,18 @@
 //! Data: the listing comes from `crate::source::DriveSource`, everything else from `source::FilesSource`
 //! (counts, the account, the sync state; every action is a call on it, answered in a toast).
 
+/// A shortcut label in this OS's notation ("Ctrl+Shift+N" on Windows, "\u{21E7}\u{2318}N" on macOS), as the
+/// `&'static str` the menu entries and hints hold. Each distinct key is built once and kept.
+pub(crate) fn key_label(key: &'static str) -> &'static str {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    cache
+        .entry(key)
+        .or_insert_with(|| Box::leak(beebeeb_engine::os_words::shortcut(key).into_boxed_str()))
+}
+
 pub mod action_scenes;
 pub mod actions_data;
 pub mod background_menu;
@@ -207,10 +219,10 @@ impl Toast {
             }
             ActionError::NotSent => " It has changes that are not uploaded yet.",
             ActionError::PinLimit => " Unpin a folder first.",
-            ActionError::HoldsKept => " Something in it is kept on this PC.",
+            ActionError::HoldsKept => concat!(" Something in it is kept on ", beebeeb_engine::device_word!(), "."),
             ActionError::NotToRecycleBin => " This file can't go to the Recycle Bin, so it was left as it is.",
             // The viewers' words for a full disk ("Not enough space to decrypt", "free on this PC").
-            ActionError::NoRoom => " There is not enough space on this PC.",
+            ActionError::NoRoom => concat!(" There is not enough space on ", beebeeb_engine::device_word!(), "."),
             ActionError::TooLarge => " It is too large to make here.",
             // w36: a name the folder refused after the dialog's own check (a file that is not listed yet, a name
             // Windows reads as another's): said, so Try again is asked with another name.
@@ -218,11 +230,11 @@ impl Toast {
                 " Something here already has that name. Try again with another name."
             }
             ActionError::NameShared => {
-                " Another item here has the same name. Rename one on the web to use it on this PC."
+                concat!(" Another item here has the same name. Rename one on the web to use it on ", beebeeb_engine::device_word!(), ".")
             }
             ActionError::NameSharedButCase => {
-                " Another item here has the same name except for capital letters. Rename one on the web to use it on \
-                 this PC."
+                concat!(" Another item here has the same name except for capital letters. Rename one on the web to use it on \
+                 ", beebeeb_engine::device_word!(), ".")
             }
             _ => "",
         };
@@ -823,17 +835,23 @@ impl State {
         if let Some(first) = files.first() {
             // Asked before the hand-over: once Windows has it, the copy may already be on its way.
             let fetch = crate::frames::open_file::fetch_toast(self, first);
+            use crate::frames::open_file::Opened;
             match crate::frames::open_file::open_file(self, crate::frames::open_file::Target::Item(first)) {
-                crate::frames::open_file::Opened::Failed(why) => {
-                    self.failed(Action::Open, why, tx);
+                // Dm-73: on a Mac a file that did not open gets its page with the reason, not a toast alone.
+                Opened::Failed(why) => {
+                    if !(cfg!(target_os = "macos") && crate::shell::viewer_intents::open_failed(self, first, why)) {
+                        self.failed(Action::Open, why, tx);
+                    }
                     return false;
                 }
-                crate::frames::open_file::Opened::DefaultApp if !several => {
-                    if let Some(toast) = fetch {
+                // Handed to another app: a start that fails later is this file's (`open_failed_later`).
+                opened @ (Opened::DefaultApp | Opened::Explorer) => {
+                    crate::shell::viewer_intents::handed_out(first);
+                    if let (Opened::DefaultApp, false, Some(toast)) = (opened, several, fetch) {
                         self.show_toast(toast, tx);
                     }
                 }
-                _ => {}
+                Opened::InApp => {}
             }
         }
         if several {

@@ -550,10 +550,10 @@ impl Toast {
             What::Trash => "Couldn\u{2019}t move to Trash".into(),
             What::Restore if several => format!("Couldn\u{2019}t put {count} back"),
             What::Restore => "Couldn\u{2019}t put it back".into(),
-            What::Keep(true) if several => format!("Couldn\u{2019}t keep {count} on this PC"),
-            What::Keep(true) => "Couldn\u{2019}t keep it on this PC".into(),
-            What::Keep(false) if several => format!("Couldn\u{2019}t remove {count} from this PC"),
-            What::Keep(false) => "Couldn\u{2019}t remove it from this PC".into(),
+            What::Keep(true) if several => format!("Couldn\u{2019}t keep {count} on {device}", device = beebeeb_engine::device_word!()),
+            What::Keep(true) => concat!("Couldn\u{2019}t keep it on ", beebeeb_engine::device_word!()).into(),
+            What::Keep(false) if several => format!("Couldn\u{2019}t remove {count} from {device}", device = beebeeb_engine::device_word!()),
+            What::Keep(false) => concat!("Couldn\u{2019}t remove it from ", beebeeb_engine::device_word!()).into(),
         };
         let reason = match why {
             Left::Offline => " \u{00B7} you\u{2019}re offline",
@@ -617,22 +617,22 @@ pub(super) fn not_here_body(ui: &Ui, t: &Theme) -> Option<El> {
     let state = match loaded {
         Loaded::Ready => return None,
         Loaded::Loading => ViewState::Loading {
-            words: "Loading your photos\u{2026} Reading what this PC knows of your Beebeeb.",
+            words: concat!("Loading your photos\u{2026} Reading what ", beebeeb_engine::device_word!(), " knows of your Beebeeb."),
         },
         Loaded::SignedOut => said("Signed out", "Sign in to see your photos."),
         Loaded::SessionEnded => said("Your session ended", "Sign in again to see your photos."),
         Loaded::NothingSynced => said(
-            "Nothing has synced to this PC yet",
-            "Photos shows your photos and videos once this PC has synced with Beebeeb.",
+            concat!("Nothing has synced to ", beebeeb_engine::device_word!(), " yet"),
+            concat!("Photos shows your photos and videos once ", beebeeb_engine::device_word!(), " has synced with Beebeeb."),
         ),
         Loaded::NotThisAccounts => said(
-            "This PC holds another account\u{2019}s files",
-            "Photos shows your photos once this PC has synced with your account.",
+            concat!(beebeeb_engine::device_word_cap!(), " holds another account\u{2019}s files"),
+            concat!("Photos shows your photos once ", beebeeb_engine::device_word!(), " has synced with your account."),
         ),
         Loaded::Failed => ViewState::Failed {
             key: "ph-not-here",
             title: "Couldn\u{2019}t load your photos",
-            why: "Beebeeb couldn\u{2019}t read the library on this PC.",
+            why: concat!("Beebeeb couldn\u{2019}t read the library on ", beebeeb_engine::device_word!(), "."),
             retry: Some(try_again("ph-not-here", t).on_press(|s: &mut State| s.photos.source.refresh())),
         },
     };

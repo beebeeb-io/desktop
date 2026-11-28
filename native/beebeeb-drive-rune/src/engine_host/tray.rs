@@ -92,7 +92,7 @@ impl<C: CredentialStores> EngineTraySource<C> {
             paused,
             report,
             progress: progress_of(&view),
-            explorer_ready: self.explorer_ready,
+            explorer_ready: live::finder_ready(self.explorer_ready, super::finder_setup::is_ready()),
             local,
             storage: if ready { self.storage() } else { None },
             unreadable,
@@ -108,8 +108,22 @@ impl<C: CredentialStores> EngineTraySource<C> {
             Ok(state) => state,
             Err(refused) => return (None, refused == LocalStateRefused::Unreadable),
         };
+        let session = state.session();
         match state.with(|db| local_of(db, now(), moving)) {
-            Ok(local) => (Some(local), false),
+            Ok(mut local) => {
+                // Dm-68: how far each download is, from the engine's transfer board (never from the database).
+                if local
+                    .rows
+                    .iter()
+                    .any(|row| matches!(row.kind, RowKind::Downloading { .. }))
+                {
+                    let board = self.live.engine.downloads_for(session).unwrap_or_default();
+                    let so_far: Vec<(String, u64, u64)> =
+                        board.into_iter().map(|d| (d.file_id, d.done, d.total)).collect();
+                    say_how_far(&mut local, &so_far);
+                }
+                (Some(local), false)
+            }
             Err(refused) => (None, refused == LocalStateRefused::Unreadable),
         }
     }
@@ -272,6 +286,25 @@ fn progress_of(view: &EngineStatusView) -> Progress {
         files_remaining: view.files_remaining,
         bytes_total: view.bytes_total,
         bytes_done: view.bytes_done,
+    }
+}
+
+/// Dm-68: a row the database has as downloading says how far it is when the transfer board holds its copy
+/// (`(file id, done, total)`, a total above 0). A row the board does not hold keeps its plain line.
+pub(super) fn say_how_far(local: &mut Local, so_far: &[(String, u64, u64)]) {
+    for row in &mut local.rows {
+        if !matches!(row.kind, RowKind::Downloading { .. }) {
+            continue;
+        }
+        let held = so_far
+            .iter()
+            .find(|(id, _, total)| *total > 0 && row.id.as_deref() == Some(id.as_str()));
+        if let Some((_, done, total)) = held {
+            row.kind = RowKind::DownloadingSoFar {
+                done: (*done).min(*total),
+                total: *total,
+            };
+        }
     }
 }
 

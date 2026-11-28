@@ -344,6 +344,12 @@ pub struct DesktopConfig {
     /// ruling R2 keeps Beebeeb in Finder across that relaunch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub finder_signed_out_by_choice: bool,
+    /// Rule 6's debt across a restart (dm-90): a sign-out whose Finder removal was not confirmed sets it; only a
+    /// confirmed removal (or a check that finds the domain gone) clears it. A sign-in does NOT clear it (unlike
+    /// `finder_signed_out_by_choice`), so the next account never reuses the previous account's domain: the app
+    /// reads it at launch, before the reconciler's first check, and removes first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub finder_removal_owed: bool,
     /// The last failure, for "Copy details" across a relaunch. Kept last: it serializes as a
     /// TOML table, and a table belongs after the plain values. The `toml` crate we use reorders
     /// on its own (swapping the two fields changes no test result), so this is for the reader and
@@ -477,6 +483,7 @@ impl Default for DesktopConfig {
             kept_unsent_unfinished: Vec::new(),
             kept_conflict_copies: Vec::new(),
             finder_signed_out_by_choice: false,
+            finder_removal_owed: false,
             finder_last_failure: None,
         }
     }

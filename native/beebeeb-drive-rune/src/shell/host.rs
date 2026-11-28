@@ -390,6 +390,11 @@ impl Shell {
 
     pub(crate) fn open_main(&self) {
         if let Some(main) = &self.wiring.main {
+            // A Mac: the Dock icon goes on before the window shows; `open` shows it and activates the app after
+            // (`macos_lifecycle::open_steps`). Rune's `open` unhides a hidden app itself.
+            if macos_lifecycle::open_steps(cfg!(target_os = "macos"), false).contains(&macos_lifecycle::Step::DockIconOn) {
+                main.set_dock_icon(true);
+            }
             main.open();
         }
     }
@@ -708,6 +713,12 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     let first_list = s.global.source.status();
     let awaited = first_list.loading.is_some() || first_list.list_failed;
     if std::mem::replace(&mut s.shell.first_list_awaited, awaited) && !awaited {
+        s.shell.check_finished = true;
+    }
+    // Dm-78: Finder's state changed (its list was read once Finder setup was ready, a file landed or went online
+    // only): the lists are read as after a finished check, so the marks and the counts are Finder's state now.
+    #[cfg(target_os = "macos")]
+    if crate::engine_host::macos_downloaded::finder_state::take_changed() {
         s.shell.check_finished = true;
     }
     // Photos reads its library again once a check finished (`frames::photos::after_a_check`).
@@ -1315,6 +1326,13 @@ const QUIT_HELLO_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// window leaves the b running"); with no b to come back through, closing quits.
 pub fn on_close(s: &mut State, tx: &mut Tx) {
     s.shell.save_window_place();
+    // A Mac: the window is gone, so the Dock icon goes with it and the b stays (`macos_lifecycle::dock_icon_wanted`).
+    if cfg!(target_os = "macos")
+        && !macos_lifecycle::dock_icon_wanted(false)
+        && let Some(main) = &s.shell.wiring.main
+    {
+        main.set_dock_icon(false);
+    }
     if s.shell.close_quits() {
         // Unsaved changes in an open editor: the window stays and asks first.
         if !crate::frames::viewers::unsaved_guard::ask(s, crate::frames::viewers::unsaved_guard::Then::Quit) {
@@ -1375,6 +1393,9 @@ pub fn on_open_url(s: &mut State, url: &str, _tx: &mut Tx) {
         }
     }
 }
+
+#[path = "macos_lifecycle.rs"]
+pub(crate) mod macos_lifecycle;
 
 #[cfg(test)]
 #[path = "host_tests.rs"]

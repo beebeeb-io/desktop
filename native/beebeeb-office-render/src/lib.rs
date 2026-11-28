@@ -13,19 +13,23 @@
 //!
 //! The worst a hostile document can achieve is a viewer that says "Renderer stopped".
 
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: the one module that calls the system's picture decoder (`picture.rs`, macOS ImageIO)
+// allows it for that call alone (drive-macos-92).
+#![deny(unsafe_code)]
 
 mod edit_guard;
 mod edit_map;
 mod engine;
 mod fit;
 mod memory;
+mod picture;
 mod save;
 mod serve;
 mod start;
 
 pub use engine::{EditingDoc, Engine, Office, OpenDoc, Opening, block_cells, open_code, render_code};
 pub use memory::{Granted, Mapped, MappedMut, Memory};
+pub use picture::MAX_PICTURE_PX;
 pub use serve::serve;
 pub use start::start;
 

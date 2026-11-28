@@ -135,7 +135,7 @@ impl StateDb {
             .execute("DELETE FROM staged_payloads WHERE path = ?1", params![path])?;
         Ok(())
     }
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn staged_payloads_for_signout(&self) -> Result<Vec<(String, Option<String>, bool)>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -198,7 +198,7 @@ impl StateDb {
     /// dc-005: what a sign-out holds, counted apart: uploads waiting (queue rows and unsynced files) and sealed
     /// staged copies no queue row names (kept encrypted, opened again after sign-in). Office recovery copies live
     /// on disk, not here; the host adds them.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn windows_signout_counts(&self) -> Result<SignoutCounts> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let waiting: i64 = conn.query_row(
@@ -219,7 +219,7 @@ impl StateDb {
             sealed_copies: u64::try_from(sealed).unwrap_or(0),
         })
     }
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn windows_signout_preflight(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let pending: i64 = conn.query_row("SELECT COUNT(*) FROM operation_queue", [], |r| r.get(0))?;
@@ -233,7 +233,7 @@ impl StateDb {
         }
         Ok(())
     }
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn finish_windows_signout(&self) -> Result<()> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction()?;
@@ -395,7 +395,7 @@ impl StateDb {
     /// of round 2, P2-1: absence of a server version alone is not evidence). Every other row is judged: a snapshot row
     /// carries the server's version, a delta or a landing stamps the time (`remote_updated_at` alone is not enough: the
     /// My Files ingest leaves it 0 for every snapshot row, the server sends `updated_at` as RFC 3339 text).
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn own_data_proof_rows(&self) -> Result<Vec<ProofRow>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(&format!(
@@ -417,7 +417,7 @@ impl StateDb {
         rows.collect()
     }
     /// every queued operation by what it acts on: its own row and its parent.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn own_data_proof_ops(&self) -> Result<Vec<ProofOp>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare("SELECT op_id, file_id, parent_id, kind FROM operation_queue")?;
@@ -430,7 +430,7 @@ impl StateDb {
     /// sign-out emptied meanwhile. An operation queued after the proof read the queue is not in `proven`, so it is held
     /// too, and so is an unproven one paused for any reason (it would lose that pause when queued again). Returns how
     /// many were held, or `None` when nothing was recorded.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn adopt_owner_holding(
         &self,
         expected: Option<&crate::account_binding::Identity>,
@@ -466,7 +466,7 @@ impl StateDb {
     }
     /// the queued operations held for the person's review (`found_while_paused`), by what
     /// they act on, oldest first.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn found_while_paused_ops(&self) -> Result<Vec<ProofOp>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
@@ -482,7 +482,7 @@ impl StateDb {
     /// the rows whose upload has begun, so the server may already
     /// hold part of them: a queued upload with a resumable session, or an upload that landed and awaits its
     /// finalization (its operation is gone then; the finalization names the row).
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn files_with_upload_begun(&self) -> Result<std::collections::HashSet<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(
@@ -495,7 +495,7 @@ impl StateDb {
     /// the one move in progress (`found_while_paused::Journal`, as
     /// JSON), written before the move and removed in the transaction that finishes it, so a crash in between is
     /// finished or undone at the next start.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn keep_journal(&self) -> Result<Option<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.query_row(
@@ -505,7 +505,7 @@ impl StateDb {
         )
         .optional()
     }
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn set_keep_journal(&self, journal: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute(
@@ -514,7 +514,7 @@ impl StateDb {
         )?;
         Ok(())
     }
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn clear_keep_journal(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.execute("DELETE FROM sync_state WHERE key = ?1", params![KEEP_JOURNAL_KEY])?;
@@ -522,7 +522,7 @@ impl StateDb {
     }
     /// the staged copies the queued operations acting on the item `ids` hold,
     /// read before the keep forgets them, so an only copy is kept first.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn keep_staged_copies(&self, ids: &[String]) -> Result<Vec<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         Ok(keep_ops_conn(&conn, ids)?.1)
@@ -531,7 +531,7 @@ impl StateDb {
     /// transaction, forget every queued operation acting on those rows (with its upload records) and the rows, remove
     /// the journal and remember `kept_dir` for "Show in Explorer". Returns the staged copies the removed operations
     /// held (as [`Self::keep_staged_copies`]).
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn finish_keep(&self, ids: &[String], kept_dir: &str) -> Result<Vec<String>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -553,7 +553,7 @@ impl StateDb {
         Ok(staged)
     }
     /// the folder the last "Keep on this PC only" moved items into.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn last_kept_dir(&self) -> Result<Option<String>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.query_row(
@@ -566,7 +566,7 @@ impl StateDb {
     /// every change held as `found_while_paused`, by kind, for the card,
     /// oldest first. A change is in a shared folder when its row, or any folder up the parent links from its row or
     /// from the folder it acts in, is not a My Files row.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn found_while_paused_changes(&self) -> Result<Vec<HeldChange>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut rows: std::collections::HashMap<String, (Option<String>, bool)> = std::collections::HashMap::new();
@@ -607,7 +607,7 @@ impl StateDb {
     }
     /// Task 2267, "Upload to my Beebeeb": the changes in `op_ids` still held as `found_while_paused` are due again at
     /// `now`, keeping their attempts. Returns how many.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn release_found_while_paused(&self, op_ids: &[String], now: i64) -> Result<usize> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -624,7 +624,7 @@ impl StateDb {
     }
     /// whether the journal names the staged copy at `path`, and the live file
     /// it was copied from: `None` when no journal row names it, `Some(None)` when the row has no source.
-    #[cfg(any(target_os = "windows", test, feature = "test-support"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
     pub fn staged_payload_source(&self, path: &str) -> Result<Option<Option<String>>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         conn.query_row(
@@ -1034,6 +1034,7 @@ impl StateDb {
 }
 
 /// dc-005: the counts a sign-out says in words (see `StateDb::windows_signout_counts`).
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignoutCounts {
     pub waiting: u64,

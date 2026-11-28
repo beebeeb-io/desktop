@@ -108,6 +108,11 @@ pub enum RowKind {
     Downloading {
         bytes: u64,
     },
+    /// Dm-68: coming down now, and how far the engine's transfer board says it is (`total` > 0).
+    DownloadingSoFar {
+        done: u64,
+        total: u64,
+    },
     Failed,
     Uploaded,
     Downloaded,
@@ -137,6 +142,12 @@ pub struct Facts {
     pub unreadable: bool,
 }
 
+/// "Open in Finder" is on when the shell says Beebeeb is in the file manager or the macOS Finder setup is `Ready`
+/// (RC6: the shell flag was never set on the Mac). The gate does not matter: a locked app still opens Finder.
+pub fn finder_ready(shell: bool, macos_setup_ready: bool) -> bool {
+    shell || macos_setup_ready
+}
+
 /// What the flyout draws for `facts`. `name` is the app's (the build's identity), `now` the clock.
 pub fn snapshot(facts: &Facts, name: &str, now: DateTime<LocalTime>) -> Snapshot {
     let (status, changes) = match facts.gate {
@@ -155,7 +166,8 @@ pub fn snapshot(facts: &Facts, name: &str, now: DateTime<LocalTime>) -> Snapshot
             } else {
                 match recent(facts.local.as_ref(), name, now) {
                     // The first answer is still out: not a finished-looking empty list.
-                    Changes::Empty { .. } if status == Status::Checking => Changes::Loading,
+                    // ...but once the state database has been read, an empty list is the answer, not a placeholder.
+                    Changes::Empty { .. } if status == Status::Checking && facts.local.is_none() => Changes::Loading,
                     changes => changes,
                 }
             };
@@ -270,7 +282,7 @@ fn offered(action: Action, gate: Gate) -> bool {
 /// DW-1213's empty list: nothing has synced on this PC yet.
 fn nothing_yet(name: &str) -> Changes {
     Changes::Empty {
-        text: format!("Changes show here once {name} syncs this PC."),
+        text: format!("Changes show here once {name} syncs {os}.", os = beebeeb_engine::device_word!()),
     }
 }
 
@@ -289,6 +301,25 @@ fn recent(local: Option<&Local>, name: &str, now: DateTime<LocalTime>) -> Change
 /// The newest row's time: DW-1202's "last change".
 fn newest(local: Option<&Local>) -> Option<i64> {
     local?.rows.iter().map(|row| row.at).max()
+}
+
+/// Dm-68: a download's line while it runs: "Downloading · 45% · 5.1 of 11.3 MB" (both figures in the whole's unit).
+pub fn downloading_so_far(done: u64, total: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * KB;
+    const GB: f64 = MB * KB;
+    let (unit, size, decimals) = match total as f64 {
+        t if t >= GB => ("GB", GB, 1),
+        t if t >= MB => ("MB", MB, 1),
+        _ => ("KB", KB, 0),
+    };
+    let part = |n: u64| format!("{:.*}", decimals, n as f64 / size);
+    let percent = (done.min(total) as f64 / total.max(1) as f64 * 100.0) as u8;
+    format!(
+        "Downloading \u{00B7} {percent}% \u{00B7} {} of {} {unit}",
+        part(done.min(total)),
+        part(total)
+    )
 }
 
 fn change(row: &Row, now: DateTime<LocalTime>) -> Change {
@@ -319,6 +350,14 @@ fn change(row: &Row, now: DateTime<LocalTime>) -> Change {
             },
             tile_for(&name),
         ),
+        RowKind::DownloadingSoFar { done, total } => (
+            What::Moving {
+                text: downloading_so_far(done, total),
+                fraction: Some((done.min(total) as f64 / total.max(1) as f64) as f32),
+                upload: false,
+            },
+            tile_for(&name),
+        ),
         RowKind::Failed => (
             What::Failed {
                 text: "Couldn't sync this file".into(),
@@ -328,21 +367,21 @@ fn change(row: &Row, now: DateTime<LocalTime>) -> Change {
         RowKind::Uploaded => (
             What::Done {
                 origin: Origin::ThisPc,
-                text: format!("Uploaded from this PC {dot} {}", folder_of(&row.path)),
+                text: format!("Uploaded from {os} {dot} {}", folder_of(&row.path), os = beebeeb_engine::device_word!()),
             },
             tile_for(&name),
         ),
         RowKind::Downloaded => (
             What::Done {
                 origin: Origin::ThisPc,
-                text: format!("Downloaded to this PC {dot} {}", folder_of(&row.path)),
+                text: format!("Downloaded to {os} {dot} {}", folder_of(&row.path), os = beebeeb_engine::device_word!()),
             },
             tile_for(&name),
         ),
         RowKind::MovedToTrash => (
             What::Done {
                 origin: Origin::ThisPc,
-                text: "Moved to Trash on this PC".into(),
+                text: concat!("Moved to Trash on ", beebeeb_engine::device_word!()).into(),
             },
             Tile::Trashed,
         ),

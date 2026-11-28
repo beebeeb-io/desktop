@@ -279,11 +279,11 @@ fn every_launch_takes_the_launch_lock() {
     );
     held.sort();
     // The scan saw the starts it is meant to see, each under the lock: open, the chooser and Show in File Explorer
-    // (7, every system's), and Open With's handler.
+    // (5: every system's, less the two child `open` spawns macOS no longer makes, dm-28), and Open With's handler.
     assert_eq!(
         held,
         [
-            ("src/engine_host/mod.rs".to_string(), 7),
+            ("src/engine_host/mod.rs".to_string(), 5),
             ("src/engine_host/open_with_apps.rs".to_string(), 1)
         ],
         "the starts held by the lock"

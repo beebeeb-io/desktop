@@ -41,26 +41,26 @@ use crate::frames::account::app_lock_password::PasswordOffer;
 /// How long a toast of this part stays.
 const STAYS: Duration = Duration::from_secs(6);
 
-const HELLO_NOT_CONFIRMED: &str = "App lock is still on: Windows Hello did not confirm it's you.";
+const HELLO_NOT_CONFIRMED: &str = concat!("App lock is still on: ", beebeeb_engine::unlock_name!(), " did not confirm it's you.");
 const HELLO_NOT_SET_UP: &str =
-    "App lock is still on: Windows Hello is not set up on this PC. Use your password instead.";
+    concat!("App lock is still on: ", beebeeb_engine::unlock_name!(), " is not set up on ", beebeeb_engine::device_word!(), ". Use your password instead.");
 const NOT_OPEN: &str = "App lock was not changed: Beebeeb is locked.";
-const NOT_SAVED: &str = "App lock was not changed: this PC could not store the setting.";
+const NOT_SAVED: &str = concat!("App lock was not changed: ", beebeeb_engine::device_word!(), " could not store the setting.");
 const SESSION_ENDED: &str = "App lock was not changed: your session ended.";
 const NOT_CHANGED: &str = "App lock was not changed.";
 // The lock screen's sentences for the same answers (`frames/signin/FRAMES.md`, "Screen lock: password", and the vault
 // level's notice), copied: they are inline there.
-const OFFLINE: &str = "App lock is still on: Beebeeb can't be reached, and this PC can't check your password offline yet. Connect to the internet or use Windows Hello.";
+const OFFLINE: &str = concat!("App lock is still on: Beebeeb can't be reached, and ", beebeeb_engine::device_word!(), " can't check your password offline yet. Connect to the internet or use ", beebeeb_engine::unlock_name!(), ".");
 const UPGRADE_NEEDED: &str = "App lock is still on: sign in again to finish updating your account.";
 
-const AFTER_HELLO_NOT_CONFIRMED: &str = "The lock delay was not changed: Windows Hello did not confirm it's you.";
+const AFTER_HELLO_NOT_CONFIRMED: &str = concat!("The lock delay was not changed: ", beebeeb_engine::unlock_name!(), " did not confirm it's you.");
 const AFTER_HELLO_NOT_SET_UP: &str =
-    "The lock delay was not changed: Windows Hello is not set up on this PC. Use your password instead.";
+    concat!("The lock delay was not changed: ", beebeeb_engine::unlock_name!(), " is not set up on ", beebeeb_engine::device_word!(), ". Use your password instead.");
 const AFTER_NOT_OPEN: &str = "The lock delay was not changed: Beebeeb is locked.";
-const AFTER_NOT_SAVED: &str = "The lock delay was not changed: this PC could not store the setting.";
+const AFTER_NOT_SAVED: &str = concat!("The lock delay was not changed: ", beebeeb_engine::device_word!(), " could not store the setting.");
 const AFTER_SESSION_ENDED: &str = "The lock delay was not changed: your session ended.";
 const AFTER_NOT_CHANGED: &str = "The lock delay was not changed.";
-const AFTER_OFFLINE: &str = "The lock delay was not changed: Beebeeb can't be reached, and this PC can't check your password offline yet. Connect to the internet or use Windows Hello.";
+const AFTER_OFFLINE: &str = concat!("The lock delay was not changed: Beebeeb can't be reached, and ", beebeeb_engine::device_word!(), " can't check your password offline yet. Connect to the internet or use ", beebeeb_engine::unlock_name!(), ".");
 const AFTER_UPGRADE_NEEDED: &str = "The lock delay was not changed: sign in again to finish updating your account.";
 
 /// A stored delay that is not one of the menu's: the button says so and no row of the menu is checked.
@@ -235,7 +235,7 @@ fn step_words(refused: AppLockRefused) -> Option<String> {
         AppLockRefused::Wrong {
             local_check_off: true,
             ..
-        } => "That password isn't right. This PC no longer checks your password offline: connect to the internet or use Windows Hello.".to_string(),
+        } => concat!("That password isn't right. ", beebeeb_engine::device_word_cap!(), " no longer checks your password offline: connect to the internet or use ", beebeeb_engine::unlock_name!(), ".").to_string(),
         AppLockRefused::Wrong { wait_ms: 0, .. } => "That password isn't right.".to_string(),
         AppLockRefused::Wrong { wait_ms, .. } => format!("That password isn't right. Try again in {}.", wait(wait_ms)),
         AppLockRefused::Wait { wait_ms } => format!("Too many wrong tries. Try again in {}.", wait(wait_ms)),

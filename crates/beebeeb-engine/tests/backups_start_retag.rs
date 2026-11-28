@@ -2,6 +2,9 @@
 //! (`backup_folders::retag_at_start`). On the fake API, settings written to the test's sandboxed file. One test
 //! per file: the state folder is resolved once per process. Every name is invented.
 
+// The one test is not run on macOS; its helpers are left unused there.
+#![cfg_attr(target_os = "macos", allow(dead_code, unused_imports))]
+
 mod common;
 
 use beebeeb_engine::app::bindings::backup_folders::owner_tag;

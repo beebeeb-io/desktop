@@ -220,13 +220,18 @@ impl std::fmt::Display for SyncStartRefused {
             ),
             Self::RegistrationFailed { code: Some(code) } => write!(
                 f,
-                "Windows did not register the sync folder (error 0x{:08X}). Nothing was changed.",
+                "{} did not register the sync folder (error 0x{:08X}). Nothing was changed.",
+                if cfg!(target_os = "macos") { "macOS" } else { "Windows" },
                 *code as u32
             ),
             Self::RegistrationFailed { code: None } => {
-                f.write_str("Windows did not register the sync folder. Nothing was changed.")
+                write!(
+                    f,
+                    "{} did not register the sync folder. Nothing was changed.",
+                    if cfg!(target_os = "macos") { "macOS" } else { "Windows" }
+                )
             }
-            Self::OtherAccountsData => f.write_str(account_binding::OTHER_ACCOUNT_ON_WINDOWS),
+            Self::OtherAccountsData => f.write_str(account_binding::OTHER_ACCOUNT_DATA),
             Self::UnsentFileOfAnotherAccount => f.write_str(
                 "A file left in the sync folder by the account that was signed in before may hold changes that were never sent. Nothing was uploaded or deleted.",
             ),
@@ -1281,7 +1286,7 @@ impl account_binding::LocalData for LocalState {
     }
 
     fn reset(&self) -> Result<(), String> {
-        Err(account_binding::OTHER_ACCOUNT_ON_WINDOWS.to_string())
+        Err(account_binding::OTHER_ACCOUNT_DATA.to_string())
     }
 
     fn record_owner(&self, owner: &Identity) -> Result<(), String> {

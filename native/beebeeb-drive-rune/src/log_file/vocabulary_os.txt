@@ -148,3 +148,15 @@ UI administrators capabilities capability container exit identifier inheritable 
 lpac map membership profile random restricted restrictions section token view wait
 # Units
 ms s KB MB GB
+# The bridge's synthesized messages (the lifecycle log writes them in words)
+timed out waiting for the beebeeb file provider domain to become available
+timed out resolving the beebeeb finder location
+timed out signaling the beebeeb file provider working set
+timed out waiting for launchservices to open the url
+file provider manager is unavailable for the beebeeb domain
+no item identifier given
+no domain identifier given
+the url does not parse
+file urls open only through a finder item's scoped url
+no url handle given
+the finder location of the item is not on disk

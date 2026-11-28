@@ -213,7 +213,7 @@ fn the_sidebar_is_navigation_of_links_with_the_current_one_selected() {
         "Notifications",
         "Storage",
         "Backups",
-        "Sync and File Explorer",
+        concat!("Sync and ", beebeeb_engine::file_manager!()),
         "Thumbnails and previews",
         "Bandwidth",
     ];
@@ -275,7 +275,7 @@ fn rows_name_what_they_say() {
     let rt = runtime("DW-0701");
     assert_eq!(
         info(&rt, "item-0-0").label.as_deref(),
-        Some("Theme, System. Follows Windows.")
+        Some(format!("Theme, System. {}", ThemeChoice::System.says()).as_str())
     );
     assert_eq!(
         info(&rt, "item-0-0").role,
@@ -405,13 +405,17 @@ fn an_available_update_is_said_once_with_one_primary_action() {
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
     assert_eq!(
         super::FRAMES.len(),
-        49,
-        "the frames the settings lanes built (28, Bandwidth's 10, Diagnostics' 2, Keep on this PC's 4, Photo previews' 3) and Notifications' 2 own states"
+        55,
+        "the frames the settings lanes built (28, Bandwidth's 10, Diagnostics' 2, Keep on this PC's 4, Photo previews' 3), Notifications' 2 own states and Beebeeb in Finder's 6 (dm-18)"
     );
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
-        assert!(find(&rt, "set-main").is_some(), "{frame}");
         assert!(find(&rt, "caption-bar").is_some(), "{frame}: the same window");
+        // Only macOS wires the Finder pane (`SettingsUi::wired`); elsewhere those scenes draw the placeholder.
+        if !cfg!(target_os = "macos") && frame.starts_with("DM-18") {
+            continue;
+        }
+        assert!(find(&rt, "set-main").is_some(), "{frame}");
         // Five board frames of Bandwidth draw the pane from its devices down, without its heading.
         if rt.state.settings.bandwidth.crop != super::bandwidth::Crop::FromDevices {
             assert_eq!(info(&rt, "set-title").role, "heading", "{frame}");
@@ -656,7 +660,7 @@ fn notifications_off_in_windows_keep_the_choices_out_of_reach_and_open_windows_s
         rt.state.settings.source.notifications().groups[0].1[0].on == Some(true),
         "and a press changes nothing"
     );
-    assert_eq!(info(&rt, "item-1-0-value").text.as_deref(), Some("Off in Windows"));
+    assert_eq!(info(&rt, "item-1-0-value").text.as_deref(), Some(format!("Off in {}", source::os_name()).as_str()));
     tab_to(&mut rt, "btn-0");
     key(&mut rt, Key::Enter);
     assert_eq!(rt.state.settings.intents, vec![Intent::OpenWindowsNotificationSettings]);
@@ -968,7 +972,7 @@ fn another_channel_checks_again_and_an_older_channel_says_so() {
     assert_eq!(
         info(&rt, "item-1-2-sub").text.as_deref(),
         Some(
-            "This PC runs 0.9.1, from the Beta channel. Read the release notes before you go back to an older version."
+            beebeeb_engine::os_words::for_this_os("This PC runs 0.9.1, from the Beta channel. Read the release notes before you go back to an older version.").as_str()
         )
     );
     assert_eq!(info(&rt, "item-1-2").role, "link");

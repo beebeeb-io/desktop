@@ -3,7 +3,7 @@
 //! item goes through `host::dispatch`, and the window says which row is lit ([`Lit`]).
 
 use crate::frames::files::source::Account;
-use crate::shell::app::{Event, Route, Section, SettingsPane};
+use crate::shell::app::{Event, Route, Screen, Section, SettingsPane};
 use crate::shell::host;
 use crate::theme::icons;
 use crate::theme::tokens::{radius, type_, Theme};
@@ -82,9 +82,16 @@ fn section(section: SidebarSection) -> Section {
 }
 
 /// Goes to `to` through the route machine (which points `s.sidebar_section` at a Drive section).
+///
+/// Files goes to the top of Files (dm-73), as a place in Finder's sidebar goes to its top: a folder opened inside it is
+/// left to Back.
 fn go(to: Section) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
         host::dispatch(s, Event::Navigate(Route::section(to)));
+        let in_files = matches!(s.shell.app.screen(), Screen::Drive(route) if route.section == Section::Files);
+        if to == Section::Files && in_files && s.listing.folder.id.is_some() {
+            s.open_folder(None);
+        }
     }
 }
 
@@ -208,7 +215,7 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
         &icons::SYNC_HISTORY,
         None,
         lit == Lit::SyncHistory,
-        "Ctrl+6",
+        concat!(beebeeb_engine::primary_key!(), "6"),
         t,
     );
     if let Some(n) = c.sync_problems {
@@ -220,7 +227,7 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
         &icons::AVAILABLE_OFFLINE,
         None,
         offline_on,
-        "Ctrl+7",
+        concat!(beebeeb_engine::primary_key!(), "7"),
         t,
     );
     if let Some(n) = c.available_offline {
@@ -257,7 +264,7 @@ pub fn drive_sidebar(s: &State, lit: Lit, standing: Standing, t: &Theme) -> El {
         .gap(1.0)
         .child(el().key("this-pc-title").px(10.0).pb(3.0).child(kit::label(
             "this-pc-label",
-            "THIS PC",
+            if cfg!(target_os = "macos") { "THIS MAC" } else { "THIS PC" },
             type_::SECTION_LABEL,
             t.text_tertiary,
         )))
@@ -490,8 +497,8 @@ fn foot(s: &State, standing: Standing, t: &Theme) -> El {
         el().key("settings-btn")
             .role("button")
             .label("Settings")
-            .shortcut_hint("Ctrl+,")
-            .help("Settings  Ctrl+,")
+            .shortcut_hint(concat!(beebeeb_engine::primary_key!(), ","))
+            .help(concat!("Settings  ", beebeeb_engine::primary_key!(), ","))
             .size(26.0, 26.0)
             .radius(radius::CONTROL)
             .center()

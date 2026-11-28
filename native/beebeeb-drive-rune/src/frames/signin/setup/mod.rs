@@ -91,7 +91,7 @@ impl Step {
             Step::Lock => "Lock Beebeeb",
             Step::Backup => "Back up your folders",
             Step::Previews => "Thumbnails and previews",
-            Step::Explorer => "Beebeeb in File Explorer",
+            Step::Explorer => concat!("Beebeeb in ", beebeeb_engine::file_manager!()),
             Step::Notifications => "Notifications",
             Step::Login => "Open at login",
             Step::Done => "You're set up",

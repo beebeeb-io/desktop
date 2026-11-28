@@ -103,6 +103,9 @@ pub fn bar(dot: Option<Dot>, state: Option<&str>, details: &str, t: &Theme) -> E
             );
         }
         left = left.child(kit::label("status-text", state, type_::STATUS_STRONG, t.text_secondary));
+        if state == PAUSED {
+            left = left.child(super::sync::resume_item(t));
+        }
     }
     frame(
         vec![
@@ -119,7 +122,7 @@ pub fn status_bar(t: &Theme) -> El {
     bar(
         Some(Dot::Green),
         Some(UP_TO_DATE),
-        "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only",
+        concat!("4 on ", beebeeb_engine::device_word!(), " \u{00B7} 3 available offline \u{00B7} 4 online only"),
         t,
     )
 }

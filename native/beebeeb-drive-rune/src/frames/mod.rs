@@ -121,7 +121,7 @@ impl PcStatus for BoardPc {
         "Up to date".into()
     }
     fn summary(&self) -> String {
-        "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only".into()
+        concat!("4 on ", beebeeb_engine::device_word!(), " \u{00B7} 3 available offline \u{00B7} 4 online only").into()
     }
 }
 

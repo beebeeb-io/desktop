@@ -116,8 +116,8 @@ fn the_exclusion_names_the_started_file_and_is_written_every_start() {
     assert!(lock(&log.calls).is_empty(), "{:?}", lock(&log.calls));
     assert!(lock(&log.section_sizes).is_empty(), "no section for it");
 
-    // The production starter writes on every start too (off Windows the write itself is empty, and the sandbox then
-    // says there is none).
+    // The production starter writes on every start too (off Windows the write itself is empty; the sandbox then says
+    // there is none, or on a Mac ends the file that did not confine itself).
     #[cfg(not(windows))]
     {
         let exe = runnable_helper("exclusion");
@@ -129,16 +129,11 @@ fn the_exclusion_names_the_started_file_and_is_written_every_start() {
             let mut events = Vec::new();
             // The worker's last state reaches `state()` with a poll: wait for both, not the end alone.
             assert!(
-                pump_for(&mut host, &mut events, LOADED, |host, _| host.worker_ended()
-                    && !matches!(host.state(), OfficeState::Opening)),
+                pump_for(&mut host, &mut events, LOADED, |host, _| start_was_answered(host)),
                 "start {start}: {:?}",
                 host.state()
             );
-            assert_eq!(
-                host.state(),
-                OfficeState::NoPreview(NoPreview::NoSandbox),
-                "start {start}"
-            );
+            assert_not_started_unconfined(&host, &format!("start {start}"));
         }
         // Other tests of this process write as well: at least these two, where once per process gives at most one.
         let writes = crash_report_writes() - before;

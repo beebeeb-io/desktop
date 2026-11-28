@@ -2,21 +2,21 @@
 //! kit (`ui::au`). Every string is the board's; every measurement is its computed CSS.
 
 use rune::tok::Family;
-use rune::{Color, Cx, El, TextStyle, col, el, row};
+use rune::{col, el, row, Color, Cx, El, TextStyle};
 
 use super::source::{Explorer, LockAfter, PreviewFormat, PreviewSize, Switch};
 use super::{
-    Answered, Compare, CompareMode, PHOTO, PasskeyStep, SHEET, Setting, Step, Ui, act, folder, icons, passkey,
+    act, folder, icons, passkey, Answered, Compare, CompareMode, PasskeyStep, Setting, Step, Ui, PHOTO, SHEET,
 };
-use crate::State;
 use crate::frames::signin::icons as signin_icons;
 use crate::theme::scale::{self, space};
-use crate::theme::tokens::{self, Theme, type_};
-use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone, type_au};
+use crate::theme::tokens::{self, type_, Theme};
+use crate::ui::au::{self, type_au, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
 use crate::ui::setup::{self, SegInk, SegSize, Status, StepState};
 use crate::ui::switch as ui_switch;
-use crate::ui::view_state::{ViewState, try_again, view_state};
+use crate::ui::view_state::{try_again, view_state, ViewState};
 use crate::ui::{kit, settings_list};
+use crate::State;
 
 const PRODUCT: &str = "Drive";
 
@@ -77,10 +77,19 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
             (step.label(), state)
         })
         .collect();
-    let adding_words = format!("Adding {name} to File Explorer\u{2026}");
-    let added_words = format!("{name} is in File Explorer");
-    let failed_words = format!("Couldn't add {name} to File Explorer");
-    let not_yet_words = format!("{name} isn't in File Explorer yet");
+    let adding_words = format!(
+        concat!("Adding {name} to ", beebeeb_engine::file_manager!(), "\u{2026}"),
+        name = name
+    );
+    let added_words = format!(concat!("{name} is in ", beebeeb_engine::file_manager!()), name = name);
+    let failed_words = format!(
+        concat!("Couldn't add {name} to ", beebeeb_engine::file_manager!()),
+        name = name
+    );
+    let not_yet_words = format!(
+        concat!("{name} isn't in ", beebeeb_engine::file_manager!(), " yet"),
+        name = name
+    );
     let status = match &ui.explorer {
         // Nothing is being added while no folder is chosen, or where nothing adds one.
         _ if ui.asks_folder() || !ui.available(Step::Explorer) => Status {
@@ -90,7 +99,11 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         },
         _ if ui.folder_unsaved() => Status {
             icon: &icons::ALERT,
-            words: "Beebeeb's folder isn't saved on this PC yet",
+            words: concat!(
+                "Beebeeb's folder isn't saved on ",
+                beebeeb_engine::device_word!(),
+                " yet"
+            ),
             failed: true,
         },
         Explorer::Adding => Status {
@@ -179,7 +192,11 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         k,
         Some(&icons::FACE),
         "App lock",
-        Some("Your PC's password works if Windows Hello doesn't"),
+        Some(if cfg!(target_os = "macos") {
+            concat!("Your Mac's password works if ", beebeeb_engine::unlock_name!(), " doesn't")
+        } else {
+            concat!("Your PC's password works if ", beebeeb_engine::unlock_name!(), " doesn't")
+        }),
         |key| vec![switch(key, "App lock", on, t, Ui::toggle_lock)],
         None,
         false,
@@ -211,14 +228,32 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     setup::column()
         .child(au::heading(
             "Lock Beebeeb",
-            Some("Ask for Windows Hello when you open the app, so nobody else can look through your files on this PC."),
+            Some(concat!(
+                "Ask for ",
+                beebeeb_engine::unlock_name!(),
+                " when you open the app, so nobody else can look through your files on ",
+                beebeeb_engine::device_word!(),
+                "."
+            )),
             false,
             t,
         ))
         .child(setup::list(
             k,
             rows,
-            Some("Sync keeps running while the app is locked. File Explorer follows your PC's lock instead."),
+            Some(if cfg!(target_os = "macos") {
+                concat!(
+                    "Sync keeps running while the app is locked. ",
+                    beebeeb_engine::file_manager!(),
+                    " follows your Mac's lock instead."
+                )
+            } else {
+                concat!(
+                    "Sync keeps running while the app is locked. ",
+                    beebeeb_engine::file_manager!(),
+                    " follows your PC's lock instead."
+                )
+            }),
             t,
         ))
         .child(
@@ -258,7 +293,11 @@ fn backup(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     setup::column()
         .child(au::heading(
             "Back up your folders",
-            Some("Your folders are encrypted on this PC before they upload. They stay where they are."),
+            Some(concat!(
+                "Your folders are encrypted on ",
+                beebeeb_engine::device_word!(),
+                " before they upload. They stay where they are."
+            )),
             false,
             t,
         ))
@@ -360,14 +399,17 @@ fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let space = setup::item(
         k,
         None,
-        "Space on this PC",
+        concat!("Space on ", beebeeb_engine::device_word!()),
         None,
         |key| vec![settings_list::pop_button(key, &limit, t).a11y_hidden()],
         None,
         false,
         t,
     )
-    .label(format!("Space on this PC, {limit}"));
+    .label(format!(
+        concat!("Space on ", beebeeb_engine::device_word!(), ", {limit}"),
+        limit = limit
+    ));
     setup::column()
         .child(au::heading("Thumbnails and previews", Some(PREVIEWS_SUB), false, t))
         .child(preview_card(ui, t))
@@ -411,7 +453,12 @@ fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
 fn previews_loading(k: &mut Keys, t: &Theme) -> El {
     setup::column()
         .child(au::heading("Thumbnails and previews", None, false, t))
-        .child(view_state(ViewState::Loading { words: "Reading your preview settings\u{2026}" }, t))
+        .child(view_state(
+            ViewState::Loading {
+                words: "Reading your preview settings\u{2026}",
+            },
+            t,
+        ))
         .child(
             actions()
                 .child(primary(k, "Continue", ButtonState::Disabled, t, Ui::go_on))
@@ -508,7 +555,10 @@ fn explorer_added(k: &mut Keys, t: &Theme) -> El {
     let mut nav = col()
         .key("nav")
         .role("image")
-        .label("File Explorer's navigation pane: Home, Gallery, Beebeeb (selected), Desktop, Documents")
+        .label(concat!(
+            beebeeb_engine::file_manager!(),
+            "'s navigation pane: Home, Gallery, Beebeeb (selected), Desktop, Documents"
+        ))
         .w(220.0)
         .padding(space::S8)
         .gap(space::S2)
@@ -517,7 +567,12 @@ fn explorer_added(k: &mut Keys, t: &Theme) -> El {
         .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
         .box_shadow(kit::ring(kit::HAIR, t.separator));
     for (i, (name, icon)) in places.iter().enumerate() {
-        let mut ni = row().h(28.0).px(space::S10).gap(space::S9).center_y().radius(tokens::radius::SM);
+        let mut ni = row()
+            .h(28.0)
+            .px(space::S10)
+            .gap(space::S9)
+            .center_y()
+            .radius(tokens::radius::SM);
         ni = match icon {
             Some(icon) => ni.child(kit::glyph(format!("nav-{i}-icon"), icon, 15.0, os.icon)),
             // The b as Windows shows it in the pane: one colour, the letter cut out of its plate.
@@ -547,15 +602,39 @@ fn explorer_added(k: &mut Keys, t: &Theme) -> El {
     }
     setup::column()
         .child(au::heading(
-            "Beebeeb is in File Explorer",
-            Some("Your Beebeeb files show in File Explorer's navigation pane, and in other apps' Open and Save As dialogs."),
+            concat!("Beebeeb is in ", beebeeb_engine::file_manager!()),
+            Some(concat!(
+                "Your Beebeeb files show in ",
+                beebeeb_engine::file_manager!(),
+                "'s navigation pane, and in other apps' Open and Save As dialogs."
+            )),
             false,
             t,
         ))
         .child(nav)
         .child(setup::note(
             k,
-            "Anyone who can use this PC while it's signed in can open these files in File Explorer. File Explorer follows Windows' lock, not Beebeeb's.",
+            if cfg!(target_os = "macos") {
+                concat!(
+                    "Anyone who can use ",
+                    beebeeb_engine::device_word!(),
+                    " while it's signed in can open these files in ",
+                    beebeeb_engine::file_manager!(),
+                    ". ",
+                    beebeeb_engine::file_manager!(),
+                    " follows your Mac's lock, not Beebeeb's."
+                )
+            } else {
+                concat!(
+                    "Anyone who can use ",
+                    beebeeb_engine::device_word!(),
+                    " while it's signed in can open these files in ",
+                    beebeeb_engine::file_manager!(),
+                    ". ",
+                    beebeeb_engine::file_manager!(),
+                    " follows Windows' lock, not Beebeeb's."
+                )
+            },
             type_::CAPTION,
             0.0,
             t,
@@ -563,14 +642,20 @@ fn explorer_added(k: &mut Keys, t: &Theme) -> El {
         .child(
             actions()
                 .child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on))
-                .child(ghost(k, "Show in File Explorer", ButtonState::Enabled, t, Ui::show_in_explorer)),
+                .child(ghost(
+                    k,
+                    concat!("Show in ", beebeeb_engine::file_manager!()),
+                    ButtonState::Enabled,
+                    t,
+                    Ui::show_in_explorer,
+                )),
         )
 }
 
 fn explorer_adding(k: &mut Keys, t: &Theme) -> El {
     setup::column()
         .child(au::heading(
-            "Adding Beebeeb to File Explorer",
+            concat!("Adding Beebeeb to ", beebeeb_engine::file_manager!()),
             Some("This takes a few seconds. You can carry on; it finishes by itself."),
             false,
             t,
@@ -579,7 +664,7 @@ fn explorer_adding(k: &mut Keys, t: &Theme) -> El {
             // Windows gives no progress: the bar says "busy", not how far.
             el().key("bar")
                 .role("progressbar")
-                .label("Adding Beebeeb to File Explorer")
+                .label(concat!("Adding Beebeeb to ", beebeeb_engine::file_manager!()))
                 .w_full()
                 .h(4.0)
                 .radius(2.0)
@@ -596,30 +681,57 @@ fn explorer_adding(k: &mut Keys, t: &Theme) -> El {
 }
 
 /// DW-0280's banner title: Windows was asked and did not finish.
-const WINDOWS_REFUSED: &str = "Windows didn't finish adding Beebeeb to File Explorer";
+#[cfg(not(target_os = "macos"))]
+const WINDOWS_REFUSED: &str = concat!("Windows didn't finish adding Beebeeb to ", beebeeb_engine::file_manager!());
+/// The Mac's words for DW-0280's title: macOS was asked and did not finish.
+#[cfg(target_os = "macos")]
+const WINDOWS_REFUSED: &str = concat!("macOS didn't finish adding Beebeeb to ", beebeeb_engine::file_manager!());
 /// The banner's title when sync did not start, so Windows was never asked (`Explorer::NotSyncing`).
-const SYNC_DID_NOT_START: &str = "Sync didn't start on this PC, so Beebeeb isn't in File Explorer yet";
+const SYNC_DID_NOT_START: &str = concat!(
+    "Sync didn't start on ",
+    beebeeb_engine::device_word!(),
+    ", so Beebeeb isn't in ",
+    beebeeb_engine::file_manager!(),
+    " yet"
+);
 
 /// DW-0280's sentence under the heading: true when only the File Explorer entry failed.
-const WINDOW_WORKS: &str = "Your files are safe, and the Beebeeb window works without File Explorer.";
+const WINDOW_WORKS: &str = concat!(
+    "Your files are safe, and the Beebeeb window works without ",
+    beebeeb_engine::file_manager!(),
+    "."
+);
 /// The sentence when sync itself did not start (the contract's ruling Q3: the board's sentence is not true then).
-const NOTHING_SYNCS: &str = "Your files are safe in Beebeeb. Nothing syncs with this PC until sync starts.";
+const NOTHING_SYNCS: &str = concat!(
+    "Your files are safe in Beebeeb. Nothing syncs with ",
+    beebeeb_engine::device_word!(),
+    " until sync starts."
+);
 
 /// `code`: Windows' code for support; empty when there is none (the sentence then stands alone). `another`: no
 /// folder was kept yet, so another one can be chosen (the folder may be what was refused).
 fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Keys, t: &Theme) -> El {
     let lead = "Try again in a moment.";
-    let why = if code.is_empty() { lead.to_string() } else { format!("{lead} {code}") };
+    let why = if code.is_empty() {
+        lead.to_string()
+    } else {
+        format!("{lead} {code}")
+    };
     let retry = try_again("explorer-failed", t).on_press_tx(act(Ui::go_on));
     setup::column()
         .child(au::heading(
-            "Couldn't add Beebeeb to File Explorer",
+            concat!("Couldn't add Beebeeb to ", beebeeb_engine::file_manager!()),
             Some(sub),
             false,
             t,
         ))
         .child(view_state(
-            ViewState::Failed { key: "explorer-failed", title, why: &why, retry: Some(retry) },
+            ViewState::Failed {
+                key: "explorer-failed",
+                title,
+                why: &why,
+                retry: Some(retry),
+            },
             t,
         ))
         .child(
@@ -635,7 +747,7 @@ fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Ke
                 }))
                 .child(ghost(
                     k,
-                    "Continue without File Explorer",
+                    concat!("Continue without ", beebeeb_engine::file_manager!()),
                     ButtonState::Enabled,
                     t,
                     Ui::not_now,
@@ -657,14 +769,19 @@ fn notifications(k: &mut Keys, t: &Theme) -> El {
             t,
         ))
         .child(
-            el().key("tile-at").a11y_hidden().w_full().py(space::S16).center().child(
-                el().key("tile")
-                    .size(64.0, 64.0)
-                    .radius(18.0)
-                    .fill(wash)
-                    .center()
-                    .child(kit::glyph("tile-icon", &icons::BELL, 32.0, mark)),
-            ),
+            el().key("tile-at")
+                .a11y_hidden()
+                .w_full()
+                .py(space::S16)
+                .center()
+                .child(
+                    el().key("tile")
+                        .size(64.0, 64.0)
+                        .radius(18.0)
+                        .fill(wash)
+                        .center()
+                        .child(kit::glyph("tile-icon", &icons::BELL, 32.0, mark)),
+                ),
         )
         .child(
             actions()
@@ -697,7 +814,11 @@ fn login(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
 }
 
 fn on_off(on: bool) -> &'static str {
-    if on { "On" } else { "Off" }
+    if on {
+        "On"
+    } else {
+        "Off"
+    }
 }
 
 fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
@@ -743,7 +864,11 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             },
             Setting::Previews,
         ),
-        ("File Explorer", explorer.into(), Setting::FileExplorer),
+        (
+            concat!(beebeeb_engine::file_manager!()),
+            explorer.into(),
+            Setting::FileExplorer,
+        ),
         (
             "Notifications",
             switch(Switch::Notifications, r.notifications).into(),
@@ -825,7 +950,10 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             note(
                 "not-changed",
                 k,
-                format!("Couldn't change {}. You can set it in Settings.", not_changed.join(" and ")),
+                format!(
+                    "Couldn't change {}. You can set it in Settings.",
+                    not_changed.join(" and ")
+                ),
             )
         }))
         .children((!lock_kept.is_empty()).then(|| {
@@ -1101,5 +1229,7 @@ fn compare_sheet(ui: &Ui, compare: Compare, t: &Theme) -> El {
 /// First letter up, for a name that starts a sentence.
 fn capitalised(s: &str) -> String {
     let mut c = s.chars();
-    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }

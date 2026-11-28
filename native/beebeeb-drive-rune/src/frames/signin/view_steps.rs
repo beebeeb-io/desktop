@@ -2,18 +2,18 @@
 //! words (DW-A23, DW-A24) and the vault password after a passkey (DW-A30). Every string is the
 //! board's; a state the board gives a rule and no words for uses words the board has elsewhere.
 
-use rune::{El, Key, Tx, col, edit_access, el, row, text};
+use rune::{col, edit_access, el, row, text, El, Key, Tx};
 
 use super::source::{PhraseProblem, SignInProblem, TwoFactorProblem};
-use super::steps::{BACKUP_DIGITS, BACKUP_KEY, CODE_DIGITS, CODE_KEY, Pictured, WORD_KEYS};
-use super::view::{GENERIC_FAILURE, actions, back, back_as};
-use super::{PASSWORD_KEY, Ui, act, icons, lock};
-use crate::State;
+use super::steps::{Pictured, BACKUP_DIGITS, BACKUP_KEY, CODE_DIGITS, CODE_KEY, WORD_KEYS};
+use super::view::{actions, back, back_as, GENERIC_FAILURE};
+use super::{act, icons, lock, Ui, PASSWORD_KEY};
 use crate::theme::scale::space;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
 use crate::ui::au_entry::{self, Caret, CaretAt, DigitsState, FocusedSpec, WordState, WordStep};
 use crate::ui::kit;
+use crate::State;
 
 pub(super) fn open(s: &mut State) -> &mut Ui {
     s.signin.as_mut().expect("the sign-in window is open")
@@ -81,7 +81,11 @@ fn code_banner(k: &mut Keys, problem: TwoFactorProblem, backup: bool, t: &Theme)
             Some(if backup {
                 "Each backup code works once. Nothing was signed in."
             } else {
-                "Codes change every 30 seconds. Check the time on this PC, then try the next one. Nothing was signed in."
+                concat!(
+                    "Codes change every 30 seconds. Check the time on ",
+                    beebeeb_engine::device_word!(),
+                    ", then try the next one. Nothing was signed in."
+                )
             }),
             true,
             t,
@@ -353,7 +357,10 @@ pub(super) fn word_grid(ui: &Ui, t: &Theme) -> El {
 pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let mut c = au::column().child(back(t)).child(au::heading(
         "Set up this device",
-        Some("This PC doesn't have your encryption keys yet. Restore them to continue."),
+        Some(concat!(
+            beebeeb_engine::device_word_cap!(),
+            " doesn't have your encryption keys yet. Restore them to continue."
+        )),
         false,
         t,
     ));
@@ -420,7 +427,11 @@ pub fn unlock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         None => column
             .child(au::heading(
                 "Unlock your vault",
-                Some("Passkey verified. Enter your password to decrypt your data on this PC."),
+                Some(concat!(
+                    "Passkey verified. Enter your password to decrypt your data on ",
+                    beebeeb_engine::device_word!(),
+                    "."
+                )),
                 false,
                 t,
             ))
@@ -444,7 +455,11 @@ pub fn unlock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         )),
         Some(lock::Level::Screen) => column.child(au::heading(
             "Unlock with your password",
-            Some("Enter your account password. Beebeeb checks it with the server; if it can't be reached, this PC checks it itself."),
+            Some(concat!(
+                "Enter your account password. Beebeeb checks it with the server; if it can't be reached, ",
+                beebeeb_engine::device_word!(),
+                " checks it itself."
+            )),
             false,
             t,
         )),

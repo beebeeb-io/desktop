@@ -58,7 +58,7 @@ pub const NO_EDITOR_WORDS: &str = "Nothing was changed. The file still opens in 
 pub struct Command {
     /// "Heading 1", "Bold", or a file's name.
     pub name: String,
-    /// "Ctrl+B".
+    /// crate::frames::files::key_label("B").
     pub shortcut: Option<String>,
 }
 

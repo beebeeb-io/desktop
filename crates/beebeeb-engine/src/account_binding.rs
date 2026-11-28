@@ -132,7 +132,7 @@ pub enum Bound {
 pub const IDENTITY_UNKNOWN: &str = "Beebeeb couldn’t confirm which account this computer’s local files belong to, so sync didn’t start. Connect to the internet and open Beebeeb again.";
 /// Task 2267: shown only when this PC's local data could not be proven the signed-in account's own
 /// (`own_data_proof`). It never tells a person they have another account: the reported PCs had one.
-pub const OTHER_ACCOUNT_ON_WINDOWS: &str = "Beebeeb couldn’t confirm that the files on this PC belong to the account you’re signed in to, so sync didn’t start. Nothing was uploaded or deleted. Contact support@beebeeb.io.";
+pub const OTHER_ACCOUNT_DATA: &str = concat!("Beebeeb couldn’t confirm that the files on ", device_word!(), " belong to the account you’re signed in to, so sync didn’t start. Nothing was uploaded or deleted. Contact support@beebeeb.io.");
 
 /// The sentence for an engine start (and a sign-out) refused because an engine stop was never confirmed: its task may
 /// still run with the keys, and nothing confirms its end later, so only a restart of Beebeeb ends the refusal (the
@@ -167,7 +167,7 @@ impl Refusal {
     pub fn sentence(self) -> &'static str {
         match self {
             Self::IdentityUnknown => IDENTITY_UNKNOWN,
-            Self::OtherAccountOnWindows => OTHER_ACCOUNT_ON_WINDOWS,
+            Self::OtherAccountOnWindows => OTHER_ACCOUNT_DATA,
             Self::EngineStopUnconfirmed => ENGINE_STOP_UNCONFIRMED,
         }
     }
@@ -210,7 +210,7 @@ pub fn bind_before_engine_start(
             }
             Ok(Bound::Kept)
         }
-        Binding::Reset if !reset_allowed => Err(OTHER_ACCOUNT_ON_WINDOWS.to_string()),
+        Binding::Reset if !reset_allowed => Err(OTHER_ACCOUNT_DATA.to_string()),
         Binding::Reset => {
             data.reset()?;
             if session.is_known() {
@@ -728,11 +728,11 @@ mod tests {
 
     /// The same order on Windows (no reset allowed): the same-account rows keep the data exactly as on macOS (a case
     /// variant now starts on Windows, as before the binding existed); another id or another email is refused as another
-    /// account's data (`OTHER_ACCOUNT_ON_WINDOWS`). Nothing is ever deleted.
+    /// account's data (`OTHER_ACCOUNT_DATA`). Nothing is ever deleted.
     #[test]
     fn the_engine_start_binding_follows_the_identity_order_on_windows() {
         let a = id(Some("u-a"), Some("a@beebeeb.io"));
-        let refused_other = Err(OTHER_ACCOUNT_ON_WINDOWS.to_string());
+        let refused_other = Err(OTHER_ACCOUNT_DATA.to_string());
         let mut rows = same_account_rows();
         rows.extend([
             (
@@ -777,7 +777,7 @@ mod tests {
         let fake = Fake::holding(Some(id(Some("u-a"), Some("a@beebeeb.io"))), true);
         assert_eq!(
             bind_before_engine_start(&fake, &id(Some("u-b"), None), false),
-            Err(OTHER_ACCOUNT_ON_WINDOWS.to_string())
+            Err(OTHER_ACCOUNT_DATA.to_string())
         );
         assert_eq!(*fake.resets.borrow(), 0);
         assert!(fake.records.borrow().is_empty());

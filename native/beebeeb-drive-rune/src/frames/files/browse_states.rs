@@ -96,7 +96,11 @@ pub fn status_words(s: &State) -> Option<String> {
             .count()
     };
     Some(format!(
-        "{} on this PC \u{00B7} {} available offline \u{00B7} {} need a connection",
+        concat!(
+            "{} on ",
+            beebeeb_engine::device_word!(),
+            " \u{00B7} {} available offline \u{00B7} {} need a connection"
+        ),
         count("on_this_pc"),
         count("available_offline"),
         count("online_only")

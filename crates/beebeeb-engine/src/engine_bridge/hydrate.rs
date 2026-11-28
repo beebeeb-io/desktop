@@ -93,6 +93,22 @@ impl EngineBridge {
             .await
     }
 
+    /// Dm-72: the download of a Finder fetch (the File Provider's `fetchContents`, [`Self::serve_hydrate`]): the
+    /// bytes written to `dest_path` are handed to the system and become Finder's copy of the file. On a Mac that copy
+    /// is the file's one copy on this computer, so the version and content it holds are recorded as agreed, as for
+    /// a copy in the sync folder: the app's own reads then know Finder's copy is the current version (and stop
+    /// reading it when a newer one comes in), and the stale pass knows which copies to signal the system for.
+    pub(super) async fn hydrate_for_finder(
+        &self,
+        file_id: &str,
+        dest_path: &Path,
+        allowed_roots: &[&Path],
+        progress: Option<&HydrateProgressFn>,
+    ) -> anyhow::Result<()> {
+        self.hydrate_from(file_id, dest_path, allowed_roots, progress, HydrateStart::Finder)
+            .await
+    }
+
     /// S6 (R7 b): a hydrate the queue runs (a pin, a re-download, a kept fetch). Never the person's resolution: unknown
     /// bytes at the place refuse it whatever the row's status, so the retry of a failed fetch (its row left `Error`)
     /// never replaces a file made at the place meanwhile.
@@ -163,6 +179,17 @@ impl EngineBridge {
         // only copy. It refuses, and the file keeps its bytes. A Finder fetch (macOS) writes
         // to the extension's own staging copy, never there.
         let in_sync_folder = self.dest_is_files_sync_folder_place(file_id, dest_path, allowed_roots)?;
+        // Dm-72: on a Mac the bytes of a Finder fetch become the file's one copy on this computer (Finder's). Not
+        // while a change of the file's own is on its way out (a held Finder write, a queued upload): its landing
+        // records the content.
+        let finders_copy = !in_sync_folder
+            && matches!(start, HydrateStart::Finder)
+            && kept_bytes_come_by_the_systems_fetch()
+            && !self.db.sync_folder_upload_queued(file_id)?
+            && !self
+                .db
+                .item_presentation(file_id)?
+                .is_some_and(|presentation| presentation.held_write_queued);
         // Task 1640 (review N1b): the version a legacy download (no `download_version`) records,
         // read BEFORE the download: at most the version the bytes are, so a later change can only
         // be refused as stale, never accepted over a newer one.
@@ -188,7 +215,7 @@ impl EngineBridge {
                 tracing::warn!(file_id = %file_id, "hydrate refused: not the place that was looked at");
                 return Err(anyhow::Error::new(UnsentLocalChange));
             }
-            (true, HydrateStart::Here | HydrateStart::Queued) => {
+            (true, HydrateStart::Here | HydrateStart::Queued | HydrateStart::Finder) => {
                 Some(PlaceSeen::take_async(dest_path).await?.fingerprint)
             }
         };
@@ -310,7 +337,7 @@ impl EngineBridge {
                         refuse_changed(&mut buf, "the local file was changed while the download was written"),
                     );
                 }
-                let hydrated_hash = in_sync_folder.then(|| sha256_hex(&buf));
+                let hydrated_hash = (in_sync_folder || finders_copy).then(|| sha256_hex(&buf));
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
                 buf.zeroize();
@@ -1123,7 +1150,11 @@ impl EngineBridge {
             )
             .into());
         }
-        tracing::debug!(transport = transport.as_str(), "download finished");
+        tracing::info!(
+            transport = transport.as_str(),
+            bytes = plaintext.len() as u64,
+            "download finished"
+        );
         Ok((plaintext, transport))
     }
 
@@ -1326,6 +1357,8 @@ impl EngineBridge {
 enum HydrateStart {
     /// A caller here and now (the IPC hydrate, Keep both, a conflict's own path): its own start look.
     Here,
+    /// Dm-72: a Finder fetch (the File Provider's): as `Here`, and on a Mac its bytes are recorded as Finder's copy.
+    Finder,
     /// The queue: its own start look, and never the person's resolution (R7 b).
     Queued,
     /// The caller's start look (Keep there's, taken before its safety copy).
@@ -1493,6 +1526,226 @@ mod refetch_streaming_tests {
             // One download: every chunk fetched once (a legacy file's last chunk first, then reused).
             assert_eq!(server.chunk_requests.lock().unwrap().len(), 41, "pinned: {pinned}");
         }
+    }
+
+    /// A row for the served file: cloud-only, at the served version.
+    #[cfg(not(target_os = "windows"))]
+    fn seed_cloud_only(bridge: &EngineBridge, size: usize) {
+        let entry = FileEntry {
+            file_id: ID.into(),
+            path: "big.bin".into(),
+            status: FileStatus::CloudOnly,
+            size_bytes: size as i64,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        bridge
+            .db
+            .upsert_file_with_contract(&entry, |contract| {
+                contract.item_kind = ItemKind::File;
+                contract.current_version = 3;
+            })
+            .unwrap();
+    }
+
+    /// Dm-68: keeping a file on this Mac is ONE download. The pin's own fetch brings the bytes down (the row then
+    /// reads `local`, what the Available offline row shows as "On this Mac"); the system's fetch of the same file
+    /// that follows (the File Provider's, for the Finder copy) is served from that copy and asks the server for no
+    /// chunk. Before, the hydrate of a keep ran twice: 2 x the file's chunks.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_kept_files_hydrate_is_one_download_and_the_finder_fetch_reads_its_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("state-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let plain = content(6 * STRIDE + 321);
+        let server = serve(&plain, true);
+        let bridge = bridge(dir.path(), &server);
+        seed_cloud_only(&bridge, plain.len());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // The keep: the pin queues the file's fetch, the queue step runs it.
+        let pinned = bridge.set_recursive_pin(&sync_root, ID, true).unwrap();
+        assert_eq!(pinned.hydrate_operations, 1);
+        rt.block_on(bridge.process_due_operations(&sync_root, now_secs())).unwrap();
+        assert_eq!(bridge.db.get_file(ID).unwrap().unwrap().status, FileStatus::Local);
+        assert_eq!(std::fs::read(sync_root.join("big.bin")).unwrap(), plain);
+        let downloaded = server.chunk_requests.lock().unwrap().len();
+        assert_eq!(downloaded, 7, "the keep's one download: every chunk once");
+
+        // The system's fetch of the kept file: the copy, with its whole size as the progress, and no request.
+        let staging = dir.path().join("hydrate-cache");
+        std::fs::create_dir_all(&staging).unwrap();
+        let dest = staging.join("big.bin");
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let heard = said.clone();
+        let progress = move |done: u64, total: u64| heard.lock().unwrap().push((done, total));
+        let source = rt
+            .block_on(bridge.serve_hydrate(ID, &dest, &[staging.as_path()], Some(&progress)))
+            .unwrap();
+        assert_eq!(source, HydrateSource::Copy);
+        assert_eq!(std::fs::read(&dest).unwrap(), plain);
+        assert_eq!(*said.lock().unwrap(), vec![(plain.len() as u64, plain.len() as u64)]);
+        assert_eq!(
+            server.chunk_requests.lock().unwrap().len(),
+            downloaded,
+            "one download per keep: the second fetch read the first's copy"
+        );
+        assert_eq!(bridge.db.get_file(ID).unwrap().unwrap().status, FileStatus::Local);
+
+        // A copy that is no longer the current version's bytes is never handed over: the server is asked.
+        std::fs::write(sync_root.join("big.bin"), b"edited here").unwrap();
+        let again = staging.join("again.bin");
+        let source = rt
+            .block_on(bridge.serve_hydrate(ID, &again, &[staging.as_path()], None))
+            .unwrap();
+        assert_eq!(source, HydrateSource::Server);
+        assert_eq!(std::fs::read(&again).unwrap(), plain);
+    }
+
+    /// Dm-71: a keep on a Mac is ONE download and ONE copy. The pin queues no fetch of the engine's own (nothing comes
+    /// down, nothing lands in the hidden state folder); the system's fetch (the File Provider's, for Finder's copy) is
+    /// the download: every chunk once, its progress on the transfer board the Available offline row reads, to the
+    /// whole size, and the row then reads `local` ("On this Mac").
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_keep_on_a_mac_is_one_download_by_the_finder_fetch_and_leaves_no_hidden_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let sync_root = dir.path().join("state-root");
+        std::fs::create_dir_all(&sync_root).unwrap();
+        let plain = content(6 * STRIDE + 321);
+        let server = serve(&plain, true);
+        let bridge = bridge(dir.path(), &server);
+        seed_cloud_only(&bridge, plain.len());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // The keep: pinned, and nothing queued for the engine to fetch.
+        system_fetch_for_test(true);
+        let pinned = bridge.set_recursive_pin(&sync_root, ID, true);
+        system_fetch_for_test(false);
+        assert_eq!(pinned.unwrap().hydrate_operations, 0);
+        rt.block_on(bridge.process_due_operations(&sync_root, now_secs())).unwrap();
+        assert_eq!(
+            server.chunk_requests.lock().unwrap().len(),
+            0,
+            "the engine downloads nothing itself"
+        );
+        assert!(!sync_root.join("big.bin").exists(), "no hidden copy");
+        assert_eq!(bridge.db.get_file(ID).unwrap().unwrap().status, FileStatus::CloudOnly);
+
+        // The system's fetch of the kept item: the one download.
+        let staging = dir.path().join("hydrate-cache");
+        std::fs::create_dir_all(&staging).unwrap();
+        let dest = staging.join("big.bin");
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let on_board = Arc::new(Mutex::new(Vec::new()));
+        let (says, rows, board) = (said.clone(), on_board.clone(), bridge.transfers.clone());
+        let progress = move |done: u64, total: u64| {
+            says.lock().unwrap().push((done, total));
+            rows.lock().unwrap().push(board.get(ID).map(|t| t.total));
+        };
+        let source = rt
+            .block_on(bridge.serve_hydrate(ID, &dest, &[staging.as_path()], Some(&progress)))
+            .unwrap();
+        assert_eq!(source, HydrateSource::Server);
+        assert_eq!(
+            server.chunk_requests.lock().unwrap().len(),
+            7,
+            "one download: every chunk once"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), plain);
+        let whole = plain.len() as u64;
+        assert_eq!(
+            said.lock().unwrap().last(),
+            Some(&(whole, whole)),
+            "progress reaches 100%"
+        );
+        let on_board = on_board.lock().unwrap();
+        assert!(
+            !on_board.is_empty() && on_board.iter().all(|row| *row == Some(whole)),
+            "the fetch is on the transfer board while it runs: {on_board:?}"
+        );
+        assert_eq!(bridge.db.get_file(ID).unwrap().unwrap().status, FileStatus::Local);
+        assert!(
+            !sync_root.join("big.bin").exists(),
+            "one copy: the system's, none in the state folder"
+        );
+    }
+
+    /// Dm-71: one download in flight per file. A Finder fetch that starts while the keep's fetch of the same file
+    /// runs asks the server for no chunk: it waits, hears the progress and copies the finished file.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_finder_fetch_started_mid_keep_reuses_the_one_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = content(6 * STRIDE + 321);
+        let server = serve(&plain, true);
+        let bridge = bridge(dir.path(), &server);
+        seed_cloud_only(&bridge, plain.len());
+        let staging = dir.path().join("hydrate-cache");
+        std::fs::create_dir_all(&staging).unwrap();
+        let (keep, finder) = (staging.join("keep.bin"), staging.join("finder.bin"));
+        let roots = [staging.as_path()];
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let hears = heard.clone();
+        let progress = move |done: u64, total: u64| hears.lock().unwrap().push((done, total));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Polled in this order: the keep's fetch leads before the second one looks.
+        let (first, second) = rt.block_on(async {
+            tokio::join!(
+                bridge.serve_hydrate(ID, &keep, &roots, None),
+                bridge.serve_hydrate(ID, &finder, &roots, Some(&progress)),
+            )
+        });
+        assert_eq!(
+            (first.unwrap(), second.unwrap()),
+            (HydrateSource::Server, HydrateSource::Copy)
+        );
+        assert_eq!(server.chunk_requests.lock().unwrap().len(), 7, "0 extra chunk requests");
+        assert_eq!(std::fs::read(&keep).unwrap(), plain);
+        assert_eq!(std::fs::read(&finder).unwrap(), plain);
+        let whole = plain.len() as u64;
+        assert_eq!(heard.lock().unwrap().last(), Some(&(whole, whole)));
+        assert_eq!(bridge.db.get_file(ID).unwrap().unwrap().status, FileStatus::Local);
+
+        // Nothing is left in flight: the next fetch leads again and downloads.
+        let again = staging.join("again.bin");
+        let source = rt.block_on(bridge.serve_hydrate(ID, &again, &roots, None)).unwrap();
+        assert_eq!(source, HydrateSource::Server);
+        assert_eq!(server.chunk_requests.lock().unwrap().len(), 14);
+    }
+
+    /// Dm-71: a leader that fails leaves nothing in flight, and the fetch behind it does not wait for ever: it starts
+    /// over and answers for itself.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_finder_fetch_behind_one_that_fails_starts_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = content(2 * STRIDE);
+        let server = serve(&plain, true);
+        let bridge = bridge(dir.path(), &server);
+        seed_cloud_only(&bridge, plain.len());
+        let staging = dir.path().join("hydrate-cache");
+        std::fs::create_dir_all(&staging).unwrap();
+        // The leader's destination cannot be written: a folder is in its place.
+        let blocked = staging.join("blocked.bin");
+        std::fs::create_dir_all(blocked.join("in-the-way")).unwrap();
+        let behind = staging.join("behind.bin");
+        let roots = [staging.as_path()];
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (first, second) = rt.block_on(async {
+            tokio::join!(
+                bridge.serve_hydrate(ID, &blocked, &roots, None),
+                bridge.serve_hydrate(ID, &behind, &roots, None),
+            )
+        });
+        assert!(first.is_err());
+        assert_eq!(second.unwrap(), HydrateSource::Server);
+        assert_eq!(std::fs::read(&behind).unwrap(), plain);
     }
 
     /// A placeholder whose size is not the file's: nothing is handed over, the real size comes back,

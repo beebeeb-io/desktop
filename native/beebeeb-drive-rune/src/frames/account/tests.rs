@@ -259,7 +259,7 @@ fn signing_out_is_confirmed_and_enter_is_cancel() {
     assert_eq!(rt.state.account.dialog, Some(Dialog::SignOutApp));
     assert_eq!(info(&rt, "dlg").role, "dialog");
     assert_eq!(name(&rt, "dlg"), "Sign out of Drive?");
-    assert!(says(&rt, "dlg-text-0").starts_with("This signs out Drive on this PC only."));
+    assert!(says(&rt, "dlg-text-0").starts_with(&beebeeb_engine::os_words::for_this_os("This signs out Drive on this PC only.")));
     // Enter is Cancel (the safe choice): nothing is signed out, nothing is asked of the shell.
     key(&mut rt, Key::Enter);
     assert_eq!(rt.state.account.dialog, None);
@@ -288,7 +288,7 @@ fn signing_out_is_confirmed_and_enter_is_cancel() {
 #[test]
 fn signing_out_of_all_apps_is_its_own_confirm() {
     let mut rt = runtime("DW-S02a");
-    assert_eq!(name(&rt, "dlg"), "Sign out of all Beebeeb apps on this PC?");
+    assert_eq!(name(&rt, "dlg"), beebeeb_engine::os_words::for_this_os("Sign out of all Beebeeb apps on this PC?"));
     assert_eq!(says(&rt, "btn-1-label"), "Sign out of all");
     click(&mut rt, "btn-2");
     assert_eq!(rt.state.account.dialog, None, "Cancel");
@@ -312,7 +312,7 @@ fn app_lock_turns_by_keyboard_and_without_it_there_is_no_time_choice() {
     key(&mut rt, Key::Text(" ".into()));
     assert!(!lock_facts(&rt).0);
     assert!(find(&rt, "item-1-0-pop").is_none(), "off: no time choice (DW-0716b)");
-    assert_eq!(says(&rt, "item-1-0-sub"), "Off: anyone using this PC can open Beebeeb");
+    assert_eq!(says(&rt, "item-1-0-sub"), beebeeb_engine::os_words::for_this_os("Off: anyone using this PC can open Beebeeb"));
     key(&mut rt, Key::Enter);
     assert!(lock_facts(&rt).0);
 }
@@ -327,7 +327,7 @@ fn app_lock_with_no_delay_draws_no_time_choice() {
     let rt = window(state);
     assert_eq!(info(&rt, "item-1-0-switch").label.as_deref(), Some("Lock Beebeeb"));
     assert!(find(&rt, "item-1-0-pop").is_none(), "no delay: no time choice");
-    assert_eq!(says(&rt, "item-1-0-sub"), "Windows Hello");
+    assert_eq!(says(&rt, "item-1-0-sub"), beebeeb_engine::os_words::for_this_os("Windows Hello"));
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn a_device_is_signed_out_after_its_confirm_and_this_pc_has_no_button() {
         name(&rt, "item-0-1"),
         "Anna's iPhone, Drive, Pass, last active 12 min ago"
     );
-    assert_eq!(says(&rt, "item-0-0-pill-label"), "This PC");
+    assert_eq!(says(&rt, "item-0-0-pill-label"), beebeeb_engine::os_words::for_this_os("This PC"));
     assert_eq!(says(&rt, "item-0-0-value"), "DE");
     let stops = tab_stops(&mut rt);
     assert_eq!(
@@ -1074,14 +1074,14 @@ fn with_the_lock_off_there_is_no_delay_and_turning_it_on_brings_it_back() {
     assert!(!lock_facts(&rt).0);
     assert!(find(&rt, "item-1-0-pop").is_none(), "no time choice");
     assert!(find(&rt, "menu-0").is_none());
-    assert_eq!(says(&rt, "item-1-0-sub"), "Off: anyone using this PC can open Beebeeb");
+    assert_eq!(says(&rt, "item-1-0-sub"), beebeeb_engine::os_words::for_this_os("Off: anyone using this PC can open Beebeeb"));
     // Asking for the menu while the lock is off opens nothing.
     rt.update(|s, _| super::go(s, "DW-0716"));
     settle(&mut rt);
     assert_eq!(rt.state.account.dialog, None);
     click(&mut rt, "item-1-0-switch");
     assert!(lock_facts(&rt).0, "DW-0716");
-    assert_eq!(says(&rt, "item-1-0-sub"), "Windows Hello · locks again after");
+    assert_eq!(says(&rt, "item-1-0-sub"), beebeeb_engine::os_words::for_this_os("Windows Hello · locks again after"));
     assert!(find(&rt, "item-1-0-pop").is_some());
 }
 

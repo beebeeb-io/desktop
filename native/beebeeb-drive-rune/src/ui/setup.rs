@@ -163,7 +163,7 @@ fn side_panel(
         .child(lockup("side", 34.0, name, product, t))
         .child(kit::label(
             "side-tagline",
-            format!("Set up {product} on this PC"),
+            format!(concat!("Set up {product} on ", beebeeb_engine::device_word!()), product = product),
             type_au::SUB,
             t.text_secondary,
         ))

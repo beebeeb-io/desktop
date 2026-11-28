@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { buildManifest, parseVersion, signedFileName, verifyMinisign } from '../native-channel-manifest.mjs'
+import { buildDarwinManifest, buildManifest, parseVersion, signedFileName, verifyMinisign } from '../native-channel-manifest.mjs'
 
 const FIXTURE = path.join(import.meta.dir, '..', '..', 'crates', 'beebeeb-updater', 'tests', 'fixtures', 'native-manifest-shape.json')
 const NAME = 'Beebeeb_0.9.0_x64-setup.exe'
@@ -86,6 +86,47 @@ describe('native channel manifest', () => {
     expect(refusal({ signature: 'PGh0bWw+' })).toContain("signs 'null'")
     expect(refusal({ date: 'yesterday' })).toContain('must look like')
     expect(refusal({ notes: '# Beebeeb Desktop 0.8.9' })).toContain('do not name 0.9.0')
+  })
+
+  test('a Mac publish writes a darwin-aarch64 entry (url, signature, size) and the two platforms merge both ways', () => {
+    const MAC_NAME = 'Beebeeb_0.9.0_aarch64.app.tar.gz'
+    const MAC = Buffer.alloc(12_345_678, 3)
+    const mac = { ...honest, installerName: MAC_NAME, installerBytes: MAC, signature: key.sigFor(MAC, MAC_NAME) }
+    const macOnly = buildDarwinManifest(mac)
+    expect(Object.keys(macOnly.platforms)).toEqual(['darwin-aarch64'])
+    expect(macOnly.platforms['darwin-aarch64']).toEqual({
+      url: `https://releases.beebeeb.io/desktop/artifacts/0.9.0/${MAC_NAME}`,
+      signature: mac.signature.trim(),
+      size: 12_345_678,
+    })
+    const windowsOnly = buildManifest(honest)
+
+    // Windows first, then the Mac publish on top of it; and the reverse. Same entries either way.
+    const macOverWindows = buildDarwinManifest({ ...mac, existing: windowsOnly })
+    const windowsOverMac = buildManifest({ ...honest, existing: macOnly })
+    for (const merged of [macOverWindows, windowsOverMac]) {
+      expect(Object.keys(merged.platforms).sort()).toEqual(['darwin-aarch64', 'windows-x86_64', 'windows-x86_64-nsis'])
+      expect(merged.platforms['darwin-aarch64']).toEqual(macOnly.platforms['darwin-aarch64'])
+      expect(merged.platforms['windows-x86_64-nsis']).toEqual(windowsOnly.platforms['windows-x86_64-nsis'])
+    }
+    // A re-publish of one platform replaces its own entry and keeps the other's.
+    expect(buildManifest({ ...honest, existing: macOverWindows }).platforms['darwin-aarch64']).toEqual(macOnly.platforms['darwin-aarch64'])
+    // A Mac re-publish of the same version replaces the old Mac entry and keeps the Windows ones.
+    const OLD_MAC = Buffer.alloc(1_000, 5)
+    const staleMac = buildDarwinManifest({ ...mac, installerBytes: OLD_MAC, signature: key.sigFor(OLD_MAC, MAC_NAME), existing: windowsOnly })
+    const republished = buildDarwinManifest({ ...mac, existing: staleMac })
+    expect(Object.keys(republished.platforms).sort()).toEqual(['darwin-aarch64', 'windows-x86_64', 'windows-x86_64-nsis'])
+    expect(republished.platforms['darwin-aarch64']).toEqual(macOnly.platforms['darwin-aarch64'])
+    expect(republished.platforms['windows-x86_64']).toEqual(windowsOnly.platforms['windows-x86_64'])
+    expect(republished.platforms['windows-x86_64-nsis']).toEqual(windowsOnly.platforms['windows-x86_64-nsis'])
+    // Another channel's manifest is never merged; the channel never rolls back, and a Mac publish never strands Windows.
+    expect(() => buildDarwinManifest({ ...mac, existing: { ...windowsOnly, channel: 'stable' } })).toThrow('desktop/beta')
+    expect(() => buildDarwinManifest({ ...mac, existing: { ...windowsOnly, version: '0.9.1' } })).toThrow('refusing to publish the lower 0.9.0')
+    expect(() => buildManifest({ ...honest, existing: { ...macOnly, version: '0.9.1' } })).toThrow('refusing to publish the lower 0.9.0')
+    expect(() => buildDarwinManifest({ ...mac, existing: { ...windowsOnly, version: '0.8.30' } })).toThrow('publish the Windows build of 0.9.0 first')
+    // The Mac artefact has its own name and signature rules.
+    expect(() => buildDarwinManifest({ ...mac, installerName: NAME })).toThrow('must be named Beebeeb_0.9.0_aarch64.app.tar.gz')
+    expect(() => buildDarwinManifest({ ...mac, signature: key.sigFor(MAC, NAME) })).toThrow('the signature signs')
   })
 
   test('reads versions and signed file names strictly', () => {

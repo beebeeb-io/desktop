@@ -110,19 +110,63 @@ fn emit_source_offer() {
     println!("cargo:rerun-if-env-changed=BEEBEEB_RELEASE_VERSION");
     let text = std::fs::read_to_string(lock).expect("reading the office-render lock");
     let marker = "desktop-office?rev=";
-    let at = text.find(marker).expect("the office-render lock has a desktop-office git source") + marker.len();
+    let at = text
+        .find(marker)
+        .expect("the office-render lock has a desktop-office git source")
+        + marker.len();
     let rev: String = text[at..].chars().take_while(char::is_ascii_hexdigit).collect();
-    assert!(rev.len() == 40, "the desktop-office rev in the lock is not a full commit: {rev:?}");
+    assert!(
+        rev.len() == 40,
+        "the desktop-office rev in the lock is not a full commit: {rev:?}"
+    );
     println!("cargo:rustc-env=BEEBEEB_OFFICE_REV={rev}");
-    let release = std::env::var("BEEBEEB_RELEASE_VERSION").ok().filter(|v| !v.trim().is_empty());
+    let release = std::env::var("BEEBEEB_RELEASE_VERSION")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let version = release.unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION"));
     println!("cargo:rustc-env=BEEBEEB_SOURCE_VERSION={}", version.trim());
 }
 
+/// macOS targets only: compiles `packaging/macos/FileProviderBridge.m` (the one Objective-C file that talks to
+/// `NSFileProviderManager` and `NSWorkspace`) with ARC, and links the three frameworks it uses. Deployment target 14.0:
+/// the bridge has no fallback for older systems. A compile failure stops the build.
+fn emit_file_provider_bridge() {
+    let source = "../../packaging/macos/FileProviderBridge.m";
+    println!("cargo:rerun-if-changed={source}");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    compile_file_provider_bridge(source);
+}
+
+/// `cc` is a build-dependency on macOS hosts only (Cargo.toml), so the compile lives behind the host gate.
+#[cfg(target_os = "macos")]
+fn compile_file_provider_bridge(source: &str) {
+    cc::Build::new()
+        .file(source)
+        .flag("-fobjc-arc")
+        .flag("-fmodules")
+        .flag("-mmacosx-version-min=14.0")
+        .warnings(false)
+        .compile("beebeeb_file_provider_bridge");
+    for framework in ["Foundation", "AppKit", "FileProvider"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn compile_file_provider_bridge(_source: &str) {
+    println!("cargo:warning=building for macOS from a non-macOS host: the File Provider bridge is not compiled");
+}
+
 fn main() {
+    emit_file_provider_bridge();
     // The optimisation level, for the large-account budget test: its budgets are an optimised build's
     // (`tests/large_account_budget.rs`); an unoptimised `cargo test` prints the numbers and does not hold them.
-    println!("cargo:rustc-env=BEEBEEB_OPT_LEVEL={}", std::env::var("OPT_LEVEL").unwrap_or_default());
+    println!(
+        "cargo:rustc-env=BEEBEEB_OPT_LEVEL={}",
+        std::env::var("OPT_LEVEL").unwrap_or_default()
+    );
     emit_source_offer();
     emit_app_identifier();
     emit_windows_resource();

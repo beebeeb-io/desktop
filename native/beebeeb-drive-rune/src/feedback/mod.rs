@@ -532,7 +532,7 @@ pub fn finish_capture(rt: &mut Runtime<State>, img: Result<Rgba, String>) {
         let inbox = fb
             .inbox
             .as_deref()
-            .ok_or("no inbox folder: this PC has no local app data folder")?;
+            .ok_or(concat!("no inbox folder: ", beebeeb_engine::device_word!(), " has no local app data folder"))?;
         let target = fb.target().ok_or("no element is picked")?;
         let picked =
             model::index_of(&tree, &target.path).ok_or("the picked element is no longer on screen; pick it again")?;

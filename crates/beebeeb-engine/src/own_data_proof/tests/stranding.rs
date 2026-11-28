@@ -21,7 +21,7 @@ fn a_closed_window_with_no_candidate_no_longer_strands_the_owner() {
     assert_eq!(pc.db.0.owner().unwrap(), None);
     assert_eq!(
         bind_before_engine_start(&pc.db, &session(), WINDOWS),
-        Err(OTHER_ACCOUNT_ON_WINDOWS.to_string()),
+        Err(OTHER_ACCOUNT_DATA.to_string()),
         "stranded before the proof"
     );
 
@@ -56,7 +56,7 @@ fn a_window_shut_before_the_candidate_arrived_no_longer_strands_the_owner() {
     );
     assert_eq!(
         bind_before_engine_start(&pc.db, &session(), WINDOWS),
-        Err(OTHER_ACCOUNT_ON_WINDOWS.to_string())
+        Err(OTHER_ACCOUNT_DATA.to_string())
     );
 
     assert!(matches!(
@@ -99,7 +99,7 @@ fn an_email_only_owner_whose_email_changed_is_proven_and_rerecorded() {
         .unwrap();
     assert_eq!(
         bind_before_engine_start(&pc.db, &session(), WINDOWS),
-        Err(OTHER_ACCOUNT_ON_WINDOWS.to_string())
+        Err(OTHER_ACCOUNT_DATA.to_string())
     );
 
     assert!(matches!(
@@ -143,7 +143,7 @@ fn another_accounts_data_is_never_adopted() {
     assert_eq!(pc.db.0.owner().unwrap(), None);
     assert_eq!(
         bind_before_engine_start(&pc.db, &session(), WINDOWS),
-        Err(OTHER_ACCOUNT_ON_WINDOWS.to_string())
+        Err(OTHER_ACCOUNT_DATA.to_string())
     );
     assert_eq!(
         due(&pc).len(),

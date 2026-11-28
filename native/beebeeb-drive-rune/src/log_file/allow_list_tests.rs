@@ -224,7 +224,7 @@ fn vocabulary_os_is_pinned() {
     let file = include_str!("vocabulary_os.txt");
     assert_eq!(
         fnv1a(file.as_bytes()),
-        0x9963_bb01_5124_9861,
+        0x6cc3_4dd8_f27d_5b32,
         "vocabulary_os.txt changed: update the pin on purpose"
     );
     let phrases: Vec<&str> = file.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();

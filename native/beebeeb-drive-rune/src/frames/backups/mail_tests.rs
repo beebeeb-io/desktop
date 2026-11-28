@@ -87,18 +87,26 @@ fn connection(rt: &Runtime<State>) -> Connection {
 #[test]
 fn every_mail_frame_shows_the_boards_words() {
     for (frame, title, sub) in [
-        ("DW-0740", "Mail Backup is on", "Runs on this PC (Anna-Laptop)"),
+        ("DW-0740", "Mail Backup is on", beebeeb_engine::os_words::for_this_os("Runs on this PC (Anna-Laptop)")),
         (
             "DW-0740b",
             "Mail Backup is off",
-            "It runs on a PC: this one, once you turn it on.",
+            if cfg!(target_os = "macos") {
+                "It runs on a Mac: this one, once you turn it on.".to_string()
+            } else {
+                beebeeb_engine::os_words::for_this_os("It runs on a PC: this one, once you turn it on.")
+            },
         ),
         (
             "DW-1405",
             "Backing up your mail",
-            "The first backup takes longest. You can use your PC as normal.",
+            if cfg!(target_os = "macos") {
+                "The first backup takes longest. You can use your Mac as normal.".to_string()
+            } else {
+                beebeeb_engine::os_words::for_this_os("The first backup takes longest. You can use your PC as normal.")
+            },
         ),
-        ("DW-1406", "Mail Backup is on", "Runs on this PC (Anna-Laptop)"),
+        ("DW-1406", "Mail Backup is on", beebeeb_engine::os_words::for_this_os("Runs on this PC (Anna-Laptop)")),
     ] {
         let rt = runtime(frame);
         assert_eq!(rt.state.backups.page, Page::Mail, "{frame}");

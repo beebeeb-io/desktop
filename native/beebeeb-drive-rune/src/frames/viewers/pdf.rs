@@ -5,18 +5,18 @@
 //! The page's pixels are the source's (rendered on this PC from the decrypted file). A source
 //! with no picture of a page gets a blank page, never a sample.
 
-use rune::{Color, El, SurfaceFit, TextStyle, col, el, row, text_input};
+use rune::{col, el, row, text_input, Color, El, SurfaceFit, TextStyle};
 
 use super::chrome::{Dot, Head, Status};
-use crate::ui::button::{ButtonState, Size, Variant, button, keys};
 use super::media::{FIND_KEY, ZOOMS};
 use super::source::{PdfDoc, Picture};
-use super::{Intent, Ui, details, media_icons, style, ui};
-use crate::State;
+use super::{details, media_icons, style, ui, Intent, Ui};
 use crate::theme::scale;
-use crate::theme::tokens::{Theme, type_};
+use crate::theme::tokens::{type_, Theme};
+use crate::ui::button::{button, keys, ButtonState, Size, Variant};
 use crate::ui::kit;
-use crate::ui::toolbar::{ToolState, tool_button};
+use crate::ui::toolbar::{tool_button, ToolState};
+use crate::State;
 
 /// What a page says while its picture is being rendered on this PC.
 pub const PAGE_RENDERING: &str = "Rendering this page\u{2026}";
@@ -96,7 +96,7 @@ pub fn tools(ui: &Ui, t: &Theme) -> Vec<El> {
         .child(also(
             "tool-0",
             step("zoom-minus", "Zoom out", &media_icons::MINUS, -1, zoom > ZOOMS[0])
-                .shortcut_hint("Ctrl+Minus")
+                .shortcut_hint(crate::frames::files::key_label("Minus"))
                 .child(
                     kit::glyph("tool-0-icon", &media_icons::MINUS, 13.0, t.text_secondary)
                         .absolute(7.5, 5.5)
@@ -123,7 +123,7 @@ pub fn tools(ui: &Ui, t: &Theme) -> Vec<El> {
                 1,
                 zoom < ZOOMS[ZOOMS.len() - 1],
             )
-            .shortcut_hint("Ctrl+Plus")
+            .shortcut_hint(crate::frames::files::key_label("Plus"))
             .child(
                 kit::glyph("tool-2-icon", &media_icons::PLUS_SMALL, 13.0, t.text_secondary)
                     .absolute(7.5, 5.5)
@@ -143,7 +143,7 @@ pub fn tools(ui: &Ui, t: &Theme) -> Vec<El> {
             if finding { ToolState::On } else { ToolState::Idle },
             t,
         )
-        .shortcut_hint("Ctrl+F")
+        .shortcut_hint(crate::frames::files::key_label("F"))
         .checked(finding)
         .on_press(with_ui(|ui| {
             if ui.media.find.is_some() {
@@ -261,7 +261,18 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
             .child(nav("find-nav-0", "Next match", 1, "Enter", false))
             .child(nav("find-nav-1", "Previous match", -1, "Shift+Enter", true))
             .child(el().key("find-spacer").grow(1.0))
-            .child(button(keys("find-done"), "Done", None, Variant::Ghost, Size::Sm, ButtonState::Enabled, t).on_press(with_ui(Ui::close_find))),
+            .child(
+                button(
+                    keys("find-done"),
+                    "Done",
+                    None,
+                    Variant::Ghost,
+                    Size::Sm,
+                    ButtonState::Enabled,
+                    t,
+                )
+                .on_press(with_ui(Ui::close_find)),
+            ),
     )
 }
 
@@ -311,15 +322,44 @@ fn thumbs(doc: &PdfDoc, t: &Theme) -> El {
         )
 }
 
+/// What a page's thumbnail shows (dm-87).
+#[derive(Clone)]
+pub(crate) enum ThumbFace {
+    /// The page's own picture, the one this PC rendered for the page itself (the same confined helper).
+    Picture(rune::Pixels),
+    /// A plain page: this source renders no pictures at all (the board's fixture), so there is none to wait for.
+    Plain,
+    /// The page is not rendered yet, or could not be: no page is drawn, only its outline. RC16: every thumbnail was a
+    /// blank white page while the page itself rendered.
+    NotYet,
+}
+
+/// The face of page `n`'s thumbnail. The picture is asked for only once the source holds the page (`Ready`): a
+/// thumbnail never sends the renderer a page of its own, which would take the turn of the page being read (the
+/// worker serves only the newest page asked).
+pub(crate) fn thumb_face(state: super::source::PageState, picture: impl FnOnce() -> Option<rune::Pixels>) -> ThumbFace {
+    use super::source::PageState;
+    match state {
+        PageState::Ready | PageState::LacksText => picture().map_or(ThumbFace::Plain, ThumbFace::Picture),
+        PageState::Rendering | PageState::Failed => ThumbFace::NotYet,
+    }
+}
+
 /// One thumbnail of the column: row `i` is page `i + 1`.
 fn thumb(s: &State, i: usize, t: &Theme) -> El {
     let n = u32::try_from(i).map_or(u32::MAX, |i| i.saturating_add(1));
     let current = s.viewer.ui.as_ref().is_some_and(|ui| ui.media.page == n);
-    let page = el()
-        .key(format!("thumb-{i}-page"))
-        .size(64.0, 84.0)
-        .radius(2.0)
-        .fill(Color::WHITE);
+    let face = s.viewer.ui.as_ref().map_or(ThumbFace::Plain, |ui| {
+        thumb_face(ui.page_state(n), || ui.source.picture(&ui.file.id, Picture::Page(n)))
+    });
+    let page = el().key(format!("thumb-{i}-page")).size(64.0, 84.0).radius(2.0);
+    let page = match face {
+        ThumbFace::Picture(pixels) => page.fill(Color::WHITE).clip_rounded(2.0).pixels_fit(&pixels, SurfaceFit::Fill),
+        ThumbFace::Plain => page.fill(Color::WHITE),
+        ThumbFace::NotYet => page
+            .border(kit::HAIR, t.separator)
+            .child(el().key(format!("thumb-{i}-not-yet")).size(1.0, 1.0).opacity(0.0)),
+    };
     let page = if current {
         page.box_shadow(kit::ring(2.0, t.text))
     } else {
