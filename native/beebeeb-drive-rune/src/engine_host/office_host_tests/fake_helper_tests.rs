@@ -238,6 +238,8 @@ impl Gate {
 #[derive(Default)]
 pub(super) struct Log {
     starts: AtomicUsize,
+    /// Starts that began (the worker is inside `start`, perhaps still waiting out a slow one).
+    entered: AtomicUsize,
     /// Helpers ended by an explicit kill, each counted once. Dropping a helper's handle ends it too (as the sandbox's
     /// `Child` does), but is not counted: a test that asks "killed?" sees only a kill somebody made.
     kills: AtomicUsize,
@@ -261,6 +263,10 @@ pub(super) struct Log {
 impl Log {
     pub(super) fn starts(&self) -> usize {
         self.starts.load(SeqCst)
+    }
+
+    pub(super) fn entered(&self) -> usize {
+        self.entered.load(SeqCst)
     }
 
     pub(super) fn kills(&self) -> usize {
@@ -440,6 +446,7 @@ impl Starter for Fake {
         if let Some(error) = self.start_error {
             return Err(error);
         }
+        self.log.entered.fetch_add(1, SeqCst);
         if !self.start_delay.is_zero() {
             thread::sleep(self.start_delay);
         }

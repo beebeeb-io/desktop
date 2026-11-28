@@ -9,7 +9,10 @@
 // Usage:
 //   node scripts/native-channel-manifest.mjs --version 0.9.0 --channel stable --installer <setup.exe> \
 //     --sig <setup.exe.sig> --notes <RELEASE_NOTES.md> --pubkey crates/beebeeb-updater/keys/updater-v2.pub \
-//     [--date 2026-11-20T10:00:00Z] --out <stable.json>
+//     [--date 2026-11-20T10:00:00Z] [--existing <manifest.json>] --out <stable.json>
+//   A Mac publish gives --mac-artifact <Beebeeb_0.9.0_aarch64.app.tar.gz> --mac-sig <file.sig> instead of
+//   --installer/--sig and writes a `darwin-aarch64` entry. --existing is the manifest already published for the same
+//   product, channel and version: the other platform's entries are kept, so neither publish drops the other's.
 //   node scripts/native-channel-manifest.mjs --verify <file> --sig <file.sig> --signed-name <name> --pubkey <.pub>
 //
 // The installer's bytes are verified against the signature and the native line's public key (--pubkey, the file
@@ -33,6 +36,11 @@ export const NATIVE_FLOOR = [0, 9, 0]
 export function parseVersion(text) {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(text ?? '')
   return match ? match.slice(1).map(Number) : null
+}
+
+function compareVersions(a, b) {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1
+  return 0
 }
 
 function atLeast(version, floor) {
@@ -80,30 +88,77 @@ export function verifyMinisign(bytes, sigBase64, pubkeyBase64) {
   }
 }
 
-/** Builds the manifest object, or throws an Error whose message names the bad input. */
-export function buildManifest({ version, channel, installerName, installerBytes, signature, pubkey, notes, date }) {
+const WINDOWS_TARGETS = ['windows-x86_64', 'windows-x86_64-nsis']
+export const DARWIN_TARGET = 'darwin-aarch64'
+
+/** The artefact each platform publishes, by its name for a version. */
+export const artifactName = (kind, version) => (kind === 'darwin' ? `Beebeeb_${version}_aarch64.app.tar.gz` : `Beebeeb_${version}_x64-setup.exe`)
+
+/**
+ * Checks one platform's artefact and returns its manifest entry; throws an Error whose message names the bad input.
+ * Everything but the platform is shared: version, channel, date, notes, name, size, signature, key.
+ */
+function platformEntry(kind, { version, channel, installerName, installerBytes, signature, pubkey, notes, date }) {
   const parsed = parseVersion(version)
   if (!parsed) throw new Error(`version '${version}' must be plain semver like 0.9.0`)
   if (!atLeast(parsed, NATIVE_FLOOR)) throw new Error(`version ${version} is older than the first native release 0.9.0: it belongs in release.yml's manifests`)
   if (!Object.hasOwn(CHANNEL_FILES, channel)) throw new Error(`channel '${channel}' must be alpha, beta or stable`)
-  const expectedName = `Beebeeb_${version}_x64-setup.exe`
-  if (installerName !== expectedName) throw new Error(`the installer must be named ${expectedName}, got ${installerName}`)
+  const expectedName = artifactName(kind, version)
+  if (installerName !== expectedName) throw new Error(`the ${kind === 'darwin' ? 'Mac artefact' : 'installer'} must be named ${expectedName}, got ${installerName}`)
   const installerSize = installerBytes.length
-  if (installerSize <= 0) throw new Error('the installer is empty')
+  if (installerSize <= 0) throw new Error(`the ${kind === 'darwin' ? 'Mac artefact' : 'installer'} is empty`)
   const signed = signedFileName(signature)
   if (signed !== expectedName) throw new Error(`the signature signs '${signed}', not ${expectedName}`)
   if (!verifyMinisign(installerBytes, signature, pubkey)) throw new Error('the installer is not the file its signature signs (or another key signed it)')
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(date)) throw new Error(`date '${date}' must look like 2026-11-20T10:00:00Z`)
   if (!notes.includes(version)) throw new Error(`the release notes do not name ${version}`)
-  const platform = { url: `${RELEASE_HOST}/desktop/artifacts/${version}/${expectedName}`, signature: signature.trim(), size: installerSize }
+  return { url: `${RELEASE_HOST}/desktop/artifacts/${version}/${expectedName}`, signature: signature.trim(), size: installerSize }
+}
+
+/**
+ * The entries of `existing` (a manifest already published for this release) that belong to the OTHER platform, so a
+ * Windows publish never drops the Mac entry and a Mac publish never drops the Windows ones. Only the same product,
+ * channel and version: an entry of another version names another file and the updater would refuse it, so it is
+ * not carried over. `ownTargets` are the targets being written now: never kept from the old file.
+ */
+export function keptEntries(existing, { version, channel }, ownTargets, { sameVersionOnly = false, allowLower = false } = {}) {
+  if (!existing) return {}
+  if (existing.product !== 'desktop' || existing.channel !== channel) throw new Error(`the existing manifest is for ${existing.product}/${existing.channel}, not desktop/${channel}`)
+  if (existing.version !== version) {
+    const old = parseVersion(existing.version)
+    const next = parseVersion(version)
+    // A run must not roll a channel back, whichever platform publishes: only a withdrawal (publish_existing, which
+    // passes allowLower) republishes an older version on purpose (docs/RELEASING.md).
+    if (!allowLower && old && next && compareVersions(next, old) < 0) throw new Error(`the channel already publishes ${existing.version}: refusing to publish the lower ${version}`)
+    // A Mac publish for another version would replace the manifest with a darwin-only one and strand Windows.
+    if (sameVersionOnly) throw new Error(`the channel publishes ${existing.version}, not ${version}: publish the Windows build of ${version} first, a Mac-only manifest would drop the Windows entries`)
+    return {}
+  }
+  return Object.fromEntries(Object.entries(existing.platforms ?? {}).filter(([target]) => !ownTargets.includes(target)))
+}
+
+function manifestOf(args, platforms, options = {}) {
+  const { version, channel, notes, date, existing, allowLower } = args
+  const own = Object.keys(platforms)
   return {
     version,
     notes,
     pub_date: date,
     product: 'desktop',
     channel,
-    platforms: { 'windows-x86_64': platform, 'windows-x86_64-nsis': platform },
+    platforms: { ...keptEntries(existing, { version, channel }, own, { ...options, allowLower }), ...platforms },
   }
+}
+
+/** Builds the Windows manifest object (keeping an `existing` manifest's Mac entry), or throws an Error naming the bad input. */
+export function buildManifest(args) {
+  const platform = platformEntry('windows', args)
+  return manifestOf(args, Object.fromEntries(WINDOWS_TARGETS.map((target) => [target, platform])))
+}
+
+/** Builds the manifest object of a Mac publish: a `darwin-aarch64` entry (url, signature, size), keeping an `existing` manifest's Windows entries. */
+export function buildDarwinManifest(args) {
+  return manifestOf(args, { [DARWIN_TARGET]: platformEntry('darwin', args) }, { sameVersionOnly: true })
 }
 
 function main(argv) {
@@ -124,21 +179,26 @@ function main(argv) {
     console.log(`verified ${args.verify}: signed as ${args['signed-name']} by the key in ${args.pubkey}`)
     return
   }
-  for (const required of ['version', 'channel', 'installer', 'sig', 'notes', 'pubkey', 'out']) {
+  // A Mac publish names `--mac-artifact`/`--mac-sig`; a Windows one `--installer`/`--sig`.
+  const mac = args['mac-artifact'] !== undefined
+  const [file, sigFile] = mac ? ['mac-artifact', 'mac-sig'] : ['installer', 'sig']
+  for (const required of ['version', 'channel', file, sigFile, 'notes', 'pubkey', 'out']) {
     if (!args[required]) throw new Error(`--${required} is required`)
   }
-  const manifest = buildManifest({
+  const manifest = (mac ? buildDarwinManifest : buildManifest)({
     version: args.version,
     channel: args.channel,
-    installerName: basename(args.installer),
-    installerBytes: readFileSync(args.installer),
-    signature: readFileSync(args.sig, 'utf8'),
+    installerName: basename(args[file]),
+    installerBytes: readFileSync(args[file]),
+    signature: readFileSync(args[sigFile], 'utf8'),
     pubkey: readFileSync(args.pubkey, 'utf8'),
     notes: readFileSync(args.notes, 'utf8'),
     date: args.date ?? new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    allowLower: args['allow-lower'] === 'true',
+    existing: args.existing ? JSON.parse(readFileSync(args.existing, 'utf8')) : undefined,
   })
   writeFileSync(args.out, `${JSON.stringify(manifest, null, 2)}\n`)
-  console.log(`wrote ${args.out}: ${manifest.version} on ${manifest.channel}, ${manifest.platforms['windows-x86_64-nsis'].size} bytes`)
+  console.log(`wrote ${args.out}: ${manifest.version} on ${manifest.channel}, platforms ${Object.keys(manifest.platforms).join(', ')}`)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

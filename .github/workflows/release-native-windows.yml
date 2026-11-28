@@ -572,6 +572,8 @@ jobs:
       # anything: a truncated or replaced asset, or one the 0.8.x key signed, gets no manifest and is not published.
       - name: Generate the v2 channel manifest
         shell: bash
+        env:
+          ALLOW_LOWER: ${{ inputs.publish_existing && 'true' || 'false' }}
         run: |
           set -euo pipefail
           installer="Beebeeb_${VER}_x64-setup.exe"
@@ -582,9 +584,14 @@ jobs:
             *) echo "::error::bad channel '$CHANNEL'"; exit 1 ;;
           esac
           mkdir -p "stage/desktop/v2" "stage/desktop/artifacts/$VER"
-          node desktop-src/scripts/native-channel-manifest.mjs --version "$VER" --channel "$CHANNEL" \
+          existing=()
+          if [[ -s "releases-repo/desktop/v2/$file" ]]; then
+            existing=(--existing "releases-repo/desktop/v2/$file")
+          fi
+          # Only a withdrawal or promotion (publish_existing) may publish a version below the channel's.
+          node desktop-src/scripts/native-channel-manifest.mjs --version "$VER" --channel "$CHANNEL" --allow-lower "$ALLOW_LOWER" \
             --installer "work/$installer" --sig "work/$installer.sig" --notes work/notes.md \
-            --pubkey desktop-src/crates/beebeeb-updater/keys/updater-v2.pub --out "stage/desktop/v2/$file"
+            --pubkey desktop-src/crates/beebeeb-updater/keys/updater-v2.pub "${existing[@]}" --out "stage/desktop/v2/$file"
           cp "work/$installer" "stage/desktop/artifacts/$VER/$installer"
           echo "MANIFEST_FILE=$file" >> "$GITHUB_ENV"
 
