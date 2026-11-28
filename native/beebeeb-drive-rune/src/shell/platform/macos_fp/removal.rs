@@ -404,7 +404,7 @@ pub(crate) fn dismiss_kept_folder(cfg: &mut DesktopConfig, shown: &str) -> bool 
 
 /// Saves `location` as the latest kept folder in the settings file, as one load-change-save under the config-write
 /// lock, so a settings save running at the same moment lands too. Merge-only: nothing else in the file changes.
-#[allow(dead_code)] // the surfacing step (dm-30)
+#[cfg_attr(test, allow(dead_code))] // Settings › Beebeeb in Finder saves the kept folder (dm-98); stubbed in tests
 pub(crate) fn remember_kept_folder(
     identity: &'static beebeeb_engine::identity::EngineIdentity,
     location: &str,
@@ -429,7 +429,7 @@ pub(crate) struct DismissOutcome {
 }
 
 /// The row's "Dismiss" as one load-change-save under the config-write lock.
-#[allow(dead_code)] // dm-18's row
+#[cfg_attr(test, allow(dead_code))] // the kept row's Dismiss (dm-98); stubbed in tests
 pub(crate) fn dismiss_saved_kept_folder(
     identity: &'static beebeeb_engine::identity::EngineIdentity,
     shown: &str,
