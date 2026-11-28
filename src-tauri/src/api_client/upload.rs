@@ -19,26 +19,21 @@ impl ApiClient {
         encrypted: &[u8],
         blurhash: Option<&str>,
     ) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .put(self.thumbnail_upload_url(FileId::new(file_id), variant, blurhash))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/octet-stream")
-            .body(encrypted.to_vec())
-            .send()
-            .await?;
-        Self::check_status(resp).await?;
+        let url = self.thumbnail_upload_url(FileId::new(file_id), variant, blurhash);
+        self.send_with_retry(|| {
+            self.client
+                .put(&url)
+                .header("Content-Type", "application/octet-stream")
+                .body(encrypted.to_vec())
+        })
+        .await?;
         Ok(())
     }
 
     pub async fn init_upload(&self, body: &DesktopUploadInitRequest) -> anyhow::Result<DesktopUploadInitResponse> {
-        let resp = self
-            .client
-            .post(self.upload_init_url())
-            .header("Authorization", format!("Bearer {}", self.token))
-            .json(body)
-            .send()
-            .await?;
+        // A POST: it waits for the pause, and its 429 is the error (never sent again).
+        let url = self.upload_init_url();
+        let resp = self.send_paced(|| self.client.post(&url).json(body)).await?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
             // `error_for_status` would drop the message the class is read from (spec §8.4).
             let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
@@ -58,25 +53,22 @@ impl ApiClient {
         chunk_idx: u32,
         data: &[u8],
     ) -> anyhow::Result<UploadChunkResponse> {
+        // A PUT of the same bytes to the same index: sent again after a 429.
+        let url = self.upload_chunk_url(UploadSessionId::new(upload_session_id), chunk_idx);
         let resp = self
-            .client
-            .put(self.upload_chunk_url(UploadSessionId::new(upload_session_id), chunk_idx))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/octet-stream")
-            .body(data.to_vec())
-            .send()
+            .send_paced(|| {
+                self.client
+                    .put(&url)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(data.to_vec())
+            })
             .await?;
         Ok(upload_response(resp).await?.json().await?)
     }
 
     pub async fn complete_upload_session(&self, upload_session_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .post(self.upload_complete_url(UploadSessionId::new(upload_session_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .json(&serde_json::json!({}))
-            .send()
-            .await?;
+        let url = self.upload_complete_url(UploadSessionId::new(upload_session_id));
+        let resp = self.send_paced(|| self.client.post(&url).json(&serde_json::json!({}))).await?;
         Ok(upload_response(resp).await?.json().await?)
     }
 
@@ -88,12 +80,8 @@ impl ApiClient {
     /// session. A `404` means the row (or its session) is already gone, which
     /// counts as done.
     pub async fn abandon_upload(&self, file_id: &str) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .post(self.upload_abandon_url(FileId::new(file_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?;
+        let url = self.upload_abandon_url(FileId::new(file_id));
+        let resp = self.send_paced(|| self.client.post(&url)).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(());
         }

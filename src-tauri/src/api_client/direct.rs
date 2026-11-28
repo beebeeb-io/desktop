@@ -12,7 +12,7 @@ use beebeeb_core::direct_transfer as dt;
 use reqwest::Client;
 use urlencoding::encode;
 
-use super::{ApiClient, FileId};
+use super::{ApiClient, DesktopApiError, FileId};
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 const STORAGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -64,9 +64,28 @@ pub(crate) fn retry_wait(retry: PinnedRetry, attempt: u32, waited: Duration, ask
 enum PinnedFailure {
     /// Not worth another try: an authorization answer, a gone version, a refusal that will repeat.
     Final(ChunkApiError),
-    /// Could be gone in a moment: a 429, a 5xx, a held file, a network blip. `wait` is what the
+    /// Could be gone in a moment: a 5xx, a held file, a network blip. `wait` is what the
     /// server asked for, if it did.
     Again { wait: Option<Duration>, message: String },
+    /// A 429 the client's shared pause already took (and, for this GET, waited out as far as the
+    /// client rule allows). No sleep here: the next attempt waits on that pause like every request.
+    Paused { message: String },
+}
+
+/// What the classifier is given when `send_paced` returned an error instead of a response: its 429
+/// (the pause is already set, the body's head is kept), or no answer at all.
+fn answer_of_error(error: &DesktopApiError) -> dt::ApiAnswer {
+    const JSON: Option<&str> = Some("application/json");
+    match error {
+        DesktopApiError::HttpStatus { status, snippet } => {
+            dt::ApiAnswer::from_parts(status.as_u16(), JSON, snippet.as_bytes(), None)
+        }
+        DesktopApiError::RateLimited { retry_after, .. } => {
+            let asked = retry_after.map(|secs| secs.to_string());
+            dt::ApiAnswer::from_parts(429, JSON, br#"{"error":"rate_limited"}"#, asked.as_deref())
+        }
+        _ => dt::ApiAnswer::no_answer(),
+    }
 }
 
 /// Unix milliseconds: the clock the planner and the discovery cache are given.
@@ -263,16 +282,12 @@ impl ApiClient {
 
     async fn fetch_discovery(&self) -> (dt::Outcome, Option<dt::Discovery>) {
         // The capabilities header is NOT sent here: only grant requests carry it.
-        let sent = self
-            .client
-            .get(self.url(dt::DISCOVERY_PATH))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .timeout(DISCOVERY_TIMEOUT)
-            .send()
-            .await;
+        // Like every API request it waits on the client's pause, and its 429 is reported to it.
+        let url = self.url(dt::DISCOVERY_PATH);
+        let sent = self.send_paced(|| self.client.get(&url).timeout(DISCOVERY_TIMEOUT)).await;
         let (answer, body) = match sent {
             Ok(resp) => answer_of(resp, dt::wire::MAX_DISCOVERY_BYTES).await,
-            Err(_) => (dt::ApiAnswer::no_answer(), Vec::new()),
+            Err(error) => (answer_of_error(&error), Vec::new()),
         };
         match dt::classify(dt::Call::Discovery, &answer) {
             dt::Outcome::Proceed => match dt::Discovery::from_json(&body) {
@@ -283,19 +298,22 @@ impl ApiClient {
         }
     }
 
-    /// `POST /api/v1/files/{id}/download-grants` with the capability header (this call only).
+    /// `POST /api/v1/files/{id}/download-grants` with the capability header (this call only). It
+    /// waits on the client's pause before it goes out; a 429 starts that pause and is this call's
+    /// answer (a POST is not sent again here).
     pub(crate) async fn download_grants(&self, file_id: &str, request: &dt::DownloadGrantRequest) -> GrantReply {
+        let url = self.url(&dt::download_grants_path(&encode(file_id)));
         let sent = self
-            .client
-            .post(self.url(&dt::download_grants_path(&encode(file_id))))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header(dt::CAPABILITIES_HEADER, dt::CAP_OBJECT_DOWNLOAD_V1)
-            .json(request)
-            .send()
+            .send_paced(|| {
+                self.client
+                    .post(&url)
+                    .header(dt::CAPABILITIES_HEADER, dt::CAP_OBJECT_DOWNLOAD_V1)
+                    .json(request)
+            })
             .await;
         let (answer, body) = match sent {
             Ok(resp) => answer_of(resp, dt::wire::MAX_GRANT_BODY_BYTES).await,
-            Err(_) => (dt::ApiAnswer::no_answer(), Vec::new()),
+            Err(error) => (answer_of_error(&error), Vec::new()),
         };
         match dt::classify(dt::Call::DownloadGrant, &answer) {
             dt::Outcome::Proceed => match dt::DownloadGrantResponse::from_json(&body) {
@@ -309,9 +327,9 @@ impl ApiClient {
     /// `GET /api/v1/files/{id}/chunks/{index}?object_version_id=<pinned>`: one chunk of the pinned
     /// version through the API, the fallback for a chunk storage could not give and the re-fetch
     /// of one that did not authenticate. `expected_len` is the stored length the grant manifest
-    /// states for this chunk. A transient failure (429, 5xx, a held file, a network blip) is retried
-    /// a few times, honouring `Retry-After`; only when that is spent does the caller give the file
-    /// to the API path.
+    /// states for this chunk. A transient failure (5xx, a held file, a network blip) is retried
+    /// a few times, honouring `Retry-After`; a 429 is waited out on the client's shared pause, not
+    /// here. Only when that is spent does the caller give the file to the API path.
     pub(crate) async fn download_chunk_pinned(
         &self,
         file_id: &str,
@@ -336,10 +354,17 @@ impl ApiClient {
         let mut waited = Duration::ZERO;
         let mut attempt: u32 = 1;
         loop {
+            let started = tokio::time::Instant::now();
             let (asked, message) = match self.pinned_attempt(file_id, index, version, expected_len, on_body).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(PinnedFailure::Final(e)) => return Err(e),
                 Err(PinnedFailure::Again { wait, message }) => (wait, message),
+                Err(PinnedFailure::Paused { message }) => {
+                    // The attempt's time was the shared pause: it counts against the budget, and the
+                    // next attempt waits on what is left of the pause before it is sent.
+                    waited = waited.saturating_add(started.elapsed());
+                    (Some(Duration::ZERO), message)
+                }
             };
             let Some(wait) = retry_wait(retry, attempt, waited, asked) else {
                 return Err(ChunkApiError::Failed(message));
@@ -359,17 +384,31 @@ impl ApiClient {
         expected_len: u64,
         on_body: OnBody<'_>,
     ) -> Result<Vec<u8>, PinnedFailure> {
-        let resp = self
-            .client
-            .get(self.chunk_url(FileId::new(file_id), index))
-            .query(&[("object_version_id", version)])
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await
-            .map_err(|e| PinnedFailure::Again {
-                wait: None,
-                message: dt::scrub(&e.without_url().to_string()),
-            })?;
+        let url = self.chunk_url(FileId::new(file_id), index);
+        let sent = self
+            .send_paced(|| self.client.get(&url).query(&[("object_version_id", version)]))
+            .await;
+        let resp = match sent {
+            Ok(resp) => resp,
+            Err(DesktopApiError::Transport(e)) => {
+                return Err(PinnedFailure::Again {
+                    wait: None,
+                    message: dt::scrub(&e.without_url().to_string()),
+                })
+            }
+            // A 429 the client could not wait out within its own rule; the pause is set.
+            Err(DesktopApiError::HttpStatus { status, .. }) => {
+                return Err(PinnedFailure::Paused {
+                    message: format!("chunk {index} through the API failed ({})", status.as_u16()),
+                })
+            }
+            // A ban or a wait over a minute is a refusal, never waited out; anything else is unknown.
+            Err(_) => {
+                return Err(PinnedFailure::Final(ChunkApiError::Failed(format!(
+                    "chunk {index} through the API was refused (429)"
+                ))))
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
             let (answer, _) = answer_of(resp, MAX_ERROR_BODY_BYTES).await;

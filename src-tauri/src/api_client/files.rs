@@ -58,13 +58,8 @@ impl ApiClient {
     /// and to recover the encrypted name when the local mirror entry
     /// is sparse (e.g. fresh placeholder).
     pub async fn get_file(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(self.file_url(FileId::new(file_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.file_url(FileId::new(file_id));
+        let resp = self.send_paced(|| self.client.get(&url)).await?.error_for_status()?;
         Ok(resp.json().await?)
     }
 
@@ -72,13 +67,8 @@ impl ApiClient {
     /// chunk bytes. Decryption is the caller's job (`beebeeb_core`). Each piece of the body is
     /// reported to `on_body` as it arrives (LD-0105 S0), not once the chunk is whole.
     pub async fn download_chunk(&self, file_id: &str, chunk_idx: u32, on_body: super::OnBody<'_>) -> anyhow::Result<Vec<u8>> {
-        let mut resp = self
-            .client
-            .get(&self.chunk_url(FileId::new(file_id), chunk_idx))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.chunk_url(FileId::new(file_id), chunk_idx);
+        let mut resp = self.send_paced(|| self.client.get(&url)).await?.error_for_status()?;
         // Sized from the length the server states, capped: a wrong header costs a reallocation, never
         // a large allocation up front.
         const RESERVE_AT_MOST: u64 = 64 << 20;
@@ -113,13 +103,8 @@ impl ApiClient {
     /// `error_for_status`; the caller treats any error as "no thumbnail" and lets
     /// Explorer fall back to the file-type icon.
     pub async fn download_thumbnail(&self, file_id: &str, variant: &str) -> anyhow::Result<Vec<u8>> {
-        let resp = self
-            .client
-            .get(self.thumbnail_url(FileId::new(file_id), variant))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.thumbnail_url(FileId::new(file_id), variant);
+        let resp = self.send_paced(|| self.client.get(&url)).await?.error_for_status()?;
         Ok(resp.bytes().await?.to_vec())
     }
 
@@ -160,56 +145,35 @@ impl ApiClient {
     }
 
     pub async fn list_versions(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(self.versions_url(FileId::new(file_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.versions_url(FileId::new(file_id));
+        let resp = self.send_paced(|| self.client.get(&url)).await?.error_for_status()?;
         Ok(resp.json().await?)
     }
 
     pub async fn restore_version(&self, file_id: &str, version_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .post(self.version_restore_url(FileId::new(file_id), VersionId::new(version_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        // A POST: it waits for the pause, and its 429 is the error (never sent again).
+        let url = self.version_restore_url(FileId::new(file_id), VersionId::new(version_id));
+        let resp = self.send_paced(|| self.client.post(&url)).await?.error_for_status()?;
         Ok(resp.json().await?)
     }
 
     /// LD-0113: a 409 `protected_folder` is a [`ProtectedFolderRefused`] (the Backups root).
     pub async fn trash_file(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .delete(self.file_url(FileId::new(file_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?;
+        let url = self.file_url(FileId::new(file_id));
+        let resp = self.send_paced(|| self.client.delete(&url)).await?;
         let resp = protected_folder_response(resp).await?;
         Ok(resp.json().await?)
     }
 
     pub async fn restore_file(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .post(self.restore_file_url(FileId::new(file_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.restore_file_url(FileId::new(file_id));
+        let resp = self.send_paced(|| self.client.post(&url)).await?.error_for_status()?;
         Ok(resp.json().await?)
     }
 
     pub async fn permanent_delete_file(&self, file_id: &str, confirm_token: &str) -> anyhow::Result<()> {
-        self.client
-            .delete(self.permanent_file_url(FileId::new(file_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("X-Confirm-Token", confirm_token)
-            .send()
+        let url = self.permanent_file_url(FileId::new(file_id));
+        self.send_paced(|| self.client.delete(&url).header("X-Confirm-Token", confirm_token))
             .await?
             .error_for_status()?;
         Ok(())
@@ -222,13 +186,8 @@ impl ApiClient {
         parent: ParentChange<'_>,
     ) -> anyhow::Result<serde_json::Value> {
         let body = metadata_update_body(name_encrypted, parent);
-        let resp = self
-            .client
-            .patch(self.file_url(FileId::new(file_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .json(&body)
-            .send()
-            .await?;
+        let url = self.file_url(FileId::new(file_id));
+        let resp = self.send_paced(|| self.client.patch(&url).json(&body)).await?;
         // LD-0113: a rename or move of the Backups root is a [`ProtectedFolderRefused`].
         let resp = protected_folder_response(resp).await?;
         Ok(resp.json().await?)
@@ -247,14 +206,8 @@ impl ApiClient {
         if let Some(folder_id) = folder_id {
             body["folder_id"] = serde_json::json!(folder_id);
         }
-        let resp = self
-            .client
-            .post(self.url("/api/v1/files/folder"))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.url("/api/v1/files/folder");
+        let resp = self.send_paced(|| self.client.post(&url).json(&body)).await?.error_for_status()?;
         Ok(resp.json().await?)
     }
 }

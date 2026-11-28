@@ -50,7 +50,7 @@ impl ApiClient {
 
     pub async fn shared_index_get(&self, id: &str, bucket: u32, page: u32) -> anyhow::Result<Option<Vec<u8>>> {
         let url=self.url(&format!("/api/v1/shared-folders/{}/search-index/shards/{bucket}/{page}",encode(id)));
-        let response=self.client.get(url).header("Authorization",format!("Bearer {}",self.token)).send().await?;
+        let response = self.send_paced(|| self.client.get(&url)).await?;
         if response.status()==reqwest::StatusCode::NOT_FOUND{return Ok(None);}
         Ok(Self::check_status(response).await?.bytes().await?.to_vec().into())
     }
@@ -136,18 +136,13 @@ impl ApiClient {
         let mut cursor: Option<String> = None;
 
         loop {
-            let resp = self
-                .client
-                .get(self.list_files_url(ListFilesScope {
-                    parent_id: parent_id.map(FolderId::new),
-                    shared_folder_id: Some(SharedFolderId::new(shared_folder_id)),
-                    trashed: None,
-                    cursor: cursor.as_deref(),
-                }))
-                .header("Authorization", format!("Bearer {}", self.token))
-                .send()
-                .await?
-                .error_for_status()?;
+            let url = self.list_files_url(ListFilesScope {
+                parent_id: parent_id.map(FolderId::new),
+                shared_folder_id: Some(SharedFolderId::new(shared_folder_id)),
+                trashed: None,
+                cursor: cursor.as_deref(),
+            });
+            let resp = self.send_paced(|| self.client.get(&url)).await?.error_for_status()?;
             let body: serde_json::Value = resp.json().await?;
             let files = body["files"].as_array().cloned().unwrap_or_default();
             out.extend(files);
@@ -168,24 +163,14 @@ impl ApiClient {
     }
 
     pub async fn get_folder_keys(&self, invite_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(self.folder_keys_url(InviteId::new(invite_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.folder_keys_url(InviteId::new(invite_id));
+        let resp = self.send_paced(|| self.client.get(&url)).await?.error_for_status()?;
         Ok(resp.json().await?)
     }
 
     pub async fn list_shared_roots(&self) -> anyhow::Result<serde_json::Value> {
-        let resp = self
-            .client
-            .get(self.shares_incoming_url())
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.shares_incoming_url();
+        let resp = self.send_paced(|| self.client.get(&url)).await?.error_for_status()?;
         Ok(resp.json().await?)
     }
 }

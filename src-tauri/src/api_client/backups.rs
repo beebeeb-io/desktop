@@ -18,12 +18,8 @@ pub struct BackupsRootAnswer {
 impl ApiClient {
     /// `GET /api/v1/backups/root`: the account's flagged root, `None` when it has none yet (404).
     pub async fn get_backups_root(&self) -> anyhow::Result<Option<String>> {
-        let resp = self
-            .client
-            .get(self.url("/api/v1/backups/root"))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?;
+        let url = self.url("/api/v1/backups/root");
+        let resp = self.send_paced(|| self.client.get(&url)).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -43,14 +39,8 @@ impl ApiClient {
         if let Some(name) = name_encrypted {
             body["name_encrypted"] = serde_json::json!(name);
         }
-        let resp = self
-            .client
-            .put(self.url("/api/v1/backups/root"))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
+        let url = self.url("/api/v1/backups/root");
+        let resp = self.send_paced(|| self.client.put(&url).json(&body)).await?.error_for_status()?;
         Ok(resp.json().await?)
     }
 
