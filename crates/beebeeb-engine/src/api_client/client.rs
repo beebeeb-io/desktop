@@ -28,7 +28,7 @@ pub struct ApiClient {
     /// no default headers (so no `X-Beebeeb-*`), no cookies, no `Authorization`, redirects
     /// refused, https only (loopback http when the API itself is on loopback http).
     pub(super) storage_client: std::sync::OnceLock<Option<Client>>,
-    /// The pause after a 429, shared by every request of this session (and its backup-pass client).
+    /// The pause after a 429, shared by every client of this account at this API base (`shared_rate_pause`).
     pub(super) rate_pause: std::sync::Arc<RatePause>,
 }
 
@@ -81,6 +81,7 @@ impl ApiClient {
             .default_headers(provenance_headers())
             .build()
             .expect("reqwest client");
+        let rate_pause = shared_rate_pause(&base_url, &token);
         Self {
             #[cfg(target_os = "windows")]
             credential_lifetime: std::sync::Arc::new(()),
@@ -91,7 +92,29 @@ impl ApiClient {
             link: std::sync::Arc::new(crate::link_health::LinkMonitor::new()),
             direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
             storage_client: std::sync::OnceLock::new(),
-            rate_pause: std::sync::Arc::new(RatePause::new()),
+            rate_pause,
+        }
+    }
+
+    /// Sign-out: drop the 429 pause and streak kept for this client's account, so the next sign-in starts clean.
+    pub fn forget_rate_pause(&self) {
+        forget_rate_pause(&self.base_url, &self.token);
+    }
+
+    /// [`Self::forget_rate_pause`] for a caller that holds the session's base and token but no client.
+    pub fn clear_rate_pause(base_url: &str, token: &str) {
+        forget_rate_pause(base_url, token);
+    }
+
+    /// The whole seconds a 429 asked this client to wait (the larger of its `Retry-After` header and its body's
+    /// `retry_after`), when `error` is one. A policy refusal always names its wait this way, unless it is a ban
+    /// without one.
+    pub fn rate_limited_wait(error: &DesktopApiError) -> Option<u64> {
+        match error {
+            DesktopApiError::HttpStatus { status, snippet } if *status == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                body_retry_after(snippet)
+            }
+            _ => None,
         }
     }
 
@@ -318,11 +341,12 @@ impl ApiClient {
     // `GET`/`DELETE`/`POST` calls returning typed DTOs from `account_dto`.
     // Unlike the sync-engine binary paths above, they go through
     // `get_typed` / `send_with_retry`, which:
-    //   * on HTTP 429 (rate limit) start one pause every request of this client
+    //   * on HTTP 429 (rate limit) start one pause every request of this account
     //     waits out (`RatePause`: `Retry-After`, or a 2 s floor that doubles, with
     //     jitter, capped at 60 s), and send a GET again (or a write that carries
     //     an idempotency key) up to `MAX_429_RETRIES` times. Other writes surface
-    //     the 429: they are never replayed.
+    //     the 429: they are never replayed. A policy refusal (a ban, or a wait
+    //     above 60 s) comes back at once for every request: no pause, no resend.
     //   * surface a clean `<status>: <body-snippet>` error on any other
     //     non-2xx instead of reqwest's opaque default.
 
@@ -411,6 +435,10 @@ impl ApiClient {
     /// again, up to `MAX_429_RETRIES` times; any other request is sent exactly once and its 429 is the error
     /// (`DesktopApiError::HttpStatus`), as is the last 429 of a request that was sent again.
     ///
+    /// A policy refusal (`is_policy_refusal`: `"error": "banned"`, or a wait above 60 s) is never waited out and
+    /// never sent again, whatever the method: the 429 comes back at once and no pause starts. Its snippet names the
+    /// wait as `retry_after` ([`Self::rate_limited_wait`] reads it), also when only the header carried it.
+    ///
     /// Only the 429 is handled here. A connection that fails, a timeout and a 502/503/504 come back at once and are
     /// not sent again: these callers were single sends before they waited on the pause, and the layers above them
     /// (the sync and transfer retries, the adapter's own read-again) already decide what a failure means.
@@ -488,7 +516,21 @@ impl ApiClient {
                 .ok()
                 .and_then(Result::ok)
                 .unwrap_or_default();
-            self.rate_pause.refused(header.max(body_retry_after(&body)));
+            let in_body = body_retry_after(&body);
+            let hint = header.max(in_body);
+            if is_policy_refusal(hint, &body) {
+                // The wait travels in the snippet; a body that does not name it (header only) is replaced by one
+                // that does.
+                let snippet = match hint {
+                    Some(secs) if in_body != hint => {
+                        let error = if is_banned(&body) { "banned" } else { "rate_limited" };
+                        serde_json::json!({ "error": error, "retry_after": secs }).to_string()
+                    }
+                    _ => body.chars().take(300).collect(),
+                };
+                return Err(DesktopApiError::HttpStatus { status, snippet });
+            }
+            self.rate_pause.refused(hint);
             if !again_after_429 || attempt >= MAX_429_RETRIES {
                 let snippet: String = body.chars().take(300).collect();
                 return Err(DesktopApiError::HttpStatus { status, snippet });

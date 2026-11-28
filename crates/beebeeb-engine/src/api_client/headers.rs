@@ -127,9 +127,11 @@ pub(super) fn retry_decision(attempt: u32, spent: u64, retry_after: Option<u64>,
     Some(wait)
 }
 
-// ── Shared 429 pause (one per client) ──────────────────────────────────────────
+// ── Shared 429 pause (one per account and API base) ────────────────────────────
 //
-// A 429 means the account is over its window, so every request of this client waits, not only the refused one.
+// A 429 means the account is over its window, so every request of the account waits, not only the refused one and
+// not only those of the client that met it: about 30 call sites build a client for one call, and they all take the
+// account's pause from `shared_rate_pause`.
 // The wait is defined by `beebeeb_core::retry::rate_limit_wait_ms` (the epic's Client pause rule); this is the
 // engine's own copy of it until its core pin moves to a revision that has the function:
 //
@@ -140,6 +142,9 @@ pub(super) fn retry_decision(attempt: u32, spent: u64, retry_after: Option<u64>,
 // not read. A 429 that arrives while a pause runs does not start or double a new one, and the streak ends on the
 // first answer that is not a 429. Only requests that are safe to send twice (a GET, or a write carrying an
 // idempotency key) are sent again on their own; the rest surface the 429.
+//
+// A policy refusal (`is_policy_refusal`: a ban, or a wait above 60 s) is not a pause: nobody sleeps through it and
+// nothing is sent again. The refused request gets its 429 back at once, with the wait.
 
 /// The shortest pause after a 429; doubles with each refusal in a row. Core: `RATE_LIMIT_WAIT_FLOOR_MS`.
 pub(super) const RATE_FLOOR: Duration = Duration::from_secs(2);
@@ -149,6 +154,19 @@ pub(super) const RATE_CAP: Duration = Duration::from_secs(60);
 
 /// The most jitter added on top of a pause, in percent of it. Core: `CLIENT_429_WAIT_JITTER_PERCENT`.
 pub(super) const RATE_JITTER_PERCENT: u64 = 25;
+
+/// A server wait above this many seconds is a policy refusal, not a pause.
+pub(super) const POLICY_REFUSAL_SECS: u64 = beebeeb_core::retry::CLIENT_429_POLICY_REFUSAL_SECONDS;
+
+/// Whether a 429 is a policy refusal: the body says `"error": "banned"`, or the wait (`hint`: the larger of the
+/// `Retry-After` header and the body's `retry_after`) is above [`POLICY_REFUSAL_SECS`].
+pub(super) fn is_policy_refusal(hint: Option<u64>, body: &str) -> bool {
+    hint.is_some_and(|secs| secs > POLICY_REFUSAL_SECS) || is_banned(body)
+}
+
+pub(super) fn is_banned(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body).is_ok_and(|value| value["error"] == "banned")
+}
 
 /// The header that makes a write safe to send twice.
 pub(super) const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
@@ -188,7 +206,7 @@ pub(super) struct PauseState {
     pub(super) streak: u32,
 }
 
-/// What a client knows about being refused: shared by every request it sends (and its backup-pass twin).
+/// What an account's clients know about being refused: shared by every request any of them sends.
 pub(super) struct RatePause {
     pub(super) state: std::sync::Mutex<PauseState>,
     floor: Duration,
@@ -220,8 +238,12 @@ impl RatePause {
     }
 
     /// A 429 came back. Starts the pause, unless one is already running: the refusals of one burst are one event
-    /// and do not double the wait again.
+    /// and do not double the wait again. A wait above [`POLICY_REFUSAL_SECS`] starts none: it is a policy refusal,
+    /// which the caller returns instead of waiting out.
     pub(super) fn refused(&self, retry_after: Option<u64>) {
+        if retry_after.is_some_and(|secs| secs > POLICY_REFUSAL_SECS) {
+            return;
+        }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = tokio::time::Instant::now();
         if state.until.is_some_and(|at| at > now) {
@@ -237,6 +259,63 @@ impl RatePause {
     pub(super) fn answered(&self) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).streak = 0;
     }
+}
+
+// ── The registry: one pause per (API base, account) in the process ─────────────
+
+/// How long a pause nobody holds is kept after it ran out, so that a run of one-call clients keeps its streak. In
+/// tests an unheld pause goes at once: a later test may be handed the same loopback port.
+const UNHELD_PAUSE_KEEP: Duration = if cfg!(any(test, feature = "test-support")) {
+    Duration::ZERO
+} else {
+    Duration::from_secs(300)
+};
+
+/// The API base and a SHA-256 of the session token. The token is what every client of one signed-in account has in
+/// common; the digest keeps the token itself out of a map that outlives the clients.
+type PauseKey = (String, [u8; 32]);
+
+type PauseRegistry = std::sync::Mutex<std::collections::HashMap<PauseKey, std::sync::Arc<RatePause>>>;
+
+fn pause_registry() -> &'static PauseRegistry {
+    static REGISTRY: std::sync::OnceLock<PauseRegistry> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(Default::default)
+}
+
+fn pause_key(base_url: &str, token: &str) -> PauseKey {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"beebeeb-engine/rate-pause/v1\0");
+    hasher.update(token.as_bytes());
+    (base_url.trim_end_matches('/').to_string(), hasher.finalize().into())
+}
+
+/// The pause of the account `token` signs in to at `base_url`: the same one for every client built with them.
+pub(super) fn shared_rate_pause(base_url: &str, token: &str) -> std::sync::Arc<RatePause> {
+    let mut registry = pause_registry().lock().unwrap_or_else(|e| e.into_inner());
+    // Entries of sessions that ended (no client left, pause long over) go here, so the map cannot grow.
+    let now = tokio::time::Instant::now();
+    registry.retain(|_, pause| {
+        std::sync::Arc::strong_count(pause) > 1 || {
+            let state = pause.state.lock().unwrap_or_else(|e| e.into_inner());
+            state
+                .until
+                .is_some_and(|at| at > now || (state.streak > 0 && at + UNHELD_PAUSE_KEEP > now))
+        }
+    });
+    registry
+        .entry(pause_key(base_url, token))
+        .or_insert_with(|| std::sync::Arc::new(RatePause::new()))
+        .clone()
+}
+
+/// Sign-out: the account's pause and streak are dropped. A client still alive keeps the one it holds; the next
+/// client built for this base and token starts clean.
+pub(super) fn forget_rate_pause(base_url: &str, token: &str) {
+    pause_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&pause_key(base_url, token));
 }
 
 // ── Transport / 5xx retry (bounded) ────────────────────────────────────────────

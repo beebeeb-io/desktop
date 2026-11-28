@@ -194,6 +194,133 @@ fn rate_limit_retries_after_429_only_for_safe_requests() {
         .header("Idempotency-Key", "k"))));
 }
 
+// ── one pause per account (the registry) ───────────────────────────────────
+
+#[test]
+fn rate_limit_two_clients_for_one_account_share_one_pause_and_another_account_does_not() {
+    let (base, arrivals) = refuse_once_server();
+    let first = ApiClient::new(base.clone(), "session-a".into(), [1; 32]);
+    // A client built for one call, as about 30 call sites do; a trailing slash is the same base.
+    let second = ApiClient::new(format!("{base}/"), "session-a".into(), [1; 32]);
+    let other_account = ApiClient::new(base.clone(), "session-b".into(), [2; 32]);
+    let other_base = ApiClient::new("http://127.0.0.1:9".into(), "session-a".into(), [1; 32]);
+    assert!(std::sync::Arc::ptr_eq(&first.rate_pause, &second.rate_pause));
+    assert!(std::sync::Arc::ptr_eq(
+        &first.rate_pause,
+        &first.for_backup_pass().rate_pause
+    ));
+    assert!(!std::sync::Arc::ptr_eq(&first.rate_pause, &other_account.rate_pause));
+    assert!(!std::sync::Arc::ptr_eq(&first.rate_pause, &other_base.rate_pause));
+
+    // The first client is refused (a POST: it is not sent again, so nothing here sleeps).
+    let url = format!("{base}/x");
+    let err = run_async(first.send_with_retry(|| first.client.post(&url))).unwrap_err();
+    assert!(err.to_string().starts_with("HTTP 429"), "{err}");
+    assert_eq!(arrivals.lock().unwrap().len(), 1);
+    let paused = |client: &ApiClient| {
+        let state = client.rate_pause.state.lock().unwrap();
+        (
+            state.until.is_some_and(|at| at > tokio::time::Instant::now()),
+            state.streak,
+        )
+    };
+    assert_eq!(
+        paused(&second),
+        (true, 1),
+        "the account's other client waits and keeps the streak"
+    );
+    assert_eq!(paused(&other_account), (false, 0), "another account is not held back");
+
+    // A client built after the first is gone still finds the pause.
+    drop(first);
+    drop(second);
+    let later = ApiClient::new(base.clone(), "session-a".into(), [1; 32]);
+    assert_eq!(paused(&later), (true, 1));
+
+    // Sign-out clears the account's entry: the next client starts clean.
+    later.forget_rate_pause();
+    let after_sign_out = ApiClient::new(base, "session-a".into(), [1; 32]);
+    assert!(!std::sync::Arc::ptr_eq(&later.rate_pause, &after_sign_out.rate_pause));
+    assert_eq!(paused(&after_sign_out), (false, 0));
+}
+
+// ── policy refusals (a ban, or a wait above 60 s) ──────────────────────────
+
+/// A raw 429 with `retry_after_header` (when given) and `body`.
+fn too_many(retry_after_header: Option<u64>, body: &str) -> &'static str {
+    let header = retry_after_header.map_or(String::new(), |secs| format!("retry-after: {secs}\r\n"));
+    let raw = format!(
+        "HTTP/1.1 429 Too Many Requests\r\n{header}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    Box::leak(raw.into_boxed_str())
+}
+
+#[test]
+fn rate_limit_a_429_with_retry_after_400_returns_at_once() {
+    for (raw, wait) in [
+        (
+            too_many(None, r#"{"error":"rate_limited","retry_after":400}"#),
+            Some(400),
+        ),
+        (too_many(Some(400), "{}"), Some(400)),
+        (
+            too_many(Some(401), r#"{"error":"rate_limited","retry_after":30}"#),
+            Some(401),
+        ),
+        (too_many(Some(5), r#"{"error":"banned"}"#), Some(5)),
+        (too_many(None, r#"{"error":"banned"}"#), None),
+    ] {
+        // A GET would be sent again after an ordinary 429; the second answer is there to be counted.
+        let (base, hits) = scripted_server(vec![Some(raw), Some(OK_JSON)]);
+        let client = link_client(base);
+        let started = std::time::Instant::now();
+        let err = run_async(client.get_typed::<serde_json::Value>("/x")).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{raw}: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(&err, DesktopApiError::HttpStatus { status, .. } if status.as_u16() == 429),
+            "{err}"
+        );
+        assert_eq!(ApiClient::rate_limited_wait(&err), wait, "{err}");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "never sent again: {raw}"
+        );
+        // Nobody sleeps through it: no pause runs, and the streak did not move.
+        let state = client.rate_pause.state.lock().unwrap();
+        assert!(state.until.is_none(), "{raw}");
+        assert_eq!(state.streak, 0, "{raw}");
+        // And it is a wait, not a signed-out session, even when the wait reads 401.
+        assert_eq!(
+            crate::operation_failure::classify_operation_error(&err.to_string()),
+            crate::operation_failure::OperationFailureClass::Retryable,
+            "{err}"
+        );
+        assert_eq!(
+            crate::operation_failure::classify_api_error(&err),
+            crate::operation_failure::OperationFailureClass::Retryable
+        );
+    }
+}
+
+#[test]
+fn rate_limit_a_wait_of_60_is_still_a_pause_and_61_is_policy() {
+    assert!(!is_policy_refusal(Some(60), "{}"));
+    assert!(is_policy_refusal(Some(61), "{}"));
+    assert!(!is_policy_refusal(None, r#"{"error":"rate_limited"}"#));
+    assert!(is_policy_refusal(None, r#"{"error":"banned"}"#));
+    // The pause itself refuses to start for a policy wait (digests.rs hands it the header as is).
+    let pause = RatePause::with_limits(Duration::from_secs(2), Duration::from_secs(60));
+    run_async(async { pause.refused(Some(400)) });
+    assert!(pause.state.lock().unwrap().until.is_none());
+    assert_eq!(pause.state.lock().unwrap().streak, 0);
+}
+
 // ── transport / 5xx retries on a fake server ───────────────────────────────
 
 /// Serve each raw response in turn, one per connection (`None` = hang up), then stop. Returns the base URL
