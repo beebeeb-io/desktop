@@ -19,26 +19,27 @@ impl ApiClient {
         encrypted: &[u8],
         blurhash: Option<&str>,
     ) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .put(self.thumbnail_upload_url(FileId::new(file_id), variant, blurhash))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Content-Type", "application/octet-stream")
-            .body(encrypted.to_vec())
-            .send()
-            .await?;
-        Self::check_status(resp).await?;
+        let url = self.thumbnail_upload_url(FileId::new(file_id), variant, blurhash);
+        self.send_with_retry(|| {
+            self.client
+                .put(&url)
+                .header("Content-Type", "application/octet-stream")
+                .body(encrypted.to_vec())
+        })
+        .await?;
         Ok(())
     }
 
     pub async fn init_upload(&self, body: &DesktopUploadInitRequest) -> anyhow::Result<DesktopUploadInitResponse> {
+        // No idempotency key: sent once, after any running pause; a 429 is the error.
+        let url = self.upload_init_url();
         let resp = self
-            .client
-            .post(self.upload_init_url())
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
-            .json(body)
-            .send()
+            .send_paced(&self.client, || {
+                self.client
+                    .post(&url)
+                    .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
+                    .json(body)
+            })
             .await?;
         if resp.status() == reqwest::StatusCode::CONFLICT {
             // `error_for_status` would drop the message the class is read from (spec §8.4).
@@ -59,14 +60,15 @@ impl ApiClient {
         chunk_idx: u32,
         data: &[u8],
     ) -> anyhow::Result<UploadChunkResponse> {
+        let url = self.upload_chunk_url(UploadSessionId::new(upload_session_id), chunk_idx);
         let resp = self
-            .client
-            .put(self.upload_chunk_url(UploadSessionId::new(upload_session_id), chunk_idx))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
-            .header("Content-Type", "application/octet-stream")
-            .body(data.to_vec())
-            .send()
+            .send_paced(&self.client, || {
+                self.client
+                    .put(&url)
+                    .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(data.to_vec())
+            })
             .await?;
         Ok(upload_response(resp).await?.json().await?)
     }
@@ -84,13 +86,16 @@ impl ApiClient {
             Some(name) => serde_json::json!({ "name_encrypted": name, "version_metadata_encrypted": name }),
             None => serde_json::json!({}),
         };
+        // The commit carries no idempotency key, so it is sent exactly once: it waits for a running pause, and a 429
+        // is the error (the caller decides what a refused commit means; a replay here could commit twice).
+        let url = self.upload_complete_url(UploadSessionId::new(upload_session_id));
         let resp = self
-            .client
-            .post(self.upload_complete_url(UploadSessionId::new(upload_session_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
-            .json(&body)
-            .send()
+            .send_paced(&self.client, || {
+                self.client
+                    .post(&url)
+                    .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
+                    .json(&body)
+            })
             .await?;
         Ok(upload_response(resp).await?.json().await?)
     }
@@ -105,12 +110,13 @@ impl ApiClient {
             self.upload_complete_url(UploadSessionId::new(upload_session_id))
                 .trim_end_matches("/complete")
         );
+        // A 429 is an error here (the session's state is unknown), never `false`.
         let resp = self
-            .client
-            .post(url)
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
-            .send()
+            .send_paced(&self.client, || {
+                self.client
+                    .post(&url)
+                    .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
+            })
             .await?;
         if resp.status().is_client_error() {
             return Ok(false);
@@ -127,12 +133,8 @@ impl ApiClient {
     /// session. A `404` means the row (or its session) is already gone, which
     /// counts as done.
     pub async fn abandon_upload(&self, file_id: &str) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .post(self.upload_abandon_url(FileId::new(file_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?;
+        let url = self.upload_abandon_url(FileId::new(file_id));
+        let resp = self.send_paced(&self.client, || self.client.post(&url)).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(());
         }
