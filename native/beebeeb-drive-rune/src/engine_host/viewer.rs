@@ -333,7 +333,8 @@ impl<C: CredentialStores> LiveViewerEngine<C> {
 }
 
 impl<C: CredentialStores + 'static> LiveViewerEngine<C> {
-    /// The path the system opens the file from, or why not.
+    /// The path the system opens the file from, or why not. A Mac goes through [`Self::mac_open_with_checks`].
+    #[cfg(not(target_os = "macos"))]
     fn elsewhere_path(&self, file_id: &str) -> Result<std::path::PathBuf, Elsewhere> {
         Self::elsewhere_path_of(&self.engine, file_id)
     }
