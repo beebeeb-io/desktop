@@ -34,7 +34,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine, LocalStateRefused};
-use crate::account::SessionGeneration;
+use crate::account::{AccountRuntime, SessionGeneration};
 use crate::api_client::ApiClient;
 use crate::drive_v2::model::{is_photo_or_video, leaf_name, live_rows_pinned, mime_for_name};
 use crate::drive_v2::photo_meta::{self, PhotoMeta};
@@ -49,6 +49,68 @@ mod tests;
 
 /// How often a thumbnail under way asks whether its session ended.
 const ASK_EVERY: Duration = Duration::from_millis(50);
+
+/// dm-96 (RC19/20): ONE API client per session for the Photos grid's thumbnails and the viewer's opens, so a picture
+/// does not pay a TLS handshake of its own, the direct-transfer discovery is asked once, and a 429 pauses every one
+/// of these requests together (the pause lives in the client). Found by the account, the session's generation and
+/// the API base. The process holds the client only weakly; the strong hold is a keeper task on the engine's runtime
+/// that lets it go as soon as the session moves on (every sign-in, unlock, lock and sign-out moves it), the account
+/// is gone or the runtime shuts down. So the token and the vault key inside it (wiped when it drops) do not outlive
+/// the session by more than [`KEEPER_ASKS_EVERY`], plus a request still holding it.
+struct SessionClient {
+    acct: std::sync::Weak<AccountRuntime>,
+    session: SessionGeneration,
+    api_base: String,
+    api: std::sync::Weak<ApiClient>,
+}
+
+static SESSION_CLIENTS: std::sync::Mutex<Vec<SessionClient>> = std::sync::Mutex::new(Vec::new());
+
+/// How often the keeper of a session's client asks whether its session moved on.
+const KEEPER_ASKS_EVERY: Duration = Duration::from_millis(100);
+
+/// The client of `session` of `acct` against `api_base`: the one already held, or one `build` makes (then kept for
+/// the session, see [`SessionClient`]). The caller asked `while_session_is` for `session` first, and asks again at its
+/// hand-over, as without the cache: a client is never found for another session, as the generation is in the key.
+pub(crate) fn session_client(
+    acct: &Arc<AccountRuntime>,
+    session: SessionGeneration,
+    api_base: &str,
+    runtime: &tokio::runtime::Handle,
+    build: impl FnOnce() -> ApiClient,
+) -> Arc<ApiClient> {
+    let mut clients = SESSION_CLIENTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    clients.retain(|held| held.api.strong_count() > 0 && held.acct.strong_count() > 0);
+    let found = clients
+        .iter()
+        .filter(|held| std::ptr::eq(held.acct.as_ptr(), Arc::as_ptr(acct)))
+        .find(|held| held.session == session && held.api_base == api_base)
+        .and_then(|held| held.api.upgrade());
+    if let Some(api) = found {
+        return api;
+    }
+    // Built under the lock: the six workers of a grid that opens at once share one, not build six.
+    let api = Arc::new(build());
+    clients.retain(|held| !std::ptr::eq(held.acct.as_ptr(), Arc::as_ptr(acct)));
+    clients.push(SessionClient {
+        acct: Arc::downgrade(acct),
+        session,
+        api_base: api_base.to_owned(),
+        api: Arc::downgrade(&api),
+    });
+    drop(clients);
+    let (kept, watched) = (Arc::clone(&api), Arc::downgrade(acct));
+    runtime.spawn(async move {
+        let _kept = kept;
+        loop {
+            tokio::time::sleep(KEEPER_ASKS_EVERY).await;
+            if !watched.upgrade().is_some_and(|acct| acct.session_unchanged_since(session)) {
+                break;
+            }
+        }
+    });
+    api
+}
 
 /// The largest encrypted-then-decrypted picture that is decoded at all.
 pub const MAX_ENCODED: usize = 8 * 1024 * 1024;
@@ -270,6 +332,19 @@ fn cut_pixels(encoded: &[u8], cut: ThumbCut) -> Option<(u32, u32, Zeroizing<Vec<
 }
 
 impl<C: CredentialStores> Engine<C> {
+    /// The one client of `session` ([`session_client`]), for a thumbnail or a viewer's open. `token` and `key` are
+    /// the copies the caller took from that session; the token moves into a client that is built, else it is wiped.
+    pub(crate) fn session_api(
+        &self,
+        session: SessionGeneration,
+        mut token: Zeroizing<String>,
+        key: &[u8; 32],
+    ) -> Arc<ApiClient> {
+        session_client(&self.acct, session, &self.config.api_base, self.runtime.handle(), || {
+            ApiClient::new(self.config.api_base.clone(), std::mem::take(&mut *token), *key)
+        })
+    }
+
     /// Every photo and video of the signed-in account's local state, newest first (then by path), in one pass.
     /// Read through the account-bound handle: a state that is not the session's answers nothing. No network.
     ///
@@ -310,7 +385,7 @@ impl<C: CredentialStores> Engine<C> {
         let (token, key) = self
             .acct
             .while_session_is(&self.writes, session, |current| {
-                (current.token.clone(), Zeroizing::new(current.master_key))
+                (Zeroizing::new(current.token.clone()), Zeroizing::new(current.master_key))
             })
             .ok_or(ThumbRefused::NotSignedIn)?;
         let fetched = state
@@ -319,7 +394,7 @@ impl<C: CredentialStores> Engine<C> {
                 if matches!(db.get_file(file_id), Ok(Some(row)) if row.status == FileStatus::Uploading) {
                     return Ok(Err(anyhow::Error::new(ThumbnailNotYet)));
                 }
-                let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
+                let api = self.session_api(session, token, &key);
                 let bridge = EngineBridge::new(self.identity, db, api);
                 self.runtime.block_on(async {
                     let mut fetch = std::pin::pin!(bridge.finder_thumbnail(file_id, cut.variant()));
@@ -636,4 +711,95 @@ fn library(db: &StateDb, hidden: &[String]) -> Option<Vec<LibraryPhoto>> {
         });
     }
     Some(photos)
+}
+
+/// dm-96: the Photos grid and the viewer share one client per session (its TLS link, its discovery and its 429 pause,
+/// which lives in the client), and nothing of it outlives the session.
+#[cfg(test)]
+mod session_client_tests {
+    use super::*;
+    use crate::account::{AccountId, SessionTransition};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const BASE: &str = "https://api.beebeeb.io";
+
+    fn client_of(
+        acct: &Arc<AccountRuntime>,
+        runtime: &tokio::runtime::Runtime,
+        builds: &AtomicUsize,
+    ) -> Arc<ApiClient> {
+        let session = acct.session_generation();
+        session_client(acct, session, BASE, runtime.handle(), || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            ApiClient::new(BASE.into(), "tok".into(), [7; 32])
+        })
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .expect("runtime")
+    }
+
+    #[test]
+    fn two_thumbnail_fetches_of_one_session_share_one_client_and_its_429_pause() {
+        let runtime = runtime();
+        let acct = Arc::new(AccountRuntime::new(AccountId::new_v4()));
+        let builds = AtomicUsize::new(0);
+        let first = client_of(&acct, &runtime, &builds);
+        drop(first.clone());
+        let second = client_of(&acct, &runtime, &builds);
+        // The same client, so the same `rate_pause`: a 429 one fetch meets pauses the other.
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        // Still the one after every caller let go: the session keeps it.
+        drop((first, second));
+        let third = client_of(&acct, &runtime, &builds);
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        drop(third);
+    }
+
+    #[test]
+    fn a_session_that_moves_on_drops_its_client_and_the_next_gets_a_new_one() {
+        let runtime = runtime();
+        let acct = Arc::new(AccountRuntime::new(AccountId::new_v4()));
+        let builds = AtomicUsize::new(0);
+        let old = Arc::downgrade(&client_of(&acct, &runtime, &builds));
+        acct.advance_session_generation_holding_session_write_lock(SessionTransition::SignOut);
+        // The keeper lets the signed-out session's client (its token and key) go.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while old.strong_count() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(old.strong_count(), 0, "the old session's client outlived it");
+        let new = client_of(&acct, &runtime, &builds);
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        drop(new);
+    }
+
+    #[test]
+    fn another_account_never_gets_the_client() {
+        let runtime = runtime();
+        let (one, other) = (
+            Arc::new(AccountRuntime::new(AccountId::new_v4())),
+            Arc::new(AccountRuntime::new(AccountId::new_v4())),
+        );
+        let builds = AtomicUsize::new(0);
+        let a = client_of(&one, &runtime, &builds);
+        let b = client_of(&other, &runtime, &builds);
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn the_client_goes_with_the_engine_runtime() {
+        let runtime = runtime();
+        let acct = Arc::new(AccountRuntime::new(AccountId::new_v4()));
+        let builds = AtomicUsize::new(0);
+        let held = Arc::downgrade(&client_of(&acct, &runtime, &builds));
+        drop(runtime);
+        assert_eq!(held.strong_count(), 0);
+    }
 }

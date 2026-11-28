@@ -28,7 +28,6 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -37,7 +36,7 @@ use zeroize::Zeroizing;
 use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
-use crate::api_client::{ApiClient, ChunkUnreachable};
+use crate::api_client::ChunkUnreachable;
 use crate::direct_download::DirectError;
 use crate::engine_bridge::{EngineBridge, EngineError, InMemoryOpen, error_http_status};
 use crate::state_db::FileStatus;
@@ -635,7 +634,8 @@ impl<C: CredentialStores> Engine<C> {
         // The token and the key of the session that is in memory now, copied the way every other hand-over copies
         // them (`AccountRuntime::while_session_is`): under the engine's session-write lock, so never while a lock,
         // a sign-out or a sign-in is half done, and only while the generation is still `session`. Both are copies
-        // of their own, wiped when this call ends (inside the call's client; the key also in a `Zeroizing`). Then
+        // of their own in `Zeroizing`s, wiped when this call ends; the session's one client (`session_api`, dm-96)
+        // holds its own, wiped when the session moves on. Then
         // the account-bound handle (it answers nothing for a session the server ended, and nothing once the
         // session moved on).
         if self.acct.session.is_poisoned() {
@@ -644,13 +644,14 @@ impl<C: CredentialStores> Engine<C> {
         let (token, key) = self
             .acct
             .while_session_is(&self.writes, session, |current| {
-                (current.token.clone(), Zeroizing::new(current.master_key))
+                (Zeroizing::new(current.token.clone()), Zeroizing::new(current.master_key))
             })
             .ok_or(OpenFileError::NotSignedIn)?;
         let state = self.local_state_for_changes().map_err(refused)?;
         let fetched = state
             .with_shared(|db| {
-                let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
+                // The session's one client, shared with the Photos grid (dm-96): its TLS link, discovery and 429 pause.
+                let api = self.session_api(session, token, &key);
                 let bridge = EngineBridge::new(self.identity, db, api);
                 self.runtime.block_on(async {
                     let mut fetch = std::pin::pin!(bridge.open_in_memory(file_id, max_bytes, Some(progress)));

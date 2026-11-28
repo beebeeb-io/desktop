@@ -63,7 +63,7 @@ pub const MAX_BYTES: usize = 160 * 1024 * 1024;
 /// At most this many wishes wait; one more is not taken (a tile that is still on screen asks again).
 pub const MAX_WISHES: usize = 400;
 /// How many fetches run at once.
-const WORKERS: usize = 3;
+const WORKERS: usize = 6;
 /// A file that had no picture is asked again after this.
 pub const ASK_AGAIN_AFTER: Duration = Duration::from_secs(60);
 /// A fetch that failed for another reason (offline, a busy database) is tried again after this.
