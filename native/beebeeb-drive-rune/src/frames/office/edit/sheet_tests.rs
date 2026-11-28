@@ -704,6 +704,7 @@ fn office_sheets_the_viewer_without_the_editor_has_no_surface() {
 }
 
 #[test]
+#[ignore = "timing: wall-clock frame budget; runs in the non-blocking Timing tests job (scripts/ci-timing-tests.txt)"]
 fn office_sheets_editing_keeps_the_frame_budget_at_the_cell_cap() {
     use std::time::{Duration, Instant};
     let cells = 65_536u32;
