@@ -707,9 +707,10 @@ fn close_kills_and_wipes() {
 fn close_while_starting_kills_the_late_helper() {
     let registry = Registry::new();
     let sizes = [LETTER];
-    let fake = Fake::new(move |link| serve(link, &sizes)).slow_start(Duration::from_millis(200));
+    let fake = Fake::new(move |link| serve(link, &sizes)).slow_start(Duration::from_secs(1));
     let (mut host, log, _) = open_fake(fake, &registry, DocKind::Docx);
-    thread::sleep(Duration::from_millis(10));
+    // The worker is inside the slow start (a close before that starts no helper at all: nothing to kill).
+    assert!(wait_for(|| log.entered() == 1), "the start began");
     host.close(CloseWhy::Closed);
     assert_eq!(log.starts(), 0, "the start had not returned yet");
     assert!(
@@ -734,11 +735,13 @@ fn kill_all_ends_every_helper_of_its_registry() {
     let silent = |link: &mut FakeLink| while link.next().is_some() {};
     let (mut open, open_log, _) = open_fake(Fake::new(move |link| serve(link, &sizes)), &registry, DocKind::Docx);
     let (mut opening, opening_log, _) = open_fake(Fake::new(silent), &registry, DocKind::Docx);
-    let late = Fake::new(silent).slow_start(Duration::from_millis(300));
+    let late = Fake::new(silent).slow_start(Duration::from_secs(2));
     let (mut starting, starting_log, _) = open_fake(late, &registry, DocKind::Docx);
     let mut events = Vec::new();
     assert!(until_open(&mut open, &mut events));
     assert!(wait_for(|| opening_log.starts() == 1), "the second helper started");
+    // The worker is inside the slow start: a close before that starts no helper, and there is nothing to kill.
+    assert!(wait_for(|| starting_log.entered() == 1), "the third began to start");
     assert_eq!(starting_log.starts(), 0, "the third is still starting");
 
     kill_all_in(&registry, CloseWhy::Locked);
