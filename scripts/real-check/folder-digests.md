@@ -1,10 +1,10 @@
-# folder-digests real check on VM 401
+# folder-digests real check on the Windows test VM
 
 The epic's real check (`board/epics/folder-digests.md`, Setup > Real check) as steps. Run every command under
-`scripts/coord/with-lock.sh vm401 -- <command>` (single seat; one lead at a time). Keyboard and mouse go over the
+the build-machine lock (single seat; one lead at a time). Keyboard and mouse go over the
 console; the same lock covers them. Write each count in the evidence file as "n/N" next to the step number.
 Nothing here is a secret: the test account's password and the database URL are made on the VM and stay there.
-Never point any step at production: the stack is `http://127.0.0.1:3001` on VM 401, the only host used.
+Never point any step at production: the stack is `http://127.0.0.1:3001` on the Windows test VM, the only host used.
 
 ## Where the numbers are
 - Backup pass line (task 12), once per pass per category, message `backup: digest pass`; fields `category`,
@@ -22,7 +22,7 @@ Never point any step at production: the stack is `http://127.0.0.1:3001` on VM 4
   `'sync drift check'`). Before each step note how many lines match, and read only the lines after that number.
 
 ## Steps
-1. **Stack.** On VM 401 start the local stack with server `folder-digests/integ` (a release build of `repos/server`
+1. **Stack.** On the Windows test VM start the local stack with server `folder-digests/integ` (a release build of `repos/server`
    at that branch tip, `BLOB_STORE=local` on a VM folder, an empty database; the dev compose file starts Postgres on
    :5434). Check `curl.exe -s http://127.0.0.1:3001/health` answers. Write down the server SHA. The fold and backfill
    jobs must run: digests are ready when `GET /api/v1/folder-digests` stops answering 503 `digests_not_ready`.
@@ -52,7 +52,7 @@ Never point any step at production: the stack is `http://127.0.0.1:3001` on VM 4
    `disagreeing=0`, `action` is not a resnapshot, `requests` at most 2. Pass = 0 of 3 started a resnapshot.
 10. **Drift by direct SQL (1/1).** Without a sync op. First upload a small file `drift-probe.txt` to the account's
     root in the web app and wait for 1 `sync drift check` line after it (the file is in the mirror and its folder
-    agrees: `disagreeing=0`). Then, against the local stack database ONLY (VM 401, port 5434; the database URL comes
+    agrees: `disagreeing=0`). Then, against the local stack database ONLY (the Windows test VM, port 5434; the database URL comes
     from the stack's own env on the VM, set as `$env:BB_PG_URL` for the shell, never written down), with `psql`:
     ```sql
     UPDATE files
