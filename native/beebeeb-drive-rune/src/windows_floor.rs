@@ -48,7 +48,11 @@ mod tests {
     fn the_sentence_is_the_briefs() {
         assert_eq!(
             NEEDS_WINDOWS_UPDATE,
-            "This file can't be shown until Windows is updated."
+            if cfg!(target_os = "macos") {
+                "This file can't be shown until macOS is updated."
+            } else {
+                "This file can't be shown until Windows is updated."
+            }
         );
     }
 }

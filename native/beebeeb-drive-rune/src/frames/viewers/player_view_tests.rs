@@ -122,6 +122,13 @@ fn video_view_letterboxes_to_fit() {
     assert_eq!(ask_size(0.0, 0.0), (1, 1));
 }
 
+/// The system's answer to an HEVC file it cannot decode: Windows names the Store extension, a Mac says it has none.
+const HEVC_HINT: &str = if cfg!(target_os = "macos") {
+    "this Mac doesn't have the decoder"
+} else {
+    "HEVC Video Extensions"
+};
+
 /// 5. A refusal names the FORMAT (never the file) and the cause; the table's own tests are in `refusal_text`.
 #[test]
 fn refusal_words_name_the_format() {
@@ -129,7 +136,7 @@ fn refusal_words_name_the_format() {
         refusal_words(&Refusal::NoDecoder("ProRes".into())),
         "This file uses ProRes, which Beebeeb doesn't support yet. Open it in another app."
     );
-    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains("HEVC Video Extensions"));
+    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains(HEVC_HINT));
     assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Aac)).contains("AAC"));
     assert!(refusal_words(&Refusal::NoSystemMedia(Codec::Aac)).contains("no media codecs"));
     assert!(refusal_words(&Refusal::CouldNotPlay).contains("damaged"));
@@ -378,8 +385,8 @@ fn hevc_words_do_not_ask_for_an_extension_while_the_switch_is_off() {
         !aac.contains(concat!(beebeeb_engine::device_word_cap!(), " can't")),
         "the cause is Beebeeb's, not the PC's: {aac}"
     );
-    // With the switch on, the PC's own answer: what to install.
-    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains("HEVC Video Extensions"));
+    // With the switch on, the PC's own answer: what to install (a Mac: that it has no decoder).
+    assert!(refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)).contains(HEVC_HINT));
     // The app's own words follow the protocol's constant.
     assert_eq!(
         refusal_words(&Refusal::NoSystemDecoder(Codec::Hevc)),
@@ -437,7 +444,8 @@ fn media_a_pc_without_the_system_decoder_says_so_and_offers_open_in_default_app(
         words.contains("HEVC (H.265)") && words.contains("doesn't have the decoder"),
         "{words}"
     );
-    assert!(words.contains("Microsoft Store"), "{words}");
+    // A Mac has no Microsoft Store to send a person to.
+    assert_eq!(words.contains("Microsoft Store"), !cfg!(target_os = "macos"), "{words}");
     assert!(words.contains("default app"), "{words}");
     assert!(
         !words.contains("yet"),
