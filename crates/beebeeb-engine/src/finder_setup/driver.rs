@@ -15,7 +15,10 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+// Read by the macOS clock and the driver's tests (through `super::*`).
+#[cfg(any(test, target_os = "macos"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::FutureExt as _;
 use tokio::sync::{mpsc, oneshot, watch};
