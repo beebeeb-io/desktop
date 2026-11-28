@@ -354,9 +354,10 @@ jobs:
   engine-crate:
     name: Engine crate test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    # 60, not 30: the Windows job's full test run took 28 minutes on a clean re-run, so a 30-minute limit cancels it
-    # on a slower runner. Raised rather than split so the one required check keeps its name.
-    timeout-minutes: 60
+    # 90, not 30 or 60: the Windows job's full test run took 28 minutes on a clean re-run and 60+ on a loaded runner
+    # (its post-step cache save was cancelled with every test green), so a lower limit cancels it. Raised rather
+    # than split so the one required check keeps its name.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
