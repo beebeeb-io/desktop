@@ -1,7 +1,7 @@
 //! Writer-provenance headers, the shared 429 pause and the bounded retry policy.
 //!
-//! Owns: the `X-Beebeeb-Client*` values every request carries and
-//! `retry_decision`'s backoff arithmetic. Must not: touch the network or the
+//! Owns: the `X-Beebeeb-Client*` values every request carries, the 429 pause
+//! (`RatePause`) and the transport retry arithmetic. Must not: touch the network or the
 //! client's credentials. Tests: `api_client/tests/` (provenance and retry).
 
 use super::*;
@@ -61,30 +61,24 @@ pub fn provenance_headers() -> HeaderMap {
     headers
 }
 
-// ── 429 backoff/retry tuning (account-data GETs) ───────────────────────────────
-//
-// The account-data endpoints (auth/me, billing/*, account/*, clients/*) can 429
-// under load. The client must ride out a transient 429 rather than surfacing a
-// "Couldn't load" to the view, but must stay BOUNDED — it is not a hot loop and
-// must never hang a view waiting on a hammered endpoint.
+// ── 429 retry bounds ───────────────────────────────────────────────────────────
 //
 /// Extra attempts after the first 429 (so up to 1 + this total requests).
 pub(super) const MAX_429_RETRIES: u32 = 3;
 
-/// Hard cap on any SINGLE backoff wait, regardless of what the server asks for.
-/// Protects against an absurd `Retry-After`/`x-ratelimit-reset` value pinning a
-/// view. ~5s keeps the UI responsive while still letting a short window clear.
+// The three constants below and `retry_decision` are the old per-request 429 backoff. Only `previews.rs`
+// (`preview_retry_wait`) still calls it; everything else waits on the shared `RatePause` further down.
+
+/// Hard cap on any SINGLE backoff wait of `retry_decision`, regardless of what the server asks for.
 pub(super) const RETRY_WAIT_CAP_SECS: u64 = 5;
 
 /// Cap on the CUMULATIVE time spent sleeping across all retries for one call.
 pub(super) const RETRY_TOTAL_BUDGET_SECS: u64 = 8;
 
-/// Backoff used when the server gives no usable hint (no Retry-After / reset).
+/// Backoff used when the server gives no usable hint (no `Retry-After`).
 pub(super) const RETRY_DEFAULT_WAIT_SECS: u64 = 1;
 
-/// Current UNIX time in seconds (for interpreting `x-ratelimit-reset`, which is
-/// an absolute epoch). Falls back to 0 on the (impossible) pre-epoch clock so
-/// the reset delta just reads as "0s" rather than panicking.
+/// Current UNIX time in seconds. Falls back to 0 on the (impossible) pre-epoch clock rather than panicking.
 pub(super) fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -136,15 +130,25 @@ pub(super) fn retry_decision(attempt: u32, spent: u64, retry_after: Option<u64>,
 // ── Shared 429 pause (one per client) ──────────────────────────────────────────
 //
 // A 429 means the account is over its window, so every request of this client waits, not only the refused one.
-// The wait is the server's `Retry-After` or a 2 s floor that doubles with each refusal in a row, plus full
-// jitter, capped at 60 s. `x-ratelimit-reset` is not read. Only requests that are safe to send twice (a GET, or
-// a write carrying an idempotency key) are sent again on their own; the rest surface the 429.
+// The wait is defined by `beebeeb_core::retry::rate_limit_wait_ms` (the epic's Client pause rule); this is the
+// engine's own copy of it until its core pin moves to a revision that has the function:
+//
+//   base = max(min(2 s << streak, 60 s), min(Retry-After, MAX_RETRY_AFTER_SECONDS))
+//   wait = base + 0-25 % of base (random)
+//
+// The 60 s cap bounds the doubling floor only: a server wait above 60 s is waited in full. `x-ratelimit-reset` is
+// not read. A 429 that arrives while a pause runs does not start or double a new one, and the streak ends on the
+// first answer that is not a 429. Only requests that are safe to send twice (a GET, or a write carrying an
+// idempotency key) are sent again on their own; the rest surface the 429.
 
-/// The shortest pause after a 429; doubles with each refusal in a row.
+/// The shortest pause after a 429; doubles with each refusal in a row. Core: `RATE_LIMIT_WAIT_FLOOR_MS`.
 pub(super) const RATE_FLOOR: Duration = Duration::from_secs(2);
 
-/// The longest pause after a 429, whatever the server asks for.
+/// Where the doubling floor stops. Not a cap on the server's `Retry-After`. Core: `RATE_LIMIT_WAIT_CAP_MS`.
 pub(super) const RATE_CAP: Duration = Duration::from_secs(60);
+
+/// The most jitter added on top of a pause, in percent of it. Core: `CLIENT_429_WAIT_JITTER_PERCENT`.
+pub(super) const RATE_JITTER_PERCENT: u64 = 25;
 
 /// The header that makes a write safe to send twice.
 pub(super) const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
@@ -158,19 +162,25 @@ pub(super) fn retries_after_429(request: &reqwest::Request) -> bool {
     ) || request.headers().contains_key(IDEMPOTENCY_KEY_HEADER)
 }
 
-/// The pause after the `streak`-th refusal in a row (0 for the first). `jitter` is in `0.0..=1.0`: the wait is
-/// `base * (1 + jitter)`, where `base` is the larger of the doubled floor and `Retry-After`, never above `cap`.
+/// The pause after the `streak`-th refusal in a row (0 for the first): `beebeeb_core::retry::rate_limit_wait_ms`
+/// with the floor and its cap as arguments. `jitter_permille` (0..=1000) picks how much of the 25 % is added.
 pub(super) fn rate_limit_wait(
     streak: u32,
     retry_after: Option<u64>,
     floor: Duration,
     cap: Duration,
-    jitter: f64,
+    jitter_permille: u32,
 ) -> Duration {
-    let doubled = floor.saturating_mul(1u32 << streak.min(16));
-    let hint = Duration::from_secs(retry_after.unwrap_or(0));
-    let base = doubled.max(hint).min(cap);
-    base.mul_f64(1.0 + jitter.clamp(0.0, 1.0)).min(cap)
+    let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+    let (floor_ms, cap_ms) = (millis(floor), millis(cap));
+    let ladder = floor_ms.saturating_mul(1u64 << streak.min(32)).min(cap_ms);
+    let hint = retry_after
+        .unwrap_or(0)
+        .min(beebeeb_types::limits::MAX_RETRY_AFTER_SECONDS)
+        .saturating_mul(1000);
+    let base = ladder.max(hint);
+    let jitter = base.saturating_mul(RATE_JITTER_PERCENT * u64::from(jitter_permille.min(1000))) / 100_000;
+    Duration::from_millis(base.saturating_add(jitter))
 }
 
 pub(super) struct PauseState {
@@ -217,7 +227,7 @@ impl RatePause {
         if state.until.is_some_and(|at| at > now) {
             return;
         }
-        let jitter: f64 = rand::Rng::gen_range(&mut rand::thread_rng(), 0.0..=1.0);
+        let jitter: u32 = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=1000);
         let wait = rate_limit_wait(state.streak, retry_after, self.floor, self.cap, jitter);
         state.until = Some(now + wait);
         state.streak = state.streak.saturating_add(1);

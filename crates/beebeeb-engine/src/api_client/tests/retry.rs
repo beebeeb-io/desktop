@@ -1,8 +1,8 @@
-//! `retry_decision` tests: bounded 429 backoff and server hints.
+//! Retry tests: the shared 429 pause, `retry_decision` (previews only) and the transport retries.
 
 use super::*;
 
-// ── 429 backoff/retry decision (pure helper) ───────────────────────────────
+// ── old per-request 429 decision (pure helper; previews.rs is its last caller) ──
 
 #[test]
 fn retry_decision_first_429_uses_default_when_no_hint() {
@@ -16,19 +16,6 @@ fn retry_decision_honours_retry_after_capped() {
     assert_eq!(retry_decision(0, 0, Some(2), None), Some(2));
     // … but an absurd one is clamped to the per-attempt cap.
     assert_eq!(retry_decision(0, 0, Some(120), None), Some(RETRY_WAIT_CAP_SECS));
-}
-
-#[test]
-fn retry_decision_uses_reset_when_retry_after_absent() {
-    // `x-ratelimit-reset` delta (seconds-until-reset) drives the wait.
-    assert_eq!(retry_decision(0, 0, None, Some(3)), Some(3));
-}
-
-#[test]
-fn retry_decision_takes_larger_of_two_hints() {
-    // When BOTH hints are present we wait the longer of the two.
-    assert_eq!(retry_decision(0, 0, Some(2), Some(4)), Some(4));
-    assert_eq!(retry_decision(0, 0, Some(4), Some(2)), Some(4));
 }
 
 #[test]
@@ -55,10 +42,10 @@ fn retry_decision_trims_wait_to_remaining_budget() {
 fn header_secs_parses_numeric_and_rejects_dates() {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("retry-after", "  7 ".parse().unwrap());
-    headers.insert("x-ratelimit-reset", "1718000000".parse().unwrap());
+    headers.insert("x-seconds", "1718000000".parse().unwrap());
     headers.insert("x-http-date", "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap());
     assert_eq!(header_secs(&headers, "retry-after"), Some(7));
-    assert_eq!(header_secs(&headers, "x-ratelimit-reset"), Some(1718000000));
+    assert_eq!(header_secs(&headers, "x-seconds"), Some(1718000000));
     // Non-numeric (HTTP-date) header → None (default wait covers it).
     assert_eq!(header_secs(&headers, "x-http-date"), None);
     // Absent header → None.
@@ -146,24 +133,39 @@ fn rate_limit_write_with_an_idempotency_key_is_resent_after_the_pause() {
 }
 
 #[test]
-fn rate_limit_wait_doubles_from_the_floor_honours_retry_after_and_is_capped() {
+fn rate_limit_wait_follows_the_core_rule() {
     let (floor, cap) = (RATE_FLOOR, RATE_CAP);
-    let no_jitter = |streak, hint| rate_limit_wait(streak, hint, floor, cap, 0.0);
-    assert_eq!(no_jitter(0, None), Duration::from_secs(2));
-    assert_eq!(no_jitter(1, None), Duration::from_secs(4));
-    assert_eq!(no_jitter(3, None), Duration::from_secs(16));
-    assert_eq!(no_jitter(30, None), cap, "doubling stops at the cap");
+    let no_jitter = |streak, hint| rate_limit_wait(streak, hint, floor, cap, 0);
+    // The ladder of `beebeeb_core::retry::rate_limit_wait_ms`: 2, 4, 8, 16, 32, 60 s.
+    for (streak, secs) in [
+        (0, 2),
+        (1, 4),
+        (2, 8),
+        (3, 16),
+        (4, 32),
+        (5, 60),
+        (30, 60),
+        (u32::MAX, 60),
+    ] {
+        assert_eq!(no_jitter(streak, None), Duration::from_secs(secs), "streak {streak}");
+    }
     assert_eq!(
         no_jitter(0, Some(10)),
         Duration::from_secs(10),
         "Retry-After above the floor"
     );
     assert_eq!(no_jitter(0, Some(1)), Duration::from_secs(2), "the floor still holds");
-    assert_eq!(no_jitter(0, Some(3600)), cap);
-    // Full jitter spreads a wait over base..2*base and never shortens it or passes the cap.
-    assert_eq!(rate_limit_wait(0, None, floor, cap, 1.0), Duration::from_secs(4));
-    assert_eq!(rate_limit_wait(5, None, floor, cap, 1.0), cap);
-    assert_eq!(rate_limit_wait(0, Some(30), floor, cap, 0.5), Duration::from_secs(45));
+    // The 60 s cap bounds the ladder, not the server's wait; that one stops at MAX_RETRY_AFTER_SECONDS.
+    assert_eq!(no_jitter(0, Some(60)), Duration::from_secs(60));
+    assert_eq!(no_jitter(0, Some(120)), Duration::from_secs(120));
+    assert_eq!(no_jitter(0, Some(3600)), Duration::from_secs(300));
+    // The jitter adds 0-25 % on top, after the cap, and never shortens a wait.
+    assert_eq!(rate_limit_wait(0, None, floor, cap, 1000), Duration::from_millis(2_500));
+    assert_eq!(rate_limit_wait(0, None, floor, cap, 500), Duration::from_millis(2_250));
+    assert_eq!(rate_limit_wait(0, None, floor, cap, 9999), Duration::from_millis(2_500));
+    assert_eq!(rate_limit_wait(5, None, floor, cap, 1000), Duration::from_secs(75));
+    assert_eq!(rate_limit_wait(0, Some(60), floor, cap, 1000), Duration::from_secs(75));
+    assert_eq!(rate_limit_wait(0, Some(30), floor, cap, 400), Duration::from_secs(33));
 }
 
 #[test]

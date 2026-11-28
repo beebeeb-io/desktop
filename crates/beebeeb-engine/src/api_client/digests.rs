@@ -3,7 +3,7 @@
 //! Owns: reading the endpoint's answers into [`DigestsAnswer`], the one place that tells "this server has no
 //! digests" (any other 404, a 405) from "this folder is gone" (404 `folder_not_found`) and "not yet" (503
 //! `digests_not_ready` with `Retry-After`). Must not: walk a tree (see `crate::folder_digest`) or log an id.
-//! Retries: the client's usual policy (`headers`: bounded 429 backoff, bounded transport/502/504 retries); a 503
+//! Retries: the client's usual policy (`headers`: the shared 429 pause, bounded transport/502/504 retries); a 503
 //! `digests_not_ready` is an answer, not a retry, so its `Retry-After` reaches the caller.
 
 use super::*;
@@ -65,11 +65,11 @@ impl ApiClient {
         limit: u32,
     ) -> anyhow::Result<DigestsAnswer> {
         let url = self.folder_digests_url(folder_id, cursor, limit);
-        let mut spent: u64 = 0;
         let mut attempt: u32 = 0;
         let mut transport_attempt: u32 = 0;
         let mut held: Option<reqwest::Response> = None;
         loop {
+            self.rate_pause.wait().await;
             let request = self
                 .client
                 .get(&url)
@@ -97,6 +97,9 @@ impl ApiClient {
             };
             self.link.note_status(resp.status(), now_unix_secs() as i64);
             let status = resp.status().as_u16();
+            if status != 429 {
+                self.rate_pause.answered();
+            }
             match status {
                 200..=299 => return Ok(DigestsAnswer::Page(resp.json::<FolderDigestPage>().await?)),
                 405 => return Ok(DigestsAnswer::Unsupported),
@@ -137,21 +140,13 @@ impl ApiClient {
                     return Err(Self::status_error(resp).await);
                 }
                 429 => {
-                    let retry_after = header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str());
-                    let reset_in = header_secs(resp.headers(), "x-ratelimit-reset")
-                        .map(|epoch| epoch.saturating_sub(now_unix_secs()));
-                    match retry_decision(attempt, spent, retry_after, reset_in) {
-                        Some(wait) => {
-                            if wait > 0 {
-                                tokio::time::sleep(Duration::from_secs(wait)).await;
-                            }
-                            spent = spent.saturating_add(wait);
-                            attempt += 1;
-                        }
-                        None => {
-                            return Err(Self::status_error(resp).await);
-                        }
+                    // Everyone waits (the loop's next turn included); the GET is sent again a bounded number of times.
+                    self.rate_pause
+                        .refused(header_secs(resp.headers(), reqwest::header::RETRY_AFTER.as_str()));
+                    if attempt >= MAX_429_RETRIES {
+                        return Err(Self::status_error(resp).await);
                     }
+                    attempt += 1;
                 }
                 _ => {
                     return Err(Self::status_error(resp).await);
