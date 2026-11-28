@@ -9,3 +9,4 @@ linux native/beebeeb-drive-rune budget_ten_thousand_lines
 linux native/beebeeb-drive-rune office_word_budget_a_caret_move_and_a_dirty_strip_fit_a_frame
 linux native/beebeeb-drive-rune office_sheets_budget_a_commit_at_the_cell_cap_fits_a_frame
 linux native/beebeeb-drive-rune office_sheets_budget_clone_and_frame_at_the_cell_cap_fit_a_frame
+linux native/beebeeb-drive-rune office_sheets_editing_keeps_the_frame_budget_at_the_cell_cap
