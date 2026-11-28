@@ -6,6 +6,7 @@
 
 use super::*;
 
+#[cfg(target_os = "macos")] // emitted only by the macOS shell
 pub const FINDER_SETUP_CHANGED_EVENT: &str = "finder-setup-changed";
 
 /// What `finder_setup_state` returns and `finder-setup-changed` carries (spec §5.2, §9).

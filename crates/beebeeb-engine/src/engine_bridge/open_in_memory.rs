@@ -13,6 +13,8 @@ pub(crate) enum InMemoryOpen {
     /// what had been decrypted was wiped. The file's size is not known. `held`: how much plaintext was in
     /// memory when it was given up. `body_given_up`: a chunk's body was given up while it streamed (it was never
     /// read whole); otherwise a decrypted chunk was dropped before it was added to what is held.
+    // The viewer answers only "over the limit"; the two fields are read by the routing tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     OverLimit { held: u64, body_given_up: bool },
 }
 

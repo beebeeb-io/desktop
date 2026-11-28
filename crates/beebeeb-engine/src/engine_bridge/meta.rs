@@ -486,7 +486,7 @@ impl crate::direct_download::Progress for HydrateReport<'_> {
 /// Subtract at most `n` from `counter`, never below 0; returns what was subtracted.
 fn take_back(counter: &std::sync::atomic::AtomicU64, n: u64) -> u64 {
     let before = counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(n)))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(n)))
         .unwrap_or(0);
     before.min(n)
 }

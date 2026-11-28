@@ -188,6 +188,8 @@ pub struct StorageCountryRefused {
     pub country: Option<String>,
 }
 
+// dc-100: the upload path does not map the server's body to this error yet; only the tests call these.
+#[cfg_attr(not(test), allow(dead_code))]
 impl StorageCountryRefused {
     pub const ERROR_CODE: &'static str = "region_unavailable_strict";
 

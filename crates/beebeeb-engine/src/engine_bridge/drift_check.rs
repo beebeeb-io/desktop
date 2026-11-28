@@ -210,7 +210,8 @@ pub(super) async fn after_idle_pull(bridge: &EngineBridge, sync_root: &Path) {
 }
 
 /// One check now, whatever the window; it starts the next window. A server found without digests is not asked
-/// again.
+/// again. Only the tests ask for one.
+#[cfg(test)]
 pub(crate) async fn check_now(bridge: &EngineBridge, sync_root: &Path) -> DriftReport {
     let _running = Running::start(sync_root);
     run_check(bridge, sync_root, FOLDERS_PER_CHECK).await

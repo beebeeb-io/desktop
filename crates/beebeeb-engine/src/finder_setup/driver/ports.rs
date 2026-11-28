@@ -31,8 +31,11 @@ pub trait Clock: Send + Sync + 'static {
     fn sleep_until(&self, at: Instant) -> impl Future<Output = ()> + Send;
 }
 
+// The real clock: only the macOS reconciler wiring starts the loop with it (the tests use a fake).
+#[cfg(target_os = "macos")]
 pub struct SystemClock;
 
+#[cfg(target_os = "macos")]
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()

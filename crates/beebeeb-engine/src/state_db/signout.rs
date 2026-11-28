@@ -1034,6 +1034,7 @@ impl StateDb {
 }
 
 /// dc-005: the counts a sign-out says in words (see `StateDb::windows_signout_counts`).
+#[cfg(any(target_os = "windows", target_os = "macos", test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignoutCounts {
     pub waiting: u64,

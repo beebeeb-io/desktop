@@ -321,6 +321,7 @@ async fn run_op<P: Ports, C: Clock>(
 
 /// `start`, on the ambient tokio runtime (call inside one). The task is supervised inside the future `start` returns (see
 /// `run`), so a panic in a port reaches the handle's view whichever way the future is spawned.
+#[cfg(target_os = "macos")] // its one caller (and re-export) is the macOS reconciler wiring
 pub fn spawn<P: Ports, C: Clock>(
     ports: P,
     clock: C,
