@@ -241,7 +241,11 @@ pub fn page(mail: &Mail, over: bool, t: &Theme) -> (Vec<El>, usize, usize) {
             buttons += 1;
             children.push(head(
                 "Mail Backup is off",
-                "It runs on a PC: this one, once you turn it on.",
+                if cfg!(target_os = "macos") {
+                    "It runs on a Mac: this one, once you turn it on."
+                } else {
+                    "It runs on a PC: this one, once you turn it on."
+                },
                 Some(turn_on),
                 t,
             ));
@@ -301,7 +305,11 @@ pub fn page(mail: &Mail, over: bool, t: &Theme) -> (Vec<El>, usize, usize) {
                 } else {
                     "Backing up your mail"
                 },
-                "The first backup takes longest. You can use your PC as normal.",
+                if cfg!(target_os = "macos") {
+                    "The first backup takes longest. You can use your Mac as normal."
+                } else {
+                    "The first backup takes longest. You can use your PC as normal."
+                },
                 Some(pause),
                 t,
             ));

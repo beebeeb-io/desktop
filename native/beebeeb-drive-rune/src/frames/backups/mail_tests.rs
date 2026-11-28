@@ -91,12 +91,20 @@ fn every_mail_frame_shows_the_boards_words() {
         (
             "DW-0740b",
             "Mail Backup is off",
-            beebeeb_engine::os_words::for_this_os("It runs on a PC: this one, once you turn it on."),
+            if cfg!(target_os = "macos") {
+                "It runs on a Mac: this one, once you turn it on.".to_string()
+            } else {
+                beebeeb_engine::os_words::for_this_os("It runs on a PC: this one, once you turn it on.")
+            },
         ),
         (
             "DW-1405",
             "Backing up your mail",
-            beebeeb_engine::os_words::for_this_os("The first backup takes longest. You can use your PC as normal."),
+            if cfg!(target_os = "macos") {
+                "The first backup takes longest. You can use your Mac as normal.".to_string()
+            } else {
+                beebeeb_engine::os_words::for_this_os("The first backup takes longest. You can use your PC as normal.")
+            },
         ),
         ("DW-1406", "Mail Backup is on", beebeeb_engine::os_words::for_this_os("Runs on this PC (Anna-Laptop)")),
     ] {

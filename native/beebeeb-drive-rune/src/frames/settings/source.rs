@@ -521,7 +521,11 @@ impl BoardSettings {
                     released: "4 Nov 2026".into(),
                     lines: vec![
                         "Bandwidth limits apply straight away, without pausing sync.".into(),
-                        "Sync history keeps 30 days on every PC.".into(),
+                        if cfg!(target_os = "macos") {
+                            "Sync history keeps 30 days on every computer.".into()
+                        } else {
+                            "Sync history keeps 30 days on every PC.".into()
+                        },
                         "A file badge no longer stays on Uploading after the upload finished.".into(),
                     ],
                     press: Press::Restart,

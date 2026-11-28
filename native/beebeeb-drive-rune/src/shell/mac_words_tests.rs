@@ -11,10 +11,22 @@ use crate::shell::web_pages;
 /// The frames that only exist on Windows and keep the board's words there; a Mac never draws them.
 const WINDOWS_ONLY: &[&str] = &[
     // The tray's "Adding / Couldn't add Beebeeb to File Explorer" (Cloud Files; `tray/tests.rs` `board_os`).
-    "DW-1215", "DW-1216", "DW-1221",
+    "DW-1215",
+    "DW-1216",
+    "DW-1221",
     // "Commands and keyboard shortcuts": a Windows app's stand-in for the Mac's menu bar.
-    "DW-1232", "DW-1233", "DW-1234",
+    "DW-1232",
+    "DW-1233",
+    "DW-1234",
+    "shortcuts",
 ];
+
+/// Words about ANOTHER device, which may well run Windows (the board's signed-in sessions, DW-A55 and DW-A56).
+#[cfg(target_os = "macos")]
+const OTHER_DEVICES: &[&str] = &["Chrome on Windows"];
+/// The not-built card quotes the board's section titles ("First run on Windows"): a pointer into FRAMES.md.
+#[cfg(target_os = "macos")]
+const BOARD_POINTER_KEYS: &[&str] = &["not-built-frames"];
 
 pub(crate) fn windows_word(said: &str) -> Option<&'static str> {
     let padded = format!(" {said} ");
@@ -55,6 +67,10 @@ fn no_scene_says_windows_or_pc_on_a_mac() {
         rt.frame(0.016);
         for e in rt.elements() {
             for said in [e.text.as_deref(), e.label.as_deref()].into_iter().flatten() {
+                let key = e.key.as_deref().unwrap_or("");
+                if BOARD_POINTER_KEYS.contains(&key) || OTHER_DEVICES.iter().any(|d| said.contains(d)) {
+                    continue;
+                }
                 if let Some(w) = windows_word(said) {
                     found.push(format!("{id} {}: {w}: {said}", e.key.as_deref().unwrap_or("")));
                 }

@@ -148,7 +148,8 @@ fn passkey_of(row: &PasskeyRow) -> Passkey {
 /// The name a new passkey is given: the person is not asked (the system's dialog says where it is saved), so it
 /// says what it is and when it was made; Rename changes it later.
 pub(crate) fn new_name() -> String {
-    format!("Windows PC, {}", chrono::Local::now().format("%-d %b %Y"))
+    let device = if cfg!(target_os = "macos") { "Mac" } else { "Windows PC" };
+    format!("{device}, {}", chrono::Local::now().format("%-d %b %Y"))
 }
 
 impl<C: CredentialStores + 'static> PasskeyCalls<C> {
