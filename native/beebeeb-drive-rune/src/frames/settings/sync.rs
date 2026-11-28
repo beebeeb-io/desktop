@@ -246,14 +246,7 @@ fn metered_foot(t: &Theme) -> El {
 
 /// Turn off Beebeeb in File Explorer (DW-0746b): the alert counts what has not uploaded.
 fn turn_off(not_uploaded: Option<&(u32, String)>, first: usize, t: &Theme) -> El {
-    let says = match not_uploaded {
-        Some((count, size)) => format!(
-            concat!("{count} files made in ", beebeeb_engine::file_manager!(), " haven't uploaded yet ({size}). Turning off removes them from ", beebeeb_engine::device_word!(), ". Everything else stays in Beebeeb."),
-            count = count,
-            size = size
-        ),
-        None => concat!("Beebeeb leaves ", beebeeb_engine::file_manager!(), ". Everything stays in Beebeeb.").to_string(),
-    };
+    let says = turn_off_says(not_uploaded);
     let foot = vec![
         dialogs::button_danger(first, "Turn off", t).on_press(|s: &mut State| {
             s.settings.drive.turn_off_explorer();
@@ -285,6 +278,27 @@ fn turn_off(not_uploaded: Option<&(u32, String)>, first: usize, t: &Theme) -> El
     )
 }
 
+/// Where files not uploaded yet go on a turn-off. macOS: the removal passes `PreserveDirtyUserData`, so they are kept in
+/// a folder of their own that Settings › Beebeeb in Finder names once Beebeeb is off (`kept_unsynced_folder`).
+#[cfg(target_os = "macos")]
+const KEPT_ON_TURN_OFF: &str = "Turning off keeps them on this Mac, in a folder of their own: Settings shows you where once Beebeeb is off.";
+/// Elsewhere the engine refuses a turn-off while changes wait (`ExplorerChangeRefused::ChangesWait`): nothing is removed.
+#[cfg(not(target_os = "macos"))]
+const KEPT_ON_TURN_OFF: &str = concat!("Beebeeb keeps them on ", beebeeb_engine::device_word!(), ": turn off once they have uploaded.");
+
+/// The turn-off alert's sentence: files not uploaded yet are kept, and where.
+pub(super) fn turn_off_says(not_uploaded: Option<&(u32, String)>) -> String {
+    match not_uploaded {
+        Some((count, size)) => format!(
+            concat!("{count} files made in ", beebeeb_engine::file_manager!(), " haven't uploaded yet ({size}). {kept} Everything else stays in Beebeeb."),
+            count = count,
+            size = size,
+            kept = KEPT_ON_TURN_OFF,
+        ),
+        None => concat!("Beebeeb leaves ", beebeeb_engine::file_manager!(), ". Everything stays in Beebeeb.").to_string(),
+    }
+}
+
 /// The row that opens the turn-off question, gone once Beebeeb leaves File Explorer.
 pub const TURN_OFF_ROW: &str = "item-3-0";
 /// Where focus goes when that row is gone: the list above it (Space on this PC).
@@ -312,4 +326,20 @@ fn repair_question(first: usize, t: &Theme) -> El {
         t,
     )
     .modal(false, |s: &mut State| s.settings.dialog = None)
+}
+
+#[cfg(test)]
+mod turn_off_tests {
+    use super::turn_off_says;
+
+    /// The removal keeps what has not uploaded (`PreserveDirtyUserData`): the alert must not say it is removed.
+    #[test]
+    fn the_settings_turn_off_alert_says_unsynced_files_are_kept_and_where() {
+        let says = turn_off_says(Some(&(3, "12 MB".to_string())));
+        assert!(says.contains("keeps them on"), "{says}");
+        #[cfg(target_os = "macos")]
+        assert!(says.contains("this Mac, in a folder of their own: Settings shows you where"), "{says}");
+        assert!(!says.contains("removes them"), "{says}");
+        assert!(says.contains("3 files") && says.contains("12 MB"), "{says}");
+    }
 }

@@ -37,6 +37,18 @@ pub const SYNC_PAUSED_OFF: &str = "Sync is paused";
 pub const SYNC_PAUSED_OFF_WHY: &str = "Nothing syncs while Beebeeb is turned off in System Settings.";
 pub const KEPT_TITLE: &str = "Files kept on this Mac";
 pub const KEPT_WHY: &str = "Files that hadn’t reached your vault yet were kept on this Mac, in this folder:";
+pub const TURN_OFF_FAILED: &str = "Couldn’t turn off Beebeeb in Finder";
+pub const TURNING_OFF: &str = "Turning off…";
+
+/// The failed turn-off's line: what macOS said, then the one thing to do.
+pub fn turn_off_failed_why(error: &str) -> String {
+    let error = error.trim().trim_end_matches('.');
+    if error.is_empty() {
+        "Beebeeb is still in Finder. Try again.".to_string()
+    } else {
+        format!("Beebeeb is still in Finder. macOS said: {error}. Try again.")
+    }
+}
 
 /// The sentence for a failure (spec §6.2), one per reason.
 pub fn failure_sentence(reason: Option<FinderFailureReason>) -> &'static str {
@@ -62,6 +74,8 @@ pub fn failure_sentence(reason: Option<FinderFailureReason>) -> &'static str {
 pub enum Press {
     TurnOn,
     TurnOff,
+    /// The failed turn-off's "Try again": the same removal once more.
+    RetryTurnOff,
     /// Opens the question; `RepairNow` is its confirm.
     Repair,
     RepairNow,
@@ -81,6 +95,7 @@ impl Press {
         match self {
             Self::TurnOn => "Turn on",
             Self::TurnOff => "Turn off",
+            Self::RetryTurnOff => "Try again",
             Self::Repair => "Repair…",
             Self::RepairNow => "Repair",
             Self::TryAgain => "Try again",
@@ -145,12 +160,15 @@ impl Page {
 }
 
 /// A repair or a turn-off in flight on a worker, and how it ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum Work {
     #[default]
     Idle,
     Repairing,
     RepairFailed,
+    TurningOff,
+    /// The removal failed: the reconciler holds and Beebeeb stays in Finder. The error is shown with "Try again".
+    TurnOffFailed(String),
 }
 
 /// What the page holds between draws. `page` is a fixed answer for scenes and tests; None reads the live reconciler.
@@ -161,6 +179,9 @@ pub struct FinderUi {
     pub pressed: Vec<Press>,
     pub work: Arc<Mutex<Work>>,
     kept: Option<String>,
+    /// A folder a worker's removal kept, there until the next press or open moves it into `kept` (the pane is drawn
+    /// from `&SettingsUi`, so a worker cannot set `kept` itself). The row shows it at once.
+    arrived: Arc<Mutex<Option<String>>>,
 }
 
 impl FinderUi {
@@ -175,7 +196,24 @@ impl FinderUi {
     }
 
     fn work(&self) -> Work {
-        *self.work.lock().unwrap_or_else(PoisonError::into_inner)
+        self.work.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    fn set_work(&self, work: Work) {
+        *self.work.lock().unwrap_or_else(PoisonError::into_inner) = work;
+    }
+
+    /// The folder the row shows: one a worker just brought, else the one held.
+    fn shown_kept(&self) -> Option<String> {
+        let arrived = self.arrived.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        arrived.or_else(|| self.kept.clone())
+    }
+
+    /// Moves a folder a worker brought into `kept` (newer replaces older).
+    fn settle_kept(&mut self) {
+        if let Some(folder) = self.arrived.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            self.kept = Some(folder);
+        }
     }
 
     /// The page as it is now.
@@ -185,19 +223,102 @@ impl FinderUi {
             None => Page {
                 view: crate::engine_host::finder_setup::view(),
                 sync_paused: drive_paused,
-                kept: self.kept.clone(),
+                kept: self.shown_kept(),
             },
         }
     }
 }
 
-/// The page opened: the folder macOS kept is read once (`take_kept_folder`).
+/// The page opened: a folder macOS kept since the last open (`take_kept_folder`, saved to the settings file so a
+/// restart keeps it), else the one the settings file holds (`kept_unsynced_folder`) until it is dismissed.
 pub fn open(ui: &mut SettingsUi) {
-    if ui.finder.page.is_none()
-        && let Some(folder) = crate::engine_host::finder_setup::take_kept_folder()
-    {
+    if ui.finder.page.is_some() {
+        return;
+    }
+    ui.finder.settle_kept();
+    if let Some(folder) = crate::engine_host::finder_setup::take_kept_folder() {
+        saved::remember(&folder);
         ui.finder.kept = Some(folder);
     }
+    if ui.finder.kept.is_none() {
+        ui.finder.kept = saved::read();
+    }
+}
+
+/// How a removal on a worker ended, handed to the page: the work's end state, and the folder macOS kept (with a
+/// success or with an error) goes to the row and the settings file, so it outlives a closed pane and a restart.
+fn finish(
+    work: &Mutex<Work>,
+    arrived: &Mutex<Option<String>>,
+    ended: Work,
+    kept: Option<String>,
+    remember: impl FnOnce(&str),
+) {
+    if let Some(folder) = kept {
+        remember(&folder);
+        *arrived.lock().unwrap_or_else(PoisonError::into_inner) = Some(folder);
+    }
+    *work.lock().unwrap_or_else(PoisonError::into_inner) = ended;
+}
+
+/// Starts a turn-off on a worker: `remove` is the removal (the host's `turn_off`), `take` hands back the folder it
+/// kept (`take_kept_folder`). The removal blocks about a second, so never on the main thread.
+fn start_turn_off(
+    ui: &FinderUi,
+    remove: impl FnOnce() -> Result<(), String> + Send + 'static,
+    take: impl FnOnce() -> Option<String> + Send + 'static,
+    remember: impl FnOnce(&str) + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    ui.set_work(Work::TurningOff);
+    let (work, arrived) = (ui.work.clone(), ui.arrived.clone());
+    std::thread::spawn(move || {
+        let ended = match remove() {
+            Ok(()) => Work::Idle,
+            Err(error) => {
+                tracing::warn!("finder setup: Settings turn-off failed");
+                Work::TurnOffFailed(error)
+            }
+        };
+        finish(&work, &arrived, ended, take(), remember);
+    })
+}
+
+/// The settings file's `kept_unsynced_folder` (macOS; merge-only writes under the config lock). Never in tests:
+/// those must not touch the real settings file.
+mod saved {
+    #[cfg(all(target_os = "macos", not(test)))]
+    pub fn remember(folder: &str) {
+        use crate::shell::platform::macos::macos_fp::removal;
+        if let Err(error) = removal::remember_kept_folder(crate::shell::identity::engine_identity(), folder) {
+            tracing::warn!("finder setup: the kept folder could not be saved: {error}");
+        }
+    }
+
+    #[cfg(all(target_os = "macos", not(test)))]
+    pub fn read() -> Option<String> {
+        beebeeb_engine::config::DesktopConfig::load_for(crate::shell::identity::engine_identity())
+            .ok()
+            .and_then(|cfg| cfg.kept_unsynced_folder)
+    }
+
+    #[cfg(all(target_os = "macos", not(test)))]
+    pub fn dismiss(shown: &str) {
+        use crate::shell::platform::macos::macos_fp::removal;
+        if let Err(error) = removal::dismiss_saved_kept_folder(crate::shell::identity::engine_identity(), shown) {
+            tracing::warn!("finder setup: the kept folder could not be dismissed: {error}");
+        }
+    }
+
+    #[cfg(any(not(target_os = "macos"), test))]
+    pub fn remember(_folder: &str) {}
+
+    #[cfg(any(not(target_os = "macos"), test))]
+    pub fn read() -> Option<String> {
+        None
+    }
+
+    #[cfg(any(not(target_os = "macos"), test))]
+    pub fn dismiss(_shown: &str) {}
 }
 
 /// Does `press`. With a fixed page it is only recorded.
@@ -215,22 +336,34 @@ pub fn press(s: &mut State, press: Press) {
         ui.finder.pressed.push(press);
         return;
     }
+    ui.finder.settle_kept();
     match press {
-        Press::TurnOn => crate::engine_host::finder_setup::turn_on(),
-        Press::TurnOff => {
-            std::thread::spawn(|| {
-                let _ = crate::engine_host::finder_setup::turn_off();
-            });
+        Press::TurnOn => {
+            if matches!(ui.finder.work(), Work::TurnOffFailed(_)) {
+                ui.finder.set_work(Work::Idle);
+            }
+            crate::engine_host::finder_setup::turn_on();
+        }
+        Press::TurnOff | Press::RetryTurnOff => {
+            if ui.finder.work() != Work::TurningOff {
+                start_turn_off(
+                    &ui.finder,
+                    crate::engine_host::finder_setup::turn_off,
+                    crate::engine_host::finder_setup::take_kept_folder,
+                    saved::remember,
+                );
+            }
         }
         Press::RepairNow => {
-            let work = ui.finder.work.clone();
-            *work.lock().unwrap_or_else(PoisonError::into_inner) = Work::Repairing;
+            let (work, arrived) = (ui.finder.work.clone(), ui.finder.arrived.clone());
+            ui.finder.set_work(Work::Repairing);
             std::thread::spawn(move || {
                 let ended = match crate::engine_host::finder_setup::repair() {
                     Ok(()) => Work::Idle,
                     Err(_) => Work::RepairFailed,
                 };
-                *work.lock().unwrap_or_else(PoisonError::into_inner) = ended;
+                let kept = crate::engine_host::finder_setup::take_kept_folder();
+                finish(&work, &arrived, ended, kept, saved::remember);
             });
         }
         Press::TryAgain => {
@@ -248,7 +381,9 @@ pub fn press(s: &mut State, press: Press) {
         Press::ResumeSync => ui.drive.set_paused(false),
         Press::KeptShow => ui.ask(Intent::Open("kept-folder-show")),
         Press::KeptDismiss => {
-            ui.finder.kept = None;
+            if let Some(shown) = ui.finder.kept.take() {
+                saved::dismiss(&shown);
+            }
             ui.ask(Intent::Open("kept-folder-dismiss"));
         }
         Press::Repair => {}
@@ -261,11 +396,15 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let work = ui.finder.work();
     let mut n = 0;
     let repairing = work == Work::Repairing;
+    let turning_off = work == Work::TurningOff;
     let mut button = |p: Press, emphasis: Emphasis| {
         n += 1;
-        // While a repair runs its button reads Repairing… and does nothing.
+        // While a repair or a turn-off runs its button reads Repairing… / Turning off… and does nothing.
         if p == Press::Repair && repairing {
             return controls::button(n - 1, "Repairing…", None, Emphasis::Plain, t);
+        }
+        if matches!(p, Press::TurnOff | Press::RetryTurnOff) && turning_off {
+            return controls::button(n - 1, TURNING_OFF, None, Emphasis::Plain, t);
         }
         controls::button(n - 1, p.label(), None, emphasis, t).on_press(move |s: &mut State| press(s, p))
     };
@@ -282,6 +421,18 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             &ic::WARN_CIRCLE,
             REPAIR_FAILED,
             REPAIR_FAILED_WHY,
+            Some(again),
+            t,
+        ));
+    }
+    if let Work::TurnOffFailed(error) = &work {
+        let again = button(Press::RetryTurnOff, Emphasis::Plain);
+        children.push(notices::note_with(
+            0,
+            Tone::Red,
+            &ic::WARN_CIRCLE,
+            TURN_OFF_FAILED,
+            &turn_off_failed_why(error),
             Some(again),
             t,
         ));
@@ -403,3 +554,150 @@ pub fn show(s: &mut State, setup: FinderSetup, reason: Option<FinderFailureReaso
 #[cfg(test)]
 #[path = "finder_tests.rs"]
 mod tests;
+
+/// dm-98: Settings "Turn off" keeps its result. A failed removal shows its error with Try again, and the folder macOS
+/// kept reaches the row and the settings file without the pane being opened again.
+#[cfg(test)]
+mod turn_off_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn remembered() -> (Arc<Mutex<Vec<String>>>, impl FnOnce(&str) + Send + 'static) {
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let into = saved.clone();
+        (saved, move |folder: &str| into.lock().unwrap().push(folder.to_owned()))
+    }
+
+    #[test]
+    fn settings_a_failed_turn_off_shows_its_error_with_try_again() {
+        let ui = FinderUi::default();
+        let (_, remember) = remembered();
+        start_turn_off(
+            &ui,
+            || Err("The operation couldn’t be completed.".into()),
+            || None,
+            remember,
+        )
+        .join()
+        .unwrap();
+        let Work::TurnOffFailed(error) = ui.work() else {
+            panic!("a failed removal is kept, not thrown away: {:?}", ui.work());
+        };
+        assert_eq!(
+            turn_off_failed_why(&error),
+            "Beebeeb is still in Finder. macOS said: The operation couldn’t be completed. Try again."
+        );
+        assert_eq!(Press::RetryTurnOff.label(), "Try again");
+        assert_eq!(turn_off_failed_why("  "), "Beebeeb is still in Finder. Try again.");
+    }
+
+    #[test]
+    fn settings_a_turn_off_shows_turning_off_then_ends_idle() {
+        let ui = FinderUi::default();
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let (_, remember) = remembered();
+        let worker = start_turn_off(
+            &ui,
+            move || {
+                gate_rx.recv().unwrap();
+                Ok(())
+            },
+            || None,
+            remember,
+        );
+        assert_eq!(ui.work(), Work::TurningOff, "the press shows at once");
+        gate_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(ui.work(), Work::Idle);
+    }
+
+    #[test]
+    fn settings_the_kept_path_survives_without_the_pane() {
+        let mut ui = FinderUi::default();
+        let (saved, remember) = remembered();
+        start_turn_off(&ui, || Ok(()), || Some("/Users/x/Beebeeb (kept)".into()), remember)
+            .join()
+            .unwrap();
+        assert_eq!(
+            saved.lock().unwrap().as_slice(),
+            ["/Users/x/Beebeeb (kept)"],
+            "saved to the settings file, so a closed pane or a restart keeps it"
+        );
+        assert_eq!(
+            ui.shown_kept().as_deref(),
+            Some("/Users/x/Beebeeb (kept)"),
+            "the open row shows it at once"
+        );
+        ui.settle_kept();
+        assert_eq!(ui.kept(), Some("/Users/x/Beebeeb (kept)"), "Show in Finder reads it");
+    }
+
+    #[test]
+    fn settings_a_folder_kept_with_a_failed_turn_off_is_not_lost() {
+        let mut ui = FinderUi::default();
+        ui.set_kept_for_test(Some("/older"));
+        let (saved, remember) = remembered();
+        start_turn_off(&ui, || Err("busy".into()), || Some("/newer".into()), remember)
+            .join()
+            .unwrap();
+        assert!(matches!(ui.work(), Work::TurnOffFailed(_)));
+        assert_eq!(saved.lock().unwrap().as_slice(), ["/newer"]);
+        assert_eq!(
+            ui.shown_kept().as_deref(),
+            Some("/newer"),
+            "a newer folder replaces an older one"
+        );
+    }
+
+    #[test]
+    fn settings_a_live_dismiss_clears_the_folder_a_worker_brought() {
+        let mut s = crate::init();
+        s.settings.finder.page = None;
+        *s.settings.finder.arrived.lock().unwrap() = Some("/k".into());
+        press(&mut s, Press::KeptDismiss);
+        assert_eq!(s.settings.finder.kept(), None);
+        assert_eq!(s.settings.finder.shown_kept(), None);
+    }
+
+    /// Only macOS wires the Finder pane; the failed turn-off draws its red note with its button. The scene's fixed
+    /// Ready page keeps the status row's buttons known; the work is read whatever the page.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn settings_a_failed_turn_off_draws_a_note_with_try_again() {
+        let drawn = |work: Work| {
+            let mut state = crate::init();
+            assert!(super::super::scene("DM-18-ready", &mut state));
+            state.settings.finder.set_work(work);
+            let mut rt = rune::Runtime::new(
+                state,
+                crate::view,
+                (958.0, 998.0),
+                rune::Env {
+                    system_dark: false,
+                    scale: 2.0,
+                },
+            );
+            rt.frame(0.0);
+            rt.frame(0.016);
+            rt.settle_all();
+            rt.frame(0.016);
+            let has = |key: &str| {
+                rt.elements()
+                    .iter()
+                    .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+            };
+            (has("note-0"), has("btn-4"))
+        };
+        // Ready draws four buttons (Open in Finder, Repair…, Turn off, the Sync row's); Try again makes a fifth.
+        assert_eq!(
+            drawn(Work::Idle),
+            (false, false),
+            "no note and four buttons without a failure"
+        );
+        assert_eq!(
+            drawn(Work::TurnOffFailed("busy".into())),
+            (true, true),
+            "the error shows, with its Try again"
+        );
+    }
+}
