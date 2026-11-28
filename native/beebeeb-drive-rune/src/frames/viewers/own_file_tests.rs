@@ -138,7 +138,7 @@ fn holding_refused(file_id: &str, kind: KindHint) -> PlayerHandle {
     };
     player.open(item, Vec::new()).expect("the player starts its worker");
     let began = Instant::now();
-    while !player.state().is_some_and(|state| state.refused.is_some()) {
+    while player.state().is_none_or(|state| state.refused.is_none()) {
         assert!(
             began.elapsed() < Duration::from_secs(5),
             "the refusal lands in the player"
