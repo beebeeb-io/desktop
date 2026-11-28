@@ -501,6 +501,7 @@
         let pair = new_pair();
         pair.knobs().storage.insert(0, vec![StorageScript::Status(503); 4].into());
         // Retry-After 2 s is longer than the 1 s the retry would wait on its own: it must be honoured.
+        // The 429 is waited out on the client's shared pause (`send_paced`), not as a pinned-route attempt.
         pair.knobs().api_chunks.insert(0, vec![ApiScript::RateLimited(2), ApiScript::Status(503)].into());
         let (bytes, transport) = done(run(&pair).await);
         assert_eq!((bytes, transport), (pair.plain(), FileTransport::Mixed));
@@ -510,7 +511,7 @@
         let after_429 = pinned[1].at.duration_since(pinned[0].at);
         assert!(after_429 >= std::time::Duration::from_millis(1950), "Retry-After 2 s was honoured: {after_429:?}");
         let after_503 = pinned[2].at.duration_since(pinned[1].at);
-        assert!(after_503 >= std::time::Duration::from_millis(1950), "then the doubled 2 s: {after_503:?}");
+        assert!(after_503 >= std::time::Duration::from_millis(950), "then the route's own first 1 s: {after_503:?}");
     }
 
     #[tokio::test]
