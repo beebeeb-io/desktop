@@ -222,7 +222,7 @@ impl Status {
             Status::Locked => "Sync keeps running while it's locked.".into(),
             Status::LockedSyncOff => "Nothing syncs while it's locked.".into(),
             Status::NeedsRecoveryPhrase => format!("Enter it in {name} to sync {os}.", os = beebeeb_engine::device_word!()),
-            Status::KeysUnreadable => "Windows didn't answer. Nothing syncs until it does.".into(),
+            Status::KeysUnreadable => crate::frames::signin::before_files::keystore::NO_ANSWER.into(),
             Status::NotSyncing => concat!("Files on ", beebeeb_engine::device_word!(), " are unchanged.").into(),
             Status::NoPlan { waiting: false } => {
                 format!(

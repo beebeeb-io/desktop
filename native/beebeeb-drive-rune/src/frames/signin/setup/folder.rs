@@ -26,8 +26,16 @@ pub fn said(why: FolderSaid) -> (&'static str, &'static str) {
             concat!("Beebeeb's folder has to be on ", beebeeb_engine::device_word!(), ". Choose a folder on one of its drives."),
         ),
         FolderSaid::System => (
-            "That folder belongs to Windows",
-            "A drive itself and the folders of Windows and its programs can't be Beebeeb's folder. Choose another folder.",
+            if cfg!(target_os = "macos") {
+                "That folder belongs to macOS"
+            } else {
+                "That folder belongs to Windows"
+            },
+            if cfg!(target_os = "macos") {
+                "A disk itself and the folders of macOS and its apps can't be Beebeeb's folder. Choose another folder."
+            } else {
+                "A drive itself and the folders of Windows and its programs can't be Beebeeb's folder. Choose another folder."
+            },
         ),
         FolderSaid::Home => (
             "That folder holds everything of yours",
@@ -51,7 +59,11 @@ pub fn said(why: FolderSaid) -> (&'static str, &'static str) {
             concat!("Choose a folder on one of ", beebeeb_engine::device_word!(), "'s drives."),
         ),
         FolderSaid::NoPicker => (
-            "Windows' folder picker didn't open",
+            if cfg!(target_os = "macos") {
+                "The folder picker didn't open"
+            } else {
+                "Windows' folder picker didn't open"
+            },
             "Nothing was changed. Try again, or use the suggested folder.",
         ),
     }

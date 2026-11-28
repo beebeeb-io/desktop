@@ -228,7 +228,11 @@ fn another_folder_can_be_chosen_after_a_refused_start_only_when_none_was_kept() 
             Explorer::Failed {
                 code: "0x80070005".into(),
             },
-            "Windows didn't finish",
+            if cfg!(target_os = "macos") {
+                "macOS didn't finish"
+            } else {
+                "Windows didn't finish"
+            },
         ),
     ] {
         let (mut ui_, log) = fixture(Script {
@@ -320,4 +324,25 @@ fn the_no_folders_words_promise_nothing_this_app_cannot_do() {
     let words = super::super::folder::BACKUP_NONE;
     assert!(words.contains("no folders it can back up"), "{words}");
     assert!(!words.contains("add folders") && !words.contains("Settings"), "{words}");
+}
+
+/// A Mac's folder refusals name macOS, never Windows or a PC (drive-macos item 99).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_macs_folder_refusals_say_no_windows_word() {
+    for why in [
+        FolderSaid::Network,
+        FolderSaid::System,
+        FolderSaid::Home,
+        FolderSaid::NotAFullPath,
+        FolderSaid::NoPicker,
+    ] {
+        let (title, text) = super::super::folder::said(why);
+        for line in [title, text] {
+            assert!(
+                crate::shell::intents::mac_words_tests::windows_word(line).is_none(),
+                "{line}"
+            );
+        }
+    }
 }

@@ -45,7 +45,10 @@ fn web_pages_open_by_name_from_the_table_and_an_unknown_name_opens_nothing() {
     rt.frame(1.0);
     assert_eq!(
         opened(),
-        vec!["https://app.beebeeb.io/settings/billing", "ms-settings:notifications"]
+        vec![
+            "https://app.beebeeb.io/settings/billing",
+            super::web_pages::OS_NOTIFICATIONS
+        ]
     );
     rt.update(|s, _| assert!(s.settings.take_intents().is_empty(), "the queue is empty"));
 }

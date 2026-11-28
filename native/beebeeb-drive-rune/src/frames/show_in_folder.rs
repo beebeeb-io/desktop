@@ -33,7 +33,11 @@ pub fn os_app_label() -> &'static str {
 pub const NOT_CONNECTED: &str = "Couldn\u{2019}t show it \u{00B7} nothing is connected right now.";
 
 /// As above, for a file with no place in the folder.
-pub const NOT_HERE: &str = "This file isn\u{2019}t in your Beebeeb folder on this PC yet.";
+pub const NOT_HERE: &str = concat!(
+    "This file isn\u{2019}t in your Beebeeb folder on ",
+    beebeeb_engine::device_word!(),
+    " yet."
+);
 
 /// Show the file in its folder, selected. `Err`: nothing was shown, and the words for it ([`NOT_HERE`] unless the
 /// source says it is not connected).

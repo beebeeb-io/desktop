@@ -64,10 +64,11 @@ fn the_opener_refuses_file_javascript_and_a_bare_path() {
         "http://beebeeb.io",
         "mailto:support@beebeeb.io",
         "ms-settings:notifications",
+        "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
     ] {
         assert!(open_web_page(good).is_ok(), "{good}");
     }
-    assert_eq!(OPENED.with(|o| o.borrow().len()), 4);
+    assert_eq!(OPENED.with(|o| o.borrow().len()), 5);
 }
 
 #[test]

@@ -405,7 +405,11 @@ fn the_details_flag_follows_the_players_state() {
 fn a_too_old_windows_says_so_in_the_media_view() {
     assert_eq!(
         refusal_words(&Refusal::NeedsWindowsUpdate),
-        "This file can't be shown until Windows is updated."
+        if cfg!(target_os = "macos") {
+            "This file can't be shown until macOS is updated."
+        } else {
+            "This file can't be shown until Windows is updated."
+        }
     );
 }
 

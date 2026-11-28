@@ -84,17 +84,24 @@ pub fn text_with(system_decoder_on: bool, why: &Refusal) -> Text {
             "no system decoder",
         ),
         Refusal::NoSystemDecoder(Codec::Hevc) => (
-            "This video uses HEVC (H.265) and Windows on this PC doesn't have the decoder for it. Install \u{201C}HEVC \
-             Video Extensions\u{201D} from the Microsoft Store, or open the file in its default app."
-                .into(),
+            if cfg!(target_os = "macos") {
+                "This video uses HEVC (H.265) and this Mac doesn't have the decoder for it. Open the file in its default \
+                 app."
+                    .into()
+            } else {
+                "This video uses HEVC (H.265) and Windows on this PC doesn't have the decoder for it. Install \u{201C}HEVC \
+                 Video Extensions\u{201D} from the Microsoft Store, or open the file in its default app."
+                    .into()
+            },
             OPEN_DEFAULT,
-            Some(HEVC_STORE_URL),
+            if cfg!(target_os = "macos") { None } else { Some(HEVC_STORE_URL) },
             "no system decoder",
         ),
         Refusal::NoSystemDecoder(codec) => (
             format!(
-                "This file uses {}, and Windows on this PC has no decoder for it. Open the file in its default app.",
-                codec_name(*codec)
+                "This file uses {}, and {} has no decoder for it. Open the file in its default app.",
+                codec_name(*codec),
+                if cfg!(target_os = "macos") { "this Mac" } else { "Windows on this PC" }
             ),
             OPEN_DEFAULT,
             None,
@@ -102,16 +109,24 @@ pub fn text_with(system_decoder_on: bool, why: &Refusal) -> Text {
         ),
         Refusal::NoSystemMedia(codec) => (
             format!(
-                "This file uses {}, and this edition of Windows has no media codecs. Open the file in its default \
-                 app.",
-                codec_name(*codec)
+                "This file uses {}, and {} has no media codecs. Open the file in its default app.",
+                codec_name(*codec),
+                if cfg!(target_os = "macos") { "this Mac" } else { "this edition of Windows" }
             ),
             if system_decoder_on { OPEN_DEFAULT } else { OPEN_ELSEWHERE },
             None,
             "no system media",
         ),
         Refusal::TenBit => (
-            "This video is 10-bit H.264/HEVC; Windows\u{2019} decoder on this PC can\u{2019}t play it. Open it in its default app.".into(),
+            if cfg!(target_os = "macos") {
+                "This video is 10-bit H.264/HEVC; the decoder on this Mac can\u{2019}t play it. Open it in its default \
+                 app."
+                    .into()
+            } else {
+                "This video is 10-bit H.264/HEVC; Windows\u{2019} decoder on this PC can\u{2019}t play it. Open it in its \
+                 default app."
+                    .into()
+            },
             OPEN_DEFAULT,
             None,
             "ten bit",
@@ -232,6 +247,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn hevc_names_the_codec_and_the_store_only_when_windows_lacks_it() {
         let on = text_with(true, &Refusal::NoSystemDecoder(Codec::Hevc));

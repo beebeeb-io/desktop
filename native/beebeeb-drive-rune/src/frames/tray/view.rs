@@ -551,7 +551,7 @@ fn footer<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El {
         explorer = explorer.on_press_tx(host.act(Ui::open_in_file_explorer));
     } else {
         // Disabled with its reason, not silently.
-        explorer = explorer.help(concat!("Not available yet: Beebeeb isn't set up in ", beebeeb_engine::file_manager!(), " on this ", beebeeb_engine::device_word!()));
+        explorer = explorer.help(concat!("Not available yet: Beebeeb isn't set up in ", beebeeb_engine::file_manager!(), " on ", beebeeb_engine::device_word!()));
     }
 
     let (settings, key, ink) = button(2, "Settings", true);

@@ -614,7 +614,15 @@ fn account(ui: &BackupsUi, connection: &Connection, banners: usize, first_button
         // The refusal's notice takes this line's place (DW-1403).
         body.push(dialogs::caption(
             0,
-            concat!("Connected over TLS. The password stays in Windows Credential Manager on ", beebeeb_engine::device_word!(), "."),
+            if cfg!(target_os = "macos") {
+                concat!("Connected over TLS. The password stays in the Keychain on ", beebeeb_engine::device_word!(), ".")
+            } else {
+                concat!(
+                    "Connected over TLS. The password stays in Windows Credential Manager on ",
+                    beebeeb_engine::device_word!(),
+                    "."
+                )
+            },
             t,
         ));
     }
