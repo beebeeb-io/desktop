@@ -121,14 +121,15 @@ function platformEntry(kind, { version, channel, installerName, installerBytes, 
  * channel and version: an entry of another version names another file and the updater would refuse it, so it is
  * not carried over. `ownTargets` are the targets being written now: never kept from the old file.
  */
-export function keptEntries(existing, { version, channel }, ownTargets, { sameVersionOnly = false } = {}) {
+export function keptEntries(existing, { version, channel }, ownTargets, { sameVersionOnly = false, allowLower = false } = {}) {
   if (!existing) return {}
   if (existing.product !== 'desktop' || existing.channel !== channel) throw new Error(`the existing manifest is for ${existing.product}/${existing.channel}, not desktop/${channel}`)
   if (existing.version !== version) {
     const old = parseVersion(existing.version)
     const next = parseVersion(version)
-    // Never roll a channel back, whichever platform publishes.
-    if (old && next && compareVersions(next, old) < 0) throw new Error(`the channel already publishes ${existing.version}: refusing to publish the lower ${version}`)
+    // A run must not roll a channel back, whichever platform publishes: only a withdrawal (publish_existing, which
+    // passes allowLower) republishes an older version on purpose (docs/RELEASING.md).
+    if (!allowLower && old && next && compareVersions(next, old) < 0) throw new Error(`the channel already publishes ${existing.version}: refusing to publish the lower ${version}`)
     // A Mac publish for another version would replace the manifest with a darwin-only one and strand Windows.
     if (sameVersionOnly) throw new Error(`the channel publishes ${existing.version}, not ${version}: publish the Windows build of ${version} first, a Mac-only manifest would drop the Windows entries`)
     return {}
@@ -136,8 +137,8 @@ export function keptEntries(existing, { version, channel }, ownTargets, { sameVe
   return Object.fromEntries(Object.entries(existing.platforms ?? {}).filter(([target]) => !ownTargets.includes(target)))
 }
 
-function manifestOf(args, platforms, options) {
-  const { version, channel, notes, date, existing } = args
+function manifestOf(args, platforms, options = {}) {
+  const { version, channel, notes, date, existing, allowLower } = args
   const own = Object.keys(platforms)
   return {
     version,
@@ -145,7 +146,7 @@ function manifestOf(args, platforms, options) {
     pub_date: date,
     product: 'desktop',
     channel,
-    platforms: { ...keptEntries(existing, { version, channel }, own, options), ...platforms },
+    platforms: { ...keptEntries(existing, { version, channel }, own, { ...options, allowLower }), ...platforms },
   }
 }
 
@@ -193,6 +194,7 @@ function main(argv) {
     pubkey: readFileSync(args.pubkey, 'utf8'),
     notes: readFileSync(args.notes, 'utf8'),
     date: args.date ?? new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    allowLower: args['allow-lower'] === 'true',
     existing: args.existing ? JSON.parse(readFileSync(args.existing, 'utf8')) : undefined,
   })
   writeFileSync(args.out, `${JSON.stringify(manifest, null, 2)}\n`)
