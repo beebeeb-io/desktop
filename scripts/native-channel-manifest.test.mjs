@@ -23,6 +23,13 @@ test('Mac publish refuses another version or a lower one', () => {
 test('no publish may lower the channel version', () => {
   assert.throws(() => keptEntries(existing('0.9.2', {}), id, ['windows-x86_64']), /lower/)
 })
+test('a withdrawal (allowLower, publish_existing) may publish a lower version; without it the same call throws', () => {
+  const higher = existing('0.9.2', { 'windows-x86_64': win })
+  assert.throws(() => keptEntries(higher, id, ['windows-x86_64']), /lower/)
+  assert.deepEqual(keptEntries(higher, id, ['windows-x86_64'], { allowLower: true }), {})
+  // A Mac-only publish for another version is still refused: it would strand the Windows entries.
+  assert.throws(() => keptEntries(higher, id, ['darwin-aarch64'], { sameVersionOnly: true, allowLower: true }), /not 0\.9\.1/)
+})
 test('no existing manifest keeps nothing; another channel throws', () => {
   assert.deepEqual(keptEntries(undefined, id, ['darwin-aarch64'], { sameVersionOnly: true }), {})
   assert.throws(() => keptEntries({ ...existing('0.9.1', {}), channel: 'beta' }, id, []), /beta/)
