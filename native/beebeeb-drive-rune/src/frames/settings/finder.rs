@@ -288,7 +288,7 @@ fn start_turn_off(
 mod saved {
     #[cfg(all(target_os = "macos", not(test)))]
     pub fn remember(folder: &str) {
-        use crate::shell::platform::macos_fp::removal;
+        use crate::shell::platform::macos::macos_fp::removal;
         if let Err(error) = removal::remember_kept_folder(crate::shell::identity::engine_identity(), folder) {
             tracing::warn!("finder setup: the kept folder could not be saved: {error}");
         }
@@ -303,7 +303,7 @@ mod saved {
 
     #[cfg(all(target_os = "macos", not(test)))]
     pub fn dismiss(shown: &str) {
-        use crate::shell::platform::macos_fp::removal;
+        use crate::shell::platform::macos::macos_fp::removal;
         if let Err(error) = removal::dismiss_saved_kept_folder(crate::shell::identity::engine_identity(), shown) {
             tracing::warn!("finder setup: the kept folder could not be dismissed: {error}");
         }
@@ -686,7 +686,7 @@ mod turn_off_tests {
                 .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
         };
         assert!(has("note-0"), "the error shows");
-        // Ready draws Open in Finder, Repair…, Turn off and the Sync row's button: Try again is the fifth.
+        // Ready draws four buttons (Open in Finder, Repair…, Turn off, the Sync row's); Try again makes a fifth.
         assert!(has("btn-4"), "with its Try again");
     }
 }
