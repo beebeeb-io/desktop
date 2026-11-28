@@ -47,17 +47,16 @@ pub use lifecycle_log::{LifecycleEvent, TAIL_LINES, token};
 pub use handle::{Event, FinderSetupHandle, RemoveAnswer};
 pub use ports::{Clock, Ports};
 pub use state::FinderSetupView;
-// Started and asked about only by the macOS reconciler wiring (`lib.rs`); exported in tests too so clippy's test build on
-// Linux and Windows does not call them dead.
-#[cfg(any(test, target_os = "macos"))]
+// Started and asked about only by the macOS reconciler wiring (`lib.rs`).
+#[cfg(target_os = "macos")]
 pub use check::spawn;
 pub use handle::NOT_RUNNING;
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub use state::FINDER_SETUP_CHANGED_EVENT;
 // `op_limit`/`within` time the macOS ports and are read by the driver's tests.
 #[cfg(any(test, target_os = "macos"))]
 pub use limits::{op_limit, within};
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub use ports::SystemClock;
 // `start` builds the task in the driver's own tests.
 #[cfg(test)]
