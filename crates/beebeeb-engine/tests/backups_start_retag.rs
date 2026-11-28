@@ -53,3 +53,9 @@ fn the_sync_start_retags_an_address_tagged_chosen_folder_by_the_accounts_id() {
     );
     s.engine.stop();
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_test_build_is_refused_on_macos() {
+    common::assert_the_test_build_is_refused();
+}
