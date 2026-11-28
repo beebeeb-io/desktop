@@ -149,7 +149,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             }
             engine.wake_host();
         });
-        if !self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok()) {
+        if self.jobs.as_ref().is_none_or(|jobs| jobs.send(job).is_err()) {
             log("sign-in: the sign-out could not be passed to the engine");
         }
     }
@@ -481,7 +481,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
             engine.recheck_gate();
             engine.wake_host();
         });
-        if !self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok()) {
+        if self.jobs.as_ref().is_none_or(|jobs| jobs.send(job).is_err()) {
             log("sign-in: the gate re-check could not be passed to the engine");
         }
     }
@@ -809,7 +809,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
             }
             engine.wake_host();
         });
-        if !self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok()) {
+        if self.jobs.as_ref().is_none_or(|jobs| jobs.send(job).is_err()) {
             log("sign-in: leaving the step could not be passed to the engine");
         }
     }
